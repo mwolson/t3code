@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  clampCollapsedComposerCursor,
+  collapseExpandedComposerCursor,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToMention,
@@ -89,6 +91,42 @@ describe("expandCollapsedComposerCursor", () => {
     const expandedCursor = expandCollapsedComposerCursor(text, collapsedCursorAfterMention);
 
     expect(detectComposerTrigger(text, expandedCursor)).toBeNull();
+  });
+});
+
+describe("collapseExpandedComposerCursor", () => {
+  it("keeps cursor unchanged when no mention segment is present", () => {
+    expect(collapseExpandedComposerCursor("plain text", 5)).toBe(5);
+  });
+
+  it("maps expanded mention cursor back to collapsed cursor", () => {
+    const text = "what's in my @AGENTS.md fsfdas";
+    const collapsedCursorAfterMention = "what's in my ".length + 2;
+    const expandedCursorAfterMention = "what's in my @AGENTS.md ".length;
+
+    expect(collapseExpandedComposerCursor(text, expandedCursorAfterMention)).toBe(
+      collapsedCursorAfterMention,
+    );
+  });
+
+  it("keeps replacement cursors aligned when another mention already exists earlier", () => {
+    const text = "open @AGENTS.md then @src/index.ts ";
+    const expandedCursor = text.length;
+    const collapsedCursor = collapseExpandedComposerCursor(text, expandedCursor);
+
+    expect(collapsedCursor).toBe("open ".length + 1 + " then ".length + 2);
+    expect(expandCollapsedComposerCursor(text, collapsedCursor)).toBe(expandedCursor);
+  });
+});
+
+describe("clampCollapsedComposerCursor", () => {
+  it("clamps to collapsed prompt length when mentions are present", () => {
+    const text = "open @AGENTS.md then ";
+
+    expect(clampCollapsedComposerCursor(text, text.length)).toBe("open ".length + 1 + " then ".length);
+    expect(clampCollapsedComposerCursor(text, Number.POSITIVE_INFINITY)).toBe(
+      "open ".length + 1 + " then ".length,
+    );
   });
 });
 
