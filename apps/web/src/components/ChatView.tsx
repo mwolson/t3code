@@ -39,9 +39,7 @@ import { isElectron } from "../env";
 import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
 import {
   clampCollapsedComposerCursor,
-  type ComposerSlashCommand,
   type ComposerTrigger,
-  type ComposerTriggerKind,
   collapseExpandedComposerCursor,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
@@ -667,10 +665,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
     }
 
     promptRef.current = nextCustomAnswer;
-    const nextCursor = collapseExpandedComposerCursor(
-      nextCustomAnswer,
-      nextCustomAnswer.length,
-    );
+    const nextCursor = collapseExpandedComposerCursor(nextCustomAnswer, nextCustomAnswer.length);
     setComposerCursor(nextCursor);
     setComposerTrigger(
       detectComposerTrigger(
@@ -2944,20 +2939,21 @@ export default function ChatView({ threadId }: ChatViewProps) {
     [activePendingProgress?.activeQuestion, activePendingUserInput, setPrompt],
   );
 
-  const readComposerSnapshot = useCallback(
-    (): { value: string; cursor: number; expandedCursor: number } => {
-      const editorSnapshot = composerEditorRef.current?.readSnapshot();
-      if (editorSnapshot) {
-        return editorSnapshot;
-      }
-      return {
-        value: promptRef.current,
-        cursor: composerCursor,
-        expandedCursor: expandCollapsedComposerCursor(promptRef.current, composerCursor),
-      };
-    },
-    [composerCursor],
-  );
+  const readComposerSnapshot = useCallback((): {
+    value: string;
+    cursor: number;
+    expandedCursor: number;
+  } => {
+    const editorSnapshot = composerEditorRef.current?.readSnapshot();
+    if (editorSnapshot) {
+      return editorSnapshot;
+    }
+    return {
+      value: promptRef.current,
+      cursor: composerCursor,
+      expandedCursor: expandCollapsedComposerCursor(promptRef.current, composerCursor),
+    };
+  }, [composerCursor]);
 
   const extendReplacementRangeForTrailingSpace = useCallback(
     (text: string, rangeEnd: number, replacement: string): number => {
@@ -3102,9 +3098,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setPrompt(nextPrompt);
       setComposerCursor(nextCursor);
       setComposerTrigger(
-        cursorAdjacentToMention
-          ? null
-          : detectComposerTrigger(nextPrompt, nextExpandedCursor),
+        cursorAdjacentToMention ? null : detectComposerTrigger(nextPrompt, nextExpandedCursor),
       );
     },
     [

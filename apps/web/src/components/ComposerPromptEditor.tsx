@@ -729,7 +729,11 @@ function ComposerPromptEditorInner({
     [editor],
   );
 
-  const readSnapshot = useCallback((): { value: string; cursor: number; expandedCursor: number } => {
+  const readSnapshot = useCallback((): {
+    value: string;
+    cursor: number;
+    expandedCursor: number;
+  } => {
     let snapshot = snapshotRef.current;
     editor.getEditorState().read(() => {
       const nextValue = $getRoot().getTextContent();

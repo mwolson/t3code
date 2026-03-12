@@ -123,7 +123,9 @@ describe("clampCollapsedComposerCursor", () => {
   it("clamps to collapsed prompt length when mentions are present", () => {
     const text = "open @AGENTS.md then ";
 
-    expect(clampCollapsedComposerCursor(text, text.length)).toBe("open ".length + 1 + " then ".length);
+    expect(clampCollapsedComposerCursor(text, text.length)).toBe(
+      "open ".length + 1 + " then ".length,
+    );
     expect(clampCollapsedComposerCursor(text, Number.POSITIVE_INFINITY)).toBe(
       "open ".length + 1 + " then ".length,
     );

@@ -82,7 +82,10 @@ function clampCollapsedComposerCursorForSegments(
 }
 
 export function clampCollapsedComposerCursor(text: string, cursorInput: number): number {
-  return clampCollapsedComposerCursorForSegments(splitPromptIntoComposerSegments(text), cursorInput);
+  return clampCollapsedComposerCursorForSegments(
+    splitPromptIntoComposerSegments(text),
+    cursorInput,
+  );
 }
 
 export function collapseExpandedComposerCursor(text: string, cursorInput: number): number {
