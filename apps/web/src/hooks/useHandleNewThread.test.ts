@@ -67,7 +67,7 @@ vi.mock("../state/entities", () => ({
   readProjects: () => testState.projects,
   readThreadShell: () => null,
   useProjects: () => testState.projects,
-  useThread: () => null,
+  useThreadShell: () => null,
 }));
 vi.mock("../state/server", () => ({ environmentServerConfigsAtom: {} }));
 vi.mock("../uiStateStore", () => ({
