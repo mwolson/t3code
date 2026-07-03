@@ -30,6 +30,7 @@ import type * as EffectAcpProtocol from "effect-acp/protocol";
 
 import { ServerConfig } from "../../config.ts";
 import * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
+import { normalizeXAiAcpToolCallState } from "../../provider/acp/XAiAcpExtension.ts";
 import { layer as idAllocatorLayer, IdAllocatorV2 } from "../IdAllocator.ts";
 import {
   ProviderAdapterV2RuntimePolicy,
@@ -37,6 +38,8 @@ import {
 } from "../ProviderAdapter.ts";
 import {
   AcpProviderCapabilitiesV2,
+  acpPostSettleContinuationOfferEvidence,
+  acpPostSettleWakeEvidence,
   makeAcpAdapterV2,
   type AcpAdapterV2Flavor,
 } from "./AcpAdapterV2.ts";
@@ -553,4 +556,295 @@ describe("AcpAdapterV2", () => {
       assert.equal(secondTurnError._tag, "ProviderAdapterTurnStartError");
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
+
+  it.effect("restarts the ACP child process before the next prompt after interrupt", () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const idAllocator = yield* IdAllocatorV2;
+      const path = yield* Path.Path;
+      const serverConfig = yield* ServerConfig;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const protocolEvents = yield* Queue.bounded<EffectAcpProtocol.AcpProtocolLogEvent>(256);
+      const instanceId = ProviderInstanceId.make("acp-test");
+      const adapter = makeAcpAdapterV2({
+        instanceId,
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          restartRuntimeAfterInterrupt: true,
+          makeRuntime: makeMockRuntime({
+            childProcessSpawner,
+            mockAgentPath,
+            protocolEvents,
+          }),
+        },
+        fileSystem,
+        idAllocator,
+        serverConfig,
+      });
+      const threadId = ThreadId.make("thread-acp-restart-after-interrupt");
+      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "default" } as const;
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("provider-session-acp-restart-after-interrupt"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const now = yield* DateTime.now;
+      yield* runtime.startTurn(
+        makeTurnInput({ threadId, providerThread, instanceId, runtimePolicy, now, ordinal: 1 }),
+      );
+      yield* Stream.fromQueue(protocolEvents).pipe(
+        Stream.filter(
+          (event) =>
+            event.direction === "outgoing" && rawProtocolMethod(event) === "session/prompt",
+        ),
+        Stream.runHead,
+      );
+      const providerTurnId = idAllocator.derive.providerTurn({
+        driver: ACP_TEST_DRIVER,
+        nativeTurnId: `${providerThread.nativeThreadRef?.nativeId}:turn:1`,
+      });
+      yield* runtime.interruptTurn({
+        providerThread,
+        providerTurnId,
+        requestRuntimeRestart: true,
+      });
+      yield* Stream.fromQueue(protocolEvents).pipe(
+        Stream.filter(
+          (event) =>
+            event.direction === "outgoing" && rawProtocolMethod(event) === "session/cancel",
+        ),
+        Stream.runHead,
+      );
+
+      yield* runtime.startTurn(
+        makeTurnInput({ threadId, providerThread, instanceId, runtimePolicy, now, ordinal: 2 }),
+      );
+      const loadAfterRestart = yield* Stream.fromQueue(protocolEvents).pipe(
+        Stream.filter(
+          (event) => event.direction === "outgoing" && rawProtocolMethod(event) === "session/load",
+        ),
+        Stream.runHead,
+      );
+      assert.isTrue(
+        Option.isSome(loadAfterRestart),
+        "post-interrupt startTurn should respawn the runtime and replay session/load",
+      );
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+});
+
+describe("acpPostSettleWakeEvidence", () => {
+  const sessionId = "session-wake";
+
+  it("accepts assistant text and tool updates as wake evidence", () => {
+    assert.isTrue(
+      acpPostSettleWakeEvidence({
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Subagent finished. SUBAGENT_DONE" },
+        },
+      }),
+    );
+    assert.isTrue(
+      acpPostSettleWakeEvidence({
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-1",
+          title: "get_command_or_subagent_output",
+          status: "pending",
+          kind: "other",
+          content: [],
+          locations: [],
+          rawInput: {},
+        },
+      }),
+    );
+  });
+
+  it("rejects monitor end chatter and background mutations", () => {
+    assert.isFalse(
+      acpPostSettleWakeEvidence({
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: {
+            type: "text",
+            text: 'Monitor "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" ended',
+          },
+        },
+      }),
+    );
+    assert.isFalse(
+      acpPostSettleWakeEvidence(
+        {
+          sessionId,
+          update: {
+            sessionUpdate: "user_message_chunk",
+            content: { type: "text", text: "task-1 completed" },
+          },
+        },
+        {
+          extractBackgroundToolMutation: () => ({
+            taskId: "task-1",
+            status: "completed",
+            appendOutput: "",
+          }),
+        },
+      ),
+    );
+  });
+});
+
+describe("acpPostSettleContinuationOfferEvidence", () => {
+  const sessionId = "session-wake-offer";
+
+  it("offers on assistant text and terminal tool status", () => {
+    assert.isTrue(
+      acpPostSettleContinuationOfferEvidence({
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Background shell finished." },
+        },
+      }),
+    );
+    assert.isTrue(
+      acpPostSettleContinuationOfferEvidence({
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-1",
+          title: "run_terminal_command",
+          status: "completed",
+          kind: "other",
+          content: [],
+          locations: [],
+          rawInput: {},
+        },
+      }),
+    );
+    assert.isTrue(
+      acpPostSettleContinuationOfferEvidence({
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-2",
+          title: "run_terminal_command",
+          status: "failed",
+          kind: "other",
+          content: [],
+          locations: [],
+          rawInput: {},
+        },
+      }),
+    );
+  });
+
+  it("buffers in-progress tool updates without offering", () => {
+    assert.isTrue(
+      acpPostSettleWakeEvidence({
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-1",
+          title: "run_terminal_command",
+          status: "in_progress",
+          kind: "other",
+          content: [],
+          locations: [],
+          rawInput: {},
+        },
+      }),
+    );
+    assert.isFalse(
+      acpPostSettleContinuationOfferEvidence({
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-1",
+          title: "run_terminal_command",
+          status: "in_progress",
+          kind: "other",
+          content: [],
+          locations: [],
+          rawInput: {},
+        },
+      }),
+    );
+    assert.isFalse(
+      acpPostSettleContinuationOfferEvidence({
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-1",
+          title: "run_terminal_command",
+          status: "pending",
+          kind: "other",
+          content: [],
+          locations: [],
+          rawInput: {},
+        },
+      }),
+    );
+  });
+
+  it("does not offer filtered monitor chatter", () => {
+    assert.isFalse(
+      acpPostSettleContinuationOfferEvidence({
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: {
+            type: "text",
+            text: 'Monitor "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" ended',
+          },
+        },
+      }),
+    );
+  });
+
+  it("does not offer on a normalized monitor start ACK despite raw completed status", () => {
+    const monitorStartAck = {
+      sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "call-monitor",
+        title: "Tool",
+        status: "completed",
+        kind: "other",
+        content: [],
+        locations: [],
+        rawInput: { variant: "Monitor", description: "stream test" },
+        rawOutput: {
+          type: "Monitor",
+          taskId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          timeoutMs: 60000,
+        },
+      },
+    } as const;
+    // Raw frame looks terminal; the Grok flavor knows it is a running monitor.
+    assert.isTrue(acpPostSettleContinuationOfferEvidence(monitorStartAck));
+    assert.isFalse(
+      acpPostSettleContinuationOfferEvidence(monitorStartAck, {
+        normalizeToolCall: normalizeXAiAcpToolCallState,
+      }),
+    );
+  });
 });
