@@ -1291,14 +1291,31 @@ function v2EventPresentation(item: OrchestrationV2TurnItem): {
         icon: MinusIcon,
       };
     }
-    case "subagent":
+    case "subagent": {
+      const title = subagentDisplayTitle(item.title ?? "Subagent");
+      const result = item.result?.trim() || null;
+      const progress = item.progress?.trim() || null;
+      // Durable completion is item.result (Claude/Codex/Cursor contract). Prefer
+      // it over prompt so completed tokens stay visible without the inspector.
+      const detail =
+        item.status === "completed" && result
+          ? result
+          : (result ?? progress ?? item.prompt ?? null);
       return {
-        label: subagentDisplayTitle(item.title ?? "Subagent"),
-        detail: item.result ?? item.progress ?? item.prompt,
+        label:
+          item.status === "completed"
+            ? `Subagent completed · ${title}`
+            : item.status === "failed"
+              ? `Subagent failed · ${title}`
+              : item.status === "running"
+                ? `Subagent running · ${title}`
+                : title,
+        detail,
         tone:
           item.status === "failed" ? "danger" : item.status === "completed" ? "success" : "muted",
         icon: BotIcon,
       };
+    }
     case "approval_request":
       return {
         label: "Approval requested",
@@ -1372,8 +1389,18 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="text-xs font-medium text-foreground/90">{presentation.label}</span>
-            {item.status !== "completed" ? (
-              <span className="rounded-full border border-border/70 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+            {item.type === "subagent" || item.status !== "completed" ? (
+              <span
+                className={cn(
+                  "rounded-full border px-1.5 py-0.5 font-mono text-[10px]",
+                  item.status === "completed" &&
+                    "border-emerald-500/30 text-emerald-700 dark:text-emerald-400",
+                  item.status === "failed" && "border-destructive/40 text-destructive",
+                  item.status !== "completed" &&
+                    item.status !== "failed" &&
+                    "border-border/70 text-muted-foreground",
+                )}
+              >
                 {item.status}
               </span>
             ) : null}
@@ -1384,7 +1411,14 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
             ) : null}
           </div>
           {presentation.detail ? (
-            <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            <div
+              className={cn(
+                "mt-1 text-xs leading-relaxed",
+                item.type === "subagent" && item.status === "completed"
+                  ? "font-mono text-foreground/85"
+                  : "text-muted-foreground",
+              )}
+            >
               <ChatMarkdown
                 text={presentation.detail}
                 cwd={ctx.markdownCwd}
@@ -2200,8 +2234,19 @@ function workEntryPreview(
   workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles">,
   workspaceRoot: string | undefined,
 ) {
+  // Prefer stdout/detail so completed shell/monitor results are visible collapsed
+  // (command alone hid ls listings behind expand-only inspector JSON).
+  if (workEntry.detail?.trim()) {
+    const lines = workEntry.detail
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (lines.length > 0) {
+      return lines.slice(0, 3).join(" · ");
+    }
+  }
   if (workEntry.command) return workEntry.command;
-  if (workEntry.detail) return workEntry.detail;
   if ((workEntry.changedFiles?.length ?? 0) === 0) return null;
   const [firstPath] = workEntry.changedFiles ?? [];
   if (!firstPath) return null;
