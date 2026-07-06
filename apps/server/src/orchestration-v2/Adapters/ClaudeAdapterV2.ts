@@ -3061,7 +3061,14 @@ export function makeClaudeAdapterV2(
             updated.add(nativeThreadId);
             return [false, updated];
           });
-          const shouldResume = resumeSessionAt !== undefined || openedWithResume;
+          // openedNativeThreads is per session instance and is lost when the
+          // provider session is idle-released. A prior persisted provider turn
+          // proves the native session already exists, so the query must resume
+          // it; reopening with a fixed session id makes the CLI fail fast with
+          // "Session ID ... is already in use".
+          const hasPersistedProviderTurn = turnInput.providerTurnOrdinal > 1;
+          const shouldResume =
+            resumeSessionAt !== undefined || openedWithResume || hasPersistedProviderTurn;
           const querySession = yield* queryRunner.open({
             threadId: turnInput.threadId,
             providerSessionId: input.providerSessionId,

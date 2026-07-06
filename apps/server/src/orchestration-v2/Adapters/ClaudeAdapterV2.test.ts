@@ -101,13 +101,14 @@ function makeClaudeTestTurnInput(input: {
   readonly attemptId: RunAttemptId;
   readonly text: string;
   readonly attachments: ProviderAdapterV2TurnInput["message"]["attachments"];
+  readonly providerTurnOrdinal?: number;
 }): ProviderAdapterV2TurnInput {
   return {
     appThread: makeClaudeTestAppThread(input),
     threadId: input.threadId,
     runId: RunId.make(`run-${input.attemptId}`),
     runOrdinal: 1,
-    providerTurnOrdinal: 1,
+    providerTurnOrdinal: input.providerTurnOrdinal ?? 1,
     attemptId: input.attemptId,
     rootNodeId: NodeId.make(`node-${input.attemptId}`),
     providerThread: input.providerThread,
@@ -727,5 +728,89 @@ describe("ClaudeAdapterV2 native fork", () => {
         assert.equal(openedQueries[0]?.options.sessionId, undefined);
       }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
     ),
+  );
+});
+
+describe("ClaudeAdapterV2 native session identity", () => {
+  const openTurnWithOrdinal = (providerTurnOrdinal: number) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const idAllocator = yield* IdAllocatorV2;
+        const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-claude-v2-session-identity-",
+        });
+        const openedQueries: Array<ClaudeAgentSdkQueryOpenInput> = [];
+        const adapter = makeClaudeAdapterV2({
+          instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+          settings: DEFAULT_CLAUDE_SETTINGS,
+          environment: {},
+          attachmentsDir,
+          fileSystem,
+          idAllocator,
+          queryRunner: {
+            allocateSessionId: Effect.succeed("native-session-identity"),
+            open: (input) =>
+              Effect.sync(() => {
+                openedQueries.push(input);
+                return {
+                  messages: Stream.empty,
+                  offer: () => Effect.void,
+                  setModel: () => Effect.void,
+                  interrupt: Effect.void,
+                  close: Effect.void,
+                };
+              }),
+            forkSession: () => Effect.die("unused forkSession"),
+            assertComplete: Effect.void,
+          },
+        });
+        const threadId = ThreadId.make("thread-claude-session-identity");
+        const providerSessionId = ProviderSessionId.make("provider-session-claude-identity");
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId,
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+        const now = yield* DateTime.now;
+        yield* runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId,
+            providerThread,
+            now,
+            attemptId: RunAttemptId.make("run-attempt-claude-session-identity"),
+            text: "Respond with identity ok",
+            attachments: [],
+            providerTurnOrdinal,
+          }),
+        );
+        return openedQueries;
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    );
+
+  it.effect("creates the native session on the first provider turn", () =>
+    Effect.gen(function* () {
+      const openedQueries = yield* openTurnWithOrdinal(1);
+      assert.equal(openedQueries.length, 1);
+      assert.equal(openedQueries[0]?.options.sessionId, "native-session-identity");
+      assert.equal(openedQueries[0]?.options.resume, undefined);
+    }),
+  );
+
+  it.effect(
+    "resumes the native session on a fresh session instance when prior provider turns exist",
+    () =>
+      Effect.gen(function* () {
+        const openedQueries = yield* openTurnWithOrdinal(2);
+        assert.equal(openedQueries.length, 1);
+        assert.equal(openedQueries[0]?.options.resume, "native-session-identity");
+        assert.equal(openedQueries[0]?.options.sessionId, undefined);
+      }),
   );
 });
