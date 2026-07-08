@@ -3,6 +3,7 @@ import type { ExpoConfig } from "expo/config";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 
 type AppVariant = "development" | "preview" | "production";
+type ExpoPlugin = NonNullable<ExpoConfig["plugins"]>[number];
 
 const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
@@ -62,16 +63,40 @@ function resolveAppVariant(value: string | undefined): AppVariant {
 }
 
 const variant = VARIANT_CONFIG[APP_VARIANT];
-
-const dmSansFonts = {
-  regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
-  medium: "@expo-google-fonts/dm-sans/500Medium/DMSans_500Medium.ttf",
-  bold: "@expo-google-fonts/dm-sans/700Bold/DMSans_700Bold.ttf",
-} as const;
-
-// These aliases match the fonts' PostScript names on iOS. Register the same
-// names on Android so React Native and the native composer use one set of
-// family names without waiting for runtime font loading.
+const localIosBundleIdentifier = process.env.T3CODE_LOCAL_IOS_BUNDLE_IDENTIFIER?.trim() || null;
+const localIosAppleTeamId = process.env.T3CODE_LOCAL_IOS_TEAM_ID?.trim() || null;
+const isLocalIosBuild = localIosBundleIdentifier !== null;
+const iosBundleIdentifier = localIosBundleIdentifier ?? variant.iosBundleIdentifier;
+const iosAppleTeamId = localIosAppleTeamId ?? (isLocalIosBuild ? null : "ARK85ZXQ4Z");
+const iosAssociatedDomains = isLocalIosBuild
+  ? undefined
+  : [`applinks:${variant.relyingParty}`, `webcredentials:${variant.relyingParty}`];
+const localIosSigningPlugin: ExpoPlugin[] = isLocalIosBuild
+  ? ["./plugins/withLocalIosSigning.cjs"]
+  : [];
+const widgetPlugin: ExpoPlugin[] = isLocalIosBuild
+  ? []
+  : [
+      [
+        "expo-widgets",
+        {
+          bundleIdentifier: `${iosBundleIdentifier}.widgets`,
+          groupIdentifier: `group.${iosBundleIdentifier}`,
+          enablePushNotifications: true,
+          // Agent activity can update many times an hour; without the
+          // frequent-updates entitlement iOS throttles the update budget sooner.
+          frequentUpdates: true,
+          widgets: [
+            {
+              name: "AgentActivity",
+              displayName: "Agent Activity",
+              description: "Shows the current state of active T3 Code agents.",
+              supportedFamilies: ["systemSmall", "systemMedium", "accessoryRectangular"],
+            },
+          ],
+        },
+      ],
+    ];
 
 const config: ExpoConfig = {
   name: variant.appName,
@@ -89,24 +114,20 @@ const config: ExpoConfig = {
   orientation: "portrait",
   icon: "./assets/icon.png",
   userInterfaceStyle: "automatic",
-  updates: {
-    enabled: true,
-    url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
-    checkAutomatically: "ON_LOAD",
-    fallbackToCacheTimeout: 0,
-  },
+  updates: isLocalIosBuild
+    ? { enabled: false }
+    : {
+        enabled: true,
+        url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
+        checkAutomatically: "ON_LOAD",
+        fallbackToCacheTimeout: 0,
+      },
   ios: {
     icon: variant.iosIcon,
     supportsTablet: true,
-    bundleIdentifier: variant.iosBundleIdentifier,
-    // Pin code signing to the T3 Tools team so non-interactive `expo run:ios`
-    // does not fall back to a personal team (which cannot sign app groups,
-    // Sign in with Apple, or push notification entitlements).
-    appleTeamId: "ARK85ZXQ4Z",
-    associatedDomains: [
-      `applinks:${variant.relyingParty}`,
-      `webcredentials:${variant.relyingParty}`,
-    ],
+    bundleIdentifier: iosBundleIdentifier,
+    ...(iosAppleTeamId === null ? {} : { appleTeamId: iosAppleTeamId }),
+    ...(iosAssociatedDomains === undefined ? {} : { associatedDomains: iosAssociatedDomains }),
     infoPlist: {
       NSAppTransportSecurity: {
         NSAllowsArbitraryLoads: true,
@@ -131,32 +152,9 @@ const config: ExpoConfig = {
     favicon: "./assets/favicon.png",
   },
   plugins: [
-    [
-      "expo-font",
-      {
-        ios: {
-          fonts: [dmSansFonts.regular, dmSansFonts.medium, dmSansFonts.bold],
-        },
-        android: {
-          fonts: [
-            {
-              fontFamily: "DMSans-Regular",
-              fontDefinitions: [{ path: dmSansFonts.regular, weight: 400 }],
-            },
-            {
-              fontFamily: "DMSans-Medium",
-              fontDefinitions: [{ path: dmSansFonts.medium, weight: 500 }],
-            },
-            {
-              fontFamily: "DMSans-Bold",
-              fontDefinitions: [{ path: dmSansFonts.bold, weight: 700 }],
-            },
-          ],
-        },
-      },
-    ],
+    ...localIosSigningPlugin,
+    "expo-font",
     "expo-secure-store",
-    "expo-sqlite",
     ["@clerk/expo", { theme: "./clerk-theme.json" }],
     "expo-web-browser",
     [
@@ -199,25 +197,7 @@ const config: ExpoConfig = {
     // would delete the asset catalog) and its xcodeproj mod creates the widget
     // target (which must exist before the compile phase can be attached).
     "./plugins/withWidgetLogoAsset.cjs",
-    [
-      "expo-widgets",
-      {
-        bundleIdentifier: `${variant.iosBundleIdentifier}.widgets`,
-        groupIdentifier: `group.${variant.iosBundleIdentifier}`,
-        enablePushNotifications: true,
-        // Agent activity can update many times an hour; without the
-        // frequent-updates entitlement iOS throttles the update budget sooner.
-        frequentUpdates: true,
-        widgets: [
-          {
-            name: "AgentActivity",
-            displayName: "Agent Activity",
-            description: "Shows the current state of active T3 Code agents.",
-            supportedFamilies: ["systemSmall", "systemMedium", "accessoryRectangular"],
-          },
-        ],
-      },
-    ],
+    ...widgetPlugin,
     "./plugins/withIosSceneLifecycle.cjs",
     "./plugins/withAndroidCleartextTraffic.cjs",
   ],
