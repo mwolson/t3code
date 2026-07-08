@@ -80,12 +80,14 @@ export function getModelSelectionBooleanOptionValue(
 function canonicalModelSelectionOptions(
   modelSelection: ModelSelection,
 ): ReadonlyArray<readonly [id: string, value: string | boolean]> {
-  return (modelSelection.options ?? [])
-    .map((selection) => [selection.id, selection.value] as const)
-    .toSorted(([leftId, leftValue], [rightId, rightValue]) => {
-      const idOrder = leftId.localeCompare(rightId);
-      return idOrder !== 0 ? idOrder : String(leftValue).localeCompare(String(rightValue));
-    });
+  const options = (modelSelection.options ?? []).map(
+    (selection) => [selection.id, selection.value] as const,
+  );
+  options.sort(([leftId, leftValue], [rightId, rightValue]) => {
+    const idOrder = leftId.localeCompare(rightId);
+    return idOrder !== 0 ? idOrder : String(leftValue).localeCompare(String(rightValue));
+  });
+  return options;
 }
 
 /**

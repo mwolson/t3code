@@ -31,10 +31,14 @@ export function deriveThreadCheckpointSummaries(
 ): ReadonlyArray<ThreadCheckpointSummary> {
   return projection.checkpoints.flatMap((checkpoint) => {
     if (checkpoint.appRunOrdinal === null || checkpoint.runId === null) return [];
-    const assistantMessageId =
-      projection.messages.findLast(
-        (message) => message.runId === checkpoint.runId && message.role === "assistant",
-      )?.id ?? null;
+    let assistantMessageId: MessageId | null = null;
+    for (let index = projection.messages.length - 1; index >= 0; index -= 1) {
+      const message = projection.messages[index];
+      if (message?.runId === checkpoint.runId && message.role === "assistant") {
+        assistantMessageId = message.id;
+        break;
+      }
+    }
     return [
       {
         checkpointId: checkpoint.id,

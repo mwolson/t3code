@@ -103,11 +103,11 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     error: Option.none(),
   }));
   const setReady = SubscriptionRef.update(state, (current) =>
-    current.status === "live" || current.status === "deleted"
+    current.status === "deleted"
       ? current
       : {
           ...current,
-          status: "synchronizing" as const,
+          status: Option.isSome(current.data) ? ("live" as const) : ("synchronizing" as const),
           error: Option.none(),
         },
   );

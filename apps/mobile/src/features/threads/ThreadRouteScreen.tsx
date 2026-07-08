@@ -30,7 +30,7 @@ import {
   useRemoteEnvironmentRuntime,
 } from "../../state/use-remote-environment-registry";
 import { useKnownTerminalSessions } from "../../state/use-terminal-session";
-import { useSelectedThreadDetailState } from "../../state/use-thread-detail";
+import { useSelectedThreadDetailQuery } from "../../state/use-thread-detail";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { GitActionProgressOverlay } from "./GitActionProgressOverlay";
 import {
@@ -77,6 +77,8 @@ interface ThreadInspectorSelection {
 }
 
 type NativeHeaderItems = ReadonlyArray<Record<string, unknown>>;
+
+const THREAD_DETAIL_STALL_RETRY_DELAYS_MS = [2_500, 6_000] as const;
 
 function InspectorPaneRoleActivation() {
   useAdaptiveWorkspacePaneRole("inspector");
@@ -144,7 +146,80 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
     selectedThread === null
       ? null
       : scopedThreadKey(selectedThread.environmentId, selectedThread.id);
-  const selectedThreadDetailState = useSelectedThreadDetailState();
+  const selectedThreadDetailQuery = useSelectedThreadDetailQuery();
+  const selectedThreadDetailState = selectedThreadDetailQuery.state;
+  const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
+  const detailRefreshAttemptsRef = useRef(new Map<string, number>());
+  const refreshSelectedThreadDetailRef = useRef(selectedThreadDetailQuery.refresh);
+
+  useEffect(() => {
+    refreshSelectedThreadDetailRef.current = selectedThreadDetailQuery.refresh;
+  }, [selectedThreadDetailQuery.refresh]);
+
+  useEffect(
+    () => () => {
+      if (routeThreadKey !== null) {
+        detailRefreshAttemptsRef.current.delete(routeThreadKey);
+      }
+    },
+    [routeThreadKey],
+  );
+
+  useEffect(() => {
+    if (routeThreadKey === null) {
+      return;
+    }
+
+    if (selectedThreadKey !== routeThreadKey) {
+      return;
+    }
+
+    if (selectedThreadDetail !== null || selectedThreadDetailState.status === "deleted") {
+      detailRefreshAttemptsRef.current.delete(routeThreadKey);
+      return;
+    }
+
+    if (routeConnectionState !== "connected") {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRetry = () => {
+      const attempts = detailRefreshAttemptsRef.current.get(routeThreadKey) ?? 0;
+      const delayMs = THREAD_DETAIL_STALL_RETRY_DELAYS_MS[attempts];
+      if (delayMs === undefined) {
+        return;
+      }
+      timer = setTimeout(() => {
+        if (cancelled) {
+          return;
+        }
+        const currentAttempts = detailRefreshAttemptsRef.current.get(routeThreadKey) ?? 0;
+        if (currentAttempts !== attempts) {
+          return;
+        }
+        detailRefreshAttemptsRef.current.set(routeThreadKey, attempts + 1);
+        refreshSelectedThreadDetailRef.current();
+        scheduleRetry();
+      }, delayMs);
+    };
+
+    scheduleRetry();
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+    };
+  }, [
+    routeThreadKey,
+    routeConnectionState,
+    selectedThreadKey,
+    selectedThreadDetail,
+    selectedThreadDetailState.status,
+  ]);
 
   if (environmentId === null || threadIdRaw === null) {
     return <OpeningThreadLoadingScreen />;
@@ -172,7 +247,7 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
 
 function ThreadRouteContent(
   props: ThreadRouteScreenProps & {
-    readonly selectedThreadDetailState: ReturnType<typeof useSelectedThreadDetailState>;
+    readonly selectedThreadDetailState: ReturnType<typeof useSelectedThreadDetailQuery>["state"];
   },
 ) {
   const {

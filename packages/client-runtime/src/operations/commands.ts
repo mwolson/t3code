@@ -184,6 +184,12 @@ const dispatch = (command: OrchestrationV2Command) =>
 const getProjection = (threadId: ThreadId) =>
   request(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, { threadId });
 
+function isActiveRunStatus(status: string): boolean {
+  return (
+    status === "preparing" || status === "starting" || status === "running" || status === "waiting"
+  );
+}
+
 const persistAttachments = Effect.fn("EnvironmentCommands.persistAttachments")(function* (
   threadId: ThreadId,
   messageId: MessageId,
@@ -449,13 +455,14 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
   }
 
   const projection = yield* getProjection(input.threadId);
-  const activeRun = projection.runs.findLast(
-    (run) =>
-      run.status === "preparing" ||
-      run.status === "starting" ||
-      run.status === "running" ||
-      run.status === "waiting",
-  );
+  let activeRun: (typeof projection.runs)[number] | undefined;
+  for (let index = projection.runs.length - 1; index >= 0; index -= 1) {
+    const run = projection.runs[index];
+    if (run && isActiveRunStatus(run.status)) {
+      activeRun = run;
+      break;
+    }
+  }
   const requestedMode = input.dispatchMode ?? "auto";
   const activeProviderThread =
     activeRun === undefined
@@ -504,16 +511,15 @@ export const interruptThreadTurn = Effect.fn("EnvironmentCommands.interruptThrea
   input: InterruptThreadTurnInput,
 ) {
   const projection = yield* getProjection(input.threadId);
-  const runId =
-    input.runId ??
-    (input.turnId as RunId | undefined) ??
-    projection.runs.findLast(
-      (run) =>
-        run.status === "preparing" ||
-        run.status === "starting" ||
-        run.status === "running" ||
-        run.status === "waiting",
-    )?.id;
+  let latestActiveRunId: RunId | undefined;
+  for (let index = projection.runs.length - 1; index >= 0; index -= 1) {
+    const run = projection.runs[index];
+    if (run && isActiveRunStatus(run.status)) {
+      latestActiveRunId = run.id;
+      break;
+    }
+  }
+  const runId = input.runId ?? (input.turnId as RunId | undefined) ?? latestActiveRunId;
   if (runId === undefined) return { sequence: 0 };
   return yield* dispatch({
     type: "run.interrupt",
@@ -550,15 +556,23 @@ export const respondToThreadUserInput = Effect.fn("EnvironmentCommands.respondTo
 export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThreadCheckpoint")(
   function* (input: RevertThreadCheckpointInput) {
     const projection = yield* getProjection(input.threadId);
+    let fallbackCheckpoint: (typeof projection.checkpoints)[number] | undefined;
+    for (let index = projection.checkpoints.length - 1; index >= 0; index -= 1) {
+      const candidate = projection.checkpoints[index];
+      if (
+        candidate &&
+        (input.turnCount === 0
+          ? candidate.ordinalWithinScope === 0 && candidate.appRunOrdinal === null
+          : candidate.appRunOrdinal === input.turnCount)
+      ) {
+        fallbackCheckpoint = candidate;
+        break;
+      }
+    }
     const checkpoint =
       projection.checkpoints.find(
         (candidate) => candidate.id === input.checkpointId && candidate.scopeId === input.scopeId,
-      ) ??
-      projection.checkpoints.findLast((candidate) =>
-        input.turnCount === 0
-          ? candidate.ordinalWithinScope === 0 && candidate.appRunOrdinal === null
-          : candidate.appRunOrdinal === input.turnCount,
-      );
+      ) ?? fallbackCheckpoint;
     if (checkpoint === undefined || checkpoint.status !== "ready") {
       const target =
         input.checkpointId === undefined

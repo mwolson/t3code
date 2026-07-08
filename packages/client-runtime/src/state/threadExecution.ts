@@ -5,6 +5,17 @@ import type { ThreadRunSummary, ThreadRuntimeSummary } from "./models.ts";
 
 const ACTIVE_RUN_STATUSES = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 
+function findLatestAssistantMessageIdForRun(
+  projection: OrchestrationV2ThreadProjection,
+  runId: OrchestrationV2ThreadProjection["runs"][number]["id"],
+): OrchestrationV2ThreadProjection["messages"][number]["id"] | null {
+  for (let index = projection.messages.length - 1; index >= 0; index -= 1) {
+    const message = projection.messages[index];
+    if (message?.runId === runId && message.role === "assistant") return message.id;
+  }
+  return null;
+}
+
 export function deriveLatestThreadRun(
   projection: OrchestrationV2ThreadProjection,
 ): ThreadRunSummary | null {
@@ -20,10 +31,7 @@ export function deriveLatestThreadRun(
     requestedAt: DateTime.formatIso(run.requestedAt),
     startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
     completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
-    assistantMessageId:
-      projection.messages.findLast(
-        (message) => message.runId === run.id && message.role === "assistant",
-      )?.id ?? null,
+    assistantMessageId: findLatestAssistantMessageIdForRun(projection, run.id),
     ...(run.sourcePlanRef === undefined ? {} : { sourcePlanRef: run.sourcePlanRef }),
   };
 }
@@ -32,12 +40,23 @@ export function deriveThreadRuntime(
   projection: OrchestrationV2ThreadProjection,
 ): ThreadRuntimeSummary | null {
   const latestRun = deriveLatestThreadRun(projection);
-  const providerSession = projection.providerSessions.findLast(
-    (session) => session.providerInstanceId === projection.thread.providerInstanceId,
-  );
+  let providerSession: (typeof projection.providerSessions)[number] | undefined;
+  for (let index = projection.providerSessions.length - 1; index >= 0; index -= 1) {
+    const session = projection.providerSessions[index];
+    if (session?.providerInstanceId === projection.thread.providerInstanceId) {
+      providerSession = session;
+      break;
+    }
+  }
   if (latestRun === null && projection.thread.activeProviderThreadId === null) return null;
-  const activeRunId =
-    projection.runs.findLast((run) => ACTIVE_RUN_STATUSES.has(run.status))?.id ?? null;
+  let activeRunId: (typeof projection.runs)[number]["id"] | null = null;
+  for (let index = projection.runs.length - 1; index >= 0; index -= 1) {
+    const run = projection.runs[index];
+    if (run && ACTIVE_RUN_STATUSES.has(run.status)) {
+      activeRunId = run.id;
+      break;
+    }
+  }
   return {
     status: latestRun?.status ?? "idle",
     activeRunId,

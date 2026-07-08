@@ -6,18 +6,17 @@ import type {
 import type { MenuAction } from "@react-native-menu/menu";
 import { SymbolView } from "expo-symbols";
 import { memo, useCallback, useMemo, type ComponentProps } from "react";
-import { Pressable, useColorScheme, useWindowDimensions, View } from "react-native";
+import { Pressable, useWindowDimensions, View } from "react-native";
+import { Pressable as GesturePressable } from "react-native-gesture-handler";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
-import Svg, { Circle, Path } from "react-native-svg";
 
 import { AppText as Text } from "../../components/AppText";
 import { ControlPillMenu } from "../../components/ControlPill";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
-import { cn } from "../../lib/cn";
 import { relativeTime } from "../../lib/time";
 import { useThemeColor } from "../../lib/useThemeColor";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
-import { useThreadPr, type ThreadPr } from "../../state/use-thread-pr";
+import { useThreadPr } from "../../state/use-thread-pr";
 import type { HomeGroupDisplayAction } from "../home/homeListItems";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { resolveThreadStatus } from "./threadPresentation";
@@ -33,41 +32,6 @@ export type ThreadListVariant = "compact" | "sidebar";
 /** Left inset that aligns compact secondary rows with the title column. */
 export const THREAD_LIST_COMPACT_INSET = 20;
 const SIDEBAR_ROW_RADIUS = 12;
-
-function pullRequestTintColor(
-  state: ThreadPr["state"],
-  colorScheme: ReturnType<typeof useColorScheme>,
-) {
-  const dark = colorScheme === "dark";
-  switch (state) {
-    case "open":
-      return dark ? "#34d399" : "#059669";
-    case "merged":
-      return dark ? "#a78bfa" : "#7c3aed";
-    case "closed":
-      return dark ? "#a1a1aa" : "#71717a";
-  }
-}
-
-function PullRequestIcon(props: { readonly size: number; readonly color: string }) {
-  return (
-    <Svg
-      width={props.size}
-      height={props.size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke={props.color}
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <Circle cx={18} cy={18} r={3} />
-      <Circle cx={6} cy={6} r={3} />
-      <Path d="M13 6h3a2 2 0 0 1 2 2v7" />
-      <Path d="M6 9v12" />
-    </Svg>
-  );
-}
 
 /* ─── Project group header ───────────────────────────────────────────── */
 
@@ -138,9 +102,10 @@ export const ThreadListGroupHeader = memo(function ThreadListGroupHeader(props: 
         <Text
           className={
             compact
-              ? "flex-shrink text-base font-t3-bold tracking-[0.2px] text-foreground-muted"
-              : "flex-shrink text-sm font-t3-bold tracking-[0.2px] text-foreground-muted"
+              ? "flex-shrink text-base font-t3-bold text-foreground-muted"
+              : "flex-shrink text-sm font-t3-bold text-foreground-muted"
           }
+          style={{ letterSpacing: 0.2 }}
           numberOfLines={1}
         >
           {props.title}
@@ -272,6 +237,7 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
   const compact = props.variant === "compact";
   const separatorColor = useThemeColor("--color-separator");
   const iconSubtleColor = useThemeColor("--color-icon-subtle");
+  const foregroundColor = useThemeColor("--color-foreground");
   const mutedColor = useThemeColor("--color-foreground-muted");
   const pressedBackgroundColor = useThemeColor("--color-subtle");
 
@@ -289,14 +255,17 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
   );
 
   const statusPill = (
-    <View className="rounded-full bg-zinc-500/12 px-1.5 py-0.5 dark:bg-zinc-500/16">
+    <View
+      className="bg-zinc-500/12 dark:bg-zinc-500/16"
+      style={{ borderRadius: 99, paddingHorizontal: 6, paddingVertical: 2 }}
+    >
       <Text className="text-3xs font-t3-bold text-zinc-600 dark:text-zinc-300">Pending</Text>
     </View>
   );
 
   const subtitleRow =
     subtitleParts.length > 0 ? (
-      <View className="mt-px flex-row items-center gap-1.5">
+      <View className="flex-row items-center gap-1.5" style={{ marginTop: 1 }}>
         <SymbolView
           name="tray.and.arrow.up"
           size={10}
@@ -304,12 +273,9 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
           type="monochrome"
         />
         <Text
-          className={
-            compact
-              ? "shrink text-sm text-foreground-muted"
-              : "shrink text-xs text-foreground-muted"
-          }
+          className={compact ? "text-sm text-foreground-muted" : "text-xs"}
           numberOfLines={1}
+          style={compact ? { flexShrink: 1 } : { flexShrink: 1, color: mutedColor }}
         >
           {subtitleParts.join(" · ")}
         </Text>
@@ -346,7 +312,12 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
             </Text>
             <View className="flex-row items-center gap-2">
               {statusPill}
-              <Text className="text-base tabular-nums text-foreground-tertiary">{timestamp}</Text>
+              <Text
+                className="text-base text-foreground-tertiary"
+                style={{ fontVariant: ["tabular-nums"] }}
+              >
+                {timestamp}
+              </Text>
               <SymbolView
                 name="chevron.right"
                 size={13}
@@ -375,14 +346,22 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
         paddingVertical: 10,
       })}
     >
-      <View className="gap-[3px]">
+      <View style={{ gap: 3 }}>
         <View className="flex-row items-center justify-between gap-2">
-          <Text className="flex-1 text-base font-t3-medium text-foreground" numberOfLines={1}>
+          <Text
+            className="flex-1 text-base font-t3-medium"
+            numberOfLines={1}
+            style={{ color: foregroundColor }}
+          >
             {pendingTask.title}
           </Text>
           <View className="flex-row items-center gap-2">
             {statusPill}
-            <Text className="text-xs tabular-nums text-foreground-muted" numberOfLines={1}>
+            <Text
+              className="text-xs"
+              numberOfLines={1}
+              style={{ color: mutedColor, fontVariant: ["tabular-nums"] }}
+            >
               {timestamp}
             </Text>
           </View>
@@ -430,7 +409,6 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   >["simultaneousWithExternalGesture"];
 }) {
   const { width: windowWidth } = useWindowDimensions();
-  const colorScheme = useColorScheme();
   const compact = props.variant === "compact";
   const selected = props.selected === true;
   // Recycling-safe: resets when the list container is reused for another
@@ -441,8 +419,12 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const iconSubtleColor = useThemeColor("--color-icon-subtle");
   const screenColor = useThemeColor("--color-screen");
   const drawerColor = useThemeColor("--color-drawer");
+  const foregroundColor = useThemeColor("--color-foreground");
+  const mutedColor = useThemeColor("--color-foreground-muted");
   const pressedBackgroundColor = useThemeColor("--color-subtle");
   const selectedBackgroundColor = useThemeColor("--color-user-bubble");
+  const selectedForegroundColor = useThemeColor("--color-user-bubble-foreground");
+  const selectedMutedColor = useThemeColor("--color-user-bubble-foreground-muted");
 
   const { thread, onSelectThread, onArchiveThread, onDeleteThread } = props;
   const status = resolveThreadStatus(thread);
@@ -450,12 +432,13 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const timestamp = relativeTime(
     thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
   );
-  const threadAccessibilityLabel = pr ? `${thread.title}, ${pr.accessibilityLabel}` : thread.title;
   const subtitleParts = [props.environmentLabel, thread.branch].filter((part): part is string =>
     Boolean(part),
   );
 
   const backgroundColor = compact ? screenColor : drawerColor;
+  const effectiveForeground = selected ? selectedForegroundColor : foregroundColor;
+  const effectiveMuted = selected ? selectedMutedColor : mutedColor;
   const effectivePressedBackground = selected ? "rgba(255,255,255,0.16)" : pressedBackgroundColor;
   const effectiveStatus =
     selected && status
@@ -482,7 +465,10 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   );
 
   const statusPill = effectiveStatus ? (
-    <View className={`${effectiveStatus.pillClassName} rounded-full px-1.5 py-0.5`}>
+    <View
+      className={effectiveStatus.pillClassName}
+      style={{ borderRadius: 99, paddingHorizontal: 6, paddingVertical: 2 }}
+    >
       <Text className={`text-3xs font-t3-bold ${effectiveStatus.textClassName}`}>
         {effectiveStatus.label}
       </Text>
@@ -491,52 +477,47 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
 
   const subtitleRow =
     subtitleParts.length > 0 || pr !== null ? (
-      <View className="mt-px flex-row items-center gap-1.5">
+      <View className="flex-row items-center gap-1.5" style={{ marginTop: 1 }}>
         {subtitleParts.length > 0 ? (
           <>
+            <SymbolView
+              name="arrow.triangle.branch"
+              size={10}
+              tintColor={compact ? iconSubtleColor : effectiveMuted}
+              type="monochrome"
+            />
             <Text
-              className={cn(
-                "shrink",
-                compact ? "text-sm text-foreground-muted" : "text-xs",
-                !compact &&
-                  (selected ? "text-user-bubble-foreground-muted" : "text-foreground-muted"),
-              )}
+              className={compact ? "text-sm text-foreground-muted" : "text-xs"}
               numberOfLines={1}
+              style={compact ? { flexShrink: 1 } : { flexShrink: 1, color: effectiveMuted }}
             >
               {subtitleParts.join(" · ")}
             </Text>
           </>
         ) : null}
         {pr !== null ? (
-          <View className="flex-row items-center gap-0.5">
-            <PullRequestIcon
-              size={compact ? 13 : 11}
-              color={selected ? "#ffffff" : pullRequestTintColor(pr.state, colorScheme)}
-            />
-            <Text
-              className={`${compact ? "text-sm" : "text-xs"} font-t3-medium ${
-                selected ? "text-white" : pr.textClassName
-              }`}
-            >
-              {pr.label}
-            </Text>
-          </View>
+          <Text
+            className={`${compact ? "text-sm" : "text-xs"} font-t3-medium ${
+              selected ? "text-white" : pr.textClassName
+            }`}
+          >
+            {pr.label}
+          </Text>
         ) : null}
       </View>
     ) : null;
 
   const rowContent = (close: () => void) =>
     compact ? (
-      <Pressable
+      <GesturePressable
         accessibilityHint="Swipe left for archive and delete actions"
-        accessibilityLabel={threadAccessibilityLabel}
+        accessibilityLabel={thread.title}
         accessibilityRole="button"
-        className="bg-screen"
         onPress={() => {
           close();
           onSelectThread(thread);
         }}
-        style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+        style={({ pressed }) => ({ backgroundColor: screenColor, opacity: pressed ? 0.7 : 1 })}
       >
         <View
           style={{
@@ -559,7 +540,12 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
               </Text>
               <View className="flex-row items-center gap-2">
                 {statusPill}
-                <Text className="text-base tabular-nums text-foreground-tertiary">{timestamp}</Text>
+                <Text
+                  className="text-base text-foreground-tertiary"
+                  style={{ fontVariant: ["tabular-nums"] }}
+                >
+                  {timestamp}
+                </Text>
                 <SymbolView
                   name="chevron.right"
                   size={13}
@@ -571,11 +557,11 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
             {subtitleRow}
           </View>
         </View>
-      </Pressable>
+      </GesturePressable>
     ) : (
       <Pressable
         accessibilityHint="Opens the thread"
-        accessibilityLabel={threadAccessibilityLabel}
+        accessibilityLabel={thread.title}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         onHoverIn={() => setHovered(true)}
@@ -598,25 +584,21 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
           paddingVertical: 10,
         })}
       >
-        <View className="gap-[3px]">
+        <View style={{ gap: 3 }}>
           <View className="flex-row items-center justify-between gap-2">
             <Text
-              className={cn(
-                "flex-1 text-base font-t3-medium",
-                selected ? "text-user-bubble-foreground" : "text-foreground",
-              )}
+              className="flex-1 text-base font-t3-medium"
               numberOfLines={1}
+              style={{ color: effectiveForeground }}
             >
               {thread.title}
             </Text>
             <View className="flex-row items-center gap-2">
               {statusPill}
               <Text
-                className={cn(
-                  "text-xs tabular-nums",
-                  selected ? "text-user-bubble-foreground-muted" : "text-foreground-muted",
-                )}
+                className="text-xs"
                 numberOfLines={1}
+                style={{ color: effectiveMuted, fontVariant: ["tabular-nums"] }}
               >
                 {timestamp}
               </Text>
@@ -643,21 +625,28 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       simultaneousWithExternalGesture={props.simultaneousSwipeGesture}
       threadTitle={thread.title}
     >
-      {(close) => (
-        // Messages-style row actions: a real UIContextMenuInteraction on
-        // long-press / pointer right-click, with the row as the zoom preview.
-        // Requires the patched @react-native-menu (see
-        // patches/@react-native-menu__menu@2.0.0.patch): in long-press mode
-        // the interaction is hosted by the component view and the underlying
-        // UIButton passes touches through, so row taps keep working.
-        <ControlPillMenu
-          actions={THREAD_ROW_MENU_ACTIONS}
-          onPressAction={handleMenuAction}
-          shouldOpenOnLongPress
-        >
-          {rowContent(close)}
-        </ControlPillMenu>
-      )}
+      {(close) => {
+        const renderedRowContent = rowContent(close);
+        if (compact) {
+          return renderedRowContent;
+        }
+
+        return (
+          // Messages-style row actions: a real UIContextMenuInteraction on
+          // long-press / pointer right-click, with the row as the zoom preview.
+          // Requires the patched @react-native-menu (see
+          // patches/@react-native-menu__menu@2.0.0.patch): in long-press mode
+          // the interaction is hosted by the component view and the underlying
+          // UIButton passes touches through, so row taps keep working.
+          <ControlPillMenu
+            actions={THREAD_ROW_MENU_ACTIONS}
+            onPressAction={handleMenuAction}
+            shouldOpenOnLongPress
+          >
+            {renderedRowContent}
+          </ControlPillMenu>
+        );
+      }}
     </ThreadSwipeable>
   );
 });

@@ -55,7 +55,6 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, {
   FadeIn,
   FadeInUp,
-  FadeOut,
   LinearTransition,
   type SharedValue,
 } from "react-native-reanimated";
@@ -916,6 +915,7 @@ function renderFeedEntry(
           hasNativeSelectableMarkdownText() ? (
             <SelectableMarkdownText
               markdown={message.text}
+              fillWidth
               skills={props.skills}
               textStyle={styles.nativeTextStyle}
               onLinkPress={props.onMarkdownLinkPress}
@@ -1224,6 +1224,7 @@ function ThreadFeedPlaceholder(props: {
   readonly bottomInset: number;
   readonly detail: string;
   readonly horizontalPadding: number;
+  readonly loading?: boolean;
   readonly title: string;
   readonly topInset: number;
 }) {
@@ -1240,6 +1241,7 @@ function ThreadFeedPlaceholder(props: {
       }}
     >
       <View className="max-w-[320px] items-center gap-2">
+        {props.loading ? <ActivityIndicator size="small" /> : null}
         <Text className="text-center font-t3-bold text-lg text-foreground">{props.title}</Text>
         <Text className="text-center text-sm leading-normal text-foreground-secondary">
           {props.detail}
@@ -1635,6 +1637,19 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     );
   }
 
+  if (props.contentPresentation.kind === "loading") {
+    return (
+      <ThreadFeedPlaceholder
+        title="Loading messages"
+        detail="Catching up this thread before showing the conversation."
+        topInset={topContentInset}
+        bottomInset={bottomContentInset}
+        horizontalPadding={horizontalPadding}
+        loading
+      />
+    );
+  }
+
   return (
     <>
       <View className="flex-1" onLayout={handleViewportLayout}>
@@ -1649,6 +1664,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             // mount positions during attach, where UIKit applies the inset.
             key={listMountKey}
             style={{ flex: 1 }}
+            bounces={false}
+            alwaysBounceVertical={false}
             // RN 0.81+ drops touches inside the contentInset area
             // (facebook/react-native#54123); the anchored end space after a send
             // is pure inset, so without this the blank region can't be scrolled.

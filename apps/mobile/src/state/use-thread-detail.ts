@@ -3,7 +3,11 @@ import type { EnvironmentThread } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId, OrchestrationV2ThreadProjection, ThreadId } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
-import { environmentThreadDetails, useEnvironmentThread } from "./threads";
+import {
+  environmentThreadDetails,
+  useEnvironmentThread,
+  useEnvironmentThreadQuery,
+} from "./threads";
 import { useThreadSelection } from "./use-thread-selection";
 
 const EMPTY_THREAD_PROJECTION_ATOM = Atom.make<EnvironmentThread | null>(null).pipe(
@@ -22,9 +26,17 @@ export function useThreadDetail(target: ThreadDetailTarget) {
   return useEnvironmentThread(target.environmentId, target.threadId);
 }
 
+export function useThreadDetailQuery(target: ThreadDetailTarget) {
+  return useEnvironmentThreadQuery(target.environmentId, target.threadId);
+}
+
 export function useSelectedThreadDetailState() {
+  return useSelectedThreadDetailQuery().state;
+}
+
+export function useSelectedThreadDetailQuery() {
   const { selectedThread } = useThreadSelection();
-  return useThreadDetail({
+  return useThreadDetailQuery({
     environmentId: selectedThread?.environmentId ?? null,
     threadId: selectedThread?.id ?? null,
   });
