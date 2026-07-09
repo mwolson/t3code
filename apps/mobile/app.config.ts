@@ -63,6 +63,17 @@ function resolveAppVariant(value: string | undefined): AppVariant {
 }
 
 const variant = VARIANT_CONFIG[APP_VARIANT];
+
+const dmSansFonts = {
+  bold: "@expo-google-fonts/dm-sans/700Bold/DMSans_700Bold.ttf",
+  medium: "@expo-google-fonts/dm-sans/500Medium/DMSans_500Medium.ttf",
+  regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
+} as const;
+
+// These aliases match the fonts' PostScript names on iOS. Register the same
+// names on Android so React Native and the native composer use one set of
+// family names without waiting for runtime font loading.
+
 const localIosBundleIdentifier = process.env.T3CODE_LOCAL_IOS_BUNDLE_IDENTIFIER?.trim() || null;
 const localIosAppleTeamId = process.env.T3CODE_LOCAL_IOS_TEAM_ID?.trim() || null;
 const isLocalIosBuild = localIosBundleIdentifier !== null;
@@ -153,8 +164,32 @@ const config: ExpoConfig = {
   },
   plugins: [
     ...localIosSigningPlugin,
-    "expo-font",
+    [
+      "expo-font",
+      {
+        android: {
+          fonts: [
+            {
+              fontDefinitions: [{ path: dmSansFonts.regular, weight: 400 }],
+              fontFamily: "DMSans-Regular",
+            },
+            {
+              fontDefinitions: [{ path: dmSansFonts.medium, weight: 500 }],
+              fontFamily: "DMSans-Medium",
+            },
+            {
+              fontDefinitions: [{ path: dmSansFonts.bold, weight: 700 }],
+              fontFamily: "DMSans-Bold",
+            },
+          ],
+        },
+        ios: {
+          fonts: [dmSansFonts.regular, dmSansFonts.medium, dmSansFonts.bold],
+        },
+      },
+    ],
     "expo-secure-store",
+    "expo-sqlite",
     ["@clerk/expo", { theme: "./clerk-theme.json" }],
     "expo-web-browser",
     [

@@ -510,7 +510,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
   const rowContent = (close: () => void) =>
     compact ? (
       <GesturePressable
-        accessibilityHint="Swipe left for archive and delete actions"
+        accessibilityHint="Opens the thread. Long-press or swipe left for archive and delete."
         accessibilityLabel={thread.title}
         accessibilityRole="button"
         onPress={() => {
@@ -625,28 +625,23 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       simultaneousWithExternalGesture={props.simultaneousSwipeGesture}
       threadTitle={thread.title}
     >
-      {(close) => {
-        const renderedRowContent = rowContent(close);
-        if (compact) {
-          return renderedRowContent;
-        }
-
-        return (
-          // Messages-style row actions: a real UIContextMenuInteraction on
-          // long-press / pointer right-click, with the row as the zoom preview.
-          // Requires the patched @react-native-menu (see
-          // patches/@react-native-menu__menu@2.0.0.patch): in long-press mode
-          // the interaction is hosted by the component view and the underlying
-          // UIButton passes touches through, so row taps keep working.
-          <ControlPillMenu
-            actions={THREAD_ROW_MENU_ACTIONS}
-            onPressAction={handleMenuAction}
-            shouldOpenOnLongPress
-          >
-            {renderedRowContent}
-          </ControlPillMenu>
-        );
-      }}
+      {(close) => (
+        // Messages-style row actions: a real UIContextMenuInteraction on
+        // long-press / pointer right-click, with the row as the zoom preview.
+        // Compact (Home) and sidebar rows both use this so long-press opens
+        // archive/delete while taps still open the thread.
+        // Requires the patched @react-native-menu (see
+        // patches/@react-native-menu__menu@2.0.0.patch): in long-press mode
+        // the interaction is hosted by the component view and the underlying
+        // UIButton passes touches through, so row taps keep working.
+        <ControlPillMenu
+          actions={THREAD_ROW_MENU_ACTIONS}
+          onPressAction={handleMenuAction}
+          shouldOpenOnLongPress
+        >
+          {rowContent(close)}
+        </ControlPillMenu>
+      )}
     </ThreadSwipeable>
   );
 });
