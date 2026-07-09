@@ -13,7 +13,7 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
 }) {
   if (!error) return null;
   return (
-    <div className="pt-3 mx-auto max-w-3xl">
+    <div className="chat-content-lane pt-3">
       <Alert variant="error">
         <CircleAlertIcon />
         <Tooltip>

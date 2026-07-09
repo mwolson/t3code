@@ -40,6 +40,9 @@ const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
 const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
 const promptDelayMs = Number(process.env.T3_ACP_PROMPT_DELAY_MS ?? "0");
+const supportsSessionLifecycle = process.env.T3_ACP_SESSION_LIFECYCLE === "1";
+const advertisedAuthMethodId = process.env.T3_ACP_AUTH_METHOD_ID?.trim();
+const requiresAuthentication = process.env.T3_ACP_REQUIRE_AUTH === "1";
 const permissionOptionIds = {
   allowOnce: process.env.T3_ACP_ALLOW_ONCE_OPTION_ID ?? "allow-once",
   allowAlways: process.env.T3_ACP_ALLOW_ALWAYS_OPTION_ID ?? "allow-always",
@@ -53,6 +56,7 @@ let parameterizedModelPicker = false;
 let currentReasoning = "medium";
 let currentContext = "272k";
 let currentFast = false;
+let authenticated = !requiresAuthentication;
 let promptCount = 0;
 let overlappingFirstPromptId: string | undefined;
 const cancelledSessions = new Set<string>();
@@ -224,35 +228,6 @@ function configOptions(): ReadonlyArray<AcpSchema.SessionConfigOption> {
   ];
 }
 
-function modelConfigOptionsFor(modelId: string): ReadonlyArray<AcpSchema.SessionConfigOption> {
-  const previousModelId = currentModelId;
-  try {
-    currentModelId = modelId;
-    return configOptions().filter(
-      (option) => option.category !== "mode" && option.category !== "model",
-    );
-  } finally {
-    currentModelId = previousModelId;
-  }
-}
-
-function availableModels(): ReadonlyArray<{
-  readonly value: string;
-  readonly name: string;
-  readonly configOptions: ReadonlyArray<AcpSchema.SessionConfigOption>;
-}> {
-  return [
-    { value: "default", name: "Auto" },
-    { value: "composer-2", name: "Composer 2" },
-    { value: "gpt-5.4", name: "GPT-5.4" },
-    { value: "claude-opus-4-6", name: "Opus 4.6" },
-  ].map((model) => ({
-    value: model.value,
-    name: model.name,
-    configOptions: modelConfigOptionsFor(model.value),
-  }));
-}
-
 const availableModes: ReadonlyArray<AcpSchema.SessionMode> = [
   {
     id: "ask",
@@ -302,19 +277,56 @@ const program = Effect.gen(function* () {
         request.clientCapabilities?._meta?.parameterizedModelPicker === true;
       return {
         protocolVersion: 1,
-        agentCapabilities: { loadSession: true },
+        agentCapabilities: {
+          loadSession: true,
+          ...(supportsSessionLifecycle
+            ? {
+                sessionCapabilities: {
+                  list: {},
+                  fork: {},
+                  resume: {},
+                  close: {},
+                },
+              }
+            : {}),
+        },
+        ...(advertisedAuthMethodId
+          ? {
+              authMethods: [
+                {
+                  id: advertisedAuthMethodId,
+                  name: "Mock agent authentication",
+                },
+              ],
+            }
+          : {}),
       };
     }),
   );
 
-  yield* agent.handleAuthenticate(() => Effect.succeed({}));
+  yield* agent.handleAuthenticate((request) =>
+    Effect.gen(function* () {
+      if (advertisedAuthMethodId && request.methodId !== advertisedAuthMethodId) {
+        return yield* AcpError.AcpRequestError.invalidParams(
+          `Unknown mock authentication method: ${request.methodId}`,
+        );
+      }
+      authenticated = true;
+      return {};
+    }),
+  );
 
   yield* agent.handleCreateSession(() =>
-    Effect.succeed({
-      sessionId,
-      modes: modeState(),
-      models: modelState(),
-      configOptions: configOptions(),
+    Effect.gen(function* () {
+      if (!authenticated) {
+        return yield* AcpError.AcpRequestError.authRequired();
+      }
+      return {
+        sessionId,
+        modes: modeState(),
+        models: modelState(),
+        configOptions: configOptions(),
+      };
     }),
   );
 
@@ -379,6 +391,38 @@ const program = Effect.gen(function* () {
       };
     }),
   );
+
+  yield* agent.handleListSessions((request) =>
+    Effect.succeed({
+      sessions: [
+        {
+          sessionId,
+          cwd: request.cwd ?? process.cwd(),
+          title: "Mock session",
+          updatedAt: "1970-01-01T00:00:00.000Z",
+        },
+      ],
+    }),
+  );
+
+  yield* agent.handleForkSession((request) =>
+    Effect.succeed({
+      sessionId: `${request.sessionId}-fork`,
+      modes: modeState(),
+      models: modelState(),
+      configOptions: configOptions(),
+    }),
+  );
+
+  yield* agent.handleResumeSession(() =>
+    Effect.succeed({
+      modes: modeState(),
+      models: modelState(),
+      configOptions: configOptions(),
+    }),
+  );
+
+  yield* agent.handleCloseSession(() => Effect.succeed({}));
 
   yield* agent.handleSetSessionModel((request) =>
     Effect.gen(function* () {
@@ -878,12 +922,6 @@ const program = Effect.gen(function* () {
   );
 
   yield* agent.handleUnknownExtRequest((method, params) => {
-    if (method === "cursor/list_available_models") {
-      return Effect.succeed({
-        models: availableModels(),
-      });
-    }
-
     if (method !== "session/mode/set") {
       return Effect.fail(AcpError.AcpRequestError.methodNotFound(method));
     }
