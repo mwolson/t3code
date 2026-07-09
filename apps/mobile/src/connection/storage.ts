@@ -24,9 +24,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SecureStore from "expo-secure-store";
 
-import { makeCatalogStore, type SecureCatalogStorage } from "./catalog-store";
+import { make as makeCatalogStore } from "./catalog-store";
 
 const SHELL_SNAPSHOT_CACHE_DIRECTORY = "connection-shell-snapshots";
 const LEGACY_SHELL_SNAPSHOT_CACHE_DIRECTORY = "shell-snapshots";
@@ -38,13 +37,6 @@ const decodeStoredShellSnapshot = Schema.decodeUnknownResult(StoredShellSnapshot
 const encodeStoredShellSnapshot = Schema.encodeUnknownResult(StoredShellSnapshot);
 const decodeStoredThreadSnapshot = Schema.decodeUnknownResult(StoredThreadSnapshot);
 const encodeStoredThreadSnapshot = Schema.encodeUnknownResult(StoredThreadSnapshot);
-
-function catalogError(operation: string, cause: unknown) {
-  return new ConnectionTransientError({
-    reason: "remote-unavailable",
-    detail: `Could not ${operation} the local connection catalog: ${String(cause)}`,
-  });
-}
 
 function shellPersistenceError(
   operation:
@@ -111,24 +103,6 @@ function targetPersistenceError(
   });
 }
 
-const secureCatalogStorage: SecureCatalogStorage = {
-  getItem: (key) =>
-    Effect.tryPromise({
-      try: () => SecureStore.getItemAsync(key),
-      catch: (cause) => catalogError("load", cause),
-    }),
-  setItem: (key, value) =>
-    Effect.tryPromise({
-      try: () => SecureStore.setItemAsync(key, value),
-      catch: (cause) => catalogError("save", cause),
-    }),
-  deleteItem: (key) =>
-    Effect.tryPromise({
-      try: () => SecureStore.deleteItemAsync(key),
-      catch: (cause) => catalogError("delete", cause),
-    }),
-};
-
 function shellSnapshotFileName(environmentId: EnvironmentId): string {
   return `${encodeURIComponent(environmentId)}.json`;
 }
@@ -163,7 +137,7 @@ const legacyShellSnapshotFile = (
 
 export const connectionStorageLayer = Layer.effectContext(
   Effect.gen(function* () {
-    const catalog = yield* makeCatalogStore(secureCatalogStorage);
+    const catalog = yield* makeCatalogStore();
 
     const targetStore = ConnectionTargetStore.of({
       list: catalog.read.pipe(

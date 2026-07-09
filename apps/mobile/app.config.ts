@@ -63,6 +63,17 @@ function resolveAppVariant(value: string | undefined): AppVariant {
 }
 
 const variant = VARIANT_CONFIG[APP_VARIANT];
+
+const dmSansFonts = {
+  bold: "@expo-google-fonts/dm-sans/700Bold/DMSans_700Bold.ttf",
+  medium: "@expo-google-fonts/dm-sans/500Medium/DMSans_500Medium.ttf",
+  regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
+} as const;
+
+// These aliases match the fonts' PostScript names on iOS. Register the same
+// names on Android so React Native and the native composer use one set of
+// family names without waiting for runtime font loading.
+
 const localIosBundleIdentifier = process.env.T3CODE_LOCAL_IOS_BUNDLE_IDENTIFIER?.trim() || null;
 const localIosAppleTeamId = process.env.T3CODE_LOCAL_IOS_TEAM_ID?.trim() || null;
 const isLocalIosBuild = localIosBundleIdentifier !== null;
@@ -97,16 +108,10 @@ const widgetPlugin: ExpoPlugin[] = isLocalIosBuild
         },
       ],
     ];
-
-const dmSansFonts = {
-  regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
-  medium: "@expo-google-fonts/dm-sans/500Medium/DMSans_500Medium.ttf",
-  bold: "@expo-google-fonts/dm-sans/700Bold/DMSans_700Bold.ttf",
-} as const;
-
-// These aliases match the fonts' PostScript names on iOS. Register the same
-// names on Android so React Native and the native composer use one set of
-// family names without waiting for runtime font loading.
+// withWidgetLogoAsset requires ExpoWidgetsTarget; skip when local builds disable widgets.
+const widgetLogoAssetPlugin: ExpoPlugin[] = isLocalIosBuild
+  ? []
+  : ["./plugins/withWidgetLogoAsset.cjs"];
 
 const config: ExpoConfig = {
   name: variant.appName,
@@ -230,7 +235,7 @@ const config: ExpoConfig = {
     // expo-widgets' — its dangerous mod wipes ios/ExpoWidgetsTarget/ (which
     // would delete the asset catalog) and its xcodeproj mod creates the widget
     // target (which must exist before the compile phase can be attached).
-    "./plugins/withWidgetLogoAsset.cjs",
+    ...widgetLogoAssetPlugin,
     ...widgetPlugin,
     "./plugins/withIosSceneLifecycle.cjs",
     "./plugins/withAndroidCleartextTraffic.cjs",

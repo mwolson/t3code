@@ -21,6 +21,9 @@ interface OptimisticPreferences {
  * still loading cannot be replaced by the eventual read result.
  */
 export function createMobilePreferencesState(runtime: Atom.AtomRuntime<MobilePreferencesStore>) {
+  // Do not keepAlive the load atom: keepAlive runs the effect when the atom
+  // runtime is constructed at module import time, which opens expo-sqlite while
+  // Hermes is still inside evaluateJavaScript and deadlocks the iOS bridge.
   const storedPreferencesAtom = runtime
     .atom(
       MobilePreferencesStore.pipe(
@@ -32,7 +35,7 @@ export function createMobilePreferencesState(runtime: Atom.AtomRuntime<MobilePre
         ),
       ),
     )
-    .pipe(Atom.keepAlive, Atom.withLabel("mobile:preferences:stored"));
+    .pipe(Atom.withLabel("mobile:preferences:stored"));
 
   const optimisticPatchAtom = Atom.make<OptimisticPreferences>({ values: {}, versions: {} }).pipe(
     Atom.keepAlive,
@@ -53,7 +56,7 @@ export function createMobilePreferencesState(runtime: Atom.AtomRuntime<MobilePre
       ...confirmed,
       ...optimistic.values,
     }));
-  }).pipe(Atom.keepAlive, Atom.withLabel("mobile:preferences"));
+  }).pipe(Atom.withLabel("mobile:preferences"));
 
   const updatePreferencesAtom = runtime
     .fn(
