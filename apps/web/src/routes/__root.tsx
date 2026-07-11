@@ -28,7 +28,7 @@ import {
   toastManager,
 } from "../components/ui/toast";
 import { resolveAndPersistPreferredEditor } from "../editorPreferences";
-import { useClientSettings } from "../hooks/useSettings";
+import { useClientSettings, useClientSettingsHydrated } from "../hooks/useSettings";
 import {
   deriveLogicalProjectKeyFromSettings,
   derivePhysicalProjectKeyFromPath,
@@ -166,17 +166,19 @@ function GlassAppearanceSync() {
 
 function InteractionSoundCoordinator() {
   const threads = useThreadShells();
+  const completionSoundEnabled = useClientSettings((settings) => settings.enableCompletionSounds);
+  const settingsHydrated = useClientSettingsHydrated();
   const previousStateRef = useRef<ThreadSoundStateByKey | null>(null);
 
   useEffect(() => {
     const previous = previousStateRef.current;
-    if (previous !== null) {
+    if (settingsHydrated && completionSoundEnabled && previous !== null) {
       for (const cue of deriveInteractionSoundCues(previous, threads)) {
         play(cue);
       }
     }
     previousStateRef.current = captureThreadSoundState(threads);
-  }, [threads]);
+  }, [completionSoundEnabled, settingsHydrated, threads]);
 
   return null;
 }
