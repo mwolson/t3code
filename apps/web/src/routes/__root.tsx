@@ -11,6 +11,7 @@ import {
 } from "@tanstack/react-router";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { play } from "cuelume";
 
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
@@ -61,7 +62,17 @@ import {
   primaryServerConfigEventAtom,
   primaryServerWelcomeAtom,
 } from "../state/server";
-import { readProject, setActiveEnvironmentId, useActiveEnvironmentId } from "../state/entities";
+import {
+  readProject,
+  setActiveEnvironmentId,
+  useActiveEnvironmentId,
+  useThreadShells,
+} from "../state/entities";
+import {
+  captureThreadSoundState,
+  deriveInteractionSoundCues,
+  type ThreadSoundStateByKey,
+} from "../interactionSounds";
 import {
   createKeybindingsUpdateToastController,
   type KeybindingsUpdateToastController,
@@ -206,6 +217,7 @@ function RootRouteView() {
             <EventRouter skipInitialBootstrapNavigation={returningFromWelcomeRef.current} />
           ) : null}
           {primaryEnvironmentAuthenticated ? <PlanAgentSelectionHeal /> : null}
+          <InteractionSoundCoordinator />
           {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
           {appShell}
           {/* Above the router: a theme draft is judged by walking the app, so the
@@ -274,6 +286,23 @@ function FontAppearanceSync() {
     fontSizePrompt,
     fontSmoothing,
   ]);
+
+  return null;
+}
+
+function InteractionSoundCoordinator() {
+  const threads = useThreadShells();
+  const previousStateRef = useRef<ThreadSoundStateByKey | null>(null);
+
+  useEffect(() => {
+    const previous = previousStateRef.current;
+    if (previous !== null) {
+      for (const cue of deriveInteractionSoundCues(previous, threads)) {
+        play(cue);
+      }
+    }
+    previousStateRef.current = captureThreadSoundState(threads);
+  }, [threads]);
 
   return null;
 }
