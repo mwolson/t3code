@@ -9,6 +9,7 @@ import {
   useNavigate,
 } from "@tanstack/react-router";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { play } from "cuelume";
 
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
@@ -47,7 +48,17 @@ import {
   primaryServerConfigEventAtom,
   primaryServerWelcomeAtom,
 } from "../state/server";
-import { readProject, setActiveEnvironmentId, useActiveEnvironmentId } from "../state/entities";
+import {
+  readProject,
+  setActiveEnvironmentId,
+  useActiveEnvironmentId,
+  useThreadShells,
+} from "../state/entities";
+import {
+  captureThreadSoundState,
+  deriveInteractionSoundCues,
+  type ThreadSoundStateByKey,
+} from "../interactionSounds";
 import {
   createKeybindingsUpdateToastController,
   type KeybindingsUpdateToastController,
@@ -135,6 +146,7 @@ function RootRouteView() {
         <SlowRpcRequestToastCoordinator />
         <HostedStaticEnvironmentBootstrap />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
+        <InteractionSoundCoordinator />
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
         {appShell}
       </AnchoredToastProvider>
@@ -148,6 +160,23 @@ function GlassAppearanceSync() {
   useEffect(() => {
     document.documentElement.style.setProperty("--glass-opacity", `${glassOpacity}%`);
   }, [glassOpacity]);
+
+  return null;
+}
+
+function InteractionSoundCoordinator() {
+  const threads = useThreadShells();
+  const previousStateRef = useRef<ThreadSoundStateByKey | null>(null);
+
+  useEffect(() => {
+    const previous = previousStateRef.current;
+    if (previous !== null) {
+      for (const cue of deriveInteractionSoundCues(previous, threads)) {
+        play(cue);
+      }
+    }
+    previousStateRef.current = captureThreadSoundState(threads);
+  }, [threads]);
 
   return null;
 }
