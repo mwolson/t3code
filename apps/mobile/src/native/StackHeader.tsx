@@ -11,6 +11,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   type ReactElement,
   type ReactNode,
 } from "react";
@@ -67,12 +68,19 @@ export function NativeStackScreenOptions(props: {
   readonly name?: string;
 }) {
   const navigation = useNativeStackNavigation();
+  const lastAppliedOptionsRef = useRef<NativeStackNavigationOptions | undefined>(undefined);
   const normalizedOptions = useMemo(() => normalizeScreenOptions(props.options), [props.options]);
 
   useLayoutEffect(() => {
     if (!navigation || !normalizedOptions) {
       return;
     }
+    // Avoid re-entering navigation state when the same options object is
+    // reapplied every layout (common when callers pass unstable object literals).
+    if (lastAppliedOptionsRef.current === normalizedOptions) {
+      return;
+    }
+    lastAppliedOptionsRef.current = normalizedOptions;
     navigation.setOptions(normalizedOptions);
   }, [navigation, normalizedOptions]);
 

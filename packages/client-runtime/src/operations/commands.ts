@@ -184,31 +184,67 @@ const dispatch = (command: OrchestrationV2Command) =>
 const getProjection = (threadId: ThreadId) =>
   request(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, { threadId });
 
+function isActiveRunStatus(status: string): boolean {
+  return (
+    status === "preparing" || status === "starting" || status === "running" || status === "waiting"
+  );
+}
+
+function isUploadChatAttachment(
+  attachment: ChatAttachment | UploadChatAttachment,
+): attachment is UploadChatAttachment {
+  return "dataUrl" in attachment;
+}
+
+function isStoredChatAttachment(
+  attachment: ChatAttachment | UploadChatAttachment,
+): attachment is ChatAttachment {
+  return "id" in attachment && !("dataUrl" in attachment);
+}
+
+function toUploadChatAttachmentPayload(attachment: UploadChatAttachment): UploadChatAttachment {
+  return {
+    type: "image",
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    dataUrl: attachment.dataUrl,
+  };
+}
+
+/**
+ * Persist draft image uploads, then return server attachment ids for dispatch.
+ *
+ * Draft objects may carry both a client-local `id` (for previews) and `dataUrl`.
+ * Those must still go through persist and use the remapped server ids; never
+ * keep the client id for provider path resolution.
+ */
 const persistAttachments = Effect.fn("EnvironmentCommands.persistAttachments")(function* (
   threadId: ThreadId,
   messageId: MessageId,
   attachments: ReadonlyArray<ChatAttachment | UploadChatAttachment>,
 ) {
-  const stored = attachments.filter(
-    (attachment): attachment is ChatAttachment => "id" in attachment,
-  );
-  const uploads = attachments.filter(
-    (attachment): attachment is UploadChatAttachment => "dataUrl" in attachment,
-  );
-  if (uploads.length === 0) return stored;
+  const uploads = attachments.filter(isUploadChatAttachment);
+  const storedOnly = attachments.filter(isStoredChatAttachment);
+  if (uploads.length === 0) return storedOnly;
+
   const result = yield* request(WS_METHODS.assetsPersistChatAttachments, {
     threadId,
     messageId,
-    attachments: uploads,
+    attachments: uploads.map(toUploadChatAttachmentPayload),
   });
-  if (stored.length === 0) return result.attachments;
-  const byUpload = new Map(
-    uploads.map((attachment, index) => [attachment, result.attachments[index]]),
-  );
+
+  let uploadIndex = 0;
   return attachments.flatMap((attachment) => {
-    if ("id" in attachment) return [attachment];
-    const persisted = byUpload.get(attachment);
-    return persisted === undefined ? [] : [persisted];
+    if (isUploadChatAttachment(attachment)) {
+      const persisted = result.attachments[uploadIndex];
+      uploadIndex += 1;
+      return persisted === undefined ? [] : [persisted];
+    }
+    if (isStoredChatAttachment(attachment)) {
+      return [attachment];
+    }
+    return [];
   });
 });
 
@@ -449,13 +485,14 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
   }
 
   const projection = yield* getProjection(input.threadId);
-  const activeRun = projection.runs.findLast(
-    (run) =>
-      run.status === "preparing" ||
-      run.status === "starting" ||
-      run.status === "running" ||
-      run.status === "waiting",
-  );
+  let activeRun: (typeof projection.runs)[number] | undefined;
+  for (let index = projection.runs.length - 1; index >= 0; index -= 1) {
+    const run = projection.runs[index];
+    if (run && isActiveRunStatus(run.status)) {
+      activeRun = run;
+      break;
+    }
+  }
   const requestedMode = input.dispatchMode ?? "auto";
   const activeProviderThread =
     activeRun === undefined
@@ -504,16 +541,15 @@ export const interruptThreadTurn = Effect.fn("EnvironmentCommands.interruptThrea
   input: InterruptThreadTurnInput,
 ) {
   const projection = yield* getProjection(input.threadId);
-  const runId =
-    input.runId ??
-    (input.turnId as RunId | undefined) ??
-    projection.runs.findLast(
-      (run) =>
-        run.status === "preparing" ||
-        run.status === "starting" ||
-        run.status === "running" ||
-        run.status === "waiting",
-    )?.id;
+  let latestActiveRunId: RunId | undefined;
+  for (let index = projection.runs.length - 1; index >= 0; index -= 1) {
+    const run = projection.runs[index];
+    if (run && isActiveRunStatus(run.status)) {
+      latestActiveRunId = run.id;
+      break;
+    }
+  }
+  const runId = input.runId ?? (input.turnId as RunId | undefined) ?? latestActiveRunId;
   if (runId === undefined) return { sequence: 0 };
   return yield* dispatch({
     type: "run.interrupt",
@@ -550,15 +586,23 @@ export const respondToThreadUserInput = Effect.fn("EnvironmentCommands.respondTo
 export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThreadCheckpoint")(
   function* (input: RevertThreadCheckpointInput) {
     const projection = yield* getProjection(input.threadId);
+    let fallbackCheckpoint: (typeof projection.checkpoints)[number] | undefined;
+    for (let index = projection.checkpoints.length - 1; index >= 0; index -= 1) {
+      const candidate = projection.checkpoints[index];
+      if (
+        candidate &&
+        (input.turnCount === 0
+          ? candidate.ordinalWithinScope === 0 && candidate.appRunOrdinal === null
+          : candidate.appRunOrdinal === input.turnCount)
+      ) {
+        fallbackCheckpoint = candidate;
+        break;
+      }
+    }
     const checkpoint =
       projection.checkpoints.find(
         (candidate) => candidate.id === input.checkpointId && candidate.scopeId === input.scopeId,
-      ) ??
-      projection.checkpoints.findLast((candidate) =>
-        input.turnCount === 0
-          ? candidate.ordinalWithinScope === 0 && candidate.appRunOrdinal === null
-          : candidate.appRunOrdinal === input.turnCount,
-      );
+      ) ?? fallbackCheckpoint;
     if (checkpoint === undefined || checkpoint.status !== "ready") {
       const target =
         input.checkpointId === undefined

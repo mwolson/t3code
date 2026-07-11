@@ -47,10 +47,14 @@ export function derivePendingThreadRequests(
     if (request.status !== "pending") continue;
     const responseCapability = request.responseCapability.type;
     if (request.kind === "user_input") {
-      const item = projection.turnItems.findLast(
-        (candidate) =>
-          candidate.type === "user_input_request" && candidate.requestId === request.id,
-      );
+      let item: (typeof projection.turnItems)[number] | undefined;
+      for (let index = projection.turnItems.length - 1; index >= 0; index -= 1) {
+        const candidate = projection.turnItems[index];
+        if (candidate?.type === "user_input_request" && candidate.requestId === request.id) {
+          item = candidate;
+          break;
+        }
+      }
       if (item === undefined || item.type !== "user_input_request") continue;
       userInputs.push({
         requestId: request.id,
@@ -62,9 +66,14 @@ export function derivePendingThreadRequests(
     }
 
     if (request.kind === "auth_refresh" || request.kind === "dynamic_tool_call") continue;
-    const item = projection.turnItems.findLast(
-      (candidate) => candidate.type === "approval_request" && candidate.requestId === request.id,
-    );
+    let item: (typeof projection.turnItems)[number] | undefined;
+    for (let index = projection.turnItems.length - 1; index >= 0; index -= 1) {
+      const candidate = projection.turnItems[index];
+      if (candidate?.type === "approval_request" && candidate.requestId === request.id) {
+        item = candidate;
+        break;
+      }
+    }
     approvals.push({
       requestId: request.id,
       requestKind: request.kind,

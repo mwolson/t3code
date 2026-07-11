@@ -56,7 +56,7 @@ function threadDetailToShell(
   projection: OrchestrationV2ThreadProjection,
 ): EnvironmentThreadShell {
   const thread = projection.thread;
-  const runsByOrdinal = projection.runs.toSorted((left, right) => right.ordinal - left.ordinal);
+  const runsByOrdinal = [...projection.runs].sort((left, right) => right.ordinal - left.ordinal);
   const latestRun = runsByOrdinal[0] ?? null;
   const activeRun =
     runsByOrdinal.find(

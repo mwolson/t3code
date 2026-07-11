@@ -7,6 +7,7 @@ import type { MenuAction } from "@react-native-menu/menu";
 import { SymbolView } from "expo-symbols";
 import { memo, useCallback, useMemo, type ComponentProps } from "react";
 import { Pressable, useColorScheme, useWindowDimensions, View } from "react-native";
+import { Pressable as GesturePressable } from "react-native-gesture-handler";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 import Svg, { Circle, Path } from "react-native-svg";
 
@@ -527,16 +528,15 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
 
   const rowContent = (close: () => void) =>
     compact ? (
-      <Pressable
-        accessibilityHint="Swipe left for archive and delete actions"
+      <GesturePressable
+        accessibilityHint="Opens the thread. Long-press or swipe left for archive and delete."
         accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
-        className="bg-screen"
         onPress={() => {
           close();
           onSelectThread(thread);
         }}
-        style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}
+        style={({ pressed }) => ({ backgroundColor: screenColor, opacity: pressed ? 0.7 : 1 })}
       >
         <View
           style={{
@@ -571,7 +571,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
             {subtitleRow}
           </View>
         </View>
-      </Pressable>
+      </GesturePressable>
     ) : (
       <Pressable
         accessibilityHint="Opens the thread"
@@ -646,6 +646,8 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       {(close) => (
         // Messages-style row actions: a real UIContextMenuInteraction on
         // long-press / pointer right-click, with the row as the zoom preview.
+        // Compact (Home) and sidebar rows both use this so long-press opens
+        // archive/delete while taps still open the thread.
         // Requires the patched @react-native-menu (see
         // patches/@react-native-menu__menu@2.0.0.patch): in long-press mode
         // the interaction is hosted by the component view and the underlying

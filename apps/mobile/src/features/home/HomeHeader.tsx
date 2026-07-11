@@ -3,12 +3,15 @@ import type {
   SidebarProjectGroupingMode,
   SidebarThreadSortOrder,
 } from "@t3tools/contracts";
-import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
-import { useCallback, useRef } from "react";
+import {
+  NativeHeaderToolbar,
+  NativeStackScreenOptions,
+  type AppNativeStackNavigationOptions,
+} from "../../native/StackHeader";
+import { useCallback, useMemo, useRef } from "react";
 import { Platform } from "react-native";
 import type { SearchBarCommands } from "react-native-screens";
 
-import { nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { withNativeGlassHeaderItem } from "../layout/native-glass-header-items";
@@ -26,7 +29,6 @@ import {
 } from "./home-list-options";
 
 export type HomeHeaderEnvironment = HomeListFilterMenuEnvironment;
-const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 
 export function HomeHeader(props: {
   readonly environments: ReadonlyArray<HomeHeaderEnvironment>;
@@ -43,70 +45,85 @@ export function HomeHeader(props: {
   readonly onStartNewTask: () => void;
 }) {
   const searchBarRef = useRef<SearchBarCommands>(null);
-  const iconColor = useThemeColor("--color-icon");
+  const propsRef = useRef(props);
+  propsRef.current = props;
+  const iconColor = String(useThemeColor("--color-icon"));
   const hasCustomListOptions = hasCustomHomeListOptions(props);
   const focusSearch = useCallback(() => {
     searchBarRef.current?.focus();
     return searchBarRef.current !== null;
   }, []);
   useHardwareKeyboardCommand("focusSearch", focusSearch);
-  const filterMenu = buildHomeListFilterMenu(props);
+
+  // Keep navigation options referentially stable. A fresh options object each
+  // render re-enters navigation.setOptions via NativeStackScreenOptions and can
+  // trip "Maximum update depth exceeded" under PreventRemoveProvider on iOS.
+  const screenOptions = useMemo((): AppNativeStackNavigationOptions => {
+    const filterSystemImageName = hasCustomListOptions
+      ? "line.3.horizontal.decrease.circle.fill"
+      : "line.3.horizontal.decrease";
+    return {
+      // Static header config (glass, title, fonts) lives in Stack.tsx
+      // (GLASS_HEADER_OPTIONS). Only dynamic values are set here.
+      headerTintColor: iconColor,
+      unstable_headerRightItems:
+        Platform.OS === "ios"
+          ? () => [
+              withNativeGlassHeaderItem({
+                accessibilityLabel: "Open settings",
+                icon: { name: "ellipsis", type: "sfSymbol" } as const,
+                identifier: "home-settings",
+                label: "",
+                onPress: () => propsRef.current.onOpenSettings(),
+                type: "button",
+              }),
+            ]
+          : undefined,
+      unstable_headerToolbarItems:
+        Platform.OS === "ios"
+          ? () => [
+              createNativeMailSearchToolbarItem({
+                composeButtonId: "home-new-task",
+                composeSystemImageName: "square.and.pencil",
+                filterMenu: buildHomeListFilterMenu(propsRef.current),
+                filterButtonId: "home-filter",
+                filterSystemImageName,
+                onComposePress: () => propsRef.current.onStartNewTask(),
+                onSearchTextChange: (query) => propsRef.current.onSearchQueryChange(query),
+                placeholder: "Search",
+                searchTextChangeId: "home-search-text",
+              }),
+            ]
+          : undefined,
+      headerSearchBarOptions:
+        Platform.OS === "ios"
+          ? undefined
+          : {
+              ref: searchBarRef,
+              allowToolbarIntegration: true,
+              hideNavigationBar: false,
+              placeholder: "Search",
+              onCancelButtonPress: () => {
+                propsRef.current.onSearchQueryChange("");
+              },
+              onChangeText: (event) => {
+                propsRef.current.onSearchQueryChange(event.nativeEvent.text);
+              },
+            },
+    };
+  }, [
+    hasCustomListOptions,
+    iconColor,
+    props.environments,
+    props.projectGroupingMode,
+    props.projectSortOrder,
+    props.selectedEnvironmentId,
+    props.threadSortOrder,
+  ]);
 
   return (
     <>
-      <NativeStackScreenOptions
-        options={{
-          // Static header config (glass, title, fonts) lives in Stack.tsx
-          // (GLASS_HEADER_OPTIONS). Only dynamic values are set here.
-          headerTintColor: iconColor,
-          unstable_headerRightItems:
-            Platform.OS === "ios"
-              ? () => [
-                  withNativeGlassHeaderItem({
-                    accessibilityLabel: "Open settings",
-                    icon: { name: "ellipsis", type: "sfSymbol" } as const,
-                    identifier: "home-settings",
-                    label: "",
-                    onPress: props.onOpenSettings,
-                    type: "button",
-                  }),
-                ]
-              : undefined,
-          unstable_headerToolbarItems:
-            Platform.OS === "ios"
-              ? () => [
-                  createNativeMailSearchToolbarItem({
-                    composeButtonId: "home-new-task",
-                    composeSystemImageName: "square.and.pencil",
-                    filterMenu,
-                    filterButtonId: "home-filter",
-                    filterSystemImageName: hasCustomListOptions
-                      ? "line.3.horizontal.decrease.circle.fill"
-                      : "line.3.horizontal.decrease",
-                    onComposePress: props.onStartNewTask,
-                    onSearchTextChange: props.onSearchQueryChange,
-                    placeholder: "Search",
-                    searchTextChangeId: "home-search-text",
-                  }),
-                ]
-              : undefined,
-          headerSearchBarOptions:
-            Platform.OS === "ios"
-              ? undefined
-              : {
-                  ref: searchBarRef,
-                  allowToolbarIntegration: true,
-                  hideNavigationBar: false,
-                  placeholder: "Search",
-                  onCancelButtonPress: () => {
-                    props.onSearchQueryChange("");
-                  },
-                  onChangeText: (event) => {
-                    props.onSearchQueryChange(event.nativeEvent.text);
-                  },
-                },
-        }}
-      />
+      <NativeStackScreenOptions options={screenOptions} />
 
       {Platform.OS === "ios" ? null : (
         <NativeHeaderToolbar placement="right">

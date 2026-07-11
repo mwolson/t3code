@@ -176,6 +176,40 @@ describe("buildHomeThreadGroups", () => {
     expect(groups[0]?.threads.map((thread) => thread.environmentId)).toEqual([remoteEnvironmentId]);
   });
 
+  it("excludes subagent threads, matching the desktop sidebar", () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    const project = makeProject({
+      environmentId,
+      id: ProjectId.make("project-1"),
+      title: "T3 Code",
+    });
+    const parentThreadId = ThreadId.make("thread-parent");
+    const threads = [
+      makeThread({
+        environmentId,
+        id: parentThreadId,
+        projectId: project.id,
+        title: "Parent thread",
+      }),
+      makeThread({
+        environmentId,
+        id: ThreadId.make("thread-subagent"),
+        projectId: project.id,
+        title: "Continue the delegated task",
+        lineage: {
+          rootThreadId: parentThreadId,
+          parentThreadId,
+          relationshipToParent: "subagent",
+        },
+      }),
+    ];
+
+    const groups = buildGroups([project], threads);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.threads.map((thread) => thread.id)).toEqual([parentThreadId]);
+  });
+
   it("matches web repository, repository-path, and separate grouping modes", () => {
     const environmentId = EnvironmentId.make("environment-1");
     const repositoryIdentity = {

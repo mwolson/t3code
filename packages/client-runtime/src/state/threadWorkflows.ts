@@ -23,7 +23,11 @@ export interface ThreadQueueWorkflowState {
 }
 
 export function resolveActiveThreadRun(projection: Projection): Run | null {
-  return projection.runs.findLast((run) => ACTIVE_RUN_STATUSES.has(run.status)) ?? null;
+  for (let index = projection.runs.length - 1; index >= 0; index -= 1) {
+    const run = projection.runs[index];
+    if (run && ACTIVE_RUN_STATUSES.has(run.status)) return run;
+  }
+  return null;
 }
 
 export function resolveThreadProviderSession(projection: Projection): ProviderSession | null {
@@ -43,30 +47,29 @@ export function resolveThreadProviderSession(projection: Projection): ProviderSe
   if (sessionId !== null) {
     return projection.providerSessions.find((session) => session.id === sessionId) ?? null;
   }
-  return (
-    projection.providerSessions.findLast(
-      (session) => session.status !== "stopped" && session.status !== "error",
-    ) ?? null
-  );
+  for (let index = projection.providerSessions.length - 1; index >= 0; index -= 1) {
+    const session = projection.providerSessions[index];
+    if (session && session.status !== "stopped" && session.status !== "error") return session;
+  }
+  return null;
 }
 
 export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQueueWorkflowState {
   const activeRun = resolveActiveThreadRun(projection);
   const session = resolveThreadProviderSession(projection);
   const capabilities = session?.capabilities.turns;
-  const queuedRuns = projection.runs
-    .filter((run) => run.status === "queued")
-    .toSorted(
-      (left, right) =>
-        (left.queuePosition ?? left.ordinal) - (right.queuePosition ?? right.ordinal) ||
-        left.ordinal - right.ordinal,
-    )
-    .map((run) => ({
-      run,
-      text:
-        projection.messages.find((message) => message.id === run.userMessageId)?.text ??
-        "Queued message",
-    }));
+  const queued = projection.runs.filter((run) => run.status === "queued");
+  queued.sort(
+    (left, right) =>
+      (left.queuePosition ?? left.ordinal) - (right.queuePosition ?? right.ordinal) ||
+      left.ordinal - right.ordinal,
+  );
+  const queuedRuns = queued.map((run) => ({
+    run,
+    text:
+      projection.messages.find((message) => message.id === run.userMessageId)?.text ??
+      "Queued message",
+  }));
 
   return {
     activeRun,

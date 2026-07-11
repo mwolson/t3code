@@ -165,10 +165,18 @@ export function inferProjectTitleFromPath(value: string): string {
   const normalized = normalizeProjectPathForDispatch(value);
   const absolutePath = splitAbsolutePath(normalized);
   if (absolutePath) {
-    return absolutePath.segments.findLast(Boolean) ?? normalized;
+    for (let index = absolutePath.segments.length - 1; index >= 0; index -= 1) {
+      const segment = absolutePath.segments[index];
+      if (segment) return segment;
+    }
+    return normalized;
   }
   const segments = normalized.split(/[/\\]/);
-  return segments.findLast(Boolean) ?? normalized;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (segment) return segment;
+  }
+  return normalized;
 }
 
 export function appendBrowsePathSegment(currentPath: string, segment: string): string {

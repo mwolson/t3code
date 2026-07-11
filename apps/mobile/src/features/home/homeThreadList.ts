@@ -165,6 +165,11 @@ export function buildHomeThreadGroups(input: {
     if (thread.archivedAt !== null) {
       continue;
     }
+    // Subagent threads are surfaced through their parent thread, matching the
+    // desktop sidebar (isSidebarSubagentThread).
+    if (thread.lineage.relationshipToParent === "subagent") {
+      continue;
+    }
     if (input.environmentId !== null && thread.environmentId !== input.environmentId) {
       continue;
     }

@@ -66,6 +66,14 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
   readonly commands: OrchestrationV2Command[];
   readonly projects: ProjectMutation[];
   readonly launches?: OrchestrationV2ThreadLaunchInput[];
+  readonly persistedUploads?: Array<{
+    readonly threadId: string;
+    readonly messageId: string;
+    readonly attachments: ReadonlyArray<{
+      readonly name: string;
+      readonly dataUrl: string;
+    }>;
+  }>;
   readonly projection?: OrchestrationV2ThreadProjection;
 }) {
   const client = {
@@ -83,6 +91,36 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
           threadId: launchInput.threadId ?? v2ThreadId,
           projection: input.projection ?? v2Projection,
           resumed: false,
+        };
+      }),
+    [WS_METHODS.assetsPersistChatAttachments]: (persistInput: {
+      readonly threadId: string;
+      readonly messageId: string;
+      readonly attachments: ReadonlyArray<{
+        readonly type: "image";
+        readonly name: string;
+        readonly mimeType: string;
+        readonly sizeBytes: number;
+        readonly dataUrl: string;
+      }>;
+    }) =>
+      Effect.sync(() => {
+        input.persistedUploads?.push({
+          threadId: persistInput.threadId,
+          messageId: persistInput.messageId,
+          attachments: persistInput.attachments.map((attachment) => ({
+            name: attachment.name,
+            dataUrl: attachment.dataUrl,
+          })),
+        });
+        return {
+          attachments: persistInput.attachments.map((attachment, index) => ({
+            type: "image" as const,
+            id: `server-attachment-${index}`,
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            sizeBytes: attachment.sizeBytes,
+          })),
         };
       }),
     [WS_METHODS.projectsMutate]: (mutation: ProjectMutation) =>
@@ -204,6 +242,69 @@ describe("V2 environment commands", () => {
           checkpointId,
         },
       ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("remaps dual-tagged draft image uploads to server attachment ids", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const persistedUploads: Array<{
+        readonly threadId: string;
+        readonly messageId: string;
+        readonly attachments: ReadonlyArray<{
+          readonly name: string;
+          readonly dataUrl: string;
+        }>;
+      }> = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [], persistedUploads });
+
+      // Mobile drafts carry a client-local id for previews plus dataUrl for upload.
+      const draftUpload = {
+        type: "image" as const,
+        id: "b30d83c1-0159-4e5b-9967-e721201aeca3",
+        name: "pasted-image.png",
+        mimeType: "image/png",
+        sizeBytes: 12,
+        dataUrl: "data:image/png;base64,AA==",
+        previewUri: "file:///tmp/pasted.png",
+      };
+
+      yield* startThreadTurn({
+        commandId: CommandId.make("mobile-image-turn"),
+        threadId: v2ThreadId,
+        message: {
+          messageId: MessageId.make("message-mobile-image"),
+          role: "user",
+          text: "see this",
+          attachments: [draftUpload as never],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(persistedUploads).toEqual([
+        {
+          threadId: v2ThreadId,
+          messageId: "message-mobile-image",
+          attachments: [{ name: "pasted-image.png", dataUrl: "data:image/png;base64,AA==" }],
+        },
+      ]);
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).toMatchObject({
+        type: "message.dispatch",
+        attachments: [
+          {
+            type: "image",
+            id: "server-attachment-0",
+            name: "pasted-image.png",
+            mimeType: "image/png",
+            sizeBytes: 12,
+          },
+        ],
+      });
+      expect(commands[0]).not.toMatchObject({
+        attachments: [{ id: "b30d83c1-0159-4e5b-9967-e721201aeca3" }],
+      });
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 

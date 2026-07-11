@@ -76,16 +76,23 @@ export function ThreadRelationshipsBanner(props: {
     [projection, shells],
   );
   const mergeTargetThreadId = resolveMergeBackTargetThreadId(projection);
-  const rows = useMemo(
-    () =>
-      immediateThreadRelationships(graph, props.threadId).toSorted(
-        (left, right) =>
-          Number(right.threadId === mergeTargetThreadId) -
-          Number(left.threadId === mergeTargetThreadId),
-      ),
-    [graph, mergeTargetThreadId, props.threadId],
-  );
-  const latestCompletedRun = projection?.runs.findLast((run) => run.status === "completed") ?? null;
+  const rows = useMemo(() => {
+    const relationships = [...immediateThreadRelationships(graph, props.threadId)];
+    relationships.sort(
+      (left, right) =>
+        Number(right.threadId === mergeTargetThreadId) -
+        Number(left.threadId === mergeTargetThreadId),
+    );
+    return relationships;
+  }, [graph, mergeTargetThreadId, props.threadId]);
+  const latestCompletedRun = useMemo(() => {
+    if (!projection) return null;
+    for (let index = projection.runs.length - 1; index >= 0; index -= 1) {
+      const run = projection.runs[index];
+      if (run?.status === "completed") return run;
+    }
+    return null;
+  }, [projection]);
   const canMerge = mergeTargetThreadId !== null && latestCompletedRun !== null;
   const canDetach = projection ? canDetachThreadProviderSession(projection) : false;
   const [visible, setVisible] = useState(false);
