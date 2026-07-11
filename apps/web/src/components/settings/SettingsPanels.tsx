@@ -549,6 +549,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.contextWindowMeterEnabled !== DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled
         ? ["Context window indicator"]
         : []),
+      ...(settings.enableCompletionSounds !== DEFAULT_UNIFIED_SETTINGS.enableCompletionSounds
+        ? ["Completion sound"]
+        : []),
       ...(settings.enableLegacyTokenStreaming !==
       DEFAULT_UNIFIED_SETTINGS.enableLegacyTokenStreaming
         ? ["Stream token by token"]
@@ -622,6 +625,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.fontSizeTerminal,
       settings.glassOpacity,
       settings.panelAnimationDurationMs,
+      settings.enableCompletionSounds,
       settings.enableLegacyTokenStreaming,
       settings.persistComposerContextStrip,
       settings.enableProviderUpdateChecks,
@@ -715,6 +719,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
       glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,
       panelAnimationDurationMs: DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs,
+      enableCompletionSounds: DEFAULT_UNIFIED_SETTINGS.enableCompletionSounds,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
       sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
       sidebarAutoSettleAfterDays: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
@@ -2286,6 +2291,32 @@ export function GeneralSettingsPanel() {
             </Select>
           }
         />
+        <SettingsRow
+          title="Completion sound"
+          description="Play a sound when a turn completes."
+          resetAction={
+            settings.enableCompletionSounds !== DEFAULT_UNIFIED_SETTINGS.enableCompletionSounds ? (
+              <SettingResetButton
+                label="completion sound"
+                onClick={() =>
+                  updateSettings({
+                    enableCompletionSounds: DEFAULT_UNIFIED_SETTINGS.enableCompletionSounds,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.enableCompletionSounds}
+              onCheckedChange={(checked) =>
+                updateSettings({ enableCompletionSounds: Boolean(checked) })
+              }
+              aria-label="Play a sound when a turn completes"
+            />
+          }
+        />
+
         <SettingsRow
           {...searchableSetting("hide-whitespace-changes")}
           description="Set whether the diff panel ignores whitespace-only edits by default."
