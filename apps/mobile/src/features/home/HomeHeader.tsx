@@ -281,6 +281,10 @@ function AndroidHomeHeader(props: HomeHeaderProps) {
 
 function IosHomeHeader(props: HomeHeaderProps) {
   const searchBarRef = useRef<SearchBarCommands>(null);
+  // Keep latest props for native header factory callbacks so iOS does not
+  // capture a stale closure across Home list option changes.
+  const propsRef = useRef(props);
+  propsRef.current = props;
   const iconColor = useThemeColor("--color-icon");
   // Thread List v2 lays the list out in fixed creation order, so the
   // sort/group filter controls would be silently ignored — hide them and
@@ -315,7 +319,7 @@ function IosHomeHeader(props: HomeHeaderProps) {
                     icon: { name: "ellipsis", type: "sfSymbol" } as const,
                     identifier: "home-settings",
                     label: "",
-                    onPress: props.onOpenSettings,
+                    onPress: () => propsRef.current.onOpenSettings(),
                     type: "button",
                   }),
                 ]
@@ -326,13 +330,18 @@ function IosHomeHeader(props: HomeHeaderProps) {
                   createNativeMailSearchToolbarItem({
                     composeButtonId: "home-new-task",
                     composeSystemImageName: "square.and.pencil",
-                    filterMenu,
+                    // Build at invocation time so filter onPress handlers always
+                    // read current callbacks via propsRef, matching compose/settings.
+                    filterMenu: buildHomeListFilterMenu({
+                      ...propsRef.current,
+                      listOrganization: !threadListV2Enabled,
+                    }),
                     filterButtonId: "home-filter",
                     filterSystemImageName: hasCustomListOptions
                       ? "line.3.horizontal.decrease.circle.fill"
                       : "line.3.horizontal.decrease",
-                    onComposePress: props.onStartNewTask,
-                    onSearchTextChange: props.onSearchQueryChange,
+                    onComposePress: () => propsRef.current.onStartNewTask(),
+                    onSearchTextChange: (query) => propsRef.current.onSearchQueryChange(query),
                     placeholder: "Search",
                     searchTextChangeId: "home-search-text",
                   }),
@@ -347,10 +356,10 @@ function IosHomeHeader(props: HomeHeaderProps) {
                   hideNavigationBar: false,
                   placeholder: "Search",
                   onCancelButtonPress: () => {
-                    props.onSearchQueryChange("");
+                    propsRef.current.onSearchQueryChange("");
                   },
                   onChangeText: (event) => {
-                    props.onSearchQueryChange(event.nativeEvent.text);
+                    propsRef.current.onSearchQueryChange(event.nativeEvent.text);
                   },
                 },
         }}
