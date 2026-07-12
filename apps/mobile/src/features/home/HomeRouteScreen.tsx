@@ -1,7 +1,7 @@
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
 import { useNavigation } from "@react-navigation/native";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { getCompactBrandHeaderOptions } from "../../components/CompactBrandTitle";
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
@@ -20,6 +20,13 @@ import { useHomeListOptions } from "./home-list-options";
 import { buildHomeProjectScopes } from "./homeThreadList";
 import { usePendingTaskListActions } from "./usePendingTaskListActions";
 import { useThreadListActions } from "./useThreadListActions";
+
+const EMPTY_HOME_TITLE_OPTIONS = {
+  title: "",
+  headerTitle: "",
+  unstable_headerLeftItems: () => [],
+} as const;
+const THREADS_HOME_TITLE_OPTIONS = getCompactBrandHeaderOptions();
 
 /* ─── Route screen ───────────────────────────────────────────────────── */
 
@@ -96,38 +103,38 @@ export function HomeRouteScreen() {
       setSelectedProjectKey(null);
     }
   }, [projectFilterOptions, selectedProjectKey]);
+  const openSettings = useCallback(() => {
+    navigation.navigate("SettingsSheet", { screen: "Settings" });
+  }, [navigation]);
+  const openNewTask = useCallback(() => {
+    navigation.navigate("NewTaskSheet", { screen: "NewTask" });
+  }, [navigation]);
 
   // In split layouts the persistent sidebar IS the thread list — Home becomes
   // an empty detail pane so selecting a thread never transitions layouts.
   if (layout.usesSplitView) {
     return (
       <>
-        <NativeStackScreenOptions
-          options={{ title: "", headerTitle: "", unstable_headerLeftItems: () => [] }}
-        />
+        <NativeStackScreenOptions options={EMPTY_HOME_TITLE_OPTIONS} />
         <WorkspaceSidebarToolbar
           afterSidebarButton={
             <NativeHeaderToolbar.Button
               accessibilityLabel="New task"
               icon="square.and.pencil"
-              onPress={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
+              onPress={openNewTask}
             />
           }
         />
-        <WorkspaceEmptyDetail
-          onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
-        />
+        <WorkspaceEmptyDetail onStartNewTask={openNewTask} />
       </>
     );
   }
 
   return (
-    <AndroidHomeFabLayout
-      onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
-    >
+    <AndroidHomeFabLayout onStartNewTask={openNewTask}>
       <>
         {/* Restore the compact title after the split branch blanks the detail header. */}
-        <NativeStackScreenOptions options={getCompactBrandHeaderOptions()} />
+        <NativeStackScreenOptions options={THREADS_HOME_TITLE_OPTIONS} />
         <HomeHeader
           environments={environments}
           projects={projectFilterOptions}
@@ -138,10 +145,10 @@ export function HomeRouteScreen() {
           threadSortOrder={listOptions.threadSortOrder}
           onEnvironmentChange={setSelectedEnvironmentId}
           onProjectChange={setSelectedProjectKey}
-          onOpenSettings={() => navigation.navigate("SettingsSheet", { screen: "Settings" })}
+          onOpenSettings={openSettings}
           onProjectSortOrderChange={setProjectSortOrder}
           onSearchQueryChange={setSearchQuery}
-          onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
+          onStartNewTask={openNewTask}
           onThreadSortOrderChange={setThreadSortOrder}
         />
 
@@ -164,7 +171,7 @@ export function HomeRouteScreen() {
           onOpenEnvironments={() =>
             navigation.navigate("SettingsSheet", { screen: "SettingsEnvironments" })
           }
-          onOpenSettings={() => navigation.navigate("SettingsSheet", { screen: "Settings" })}
+          onOpenSettings={openSettings}
           onProjectSortOrderChange={setProjectSortOrder}
           onSearchQueryChange={setSearchQuery}
           onSelectThread={(thread) => {
@@ -187,7 +194,7 @@ export function HomeRouteScreen() {
               },
             });
           }}
-          onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
+          onStartNewTask={openNewTask}
           onThreadSortOrderChange={setThreadSortOrder}
           pendingTasks={pendingTasks}
           projectGroupingMode={listOptions.projectGroupingMode}
