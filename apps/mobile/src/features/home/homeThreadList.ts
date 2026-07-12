@@ -325,6 +325,9 @@ export function buildHomeThreadGroups(input: {
     if (thread.archivedAt !== null) {
       continue;
     }
+    if (thread.lineage.relationshipToParent === "subagent") {
+      continue;
+    }
     if (input.environmentId !== null && thread.environmentId !== input.environmentId) {
       continue;
     }
