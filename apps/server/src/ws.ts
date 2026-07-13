@@ -1104,7 +1104,14 @@ const makeWsRpcLayer = (
                             }),
                         ),
                       );
-                    return Stream.concat(catchUpStream, Stream.fromQueue(liveBuffer));
+                    // A warm client already has the full snapshot and might have no
+                    // replay events to apply. Emit a lightweight marker once its live
+                    // subscription is attached so it can leave the syncing state
+                    // without retransmitting the full thread body.
+                    return Stream.concat(
+                      Stream.make({ kind: "synchronized" as const }),
+                      Stream.concat(catchUpStream, Stream.fromQueue(liveBuffer)),
+                    );
                   }),
                 );
               }

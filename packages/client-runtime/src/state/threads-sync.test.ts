@@ -77,6 +77,10 @@ const BASE_THREAD: OrchestrationThread = {
 
 type TestThreadInput = OrchestrationThreadStreamItem | Error;
 
+function synchronized(): OrchestrationThreadStreamItem {
+  return { kind: "synchronized" };
+}
+
 function testSession(client: WsRpcProtocolClient): RpcSession.RpcSession {
   return {
     client,
@@ -484,38 +488,47 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
-  it.effect("restores live status after reconnect when no new thread events arrive", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness({ cached: BASE_THREAD });
-      yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+  it.effect(
+    "waits for stream synchronization after reconnect when no new thread events arrive",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ cached: BASE_THREAD });
+        yield* awaitThreadState(harness.observed, (value) => value.status === "live");
 
-      yield* SubscriptionRef.set(harness.supervisorState, {
-        desired: true,
-        network: "online",
-        phase: "connecting",
-        stage: "synchronizing",
-        attempt: 2,
-        generation: 1,
-        lastFailure: null,
-        retryAt: null,
-      });
-      yield* awaitThreadState(harness.observed, (value) => value.status === "synchronizing");
+        yield* SubscriptionRef.set(harness.supervisorState, {
+          desired: true,
+          network: "online",
+          phase: "connecting",
+          stage: "synchronizing",
+          attempt: 2,
+          generation: 1,
+          lastFailure: null,
+          retryAt: null,
+        });
+        yield* awaitThreadState(harness.observed, (value) => value.status === "synchronizing");
 
-      yield* SubscriptionRef.set(harness.supervisorState, {
-        desired: true,
-        network: "online",
-        phase: "connected",
-        stage: null,
-        attempt: 2,
-        generation: 2,
-        lastFailure: null,
-        retryAt: null,
-      });
-      yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+        yield* SubscriptionRef.set(harness.supervisorState, {
+          desired: true,
+          network: "online",
+          phase: "connected",
+          stage: null,
+          attempt: 2,
+          generation: 2,
+          lastFailure: null,
+          retryAt: null,
+        });
+        for (let index = 0; index < 10; index += 1) {
+          yield* Effect.yieldNow;
+        }
 
-      const latest = yield* Ref.get(harness.latest);
-      expect(latest.status).toBe("live");
-      expect(Option.getOrThrow(latest.data)).toEqual(BASE_THREAD);
-    }),
+        expect((yield* Ref.get(harness.latest)).status).toBe("synchronizing");
+
+        yield* Queue.offer(harness.inputs, synchronized());
+        yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+
+        const latest = yield* Ref.get(harness.latest);
+        expect(latest.status).toBe("live");
+        expect(Option.getOrThrow(latest.data)).toEqual(BASE_THREAD);
+      }),
   );
 });

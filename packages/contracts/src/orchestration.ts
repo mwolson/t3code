@@ -1135,6 +1135,11 @@ export const OrchestrationEvent = Schema.Union([
 export type OrchestrationEvent = typeof OrchestrationEvent.Type;
 
 export const OrchestrationThreadStreamItem = Schema.Union([
+  // Confirms that a resumed detail subscription is live even when no events
+  // were emitted after the client's cached snapshot sequence.
+  Schema.Struct({
+    kind: Schema.Literal("synchronized"),
+  }),
   Schema.Struct({
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationThreadDetailSnapshot,

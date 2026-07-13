@@ -99,11 +99,11 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     error: Option.none(),
   }));
   const setReady = SubscriptionRef.update(state, (current) =>
-    current.status === "deleted"
+    current.status === "live" || current.status === "deleted"
       ? current
       : {
           ...current,
-          status: Option.isSome(current.data) ? ("live" as const) : ("synchronizing" as const),
+          status: "synchronizing" as const,
           error: Option.none(),
         },
   );
@@ -154,6 +154,15 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const applyItem = Effect.fn("EnvironmentThreadState.applyItem")(function* (
     item: OrchestrationThreadStreamItem,
   ) {
+    if (item.kind === "synchronized") {
+      yield* SubscriptionRef.update(state, (current) =>
+        Option.isSome(current.data) && current.status !== "deleted"
+          ? { ...current, status: "live" as const, error: Option.none() }
+          : current,
+      );
+      return;
+    }
+
     if (item.kind === "snapshot") {
       yield* SubscriptionRef.set(lastSequence, item.snapshot.snapshotSequence);
       yield* setThread(item.snapshot.thread);

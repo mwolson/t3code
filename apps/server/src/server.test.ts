@@ -5607,6 +5607,30 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("confirms a resumed thread subscription when no replay events exist", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            readEvents: () => Stream.empty,
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const firstItem = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeThread]({
+            threadId: defaultThreadId,
+            afterSequence: 0,
+          }).pipe(Stream.runHead),
+        ),
+      );
+
+      assert.deepEqual(Option.getOrThrow(firstItem), { kind: "synchronized" });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("enriches replayed project events with repository identity metadata", () =>
     Effect.gen(function* () {
       const repositoryIdentity = {
