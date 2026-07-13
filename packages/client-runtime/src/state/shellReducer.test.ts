@@ -2,7 +2,7 @@ import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { v2Project, v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
-import { applyShellStreamEvent } from "./shellReducer.ts";
+import { applyShellStreamEvent, normalizeShellThreadMembership } from "./shellReducer.ts";
 
 describe("applyShellStreamEvent", () => {
   it("ignores stale project updates without mutating the snapshot", () => {
@@ -62,6 +62,18 @@ describe("applyShellStreamEvent", () => {
     expect(active.archivedThreads).toEqual([]);
   });
 
+  it("forces archive membership when archivedAt is set even if location is active", () => {
+    const next = applyShellStreamEvent(v2ShellSnapshot, {
+      kind: "thread.updated",
+      sequence: 3,
+      location: "active",
+      thread: { ...v2ThreadShell, archivedAt: v2ThreadShell.updatedAt },
+    });
+    expect(next.threads).toEqual([]);
+    expect(next.archivedThreads).toHaveLength(1);
+    expect(next.archivedThreads[0]?.id).toBe(v2ThreadShell.id);
+  });
+
   it("removes a thread from either collection", () => {
     const next = applyShellStreamEvent(v2ShellSnapshot, {
       kind: "thread.removed",
@@ -80,5 +92,22 @@ describe("applyShellStreamEvent", () => {
     } as never);
 
     expect(next).toBe(v2ShellSnapshot);
+  });
+});
+
+describe("normalizeShellThreadMembership", () => {
+  it("moves archived threads out of the active list", () => {
+    const archivedThread = { ...v2ThreadShell, archivedAt: v2ThreadShell.updatedAt };
+    const next = normalizeShellThreadMembership({
+      ...v2ShellSnapshot,
+      threads: [archivedThread],
+      archivedThreads: [],
+    });
+    expect(next.threads).toEqual([]);
+    expect(next.archivedThreads).toEqual([archivedThread]);
+  });
+
+  it("returns the same reference when membership is already consistent", () => {
+    expect(normalizeShellThreadMembership(v2ShellSnapshot)).toBe(v2ShellSnapshot);
   });
 });
