@@ -60,7 +60,7 @@ export interface AcpRegistryAdapterV2Options {
   ) => Effect.Effect<
     AcpSessionRuntime.AcpSessionRuntime["Service"],
     EffectAcpErrors.AcpError,
-    Scope.Scope
+    Crypto.Crypto | Scope.Scope
   >;
   readonly assertComplete?: Effect.Effect<void, EffectAcpErrors.AcpError>;
 }
@@ -71,7 +71,7 @@ function makeAcpRegistryRuntime(options: AcpRegistryAdapterV2Options) {
   ): Effect.Effect<
     AcpSessionRuntime.AcpSessionRuntime["Service"],
     EffectAcpErrors.AcpError,
-    Scope.Scope
+    Crypto.Crypto | Scope.Scope
   > =>
     Effect.gen(function* () {
       const resolved = yield* options.resolver
@@ -115,6 +115,7 @@ export function makeAcpRegistryAdapterV2(options: AcpRegistryAdapterV2Options) {
   return makeAcpAdapterV2({
     instanceId: options.instanceId,
     flavor,
+    crypto: options.crypto,
     fileSystem: options.fileSystem,
     idAllocator: options.idAllocator,
     serverConfig: options.serverConfig,

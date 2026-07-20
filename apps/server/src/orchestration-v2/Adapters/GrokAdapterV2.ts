@@ -94,7 +94,7 @@ export interface GrokAdapterV2Options {
   ) => Effect.Effect<
     AcpSessionRuntime.AcpSessionRuntime["Service"],
     EffectAcpErrors.AcpError,
-    Scope.Scope
+    Crypto.Crypto | Scope.Scope
   >;
   readonly assertComplete?: Effect.Effect<void, EffectAcpErrors.AcpError>;
 }
@@ -150,6 +150,7 @@ export function makeGrokAdapterV2(options: GrokAdapterV2Options) {
   return makeAcpAdapterV2({
     instanceId: options.instanceId,
     flavor,
+    crypto: options.crypto,
     fileSystem: options.fileSystem,
     idAllocator: options.idAllocator,
     serverConfig: options.serverConfig,

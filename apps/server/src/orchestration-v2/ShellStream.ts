@@ -1,9 +1,27 @@
 import type {
+  ApplicationStoredEvent,
   OrchestrationV2ArchivedShellStreamItem,
   OrchestrationV2ThreadShellSnapshot,
   OrchestrationV2ShellStreamItem,
   OrchestrationV2StoredEvent,
 } from "@t3tools/contracts";
+
+/** Keep only the newest shell-relevant event per project/thread aggregate. */
+export function coalesceShellApplicationEvents(
+  events: ReadonlyArray<ApplicationStoredEvent>,
+): ReadonlyArray<ApplicationStoredEvent> {
+  const latestByAggregate = new Map<string, ApplicationStoredEvent>();
+  for (const stored of events) {
+    const key =
+      "aggregateKind" in stored
+        ? `project:${stored.aggregateId}`
+        : `thread:${stored.event.threadId}`;
+    latestByAggregate.set(key, stored);
+  }
+  return Array.from(latestByAggregate.values()).sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+}
 
 /** Converts a committed event and its resulting shell snapshot into one delta. */
 export function shellStreamItemFromSnapshot(input: {

@@ -49,6 +49,7 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
+import { TouchableOpacity } from "react-native-gesture-handler";
 import ImageViewing from "react-native-image-viewing";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, {
@@ -122,7 +123,6 @@ function formatMessageTime(input: string): string {
 // Rows shift when content above them grows (streaming text, work-log folds);
 // animating the container position turns those jumps into slides.
 const FEED_ITEM_LAYOUT_TRANSITION = LinearTransition.duration(180);
-const CONTENT_FIT_EPSILON = 3;
 
 // Entering animations must only play for rows born just now — LegendList
 // remounts rows when they scroll back into view, and replaying an entrance for
@@ -146,8 +146,6 @@ export interface ThreadFeedProps {
   readonly freeze: SharedValue<boolean>;
   readonly anchorMessageId: MessageId | null;
   readonly contentInsetEndAdjustment: SharedValue<number>;
-  /** Effective resting end inset: measured composer overlay plus feed gap. */
-  readonly contentInsetEndEstimate: number;
   readonly contentTopInset?: number;
   readonly contentBottomInset?: number;
   readonly topAccessory?: ReactNode;
@@ -243,26 +241,18 @@ function MessageAttachmentImage(props: {
     attachmentId: props.attachmentId,
   });
 
-  return (
-    <View className={`${props.className} items-center justify-center overflow-hidden`}>
-      {uri === null ? (
+  if (uri === null) {
+    return (
+      <View className={`${props.className} items-center justify-center`}>
         <ActivityIndicator />
-      ) : (
-        <Pressable
-          accessibilityLabel="Open attached image"
-          accessibilityRole="button"
-          onPress={() => props.onPressImage(uri)}
-          style={({ pressed }) => ({ height: "100%", opacity: pressed ? 0.7 : 1, width: "100%" })}
-        >
-          <Image
-            accessible={false}
-            source={{ uri }}
-            resizeMode="cover"
-            style={{ height: "100%", width: "100%" }}
-          />
-        </Pressable>
-      )}
-    </View>
+      </View>
+    );
+  }
+
+  return (
+    <TouchableOpacity activeOpacity={0.7} onPress={() => props.onPressImage(uri)}>
+      <Image source={{ uri }} className={props.className} resizeMode="cover" />
+    </TouchableOpacity>
   );
 }
 
@@ -1031,7 +1021,6 @@ function renderFeedEntry(
           hasNativeSelectableMarkdownText() ? (
             <SelectableMarkdownText
               markdown={message.text}
-              fillWidth
               skills={props.skills}
               textStyle={styles.nativeTextStyle}
               onLinkPress={props.onMarkdownLinkPress}
@@ -1340,7 +1329,6 @@ function ThreadFeedPlaceholder(props: {
   readonly bottomInset: number;
   readonly detail: string;
   readonly horizontalPadding: number;
-  readonly loading?: boolean;
   readonly title: string;
   readonly topInset: number;
 }) {
@@ -1357,7 +1345,6 @@ function ThreadFeedPlaceholder(props: {
       }}
     >
       <View className="max-w-[320px] items-center gap-2">
-        {props.loading ? <ActivityIndicator size="small" /> : null}
         <Text className="text-center font-t3-bold text-lg text-foreground">{props.title}</Text>
         <Text className="text-center text-sm leading-normal text-foreground-secondary">
           {props.detail}
@@ -1372,10 +1359,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const foldSettleFrameRef = useRef<number | null>(null);
   const foldSettleSecondFrameRef = useRef<number | null>(null);
-  const initialEndCorrectionFrameRef = useRef<number | null>(null);
-  const underflowCorrectionFrameRef = useRef<number | null>(null);
-  const initialEndCorrectionKeyRef = useRef<string | null>(null);
-  const previousContentUnderflowsViewportRef = useRef(false);
   const previousLatestTurnRef = useRef(props.latestRun);
   const disclosureAnchorKeyRef = useRef<string | null>(null);
   const headerMaterialVisibleRef = useRef(false);
@@ -1384,7 +1367,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     props.layoutVariant === "split" ? 0 : windowWidth,
   );
   const [viewportHeight, setViewportHeight] = useState(0);
-  const [contentHeight, setContentHeight] = useState(0);
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
   const [interactionState, setInteractionState] = useState<{
     readonly copiedRowId: string | null;
@@ -1509,51 +1491,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     setViewportHeight((current) => (Math.abs(current - nextHeight) > 1 ? nextHeight : current));
   }, []);
 
-  const handleContentSizeChange = useCallback((_width: number, height: number) => {
-    setContentHeight((current) => (Math.abs(current - height) > 1 ? height : current));
-  }, []);
-  // UIKit's automatic top inset reduces the visible list area without adding
-  // to contentHeight. Non-automatic layouts render their header spacer inside
-  // the list, so their contentHeight already accounts for it.
-  const usableViewportHeight = viewportHeight - (usesNativeAutomaticInsets ? anchorTopInset : 0);
-  const contentUnderflowsViewport =
-    contentHeight > 0 &&
-    viewportHeight > 0 &&
-    contentHeight + props.contentInsetEndEstimate < usableViewportHeight - CONTENT_FIT_EPSILON;
-
-  useEffect(() => {
-    if (underflowCorrectionFrameRef.current !== null) {
-      cancelAnimationFrame(underflowCorrectionFrameRef.current);
-      underflowCorrectionFrameRef.current = null;
-    }
-
-    const previouslyUnderflowed = previousContentUnderflowsViewportRef.current;
-    previousContentUnderflowsViewportRef.current = contentUnderflowsViewport;
-    if (contentUnderflowsViewport) {
-      underflowCorrectionFrameRef.current = requestAnimationFrame(() => {
-        underflowCorrectionFrameRef.current = null;
-        void props.listRef.current?.scrollToOffset({
-          animated: false,
-          offset: -anchorTopInset,
-        });
-      });
-      return;
-    }
-
-    // A disclosure transition owns its visible-content anchor, so consuming
-    // the underflow transition without an end scroll is intentional there.
-    if (previouslyUnderflowed && !disclosureToggleSettling) {
-      void props.listRef.current?.scrollToEnd({ animated: true });
-    }
-  }, [
-    anchorTopInset,
-    contentHeight,
-    contentUnderflowsViewport,
-    disclosureToggleSettling,
-    props.listRef,
-    viewportHeight,
-  ]);
-
   useEffect(() => {
     reportHeaderMaterialVisibility(false);
   }, [props.threadId, reportHeaderMaterialVisibility]);
@@ -1563,64 +1500,20 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     [expandedTurnIds, props.feed, props.latestRun],
   );
 
-  // A hydrating thread reserves the filled identity so detail arrival does not
-  // replace the native list during the draft-to-thread transition. An already
-  // open empty thread still remounts when its first message arrives. That
-  // remount resets its imperative content-inset override — and
-  // useKeyboardChatComposerInset (mounted above
+  // The empty↔filled key below remounts the list, which resets its imperative
+  // content-inset override — and useKeyboardChatComposerInset (mounted above
   // the remount boundary) deduplicates by height, so it never re-reports the
   // composer inset to the fresh instance. Without this, the remounted list's
   // initial scroll-to-end computes with a zero end inset and rests one
   // composer-height short of the end. Layout effect: it must land before the
   // list's first positioning tick or the one-shot initial scroll misses it.
-  const listMountState =
-    props.contentPresentation.kind === "loading"
-      ? "filled"
-      : props.feed.length === 0
-        ? "empty"
-        : "filled";
-  const listMountKey = `${props.threadId}:${listMountState}`;
+  const listMountKey = `${props.threadId}:${props.feed.length === 0 ? "empty" : "filled"}`;
   useLayoutEffect(() => {
     const bottom = props.contentInsetEndAdjustment.value;
     if (bottom > 0) {
       props.listRef.current?.reportContentInset({ bottom });
     }
   }, [listMountKey, props.contentInsetEndAdjustment, props.listRef]);
-
-  useEffect(() => {
-    if (initialEndCorrectionFrameRef.current !== null) {
-      cancelAnimationFrame(initialEndCorrectionFrameRef.current);
-      initialEndCorrectionFrameRef.current = null;
-    }
-
-    if (
-      initialEndCorrectionKeyRef.current === listMountKey ||
-      props.contentPresentation.kind !== "ready" ||
-      contentHeight <= 0 ||
-      viewportHeight <= 0
-    ) {
-      return;
-    }
-
-    initialEndCorrectionKeyRef.current = listMountKey;
-    if (contentUnderflowsViewport) {
-      return;
-    }
-
-    initialEndCorrectionFrameRef.current = requestAnimationFrame(() => {
-      initialEndCorrectionFrameRef.current = requestAnimationFrame(() => {
-        initialEndCorrectionFrameRef.current = null;
-        void props.listRef.current?.scrollToEnd({ animated: false });
-      });
-    });
-  }, [
-    contentHeight,
-    contentUnderflowsViewport,
-    listMountKey,
-    props.contentPresentation.kind,
-    props.listRef,
-    viewportHeight,
-  ]);
 
   const anchoredEndSpace = useMemo(
     () =>
@@ -1683,12 +1576,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       }
       if (foldSettleSecondFrameRef.current !== null) {
         cancelAnimationFrame(foldSettleSecondFrameRef.current);
-      }
-      if (underflowCorrectionFrameRef.current !== null) {
-        cancelAnimationFrame(underflowCorrectionFrameRef.current);
-      }
-      if (initialEndCorrectionFrameRef.current !== null) {
-        cancelAnimationFrame(initialEndCorrectionFrameRef.current);
       }
     };
   }, []);
@@ -1911,7 +1798,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             // anchor scrolls also lets it correct a scroll that landed on a
             // stale end target once the anchor row finishes measuring.
             maintainScrollAtEnd={
-              disclosureToggleSettling || contentUnderflowsViewport
+              disclosureToggleSettling
                 ? false
                 : {
                     animated: true,
@@ -1950,7 +1837,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             scrollToOverflowEnabled
             estimatedItemSize={180}
             initialScrollAtEnd
-            onContentSizeChange={handleContentSizeChange}
             onScroll={handleScroll}
             scrollEventThrottle={16}
             ListHeaderComponent={
@@ -1976,18 +1862,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             />
           </View>
         ) : null}
-        {props.contentPresentation.kind === "loading" ? (
-          <View pointerEvents="none" className="bg-screen" style={StyleSheet.absoluteFill}>
-            <ThreadFeedPlaceholder
-              title="Loading messages"
-              detail="Catching up this thread before showing the conversation."
-              topInset={topContentInset}
-              bottomInset={bottomContentInset}
-              horizontalPadding={horizontalPadding}
-              loading
-            />
-          </View>
-        ) : null}
       </View>
 
       <ImageViewing
@@ -2004,7 +1878,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         imageIndex={0}
         visible={expandedImage !== null}
         onRequestClose={() => setExpandedImage(null)}
-        presentationStyle="overFullScreen"
         swipeToCloseEnabled
         doubleTapToZoomEnabled
       />

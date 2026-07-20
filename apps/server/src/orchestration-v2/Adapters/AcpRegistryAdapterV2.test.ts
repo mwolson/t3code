@@ -109,6 +109,7 @@ describe("AcpRegistryAdapterV2", () => {
       });
       const instanceId = ProviderInstanceId.make("acp-registry-fixture");
       const adapter = makeAcpRegistryAdapterV2({
+        crypto: yield* Crypto.Crypto,
         instanceId,
         settings,
         environment: {

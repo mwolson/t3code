@@ -18,9 +18,10 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { connectionProjectionPhase } from "../connection/model.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
+import * as ConnectionWakeups from "../connection/wakeups.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
-import { subscribe } from "../rpc/client.ts";
+import { subscribeDynamic } from "../rpc/client.ts";
 import { ShellSnapshotLoader } from "./shellSnapshotHttp.ts";
 import { applyShellStreamEvent } from "./shellReducer.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
@@ -52,6 +53,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
   const supervisor = yield* EnvironmentSupervisor;
   const cache = yield* EnvironmentCacheStore;
   const snapshotLoader = yield* ShellSnapshotLoader;
+  const wakeups = yield* Effect.serviceOption(ConnectionWakeups.ConnectionWakeups);
   const environmentId = supervisor.target.environmentId;
   const cachedSnapshot = yield* cache.loadShell(environmentId).pipe(
     Effect.catch((error) =>
@@ -64,22 +66,12 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
       ),
     ),
   );
-  // Do not paint disk into the visible snapshot up front. A stale warm cache can
-  // list more active threads than the server (dropped archive deltas); showing it
-  // before the HTTP/socket heal balloons Home, then the heal shrinks the list.
-  // Disk is kept for offline / heal-failure fallback only.
   const state = yield* SubscriptionRef.make<EnvironmentShellState>({
-    snapshot: Option.none(),
-    status: "synchronizing",
+    snapshot: cachedSnapshot,
+    status: shellStatusForSnapshot(cachedSnapshot),
     error: Option.none(),
   });
-  // When HTTP heal fails we subscribe without afterSequence so the server
-  // embeds a full snapshot. That first snapshot must apply even if its sequence
-  // is behind the warm disk cache (authoritative server membership).
-  const acceptNextSocketSnapshotAuthoritatively = yield* Ref.make(false);
-  // True after an authoritative server snapshot (HTTP or socket heal) or any
-  // live delta. While true, non-authoritative disk must not replace the list.
-  const hasServerBackedSnapshot = yield* Ref.make(false);
+  const awaitingCompletion = yield* Ref.make(false);
   const persistence = yield* Queue.sliding<OrchestrationV2ShellSnapshot>(1);
 
   const persist = Effect.fn("EnvironmentShellState.persist")(function* (
@@ -103,84 +95,31 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
     Effect.forkScoped,
   );
 
-  const applyItem = Effect.fn("EnvironmentShellState.applyItem")(function* (
-    item: OrchestrationV2ShellStreamItem,
-    options?: { readonly authoritative?: boolean; readonly fromDisk?: boolean },
-  ) {
-    const current = yield* SubscriptionRef.get(state);
-    // Hold the last server-backed (or live) list while reconciling. Disk must
-    // not overwrite it or Home balloons with stale active membership.
-    if (options?.fromDisk === true) {
-      const serverBacked = yield* Ref.get(hasServerBackedSnapshot);
-      if (serverBacked || Option.isSome(current.snapshot)) {
-        return;
-      }
-    }
-    const nextSnapshot =
-      item.kind === "snapshot"
-        ? Option.match(current.snapshot, {
-            // Reject older full snapshots from the live stream so a slow
-            // enrichment refresh cannot reintroduce archived threads. HTTP
-            // reconnect heals use authoritative:true and always apply.
-            onSome: (snapshot) =>
-              !options?.authoritative && item.snapshot.snapshotSequence < snapshot.snapshotSequence
-                ? null
-                : item.snapshot,
-            onNone: () => item.snapshot,
-          })
-        : Option.match(current.snapshot, {
-            onNone: () => null,
-            onSome: (snapshot) =>
-              item.sequence > snapshot.snapshotSequence
-                ? applyShellStreamEvent(snapshot, item)
-                : snapshot,
-          });
-    if (nextSnapshot === null) {
-      return;
-    }
-
-    // Disk fallback is provisional only. Authoritative heals and live deltas
-    // mark the list as server-backed so later disk paints cannot overwrite it.
-    if (options?.fromDisk !== true) {
-      yield* Ref.set(hasServerBackedSnapshot, true);
-    }
-
-    yield* SubscriptionRef.set(state, {
-      snapshot: Option.some(nextSnapshot),
-      status: "live",
-      error: Option.none(),
-    });
-    yield* Queue.offer(persistence, nextSnapshot);
-  });
-
-  const applyDiskFallback = Effect.gen(function* () {
-    if (Option.isNone(cachedSnapshot)) {
-      return;
-    }
-    yield* applyItem({ kind: "snapshot", snapshot: cachedSnapshot.value }, { fromDisk: true });
-  });
-
-  const setDisconnected = Effect.gen(function* () {
-    yield* SubscriptionRef.update(state, (current) => ({
-      ...current,
-      status: shellStatusForSnapshot(current.snapshot),
-    }));
-    // Truly offline/unavailable only: session is often None while connecting,
-    // so disk must not run off session absence alone.
-    yield* applyDiskFallback;
-  });
+  const setDisconnected = Ref.set(awaitingCompletion, false).pipe(
+    Effect.andThen(
+      SubscriptionRef.update(state, (current) => ({
+        ...current,
+        status: shellStatusForSnapshot(current.snapshot),
+      })),
+    ),
+  );
   const setSynchronizing = SubscriptionRef.update(state, (current) => ({
     ...current,
     status: "synchronizing" as const,
     error: Option.none(),
   }));
-  const setReady = SubscriptionRef.update(state, (current) => ({
-    ...current,
-    status: Option.isSome(current.snapshot) ? ("live" as const) : ("synchronizing" as const),
-    error: Option.none(),
-  }));
+  const setReady = SubscriptionRef.update(state, (current) =>
+    current.status === "live"
+      ? current
+      : {
+          ...current,
+          status: "synchronizing" as const,
+          error: Option.none(),
+        },
+  );
   const setStreamError = (error: unknown) =>
-    Effect.logWarning("Could not synchronize the environment shell.").pipe(
+    Ref.set(awaitingCompletion, false).pipe(
+      Effect.andThen(Effect.logWarning("Could not synchronize the environment shell.")),
       Effect.annotateLogs({
         environmentId,
         ...safeErrorLogAttributes(error),
@@ -194,82 +133,92 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
       ),
     );
 
-  yield* Effect.forkScoped(
-    Effect.gen(function* () {
-      // Why HTTP heal is required even with a warm cache:
-      // If an archive delta is dropped, later unrelated shell events still
-      // advance snapshotSequence. Resuming only via afterSequence then skips
-      // the archive forever and keeps the thread on the home list.
-      //
-      // Do not paint disk when session is still None during online connect
-      // setup (lease not ready yet). Disk is only applied from setDisconnected
-      // or when a live session fails HTTP heal and needs a provisional list
-      // before the socket snapshot.
-      yield* SubscriptionRef.changes(supervisor.session).pipe(
-        Stream.switchMap(
-          Option.match({
-            onNone: () => Stream.empty,
-            onSome: () =>
-              Stream.unwrap(
-                Effect.gen(function* () {
-                  // Never resume afterSequence from disk cache alone. A dropped
-                  // archive delta plus later events advances snapshotSequence
-                  // past the archive, so delta-only resume keeps the thread on
-                  // the home list forever. Require a server heal first:
-                  // HTTP full snapshot, or a socket-embedded full snapshot.
-                  //
-                  // While reconciling, keep the previous server-backed snapshot
-                  // visible (setSynchronizing only flips status).
-                  let healedFromServer = false;
-                  const prepared = yield* SubscriptionRef.get(supervisor.prepared);
-                  if (Option.isSome(prepared)) {
-                    const httpSnapshot = yield* snapshotLoader.load(prepared.value);
-                    if (Option.isSome(httpSnapshot)) {
-                      yield* applyItem(
-                        { kind: "snapshot", snapshot: httpSnapshot.value },
-                        { authoritative: true },
-                      );
-                      healedFromServer = true;
-                      // Clear any leftover flag from a prior session that
-                      // failed HTTP heal and disconnected before its socket
-                      // snapshot arrived.
-                      yield* Ref.set(acceptNextSocketSnapshotAuthoritatively, false);
-                    }
-                  }
-
-                  if (!healedFromServer) {
-                    // Prefer holding an existing list over painting disk. Disk
-                    // only fills an empty Home when the socket must carry the heal.
-                    yield* applyDiskFallback;
-                    yield* Ref.set(acceptNextSocketSnapshotAuthoritatively, true);
-                  }
-
-                  const live = yield* SubscriptionRef.get(state);
-                  const subscribeInput =
-                    healedFromServer && Option.isSome(live.snapshot)
-                      ? { afterSequence: live.snapshot.value.snapshotSequence }
-                      : {};
-                  return subscribe(ORCHESTRATION_V2_WS_METHODS.subscribeShell, subscribeInput, {
-                    onExpectedFailure: (cause) => setStreamError(Cause.squash(cause)),
-                  });
-                }),
-              ),
-          }),
-        ),
-        Stream.runForEach((item) =>
-          Effect.gen(function* () {
-            if (item.kind === "snapshot") {
-              const acceptAuthoritative = yield* Ref.get(acceptNextSocketSnapshotAuthoritatively);
-              if (acceptAuthoritative) {
-                yield* Ref.set(acceptNextSocketSnapshotAuthoritatively, false);
-                return yield* applyItem(item, { authoritative: true });
-              }
-            }
-            return yield* applyItem(item);
-          }),
-        ),
+  const applyItem = Effect.fn("EnvironmentShellState.applyItem")(function* (
+    item: OrchestrationV2ShellStreamItem,
+  ) {
+    if (item.kind === "synchronized") {
+      yield* Ref.set(awaitingCompletion, false);
+      yield* SubscriptionRef.update(state, (current) =>
+        Option.isSome(current.snapshot)
+          ? { ...current, status: "live" as const, error: Option.none() }
+          : current,
       );
-    }),
+      return;
+    }
+
+    const current = yield* SubscriptionRef.get(state);
+    const nextSnapshot =
+      item.kind === "snapshot"
+        ? item.snapshot
+        : Option.match(current.snapshot, {
+            onNone: () => null,
+            onSome: (snapshot) =>
+              item.sequence > snapshot.snapshotSequence
+                ? applyShellStreamEvent(snapshot, item)
+                : snapshot,
+          });
+    if (nextSnapshot === null) {
+      return;
+    }
+
+    const waiting = yield* Ref.get(awaitingCompletion);
+    yield* SubscriptionRef.set(state, {
+      snapshot: Option.some(nextSnapshot),
+      status: waiting ? "synchronizing" : "live",
+      error: Option.none(),
+    });
+    yield* Queue.offer(persistence, nextSnapshot);
+  });
+
+  const foregroundResubscriptions = Option.match(wakeups, {
+    onNone: () => Stream.never,
+    onSome: (service) =>
+      service.changes.pipe(Stream.filter((reason) => reason === "application-active")),
+  });
+
+  yield* setSynchronizing;
+  yield* Effect.forkScoped(
+    subscribeDynamic(
+      ORCHESTRATION_V2_WS_METHODS.subscribeShell,
+      Effect.fn("EnvironmentShellState.makeSubscribeInput")(function* (session) {
+        const supportsCompletionMarker = yield* session.initialConfig.pipe(
+          Effect.map((config) => config.shellResumeCompletionMarker === true),
+          Effect.orElseSucceed(() => false),
+        );
+        yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
+        yield* setSynchronizing;
+
+        const prepared = yield* SubscriptionRef.get(supervisor.prepared).pipe(
+          Effect.flatMap(
+            Option.match({
+              onSome: Effect.succeed,
+              onNone: () =>
+                SubscriptionRef.changes(supervisor.prepared).pipe(
+                  Stream.filter(Option.isSome),
+                  Stream.map((value) => value.value),
+                  Stream.runHead,
+                  Effect.map(Option.getOrThrow),
+                ),
+            }),
+          ),
+        );
+        const httpSnapshot = yield* snapshotLoader.load(prepared);
+        if (Option.isSome(httpSnapshot)) {
+          yield* applyItem({ kind: "snapshot", snapshot: httpSnapshot.value });
+          return {
+            afterSequence: httpSnapshot.value.snapshotSequence,
+            ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
+          };
+        }
+
+        return supportsCompletionMarker ? { requestCompletionMarker: true as const } : {};
+      }),
+      {
+        onExpectedFailure: (cause) => setStreamError(Cause.squash(cause)),
+        retryExpectedFailureAfter: "250 millis",
+        resubscribe: foregroundResubscriptions,
+      },
+    ).pipe(Stream.runForEach(applyItem)),
   );
   yield* SubscriptionRef.changes(supervisor.state).pipe(
     Stream.runForEach((connectionState) => {
