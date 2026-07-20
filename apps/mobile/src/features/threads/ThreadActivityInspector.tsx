@@ -31,6 +31,7 @@ function buildThreadFileParams(
 
 export function ThreadActivityInspector(props: {
   readonly activity: ThreadFeedActivity;
+  readonly currentThreadId: ThreadId;
   readonly environmentId: EnvironmentId;
   readonly iconColor: ColorValue;
   readonly workspaceRoot?: string | null;
@@ -43,8 +44,8 @@ export function ThreadActivityInspector(props: {
     sourceItemId: row.sourceItemId,
   });
   const model = useMemo(
-    () => buildThreadActivityInspector(props.activity, support),
-    [props.activity, support],
+    () => buildThreadActivityInspector(props.activity, support, props.currentThreadId),
+    [props.activity, props.currentThreadId, support],
   );
   const revertCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
     label: "checkpoint rollback",
