@@ -123,6 +123,7 @@ function formatMessageTime(input: string): string {
 // Rows shift when content above them grows (streaming text, work-log folds);
 // animating the container position turns those jumps into slides.
 const FEED_ITEM_LAYOUT_TRANSITION = LinearTransition.duration(180);
+const CONTENT_FIT_EPSILON = 3;
 
 // Entering animations must only play for rows born just now — LegendList
 // remounts rows when they scroll back into view, and replaying an entrance for
@@ -146,6 +147,8 @@ export interface ThreadFeedProps {
   readonly freeze: SharedValue<boolean>;
   readonly anchorMessageId: MessageId | null;
   readonly contentInsetEndAdjustment: SharedValue<number>;
+  /** Effective resting end inset: measured composer overlay plus feed gap. */
+  readonly contentInsetEndEstimate: number;
   readonly contentTopInset?: number;
   readonly contentBottomInset?: number;
   readonly topAccessory?: ReactNode;
@@ -1359,6 +1362,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const foldSettleFrameRef = useRef<number | null>(null);
   const foldSettleSecondFrameRef = useRef<number | null>(null);
+  const underflowCorrectionFrameRef = useRef<number | null>(null);
+  const previousContentUnderflowsViewportRef = useRef(false);
   const previousLatestTurnRef = useRef(props.latestRun);
   const disclosureAnchorKeyRef = useRef<string | null>(null);
   const headerMaterialVisibleRef = useRef(false);
@@ -1367,6 +1372,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     props.layoutVariant === "split" ? 0 : windowWidth,
   );
   const [viewportHeight, setViewportHeight] = useState(0);
+  const [contentHeight, setContentHeight] = useState(0);
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
   const [interactionState, setInteractionState] = useState<{
     readonly copiedRowId: string | null;
@@ -1491,6 +1497,48 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     setViewportHeight((current) => (Math.abs(current - nextHeight) > 1 ? nextHeight : current));
   }, []);
 
+  const handleContentSizeChange = useCallback((_width: number, height: number) => {
+    setContentHeight((current) => (Math.abs(current - height) > 1 ? height : current));
+  }, []);
+  const contentUnderflowsViewport =
+    contentHeight > 0 &&
+    viewportHeight > 0 &&
+    contentHeight +
+      props.contentInsetEndEstimate +
+      (usesNativeAutomaticInsets ? anchorTopInset : 0) <
+      viewportHeight - CONTENT_FIT_EPSILON;
+
+  useEffect(() => {
+    if (underflowCorrectionFrameRef.current !== null) {
+      cancelAnimationFrame(underflowCorrectionFrameRef.current);
+      underflowCorrectionFrameRef.current = null;
+    }
+
+    const previouslyUnderflowed = previousContentUnderflowsViewportRef.current;
+    previousContentUnderflowsViewportRef.current = contentUnderflowsViewport;
+    if (contentUnderflowsViewport) {
+      underflowCorrectionFrameRef.current = requestAnimationFrame(() => {
+        underflowCorrectionFrameRef.current = null;
+        void props.listRef.current?.scrollToOffset({
+          animated: false,
+          offset: -anchorTopInset,
+        });
+      });
+      return;
+    }
+
+    if (previouslyUnderflowed && !disclosureToggleSettling) {
+      void props.listRef.current?.scrollToEnd({ animated: true });
+    }
+  }, [
+    anchorTopInset,
+    contentHeight,
+    contentUnderflowsViewport,
+    disclosureToggleSettling,
+    props.listRef,
+    viewportHeight,
+  ]);
+
   useEffect(() => {
     reportHeaderMaterialVisibility(false);
   }, [props.threadId, reportHeaderMaterialVisibility]);
@@ -1576,6 +1624,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       }
       if (foldSettleSecondFrameRef.current !== null) {
         cancelAnimationFrame(foldSettleSecondFrameRef.current);
+      }
+      if (underflowCorrectionFrameRef.current !== null) {
+        cancelAnimationFrame(underflowCorrectionFrameRef.current);
       }
     };
   }, []);
@@ -1837,6 +1888,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             scrollToOverflowEnabled
             estimatedItemSize={180}
             initialScrollAtEnd
+            onContentSizeChange={handleContentSizeChange}
             onScroll={handleScroll}
             scrollEventThrottle={16}
             ListHeaderComponent={
