@@ -183,6 +183,8 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
 
     assert.deepEqual(queryPolicy, {
       permissionMode: "default",
+      tools: CLAUDE_READ_ONLY_ALLOWED_TOOLS,
+      allowedTools: CLAUDE_READ_ONLY_ALLOWED_TOOLS,
       installPermissionCallback: true,
     });
   });
@@ -219,6 +221,78 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
         runtimeMode: "full-access",
         interactionMode: "default",
         cwd: "/workspace",
+      }),
+    );
+
+    assert.deepEqual(queryPolicy, {
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      installPermissionCallback: false,
+    });
+  });
+
+  it("keeps approval-required mode interactive with danger-full-access sandboxing", () => {
+    const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(
+      ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        cwd: "/workspace",
+        sandboxPolicy: {
+          type: "dangerFullAccess",
+        },
+      }),
+    );
+
+    assert.deepEqual(queryPolicy, {
+      permissionMode: "default",
+      installPermissionCallback: true,
+    });
+  });
+
+  it("installs the permission callback for approval-required plan mode", () => {
+    const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(
+      ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+        cwd: "/workspace",
+      }),
+    );
+
+    assert.deepEqual(queryPolicy, {
+      permissionMode: "plan",
+      installPermissionCallback: true,
+    });
+  });
+
+  it("honors never approvals for approval-required workspace-write policy", () => {
+    const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(
+      ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        cwd: "/workspace",
+        approvalPolicy: "never",
+        sandboxPolicy: {
+          type: "workspaceWrite",
+        },
+      }),
+    );
+
+    assert.deepEqual(queryPolicy, {
+      permissionMode: "dontAsk",
+      installPermissionCallback: false,
+    });
+  });
+
+  it("honors never approvals for externally sandboxed policy", () => {
+    const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(
+      ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        cwd: "/workspace",
+        approvalPolicy: "never",
+        sandboxPolicy: {
+          type: "externalSandbox",
+        },
       }),
     );
 
@@ -362,6 +436,38 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
     });
   });
 
+  it("invalidates live-query reuse when MCP credentials rotate", () => {
+    const threadId = ThreadId.make("thread-claude-mcp-credential-rotation");
+    withMcpSession(threadId, () => {
+      const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(
+        ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: "/workspace",
+        }),
+      );
+      const initialKey = claudeEffectiveQueryPolicyKey(
+        queryPolicy,
+        claudeMcpQueryOverrides({ threadId, readOnlySandbox: false }),
+      );
+
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make(`environment-${threadId}`),
+        threadId,
+        providerSessionId: `mcp-session-${threadId}`,
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        endpoint: "http://127.0.0.1:43123/mcp",
+        authorizationHeader: "Bearer rotated-claude-token",
+      });
+
+      const rotatedKey = claudeEffectiveQueryPolicyKey(
+        queryPolicy,
+        claudeMcpQueryOverrides({ threadId, readOnlySandbox: false }),
+      );
+      assert.notEqual(rotatedKey, initialKey);
+    });
+  });
+
   it("matches the read-only allowlist to the orchestrator toolkit annotations", () => {
     const readOnlyToolNames = Object.values(OrchestratorToolkit.tools)
       .filter((tool) => Context.get(tool.annotations, Tool.Readonly))
@@ -497,6 +603,9 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
       env: {
         ANTHROPIC_API_KEY: "secret",
       },
+      extraArgs: {
+        "append-system-prompt": "secret launch prompt",
+      },
       canUseTool: (_toolName, input, callbackOptions) =>
         Promise.resolve({
           behavior: "allow",
@@ -517,7 +626,9 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
       cwd: "/workspace",
       hasCanUseTool: true,
       hasEnvironment: true,
+      hasExtraArgs: true,
     });
+    assert.notInclude(JSON.stringify(loggedClaudeQueryOptions(options)), "secret launch prompt");
   });
 });
 

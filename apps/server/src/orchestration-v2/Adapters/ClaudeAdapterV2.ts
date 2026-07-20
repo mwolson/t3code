@@ -344,7 +344,7 @@ export interface ClaudeAgentSdkLoggedQueryOptions {
   readonly effort?: ClaudeAgentSdkQueryOptions["effort"];
   readonly includePartialMessages?: true;
   readonly pathToClaudeCodeExecutable?: ClaudeAgentSdkQueryOptions["pathToClaudeCodeExecutable"];
-  readonly extraArgs?: ClaudeAgentSdkQueryOptions["extraArgs"];
+  readonly hasExtraArgs?: true;
   readonly allowDangerouslySkipPermissions?: true;
   readonly hasCanUseTool?: true;
   readonly hasEnvironment?: true;
@@ -436,7 +436,7 @@ export function loggedClaudeQueryOptions(
     ...(options.pathToClaudeCodeExecutable === undefined
       ? {}
       : { pathToClaudeCodeExecutable: options.pathToClaudeCodeExecutable }),
-    ...(options.extraArgs === undefined ? {} : { extraArgs: options.extraArgs }),
+    ...(options.extraArgs === undefined ? {} : { hasExtraArgs: true }),
     ...(options.allowDangerouslySkipPermissions === true
       ? { allowDangerouslySkipPermissions: true }
       : {}),
@@ -1128,6 +1128,22 @@ function permissionModeForClaudeRuntimePolicy(
   if (runtimePolicy.interactionMode === "plan") {
     return "plan";
   }
+  if (runtimePolicy.approvalPolicy === "never") {
+    switch (sandboxPolicyKindForClaudeRuntimePolicy(runtimePolicy)) {
+      case "readOnly":
+        return "dontAsk";
+      case "dangerFullAccess":
+      case "externalSandbox":
+        return "bypassPermissions";
+      case "workspaceWrite":
+      case undefined:
+        return runtimePolicy.runtimeMode === "approval-required"
+          ? "dontAsk"
+          : runtimePolicy.runtimeMode === "auto-accept-edits"
+            ? "acceptEdits"
+            : "bypassPermissions";
+    }
+  }
   if (runtimePolicy.approvalPolicy !== undefined && runtimePolicy.approvalPolicy !== "never") {
     return "default";
   }
@@ -1136,7 +1152,7 @@ function permissionModeForClaudeRuntimePolicy(
     case "readOnly":
       return "dontAsk";
     case "dangerFullAccess":
-      return "bypassPermissions";
+      return runtimePolicy.runtimeMode === "approval-required" ? "default" : "bypassPermissions";
     case "externalSandbox":
     case "workspaceWrite":
     case undefined:
@@ -1166,7 +1182,6 @@ export function claudeRuntimeQueryPolicyForRuntimePolicy(
 ): ClaudeRuntimeQueryPolicy {
   const permissionMode = permissionModeForClaudeRuntimePolicy(runtimePolicy);
   const readOnlyTools =
-    permissionMode === "dontAsk" &&
     sandboxPolicyKindForClaudeRuntimePolicy(runtimePolicy) === "readOnly"
       ? CLAUDE_READ_ONLY_ALLOWED_TOOLS
       : undefined;
@@ -1174,20 +1189,19 @@ export function claudeRuntimeQueryPolicyForRuntimePolicy(
     readOnlyTools !== undefined && readOnlyPolicyAllowsGlobalReads(runtimePolicy)
       ? readOnlyTools
       : undefined;
+  const installPermissionCallback =
+    runtimePolicy.approvalPolicy === undefined
+      ? runtimePolicy.runtimeMode === "approval-required"
+      : runtimePolicy.approvalPolicy !== "never";
 
   if (permissionMode === "plan") {
     return {
       permissionMode,
       ...(readOnlyTools === undefined ? {} : { tools: readOnlyTools }),
       ...(allowedTools === undefined ? {} : { allowedTools }),
-      installPermissionCallback: false,
+      installPermissionCallback,
     };
   }
-
-  const installPermissionCallback =
-    runtimePolicy.approvalPolicy === undefined
-      ? runtimePolicy.runtimeMode === "approval-required"
-      : runtimePolicy.approvalPolicy !== "never";
 
   return {
     permissionMode,
@@ -1199,9 +1213,6 @@ export function claudeRuntimeQueryPolicyForRuntimePolicy(
 }
 
 function shouldInstallClaudePermissionCallback(policy: ClaudeRuntimeQueryPolicy): boolean {
-  if (policy.permissionMode === "plan") {
-    return false;
-  }
   return policy.installPermissionCallback;
 }
 
@@ -1220,11 +1231,19 @@ function claudeRuntimeQueryPolicyKey(policy: ClaudeRuntimeQueryPolicy): string {
 // share a policy key can still differ in MCP pre-approvals.
 export function claudeEffectiveQueryPolicyKey(
   queryPolicy: ClaudeRuntimeQueryPolicy,
-  mcpOverrides: { readonly allowedTools?: ReadonlyArray<string> },
+  mcpOverrides: {
+    readonly allowedTools?: ReadonlyArray<string>;
+    readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+  },
 ): string {
-  return claudeRuntimeQueryPolicyKey({
-    ...queryPolicy,
-    ...(mcpOverrides.allowedTools === undefined ? {} : { allowedTools: mcpOverrides.allowedTools }),
+  return JSON.stringify({
+    runtimePolicy: claudeRuntimeQueryPolicyKey({
+      ...queryPolicy,
+      ...(mcpOverrides.allowedTools === undefined
+        ? {}
+        : { allowedTools: mcpOverrides.allowedTools }),
+    }),
+    mcpServers: mcpOverrides.mcpServers,
   });
 }
 

@@ -247,6 +247,7 @@ import {
   buildLocalDraftThread,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
+  deriveCommittedServerUserMessageIds,
   deriveComposerSendState,
   hasServerAcknowledgedLocalDispatch,
   getStartedThreadModelChangeBlockReason,
@@ -1154,8 +1155,8 @@ function ChatViewContent(props: ChatViewProps) {
   const serverProjection = serverThreadProjection?.projection ?? null;
   const serverVisibleTurnItems = useThreadVisibleTurnItems(routeThreadRef);
   const committedServerMessageIds = useMemo(
-    () => new Set(serverProjection?.messages.map((message) => message.id) ?? []),
-    [serverProjection],
+    () => deriveCommittedServerUserMessageIds(serverVisibleTurnItems),
+    [serverVisibleTurnItems],
   );
   const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
   const activeThreadLastVisitedAt = useUiStateStore(
@@ -1444,7 +1445,11 @@ function ChatViewContent(props: ChatViewProps) {
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
-  const activeMessageCount = isServerThread ? committedServerMessageIds.size : 0;
+  // Prefer the larger of turn-item-committed ids and projection messages so
+  // env lock does not unlock while turn items lag projection hydration.
+  const activeMessageCount = isServerThread
+    ? Math.max(committedServerMessageIds.size, serverProjection?.messages.length ?? 0)
+    : 0;
   const runningTerminalIds = useThreadRunningTerminalIds({
     environmentId: activeThread?.environmentId ?? null,
     threadId: activeThreadId,
