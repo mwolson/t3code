@@ -67,7 +67,10 @@ export function normalizeShellThreadMembership(
 /** Applies one committed V2 shell delta while preserving active/archive exclusivity. */
 export function applyShellStreamEvent(
   snapshot: OrchestrationV2ShellSnapshot,
-  event: Exclude<OrchestrationV2ShellStreamItem, { readonly kind: "snapshot" }>,
+  event: Exclude<
+    OrchestrationV2ShellStreamItem,
+    { readonly kind: "snapshot" } | { readonly kind: "synchronized" }
+  >,
 ): OrchestrationV2ShellSnapshot {
   if (event.sequence <= snapshot.snapshotSequence) return snapshot;
 

@@ -15,12 +15,12 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { Atom } from "effect/unstable/reactivity";
 
-import { causeFailureMessage } from "../errors/causeMessage.ts";
 import { EnvironmentRegistry } from "../connection/registry.ts";
 import { connectionProjectionPhase } from "../connection/model.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
+import * as ConnectionWakeups from "../connection/wakeups.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
-import { subscribe } from "../rpc/client.ts";
+import { subscribeDynamic } from "../rpc/client.ts";
 import { ThreadSnapshotLoader } from "./threadSnapshotHttp.ts";
 import { parseThreadKey, threadKey } from "./entities.ts";
 import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection.ts";
@@ -39,11 +39,16 @@ function statusWithoutLiveData(
 }
 
 function formatThreadError(cause: Cause.Cause<unknown>): string {
-  return causeFailureMessage(cause, "Could not synchronize the thread.");
+  const error = Cause.squash(cause);
+  return error instanceof Error && error.message.trim().length > 0
+    ? error.message
+    : "Could not synchronize the thread.";
 }
 
-function shouldPersistThread(projection: OrchestrationV2ThreadProjection): boolean {
-  return !projection.runs.some((run) => run.status === "starting" || run.status === "running");
+function shouldPersistThread(thread: OrchestrationV2ThreadProjection): boolean {
+  return !thread.runs.some(
+    (run) => run.status === "preparing" || run.status === "starting" || run.status === "running",
+  );
 }
 
 export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make")(function* (
@@ -52,6 +57,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const supervisor = yield* EnvironmentSupervisor;
   const cache = yield* EnvironmentCacheStore;
   const snapshotLoader = yield* ThreadSnapshotLoader;
+  const wakeups = yield* Effect.serviceOption(ConnectionWakeups.ConnectionWakeups);
   const environmentId = supervisor.target.environmentId;
   const cached = yield* cache.loadThread(environmentId, threadId).pipe(
     Effect.catch((error) =>
@@ -76,14 +82,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const lastSequence = yield* SubscriptionRef.make(
     Option.match(cached, { onNone: () => 0, onSome: (snapshot) => snapshot.snapshotSequence }),
   );
-  const persistence = yield* Queue.sliding<OrchestrationV2ThreadDetailSnapshot>(1);
-  // When the server advertises threadResumeCompletionMarker and we request it on
-  // resume, keep status synchronizing until the stream marker arrives (including
-  // through catch-up events). Legacy servers never set this path.
-  // markerMode stays true for the life of this thread state once we opt in;
-  // awaitingCompletion is re-armed on each reconnect generation.
-  const markerMode = yield* Ref.make(false);
   const awaitingCompletion = yield* Ref.make(false);
+  const persistence = yield* Queue.sliding<OrchestrationV2ThreadDetailSnapshot>(1);
 
   const persist = Effect.fn("EnvironmentThreadState.persist")(function* (
     snapshot: OrchestrationV2ThreadDetailSnapshot,
@@ -107,38 +107,24 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     Effect.forkScoped,
   );
 
-  const setSynchronizing = Effect.gen(function* () {
-    // Ordinary reconnect clears awaitingCompletion on disconnect; re-arm here so
-    // setReady / catch-up setThread keep synchronizing until the new marker.
-    if (yield* Ref.get(markerMode)) {
-      yield* Ref.set(awaitingCompletion, true);
-    }
-    yield* SubscriptionRef.update(state, (current) => ({
-      ...current,
-      status: "synchronizing" as const,
-      error: Option.none(),
-    }));
-  });
-  const setReady = Effect.gen(function* () {
-    const waiting = yield* Ref.get(awaitingCompletion);
-    yield* SubscriptionRef.update(state, (current) => {
-      if (current.status === "deleted") {
-        return current;
-      }
-      if (waiting) {
-        return {
+  const setSynchronizing = SubscriptionRef.update(state, (current) =>
+    current.status === "deleted"
+      ? current
+      : {
           ...current,
-          status: Option.isSome(current.data) ? ("live" as const) : ("synchronizing" as const),
+          status: "synchronizing" as const,
           error: Option.none(),
-        };
-      }
-      return {
-        ...current,
-        status: Option.isSome(current.data) ? ("live" as const) : ("synchronizing" as const),
-        error: Option.none(),
-      };
-    });
-  });
+        },
+  );
+  const setReady = SubscriptionRef.update(state, (current) =>
+    current.status === "live" || current.status === "deleted"
+      ? current
+      : {
+          ...current,
+          status: "synchronizing" as const,
+          error: Option.none(),
+        },
+  );
   const setDisconnected = Effect.gen(function* () {
     yield* Ref.set(awaitingCompletion, false);
     yield* SubscriptionRef.update(state, (current) => ({
@@ -147,17 +133,16 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     }));
   });
   const setStreamError = (cause: Cause.Cause<unknown>) =>
-    Effect.gen(function* () {
-      // Resubscribe will re-enter marker wait when this stream is in marker mode.
-      if (yield* Ref.get(markerMode)) {
-        yield* Ref.set(awaitingCompletion, true);
-      }
-      yield* SubscriptionRef.update(state, (current) => ({
-        ...current,
-        status: current.status === "deleted" ? current.status : statusWithoutLiveData(current.data),
-        error: Option.some(formatThreadError(cause)),
-      }));
-    });
+    Ref.set(awaitingCompletion, false).pipe(
+      Effect.andThen(
+        SubscriptionRef.update(state, (current) => ({
+          ...current,
+          status:
+            current.status === "deleted" ? current.status : statusWithoutLiveData(current.data),
+          error: Option.some(formatThreadError(cause)),
+        })),
+      ),
+    );
 
   const setThread = Effect.fn("EnvironmentThreadState.setThread")(function* (
     thread: OrchestrationV2ThreadProjection,
@@ -165,12 +150,12 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     const waiting = yield* Ref.get(awaitingCompletion);
     yield* SubscriptionRef.set(state, {
       data: Option.some(thread),
-      status: waiting ? ("synchronizing" as const) : ("live" as const),
+      status: waiting ? "synchronizing" : "live",
       error: Option.none(),
     });
-    // Active threads can update many times per second and retain large tool
-    // payloads. The server remains the source of truth while a turn is active;
-    // persist once it settles so cache encoding stays off the streaming path.
+    // Active projections can update many times per second and retain large tool
+    // payloads. Persist once the run settles so cache encoding stays off the
+    // streaming path.
     if (shouldPersistThread(thread)) {
       const snapshotSequence = yield* SubscriptionRef.get(lastSequence);
       yield* Queue.offer(persistence, { snapshotSequence, projection: thread });
@@ -253,72 +238,73 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     Effect.forkScoped,
   );
 
+  const foregroundResubscriptions = Option.match(wakeups, {
+    onNone: () => Stream.never,
+    onSome: (service) =>
+      service.changes.pipe(Stream.filter((reason) => reason === "application-active")),
+  });
+
   yield* setSynchronizing;
   yield* Effect.forkScoped(
-    Effect.gen(function* () {
-      // Establish the base snapshot to resume from, minimizing bytes over the
-      // wire:
-      // - Warm cache: reuse the cached snapshot (zero network) and resume via
-      //   `afterSequence` so we only receive events since the cached sequence.
-      // - Cold cache: load the full snapshot over HTTP (gzip-compressible, and
-      //   off the socket), then resume via `afterSequence`.
-      // If no base can be established we fall back to the socket-embedded
-      // snapshot so the thread still synchronizes. Overlapping/replayed events
-      // are deduped by sequence in applyItem.
-      const base = Option.isSome(cached)
-        ? cached
-        : yield* Effect.gen(function* () {
-            // Cold cache only: wait for a prepared connection so we can
-            // authenticate the HTTP request; this mirrors the socket path, which
-            // likewise waits for a live session.
-            const prepared = yield* SubscriptionRef.changes(supervisor.prepared).pipe(
-              Stream.filter(Option.isSome),
-              Stream.map((current) => current.value),
-              Stream.runHead,
-            );
-            return Option.isSome(prepared)
-              ? yield* snapshotLoader.load(prepared.value, threadId)
-              : Option.none<OrchestrationV2ThreadDetailSnapshot>();
-          });
+    subscribeDynamic(
+      ORCHESTRATION_V2_WS_METHODS.subscribeThread,
+      Effect.fn("EnvironmentThreadState.makeSubscribeInput")(function* (session) {
+        const supportsCompletionMarker = yield* session.initialConfig.pipe(
+          Effect.map((config) => config.threadResumeCompletionMarker === true),
+          Effect.orElseSucceed(() => false),
+        );
+        yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
+        yield* setSynchronizing;
 
-      const session = yield* SubscriptionRef.get(supervisor.session);
-      const serverSupportsCompletionMarker = Option.isSome(session)
-        ? yield* session.value.initialConfig.pipe(
-            Effect.map((config) => config.threadResumeCompletionMarker === true),
-            Effect.orElseSucceed(() => false),
-          )
-        : false;
-      const requestCompletionMarker = serverSupportsCompletionMarker && Option.isSome(base);
-      if (requestCompletionMarker) {
-        yield* Ref.set(markerMode, true);
-        yield* Ref.set(awaitingCompletion, true);
-      }
+        let current = yield* SubscriptionRef.get(state);
+        if (Option.isNone(current.data) && current.status !== "deleted") {
+          const prepared = yield* SubscriptionRef.get(supervisor.prepared).pipe(
+            Effect.flatMap(
+              Option.match({
+                onSome: Effect.succeed,
+                onNone: () =>
+                  SubscriptionRef.changes(supervisor.prepared).pipe(
+                    Stream.filter(Option.isSome),
+                    Stream.map((value) => value.value),
+                    Stream.runHead,
+                    Effect.map(Option.getOrThrow),
+                  ),
+              }),
+            ),
+          );
+          const httpSnapshot = yield* snapshotLoader.load(prepared, threadId);
+          if (Option.isSome(httpSnapshot)) {
+            yield* applyItem({
+              kind: "snapshot",
+              snapshotSequence: httpSnapshot.value.snapshotSequence,
+              projection: httpSnapshot.value.projection,
+            });
+            current = yield* SubscriptionRef.get(state);
+          }
+        }
 
-      if (Option.isSome(base)) {
-        yield* applyItem({
-          kind: "snapshot",
-          snapshotSequence: base.value.snapshotSequence,
-          projection: base.value.projection,
-        });
-      }
+        const sequence = yield* SubscriptionRef.get(lastSequence);
+        const canResume = Option.isSome(current.data);
+        if (!supportsCompletionMarker && canResume) {
+          yield* SubscriptionRef.update(state, (value) => ({
+            ...value,
+            status: value.status === "deleted" ? value.status : ("live" as const),
+            error: Option.none(),
+          }));
+        }
 
-      const subscribeInput = Option.match(base, {
-        onNone: () => ({ threadId }),
-        onSome: (snapshot) =>
-          requestCompletionMarker
-            ? {
-                threadId,
-                afterSequence: snapshot.snapshotSequence,
-                requestCompletionMarker: true as const,
-              }
-            : { threadId, afterSequence: snapshot.snapshotSequence },
-      });
-
-      yield* subscribe(ORCHESTRATION_V2_WS_METHODS.subscribeThread, subscribeInput, {
-        onExpectedFailure: (cause) => setStreamError(cause),
+        return {
+          threadId,
+          ...(canResume ? { afterSequence: sequence } : {}),
+          ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
+        };
+      }),
+      {
+        onExpectedFailure: setStreamError,
         retryExpectedFailureAfter: "250 millis",
-      }).pipe(Stream.runForEach(applyItem));
-    }),
+        resubscribe: foregroundResubscriptions,
+      },
+    ).pipe(Stream.runForEach(applyItem)),
   );
 
   yield* Effect.addFinalizer(() =>

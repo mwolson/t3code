@@ -1,9 +1,9 @@
 import * as Haptics from "expo-haptics";
+import { type AppSymbolName, SymbolView } from "../../components/AppSymbol";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useNavigation } from "@react-navigation/native";
 import { LayoutAnimation, Pressable, useColorScheme, View } from "react-native";
 
-import { type AppSymbolName, SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { cn } from "../../lib/cn";
 import type { ThreadFeedActivity } from "../../lib/threadActivity";
@@ -314,11 +314,7 @@ export function ThreadWorkLog(props: {
         >
           <View className="h-5 w-5 items-center justify-center">
             <SymbolView
-              name={
-                props.expanded
-                  ? { ios: "chevron.up", android: "keyboard_arrow_up" }
-                  : { ios: "chevron.down", android: "keyboard_arrow_down" }
-              }
+              name={props.expanded ? "chevron.up" : "chevron.down"}
               size={13}
               tintColor={props.iconSubtleColor}
               type="monochrome"

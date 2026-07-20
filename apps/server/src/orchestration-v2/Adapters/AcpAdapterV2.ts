@@ -24,6 +24,7 @@ import {
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import * as Cause from "effect/Cause";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -120,7 +121,7 @@ export interface AcpAdapterV2Flavor {
   ) => Effect.Effect<
     AcpSessionRuntime.AcpSessionRuntime["Service"],
     EffectAcpErrors.AcpError,
-    Scope.Scope
+    Crypto.Crypto | Scope.Scope
   >;
   readonly resolveModelId?: (selection: ModelSelection) => string | undefined;
   readonly registerExtensions?: (
@@ -145,6 +146,7 @@ export interface AcpAdapterV2SubagentUpdate {
 export interface AcpAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly flavor: AcpAdapterV2Flavor;
+  readonly crypto: Crypto.Crypto;
   readonly fileSystem: FileSystem.FileSystem;
   readonly idAllocator: IdAllocatorV2Shape;
   readonly serverConfig: ServerConfig["Service"];
@@ -635,25 +637,27 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
 
         const nativeLogging = options.nativeLogging?.(input.threadId);
 
-        const runtime = yield* flavor.makeRuntime({
-          cwd: input.runtimePolicy.cwd ?? process.cwd(),
-          mcpServers: acpMcpServers(input.threadId),
-          interruptPromptOnCancel: false,
-          clientCapabilities: {
-            fs: { readTextFile: false, writeTextFile: false },
-            terminal: false,
-            elicitation: { form: {} },
-          },
-          clientInfo: { name: "t3-code", version: "0.0.0" },
-          ...(nativeLogging?.requestLogger === undefined
-            ? {}
-            : { requestLogger: nativeLogging.requestLogger }),
-          protocolLogging: nativeLogging?.protocolLogging ?? {
-            logIncoming: true,
-            logOutgoing: true,
-            logger: () => Effect.void,
-          },
-        });
+        const runtime = yield* flavor
+          .makeRuntime({
+            cwd: input.runtimePolicy.cwd ?? process.cwd(),
+            mcpServers: acpMcpServers(input.threadId),
+            interruptPromptOnCancel: false,
+            clientCapabilities: {
+              fs: { readTextFile: false, writeTextFile: false },
+              terminal: false,
+              elicitation: { form: {} },
+            },
+            clientInfo: { name: "t3-code", version: "0.0.0" },
+            ...(nativeLogging?.requestLogger === undefined
+              ? {}
+              : { requestLogger: nativeLogging.requestLogger }),
+            protocolLogging: nativeLogging?.protocolLogging ?? {
+              logIncoming: true,
+              logOutgoing: true,
+              logger: () => Effect.void,
+            },
+          })
+          .pipe(Effect.provideService(Crypto.Crypto, options.crypto));
 
         const resolveItemOrdinal = Effect.fnUntraced(function* (
           context: ActiveAcpTurn,

@@ -13,10 +13,6 @@ const PREVIEW_PANEL_MIN_WIDTH = 360;
 const PREVIEW_PANEL_MAX_WIDTH_FRACTION = 0.7;
 const PREVIEW_PANEL_DEFAULT_WIDTH = 540;
 
-export function getPreviewPanelMaxWidth(viewportWidth: number): number {
-  return Math.floor(viewportWidth * PREVIEW_PANEL_MAX_WIDTH_FRACTION);
-}
-
 export function usePreviewPanelInlineSize(): PreviewPanelInlineSize {
   const maxWidth = useViewportClampedMaxWidth();
   return useResizableWidth({
@@ -48,4 +44,7 @@ function useViewportClampedMaxWidth(): number {
     };
   }, []);
   return getPreviewPanelMaxWidth(vw);
+}
+export function getPreviewPanelMaxWidth(viewportWidth: number): number {
+  return Math.floor(viewportWidth * PREVIEW_PANEL_MAX_WIDTH_FRACTION);
 }

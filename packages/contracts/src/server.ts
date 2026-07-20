@@ -417,11 +417,9 @@ export const ServerConfig = Schema.Struct({
   availableEditors: Schema.Array(EditorId),
   observability: ServerObservability,
   settings: ServerSettings,
-  /**
-   * When true, `orchestration.subscribeThread` resume (`afterSequence`) can emit
-   * a `{ kind: "synchronized" }` completion marker if the client requests it.
-   * Absent or false means legacy servers: clients must not wait for the marker.
-   */
+  /** Whether shell subscriptions can emit an opt-in catch-up completion marker. */
+  shellResumeCompletionMarker: Schema.optionalKey(Schema.Boolean),
+  /** Whether thread subscriptions can emit an opt-in catch-up completion marker. */
   threadResumeCompletionMarker: Schema.optionalKey(Schema.Boolean),
 });
 export type ServerConfig = typeof ServerConfig.Type;
