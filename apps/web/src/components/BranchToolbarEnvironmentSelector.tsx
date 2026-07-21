@@ -24,7 +24,9 @@ interface BranchToolbarEnvironmentSelectorProps {
   envLocked: boolean;
   environmentId: EnvironmentId;
   availableEnvironments: readonly EnvironmentOption[];
-  onEnvironmentChange: (environmentId: EnvironmentId) => void;
+  // Absent when there is only one environment to show: the indicator still
+  // renders (as a static label) so remote projects are always identifiable.
+  onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   displayMode?: "toolbar" | "panel";
 }
 
@@ -48,7 +50,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
     [availableEnvironments],
   );
 
-  if (envLocked) {
+  if (envLocked || onEnvironmentChange === undefined) {
     return (
       <span
         className={cn(
