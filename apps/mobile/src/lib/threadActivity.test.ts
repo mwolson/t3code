@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   EventId,
@@ -14,6 +14,9 @@ import {
 import {
   buildThreadFeed,
   deriveThreadFeedPresentation,
+  formatThreadActivityCopyText,
+  formatThreadActivityFullDetail,
+  hasThreadActivityFullDetail,
   type ThreadFeedActivity,
   type ThreadFeedEntry,
 } from "./threadActivity";
@@ -161,20 +164,27 @@ describe("buildThreadFeed", () => {
       return;
     }
 
-    expect(group.activities).toEqual([
-      {
-        id: "tool-completed",
-        createdAt: "2026-04-01T00:00:02.000Z",
-        turnId: "turn-1",
-        summary: "Run tests",
-        detail: "bun run test",
-        fullDetail: "/bin/zsh -lc 'bun run test'",
-        copyText: "Run tests\nbun run test\n/bin/zsh -lc 'bun run test'",
-        icon: "command",
-        toolLike: true,
-        status: "success",
-      },
-    ]);
+    expect(group.activities).toHaveLength(1);
+    const activity = group.activities[0];
+    expect(activity).toMatchObject({
+      id: "tool-completed",
+      createdAt: "2026-04-01T00:00:02.000Z",
+      turnId: "turn-1",
+      summary: "Run tests",
+      detail: "bun run test",
+      icon: "command",
+      toolLike: true,
+      status: "success",
+    });
+    expect(activity).not.toHaveProperty("fullDetail");
+    expect(activity).not.toHaveProperty("copyText");
+    expect(activity ? hasThreadActivityFullDetail(activity) : false).toBe(true);
+    expect(activity ? formatThreadActivityFullDetail(activity) : null).toBe(
+      "/bin/zsh -lc 'bun run test'",
+    );
+    expect(activity ? formatThreadActivityCopyText(activity) : null).toBe(
+      "Run tests\nbun run test\n/bin/zsh -lc 'bun run test'",
+    );
   });
 
   it("keeps MCP inputs available to expanded mobile work rows", () => {
@@ -222,9 +232,83 @@ describe("buildThreadFeed", () => {
       return;
     }
 
-    expect(group.activities[0]?.icon).toBe("wrench");
-    expect(group.activities[0]?.fullDetail).toContain('"query": "work log"');
-    expect(group.activities[0]?.fullDetail).toContain("repository.search");
+    const activity = group.activities[0];
+    expect(activity?.icon).toBe("wrench");
+    expect(activity ? formatThreadActivityFullDetail(activity) : null).toContain(
+      '"query": "work log"',
+    );
+    expect(activity ? formatThreadActivityFullDetail(activity) : null).toContain(
+      "repository.search",
+    );
+  });
+
+  it("defers serializing full activity payloads until expansion or copy", () => {
+    const turnId = TurnId.make("turn-large-mcp");
+    const largeOutput = "x".repeat(64 * 1024);
+    const thread = makeThread({
+      id: ThreadId.make("thread-large-mcp"),
+      projectId: ProjectId.make("project-1"),
+      title: "Large MCP call",
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-04-01T00:00:00.000Z",
+        startedAt: "2026-04-01T00:00:01.000Z",
+        completedAt: "2026-04-01T00:00:03.000Z",
+        assistantMessageId: null,
+      },
+      activities: [
+        makeActivity({
+          id: EventId.make("mcp-large-completed"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Call repository tool",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId,
+          payload: {
+            title: "Call repository tool",
+            itemType: "mcp_tool_call",
+            detail: "repository.search",
+            status: "completed",
+            data: {
+              item: {
+                server: "repository",
+                tool: "search",
+                output: largeOutput,
+              },
+            },
+          },
+        }),
+      ],
+    });
+    const stringifySpy = vi.spyOn(JSON, "stringify");
+
+    try {
+      const group = buildThreadFeed(thread)[0];
+      expect(group).toMatchObject({ type: "activity-group" });
+      if (!group || group.type !== "activity-group") {
+        return;
+      }
+      const activity = group.activities[0];
+      expect(activity).toBeDefined();
+      if (!activity) {
+        return;
+      }
+
+      expect(stringifySpy).not.toHaveBeenCalled();
+      expect(activity).not.toHaveProperty("fullDetail");
+      expect(activity).not.toHaveProperty("copyText");
+      expect(activity.detail).toBe("repository.search");
+      expect(hasThreadActivityFullDetail(activity)).toBe(true);
+      expect(stringifySpy).not.toHaveBeenCalled();
+
+      const fullDetail = formatThreadActivityFullDetail(activity);
+      expect(fullDetail).toContain(largeOutput);
+      expect(formatThreadActivityCopyText(activity)).toContain(fullDetail);
+      expect(stringifySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      stringifySpy.mockRestore();
+    }
   });
 
   it("folds settled turn work while leaving the terminal answer visible", () => {
@@ -425,8 +509,7 @@ describe("buildThreadFeed", () => {
       turnId: null,
       summary: `Tool ${id}`,
       detail: null,
-      fullDetail: null,
-      copyText: id,
+      detailSource: {},
       icon: "command",
       toolLike: true,
       status,

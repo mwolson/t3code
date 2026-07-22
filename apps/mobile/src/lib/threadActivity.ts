@@ -36,8 +36,7 @@ export interface ThreadFeedActivity {
   readonly turnId: TurnId | null;
   readonly summary: string;
   readonly detail: string | null;
-  readonly fullDetail: string | null;
-  readonly copyText: string;
+  readonly detailSource: ThreadActivityDetailSource;
   readonly icon:
     | "agent"
     | "alert"
@@ -54,6 +53,17 @@ export interface ThreadFeedActivity {
   readonly toolLike: boolean;
   readonly status: "success" | "failure" | "neutral" | null;
 }
+
+export interface ThreadActivityDetailSource {
+  readonly detail?: string | undefined;
+  readonly command?: string | undefined;
+  readonly rawCommand?: string | undefined;
+  readonly changedFiles?: ReadonlyArray<string> | undefined;
+  readonly itemType?: ToolLifecycleItemType | undefined;
+  readonly toolData?: unknown;
+}
+
+const threadActivityFullDetailCache = new WeakMap<ThreadActivityDetailSource, string | null>();
 
 const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
 
@@ -528,7 +538,7 @@ function workEntryIcon(entry: DerivedWorkLogEntry): ThreadFeedActivity["icon"] {
   return "zap";
 }
 
-function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
+function buildWorkEntryExpandedBody(entry: ThreadActivityDetailSource): string | null {
   const blocks: string[] = [];
   const appendUniqueBlock = (value: string | null | undefined) => {
     const trimmed = value?.trim();
@@ -547,6 +557,34 @@ function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
   }
 
   return blocks.length > 0 ? blocks.join("\n\n") : null;
+}
+
+export function hasThreadActivityFullDetail(activity: ThreadFeedActivity): boolean {
+  const source = activity.detailSource;
+  return (
+    (source.itemType === "mcp_tool_call" && source.toolData !== undefined) ||
+    Boolean(source.rawCommand || source.command || source.detail) ||
+    (source.changedFiles?.length ?? 0) > 0
+  );
+}
+
+export function formatThreadActivityFullDetail(activity: ThreadFeedActivity): string | null {
+  const cached = threadActivityFullDetailCache.get(activity.detailSource);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const fullDetail = buildWorkEntryExpandedBody(activity.detailSource);
+  threadActivityFullDetailCache.set(activity.detailSource, fullDetail);
+  return fullDetail;
+}
+
+export function formatThreadActivityCopyText(activity: ThreadFeedActivity): string {
+  const fullDetail = formatThreadActivityFullDetail(activity);
+  return [activity.summary, activity.detail, fullDetail]
+    .filter(
+      (value, index, values): value is string => Boolean(value) && values.indexOf(value) === index,
+    )
+    .join("\n");
 }
 
 function workEntryPreview(
@@ -1339,7 +1377,6 @@ export function buildThreadFeed(
         .map<RawThreadFeedEntry>((entry) => {
           const summary = workEntryHeading(entry);
           const detail = workEntryPreview(entry);
-          const fullDetail = buildWorkEntryExpandedBody(entry);
           return {
             type: "activity",
             id: entry.id,
@@ -1351,13 +1388,15 @@ export function buildThreadFeed(
               turnId: entry.turnId,
               summary,
               detail,
-              fullDetail,
+              detailSource: {
+                detail: entry.detail,
+                command: entry.command,
+                rawCommand: entry.rawCommand,
+                changedFiles: entry.changedFiles,
+                itemType: entry.itemType,
+                toolData: entry.toolData,
+              },
               icon: workEntryIcon(entry),
-              copyText: [summary, detail, fullDetail]
-                .filter((value, index, values): value is string => {
-                  return Boolean(value) && values.indexOf(value) === index;
-                })
-                .join("\n"),
               toolLike: workLogEntryIsToolLike(entry),
               status: workEntryStatus(entry),
             },
