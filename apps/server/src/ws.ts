@@ -79,6 +79,10 @@ import {
   coalesceShellApplicationEvents,
   shellStreamItemFromSnapshot,
 } from "./orchestration-v2/ShellStream.ts";
+import {
+  decideThreadResume,
+  THREAD_RESUME_MAX_REPLAY_EVENTS,
+} from "./orchestration-v2/ThreadStream.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEventStore from "./persistence/Services/OrchestrationEventStore.ts";
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
@@ -639,12 +643,13 @@ const makeWsRpcLayer = (
                 ),
               );
 
-          const replayThrough = (afterSequence: number, throughSequence: number) =>
+          const loadReplayThrough = (afterSequence: number, throughSequence: number) =>
             applicationEvents
               .readAgentEvents({
                 threadId: input.threadId,
                 afterSequence,
                 throughSequence,
+                limit: THREAD_RESUME_MAX_REPLAY_EVENTS + 1,
               })
               .pipe(
                 Stream.map((stored) => ({
@@ -652,7 +657,9 @@ const makeWsRpcLayer = (
                   sequence: stored.sequence,
                   event: stored.event,
                 })),
-                Stream.mapError(
+                Stream.runCollect,
+                Effect.map((items) => Array.from(items)),
+                Effect.mapError(
                   (cause) =>
                     new OrchestrationV2GetThreadProjectionError({
                       threadId: input.threadId,
@@ -667,13 +674,42 @@ const makeWsRpcLayer = (
               ? Stream.make({ kind: "synchronized" as const })
               : Stream.empty;
 
+          const snapshotThenLive = Effect.fn("ws.orchestrationV2.threadSnapshotThenLive")(
+            function* () {
+              const snapshot = yield* threadManagement.getThreadSnapshot(input.threadId).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationV2GetThreadProjectionError({
+                      threadId: input.threadId,
+                      message: `Failed to load orchestration V2 thread ${input.threadId}`,
+                      cause,
+                    }),
+                ),
+              );
+              const { projection, snapshotSequence } = snapshot;
+              return Stream.concat(
+                Stream.concat(
+                  Stream.make({
+                    kind: "snapshot" as const,
+                    snapshotSequence,
+                    projection,
+                  }),
+                  completionMarker,
+                ),
+                eventStreamFrom(snapshotSequence),
+              );
+            },
+          );
+
           // When the client already holds the projection (cached, or loaded over
           // HTTP) it passes that snapshot's sequence, and we resume by replaying
           // persisted events after it instead of re-sending the (potentially
-          // multi-KB) snapshot frame over the socket. The event sink subscribes
-          // to live events before reading the persisted tail, so no event
-          // published during the replay window is lost; overlapping events are
-          // deduped by sequence on the client.
+          // multi-KB) snapshot frame over the socket. Large or inverted resumes
+          // fall back to a fresh snapshot so a long-idle cache does not flood the
+          // renderer. The event sink
+          // subscribes to live events before reading the persisted tail, so no
+          // event published during the replay window is lost; overlapping events
+          // are deduped by sequence on the client.
           if (input.afterSequence !== undefined) {
             const highWater = yield* applicationEvents.latestAgentSequence(input.threadId).pipe(
               Effect.mapError(
@@ -685,35 +721,22 @@ const makeWsRpcLayer = (
                   }),
               ),
             );
+            const replay = yield* loadReplayThrough(input.afterSequence, highWater);
+            const plan = decideThreadResume({
+              afterSequence: input.afterSequence,
+              highWater,
+              replayEventCount: replay.length,
+            });
+            if (plan.mode === "snapshot") {
+              return yield* snapshotThenLive();
+            }
             return Stream.concat(
-              Stream.concat(replayThrough(input.afterSequence, highWater), completionMarker),
+              Stream.concat(Stream.fromIterable(replay), completionMarker),
               eventStreamFrom(highWater),
             );
           }
 
-          const snapshot = yield* threadManagement.getThreadSnapshot(input.threadId).pipe(
-            Effect.mapError(
-              (cause) =>
-                new OrchestrationV2GetThreadProjectionError({
-                  threadId: input.threadId,
-                  message: `Failed to load orchestration V2 thread ${input.threadId}`,
-                  cause,
-                }),
-            ),
-          );
-          const { projection, snapshotSequence } = snapshot;
-
-          return Stream.concat(
-            Stream.concat(
-              Stream.make({
-                kind: "snapshot" as const,
-                snapshotSequence,
-                projection,
-              }),
-              completionMarker,
-            ),
-            eventStreamFrom(snapshotSequence),
-          );
+          return yield* snapshotThenLive();
         },
       );
 
