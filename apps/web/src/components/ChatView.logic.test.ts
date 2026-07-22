@@ -25,6 +25,7 @@ import {
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
   resolveSendEnvMode,
+  shouldSubscribeThreadDetail,
   shouldWriteThreadErrorToCurrentServerThread,
 } from "./ChatView.logic";
 
@@ -328,6 +329,24 @@ describe("shouldWriteThreadErrorToCurrentServerThread", () => {
         targetThreadId: threadId,
       }),
     ).toBe(false);
+  });
+});
+
+describe("shouldSubscribeThreadDetail", () => {
+  it("waits for a draft thread to appear in the server shell", () => {
+    expect(shouldSubscribeThreadDetail({ hasDraftThread: true, hasServerThread: false })).toBe(
+      false,
+    );
+    expect(shouldSubscribeThreadDetail({ hasDraftThread: true, hasServerThread: true })).toBe(true);
+  });
+
+  it("subscribes for server routes without local draft ownership", () => {
+    expect(shouldSubscribeThreadDetail({ hasDraftThread: false, hasServerThread: false })).toBe(
+      true,
+    );
+    expect(shouldSubscribeThreadDetail({ hasDraftThread: false, hasServerThread: true })).toBe(
+      true,
+    );
   });
 });
 
