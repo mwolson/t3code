@@ -127,6 +127,13 @@ export function shouldWriteThreadErrorToCurrentServerThread(input: {
   );
 }
 
+export function shouldSubscribeThreadDetail(input: {
+  readonly hasDraftThread: boolean;
+  readonly hasServerThread: boolean;
+}): boolean {
+  return !input.hasDraftThread || input.hasServerThread;
+}
+
 export function reconcileMountedTerminalThreadIds(input: {
   currentThreadIds: ReadonlyArray<string>;
   openThreadIds: ReadonlyArray<string>;

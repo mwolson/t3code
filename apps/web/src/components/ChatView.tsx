@@ -296,6 +296,7 @@ import {
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
   shouldShowComposerContextStrip,
+  shouldSubscribeThreadDetail,
   startNewThreadForProject,
   waitForStartedServerThread,
 } from "./ChatView.logic";
@@ -1216,9 +1217,22 @@ function ChatViewContent(props: ChatViewProps) {
   const composerDraftTarget: ScopedThreadRef | DraftId =
     routeKind === "server" ? routeThreadRef : props.draftId;
   const serverThread = useThreadShell(routeThreadRef);
-  const serverThreadProjection = useThreadProjection(routeThreadRef);
+  const draftThread = useComposerDraftStore((store) =>
+    routeKind === "server"
+      ? store.getDraftSessionByRef(routeThreadRef)
+      : draftId
+        ? store.getDraftSession(draftId)
+        : null,
+  );
+  const serverDetailRef = shouldSubscribeThreadDetail({
+    hasDraftThread: draftThread !== null,
+    hasServerThread: serverThread !== null,
+  })
+    ? routeThreadRef
+    : null;
+  const serverThreadProjection = useThreadProjection(serverDetailRef);
   const serverProjection = serverThreadProjection?.projection ?? null;
-  const serverVisibleTurnItems = useThreadVisibleTurnItems(routeThreadRef);
+  const serverVisibleTurnItems = useThreadVisibleTurnItems(serverDetailRef);
   const committedServerMessageIds = useMemo(
     () => deriveCommittedServerUserMessageIds(serverVisibleTurnItems),
     [serverVisibleTurnItems],
@@ -1274,13 +1288,6 @@ function ChatViewContent(props: ChatViewProps) {
   const getDraftSession = useComposerDraftStore((store) => store.getDraftSession);
   const setLogicalProjectDraftThreadId = useComposerDraftStore(
     (store) => store.setLogicalProjectDraftThreadId,
-  );
-  const draftThread = useComposerDraftStore((store) =>
-    routeKind === "server"
-      ? store.getDraftSessionByRef(routeThreadRef)
-      : draftId
-        ? store.getDraftSession(draftId)
-        : null,
   );
   const promptRef = useRef("");
   const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
