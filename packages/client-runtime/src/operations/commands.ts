@@ -639,17 +639,17 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
 export const interruptThreadTurn = Effect.fn("EnvironmentCommands.interruptThreadTurn")(function* (
   input: InterruptThreadTurnInput,
 ) {
-  const projection = yield* getProjection(input.threadId);
-  const runId =
-    input.runId ??
-    (input.turnId as RunId | undefined) ??
-    projection.runs.findLast(
+  let runId = input.runId ?? (input.turnId as RunId | undefined);
+  if (runId === undefined) {
+    const projection = yield* getProjection(input.threadId);
+    runId = projection.runs.findLast(
       (run) =>
         run.status === "preparing" ||
         run.status === "starting" ||
         run.status === "running" ||
         run.status === "waiting",
     )?.id;
+  }
   if (runId === undefined) return { sequence: 0 };
   return yield* dispatch({
     type: "run.interrupt",
