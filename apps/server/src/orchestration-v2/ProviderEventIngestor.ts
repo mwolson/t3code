@@ -11,6 +11,7 @@ import {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import { shouldApplyActivityUnsettle } from "@t3tools/shared/orchestrationV2Settled";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -103,19 +104,34 @@ function compactUndefined<T extends Record<string, unknown>>(record: T): T {
  * or arbitrary provider updates.
  */
 export function isSettledClearingProviderActivity(event: OrchestrationV2DomainEvent): boolean {
+  return providerActivityTimestamp(event) !== null;
+}
+
+/**
+ * Actual provider activity time for settle-clearing events. Prefer payload
+ * timestamps over ingestion clock so delayed/duplicate provider events cannot
+ * clear a newer manual pin.
+ */
+export function providerActivityTimestamp(event: OrchestrationV2DomainEvent): DateTime.Utc | null {
   switch (event.type) {
     case "runtime-request.updated":
       // Newly pending blocked-on-you work wakes a settled/active pin. Resolved
       // or cancelled requests and auth refresh do not.
-      return event.payload.status === "pending" && event.payload.kind !== "auth_refresh";
+      if (event.payload.status !== "pending" || event.payload.kind === "auth_refresh") {
+        return null;
+      }
+      return event.payload.createdAt;
     case "provider-session.updated":
-      return (
-        event.payload.status === "starting" ||
-        event.payload.status === "running" ||
-        event.payload.status === "waiting"
-      );
+      if (
+        event.payload.status !== "starting" &&
+        event.payload.status !== "running" &&
+        event.payload.status !== "waiting"
+      ) {
+        return null;
+      }
+      return event.payload.updatedAt;
     default:
-      return false;
+      return null;
   }
 }
 
@@ -140,6 +156,8 @@ export const layer: Layer.Layer<
         readonly threadId?: ThreadId;
         readonly runId?: RunId | null;
         readonly nodeId?: NodeId | null;
+        /** Prefer provider payload time for activity events. */
+        readonly occurredAt?: DateTime.Utc;
       },
     ) =>
       Effect.gen(function* () {
@@ -148,7 +166,7 @@ export const layer: Layer.Layer<
           threadId,
           providerSessionId: input.providerSessionId,
         });
-        const occurredAt = yield* DateTime.now;
+        const occurredAt = payloadInput.occurredAt ?? (yield* DateTime.now);
         return yield* decodeDomainEvent(
           compactUndefined({
             id: eventId,
@@ -181,6 +199,8 @@ export const layer: Layer.Layer<
               yield* makeDomainEvent(input, {
                 type: "provider-session.updated",
                 payload: input.event.providerSession,
+                // Activity time is the session payload clock, not ingest time.
+                occurredAt: input.event.providerSession.updatedAt,
               }),
             ];
           case "provider_thread.updated":
@@ -247,6 +267,8 @@ export const layer: Layer.Layer<
                 ...(input.event.threadId === undefined ? {} : { threadId: input.event.threadId }),
                 payload: input.event.runtimeRequest,
                 nodeId: input.event.runtimeRequest.nodeId,
+                // Pending-request birth time, not ingest time.
+                occurredAt: input.event.runtimeRequest.createdAt,
               }),
             ];
           case "plan.updated":
@@ -319,6 +341,10 @@ export const layer: Layer.Layer<
 
         const unsettled: Array<OrchestrationV2DomainEvent> = [];
         for (const [threadId, activityEvent] of activityByThread) {
+          const activityAt = providerActivityTimestamp(activityEvent);
+          if (activityAt === null) {
+            continue;
+          }
           const projectionOption = yield* projectionStore
             .getThreadProjection(threadId)
             .pipe(Effect.option);
@@ -326,14 +352,29 @@ export const layer: Layer.Layer<
             continue;
           }
           const projection = projectionOption.value;
-          if (projection.thread.settledOverride === null) {
+          // Optimistic skip: definitive ordering + settlement-only merge still
+          // runs transactionally inside ProjectionStore.apply.
+          if (
+            !shouldApplyActivityUnsettle(
+              {
+                settledOverride: projection.thread.settledOverride,
+                settledAtMs:
+                  projection.thread.settledAt === null
+                    ? null
+                    : DateTime.toEpochMillis(projection.thread.settledAt),
+                updatedAtMs: DateTime.toEpochMillis(projection.thread.updatedAt),
+              },
+              DateTime.toEpochMillis(activityAt),
+            )
+          ) {
             continue;
           }
           const eventId = yield* idAllocator.allocate.event({
             threadId,
             providerSessionId: input.providerSessionId,
           });
-          const occurredAt = activityEvent.occurredAt;
+          // Payload may be a stale full-thread snapshot; reducers apply only
+          // settlement fields so concurrent metadata/archive stays intact.
           unsettled.push(
             yield* decodeDomainEvent({
               id: eventId,
@@ -341,12 +382,12 @@ export const layer: Layer.Layer<
               threadId,
               providerInstanceId:
                 activityEvent.providerInstanceId ?? projection.thread.providerInstanceId,
-              occurredAt,
+              occurredAt: activityAt,
               payload: {
                 ...projection.thread,
                 settledOverride: null,
                 settledAt: null,
-                updatedAt: occurredAt,
+                updatedAt: activityAt,
               },
             }),
           );
