@@ -506,6 +506,18 @@ export const OrchestrationV2ProviderSessionDetached = Schema.Struct({
 export type OrchestrationV2ProviderSessionDetached =
   typeof OrchestrationV2ProviderSessionDetached.Type;
 
+/**
+ * Provider-owned background work that can outlive the root turn (for example a
+ * Claude background Bash task). Associated with the provider thread so shared
+ * runtimes cannot make an unrelated app thread look busy.
+ */
+export const OrchestrationV2PendingBackgroundTask = Schema.Struct({
+  taskId: TrimmedNonEmptyString,
+  description: Schema.optional(TrimmedNonEmptyString),
+  taskType: Schema.optional(TrimmedNonEmptyString),
+});
+export type OrchestrationV2PendingBackgroundTask = typeof OrchestrationV2PendingBackgroundTask.Type;
+
 export const OrchestrationV2ProviderThread = Schema.Struct({
   id: ProviderThreadId,
   driver: ProviderDriverKind,
@@ -525,6 +537,10 @@ export const OrchestrationV2ProviderThread = Schema.Struct({
       providerTurnId: Schema.optional(ProviderTurnId),
       checkpointId: Schema.optional(CheckpointId),
     }),
+  ),
+  // Optional Type so adapters can omit empty rosters; historical JSON decodes to [].
+  pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
   ),
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
@@ -1182,6 +1198,11 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummary),
   latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),
   hasActionableProposedPlan: Schema.Boolean,
+  // Normalized post-settlement background work for sidebar Waiting pills.
+  // Empty when the latest root run is still active or no pending work remains.
+  pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   itemCount: NonNegativeInt,
   visibleItemCount: NonNegativeInt,
   createdAt: Schema.DateTimeUtc,
