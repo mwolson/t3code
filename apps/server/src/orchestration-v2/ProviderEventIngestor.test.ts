@@ -31,9 +31,14 @@ import {
   type IdAllocatorV2Error,
   layer as idAllocatorLayer,
 } from "./IdAllocator.ts";
-import { ProjectionStoreV2, layer as projectionStoreLayer } from "./ProjectionStore.ts";
+import {
+  applyToProjection,
+  ProjectionStoreV2,
+  layer as projectionStoreLayer,
+} from "./ProjectionStore.ts";
 import {
   isSettledClearingProviderActivity,
+  providerActivityTimestamp,
   ProviderEventIngestorV2,
   layer as providerEventIngestorLayer,
 } from "./ProviderEventIngestor.ts";
@@ -983,6 +988,167 @@ layer("ProviderEventIngestorV2", (it) => {
           },
         }),
       );
+      const pending = {
+        ...base,
+        type: "runtime-request.updated" as const,
+        payload: makeRuntimeRequest({
+          id: "pending-ts",
+          kind: "command",
+          status: "pending",
+          providerSessionId,
+          now,
+        }),
+      };
+      assert.equal(
+        providerActivityTimestamp(pending) === null
+          ? null
+          : DateTime.formatIso(providerActivityTimestamp(pending)!),
+        DateTime.formatIso(now),
+      );
     }),
+  );
+
+  it.effect(
+    "clears settlement without restoring concurrent metadata from a stale full-thread payload",
+    () =>
+      Effect.gen(function* () {
+        const pinAt = DateTime.makeUnsafe("2026-07-01T10:00:00.000Z");
+        const activityAt = DateTime.makeUnsafe("2026-07-01T10:05:00.000Z");
+        const renameAt = DateTime.makeUnsafe("2026-07-01T10:10:00.000Z");
+        const eventSink = yield* EventSinkV2;
+        const projectionStore = yield* ProjectionStoreV2;
+        const idAllocator = yield* IdAllocatorV2;
+        const threadEvent = yield* threadCreatedEvent(pinAt, {
+          fixtureName: "provider-event-stale-payload",
+          settledOverride: "settled",
+        });
+        if (threadEvent.type !== "thread.created") {
+          return yield* Effect.die("expected thread.created fixture");
+        }
+        const thread = threadEvent.payload;
+        yield* eventSink.write({ events: [threadEvent] });
+
+        // Concurrent rename after the pin, before delayed unsettle reduction.
+        const renamed: OrchestrationV2AppThread = {
+          ...thread,
+          title: "Concurrent rename",
+          updatedAt: renameAt,
+        };
+        const renameEvent: OrchestrationV2DomainEvent = {
+          id: yield* idAllocator.allocate.event({ threadId: threadEvent.threadId }),
+          type: "thread.metadata-updated",
+          threadId: threadEvent.threadId,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: renameAt,
+          payload: renamed,
+        };
+        yield* eventSink.write({ events: [renameEvent] });
+
+        // Stale full-thread unsettle payload still carries the pre-rename title.
+        const staleUnsettle: OrchestrationV2DomainEvent = {
+          id: yield* idAllocator.allocate.event({ threadId: threadEvent.threadId }),
+          type: "thread.unsettled",
+          threadId: threadEvent.threadId,
+          providerInstanceId: modelSelection.instanceId,
+          occurredAt: activityAt,
+          payload: {
+            ...thread,
+            title: "Stale pre-rename title",
+            settledOverride: null,
+            settledAt: null,
+            updatedAt: activityAt,
+          },
+        };
+        // applyToProjection is the in-memory reducer used by getProjectionWithPendingEvents.
+        const afterRename = yield* projectionStore.getThreadProjection(threadEvent.threadId);
+        const reduced = applyToProjection(afterRename, staleUnsettle);
+        assert.equal(reduced.thread.title, "Concurrent rename");
+        assert.isNull(reduced.thread.settledOverride);
+
+        // Durable SQL path must agree.
+        yield* eventSink.write({ events: [staleUnsettle] });
+        const durable = yield* projectionStore.getThreadProjection(threadEvent.threadId);
+        assert.equal(durable.thread.title, "Concurrent rename");
+        assert.isNull(durable.thread.settledOverride);
+      }),
+  );
+
+  it.effect(
+    "does not clear a newer settled or active pin when delayed provider activity is ingested",
+    () =>
+      Effect.gen(function* () {
+        const activityAt = DateTime.makeUnsafe("2026-07-01T09:00:00.000Z");
+        const pinAt = DateTime.makeUnsafe("2026-07-01T10:00:00.000Z");
+        const eventSink = yield* EventSinkV2;
+        const projectionStore = yield* ProjectionStoreV2;
+        const ingestor = yield* ProviderEventIngestorV2;
+        const idAllocator = yield* IdAllocatorV2;
+
+        for (const override of ["settled", "active"] as const) {
+          const threadEvent = yield* threadCreatedEvent(pinAt, {
+            fixtureName: `provider-event-delayed-${override}`,
+            settledOverride: override,
+          });
+          if (threadEvent.type !== "thread.created") {
+            return yield* Effect.die("expected thread.created fixture");
+          }
+          // Pin time is later than the delayed activity.
+          const pinnedEvent: OrchestrationV2DomainEvent = {
+            ...threadEvent,
+            occurredAt: pinAt,
+            payload: {
+              ...threadEvent.payload,
+              settledOverride: override,
+              settledAt: override === "settled" ? pinAt : null,
+              updatedAt: pinAt,
+            },
+          };
+          yield* eventSink.write({ events: [pinnedEvent] });
+
+          const providerSessionId = yield* idAllocator.allocate.providerSession({
+            providerInstanceId: modelSelection.instanceId,
+            threadId: threadEvent.threadId,
+          });
+
+          const stored =
+            override === "settled"
+              ? yield* ingestor.ingestNormalized({
+                  providerSessionId,
+                  providerInstanceId: modelSelection.instanceId,
+                  threadId: threadEvent.threadId,
+                  event: {
+                    type: "runtime_request.updated",
+                    driver: CODEX_DRIVER,
+                    runtimeRequest: makeRuntimeRequest({
+                      id: `delayed-approval-${override}`,
+                      kind: "command",
+                      status: "pending",
+                      providerSessionId,
+                      now: activityAt,
+                    }),
+                  },
+                })
+              : yield* ingestor.ingestNormalized({
+                  providerSessionId,
+                  providerInstanceId: modelSelection.instanceId,
+                  threadId: threadEvent.threadId,
+                  event: {
+                    type: "provider_session.updated",
+                    driver: CODEX_DRIVER,
+                    providerSession: makeProviderSession({
+                      id: providerSessionId,
+                      status: "running",
+                      now: activityAt,
+                    }),
+                  },
+                });
+
+          // Delayed activity must not emit thread.unsettled (optimistic guard)
+          // and must not clear the pin even if such an event were applied.
+          assert.isFalse(stored.some((row) => row.event.type === "thread.unsettled"));
+          const projection = yield* projectionStore.getThreadProjection(threadEvent.threadId);
+          assert.equal(projection.thread.settledOverride, override);
+        }
+      }),
   );
 });
