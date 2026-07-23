@@ -408,7 +408,7 @@ function ThreadNavigationSidebarPane(
   const threadListV2Layout = useMemo(() => {
     if (!threadListV2Enabled) return { items: [], hiddenSettledCount: 0 };
     return buildThreadListV2Items({
-      threads: threads.filter((thread) => thread.archivedAt === null),
+      threads,
       environmentId: options.selectedEnvironmentId,
       projectRefs: selectedProjectScope === null ? null : selectedProjectScope.projectRefs,
       searchQuery: props.searchQuery,

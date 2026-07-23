@@ -5,6 +5,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { makeThreadShellFixture } from "../../test-fixtures";
 import {
   buildThreadListV2Items,
+  isThreadListV2Thread,
   resolveThreadListV2Status,
   sortThreadsForListV2,
 } from "./threadListV2";
@@ -75,6 +76,48 @@ describe("sortThreadsForListV2", () => {
 });
 
 describe("buildThreadListV2Items", () => {
+  it("keeps root and fork threads while excluding subagents and archived threads", () => {
+    const parentId = ThreadId.make("parent");
+    const root = makeThread({ id: parentId, title: "Root" });
+    const fork = makeThread({
+      id: ThreadId.make("fork"),
+      title: "Fork",
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: parentId,
+        relationshipToParent: "fork",
+      },
+    });
+    const subagent = makeThread({
+      id: ThreadId.make("subagent"),
+      title: "Subagent",
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: parentId,
+        relationshipToParent: "subagent",
+      },
+    });
+    const archived = makeThread({
+      id: ThreadId.make("archived"),
+      title: "Archived",
+      archivedAt: NOW,
+    });
+
+    expect(isThreadListV2Thread(root)).toBe(true);
+    expect(isThreadListV2Thread(fork)).toBe(true);
+    expect(isThreadListV2Thread(subagent)).toBe(false);
+    expect(isThreadListV2Thread(archived)).toBe(false);
+
+    const { items } = buildThreadListV2Items({
+      threads: [root, fork, subagent, archived],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+    });
+
+    expect(items.map((item) => item.thread.id)).toEqual(["fork", "parent"]);
+  });
+
   it("partitions settled threads into a slim tail with one divider", () => {
     const { items } = buildThreadListV2Items({
       threads: [
