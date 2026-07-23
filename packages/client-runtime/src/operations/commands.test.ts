@@ -504,6 +504,79 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 
+  it.effect("dispatches explicit start without getThreadProjection", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const projectionRequests: Array<{ readonly threadId: string }> = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [], projectionRequests });
+
+      yield* startThreadTurn({
+        commandId: CommandId.make("command-start-direct"),
+        threadId: v2ThreadId,
+        message: {
+          messageId: MessageId.make("message-start-direct"),
+          role: "user",
+          text: "start without projection",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        dispatchMode: "start",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(projectionRequests).toEqual([]);
+      expect(commands).toEqual([
+        {
+          type: "message.dispatch",
+          commandId: "command-start-direct",
+          createdBy: "user",
+          creationSource: "web",
+          threadId: v2ThreadId,
+          messageId: "message-start-direct",
+          text: "start without projection",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("auto mode still loads getThreadProjection to resolve dispatchMode", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const projectionRequests: Array<{ readonly threadId: string }> = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [], projectionRequests });
+
+      yield* startThreadTurn({
+        commandId: CommandId.make("command-auto"),
+        threadId: v2ThreadId,
+        message: {
+          messageId: MessageId.make("message-auto"),
+          role: "user",
+          text: "auto path",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(projectionRequests).toEqual([{ threadId: v2ThreadId }]);
+      expect(commands).toEqual([
+        {
+          type: "message.dispatch",
+          commandId: "command-auto",
+          createdBy: "user",
+          creationSource: "web",
+          threadId: v2ThreadId,
+          messageId: "message-auto",
+          text: "auto path",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
   it.effect(
     "dispatches V2-native relationship and queue commands without compatibility shaping",
     () =>
