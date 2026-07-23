@@ -120,7 +120,7 @@ export interface StartThreadTurnInput extends ThreadCommandInput {
   readonly interactionMode: ProviderInteractionMode;
   readonly bootstrap?: StartThreadBootstrap;
   readonly sourceProposedPlan?: { readonly threadId: ThreadId; readonly planId: PlanId };
-  readonly dispatchMode?: "auto" | "queue" | "steer" | "restart";
+  readonly dispatchMode?: "auto" | "queue" | "steer" | "restart" | "start";
 }
 
 export interface InterruptThreadTurnInput extends ThreadCommandInput {
@@ -490,6 +490,25 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
     });
   }
 
+  const requestedMode = input.dispatchMode ?? "auto";
+  if (requestedMode === "start") {
+    return yield* dispatch({
+      type: "message.dispatch",
+      commandId,
+      createdBy: "user",
+      creationSource: input.creationSource ?? "web",
+      threadId: input.threadId,
+      messageId: input.message.messageId,
+      text: input.message.text,
+      attachments,
+      ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+      ...(input.sourceProposedPlan === undefined
+        ? {}
+        : { sourcePlanRef: input.sourceProposedPlan }),
+      dispatchMode: { type: "start_immediately" },
+    });
+  }
+
   const projection = yield* getProjection(input.threadId);
   const activeRun = projection.runs.findLast(
     (run) =>
@@ -498,7 +517,6 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       run.status === "running" ||
       run.status === "waiting",
   );
-  const requestedMode = input.dispatchMode ?? "auto";
   const activeProviderThread =
     activeRun === undefined
       ? undefined
