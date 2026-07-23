@@ -104,6 +104,12 @@ export interface ThreadListV2Layout {
   readonly nextSnoozeWakeAt: string | null;
 }
 
+export function isThreadListV2Thread(
+  thread: Pick<EnvironmentThreadShell, "archivedAt" | "lineage">,
+): boolean {
+  return thread.archivedAt === null && thread.lineage.relationshipToParent !== "subagent";
+}
+
 /**
  * Partitions visible threads into the active card block (creation order) and
  * the settled recency tail, matching the web v2 list. `autoSettleAfterDays`
@@ -151,8 +157,7 @@ export function buildThreadListV2Items(input: {
   let snoozedCount = 0;
   let nextSnoozeWakeAt: string | null = null;
   for (const thread of input.threads) {
-    // Callers pass live (unarchived) shells; settled threads are among them
-    // and partition into the tail via effectiveSettled.
+    if (!isThreadListV2Thread(thread)) continue;
     if (input.environmentId !== null && thread.environmentId !== input.environmentId) continue;
     if (projectKeys !== null && !projectKeys.has(`${thread.environmentId}:${thread.projectId}`)) {
       continue;
