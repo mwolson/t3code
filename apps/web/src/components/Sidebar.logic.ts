@@ -96,6 +96,20 @@ export function isSidebarSubagentThread(thread: Pick<SidebarThreadSummary, "line
   return thread.lineage.relationshipToParent === "subagent";
 }
 
+/** Top-level Sidebar v2 row eligibility: live, non-subagent, optionally project-scoped. */
+export function isSidebarV2ListThread(
+  thread: Pick<SidebarThreadSummary, "archivedAt" | "environmentId" | "lineage" | "projectId">,
+  scopedProjectKeys: ReadonlySet<string> | null = null,
+): boolean {
+  if (thread.archivedAt !== null || isSidebarSubagentThread(thread)) {
+    return false;
+  }
+  return (
+    scopedProjectKeys === null ||
+    scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)
+  );
+}
+
 export function getSidebarForkParentThreadId(
   thread: Pick<SidebarThreadSummary, "forkedFrom" | "lineage">,
 ) {
