@@ -62,6 +62,9 @@ export function normalizeShellThreadMembership(
     ...snapshot,
     threads,
     archivedThreads,
+  };
+}
+
 function retainRepositoryIdentity(
   previous: OrchestrationProjectShell | undefined,
   next: OrchestrationProjectShell,
