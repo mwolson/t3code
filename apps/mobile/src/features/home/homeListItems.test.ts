@@ -66,6 +66,8 @@ function makeThread(id: string, projectId: ProjectId): EnvironmentThreadShell {
     updatedAt: threadTimestamp,
     archivedAt: null,
     deletedAt: null,
+    settledOverride: null,
+    settledAt: null,
   });
 }
 

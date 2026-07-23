@@ -97,8 +97,10 @@ function useThreadActionExecutor(
         // thread mid-turn.
         if (
           action === "archive" &&
-          thread.session?.status === "running" &&
-          thread.session.activeTurnId != null
+          (thread.runtime?.status === "running" ||
+            thread.runtime?.status === "waiting" ||
+            thread.runtime?.status === "starting") &&
+          thread.runtime?.activeRunId != null
         ) {
           Alert.alert(
             actionFailureTitle(action),
@@ -112,7 +114,7 @@ function useThreadActionExecutor(
               // suppressed until real activity clears the pin server-side.
               await unsettleMutation({
                 environmentId: thread.environmentId,
-                input: { threadId: thread.id, reason: "user" },
+                input: { threadId: thread.id },
               })
             : await (
                 action === "settle"

@@ -169,6 +169,8 @@ function makeThreadCreatedEvent(input: {
       updatedAt: input.now,
       archivedAt: null,
       deletedAt: null,
+      settledOverride: null,
+      settledAt: null,
     };
     return {
       id: yield* input.idAllocator.allocate.event({ threadId: input.threadId }),

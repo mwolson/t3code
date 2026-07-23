@@ -639,7 +639,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
             ? "Approve actions"
             : currentRuntimeMode === "auto-accept-edits"
               ? "Auto-accept edits"
-              : currentRuntimeMode === "auto"
+              : (currentRuntimeMode as string) === "auto"
                 ? "Auto"
                 : "Full access",
         subactions: [

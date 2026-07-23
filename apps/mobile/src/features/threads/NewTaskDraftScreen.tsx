@@ -582,7 +582,7 @@ export function NewTaskDraftScreen(props: {
             ? "Approve actions"
             : flow.runtimeMode === "auto-accept-edits"
               ? "Auto-accept edits"
-              : flow.runtimeMode === "auto"
+              : (flow.runtimeMode as string) === "auto"
                 ? "Auto"
                 : "Full access",
         subactions: [

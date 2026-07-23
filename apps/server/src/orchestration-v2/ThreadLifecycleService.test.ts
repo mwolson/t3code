@@ -30,6 +30,8 @@ it.effect("maps application lifecycle operations to V2-native commands", () => {
     const service = yield* ThreadLifecycle.ThreadLifecycleService;
     yield* service.archive({ commandId: CommandId.make("archive"), threadId });
     yield* service.unarchive({ commandId: CommandId.make("unarchive"), threadId });
+    yield* service.settle({ commandId: CommandId.make("settle"), threadId });
+    yield* service.unsettle({ commandId: CommandId.make("unsettle"), threadId });
     yield* service.updateMetadata({ commandId: CommandId.make("metadata"), threadId, title: "T" });
     yield* service.setRuntimeMode({
       commandId: CommandId.make("runtime"),
@@ -50,6 +52,8 @@ it.effect("maps application lifecycle operations to V2-native commands", () => {
     assert.deepEqual(commands, [
       "thread.archive",
       "thread.unarchive",
+      "thread.settle",
+      "thread.unsettle",
       "thread.metadata.update",
       "thread.runtime-mode.set",
       "thread.interaction-mode.set",

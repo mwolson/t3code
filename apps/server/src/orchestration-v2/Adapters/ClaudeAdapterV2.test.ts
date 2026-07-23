@@ -108,6 +108,8 @@ function makeClaudeTestAppThread(input: {
     updatedAt: input.now,
     archivedAt: null,
     deletedAt: null,
+    settledOverride: null,
+    settledAt: null,
   };
 }
 
@@ -982,6 +984,8 @@ describe("ClaudeAdapterV2 native fork", () => {
             updatedAt: now,
             archivedAt: null,
             deletedAt: null,
+            settledOverride: null,
+            settledAt: null,
           },
           threadId: targetThreadId,
           runId: RunId.make("run-claude-fork-target"),

@@ -396,6 +396,8 @@ it.effect("defaults settled fields when decoding historical thread data", () =>
     const thread = yield* decodeOrchestrationThread({
       ...common,
       deletedAt: null,
+      settledOverride: null,
+      settledAt: null,
       messages: [],
       proposedPlans: [],
       activities: [],

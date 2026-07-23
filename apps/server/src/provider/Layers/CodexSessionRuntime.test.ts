@@ -199,7 +199,7 @@ describe("buildTurnStartParams", () => {
     Effect.gen(function* () {
       const params = yield* buildTurnStartParams({
         threadId: "provider-thread-1",
-        runtimeMode: "auto",
+        runtimeMode: "auto-accept-edits",
         prompt: "Ship it",
       });
 

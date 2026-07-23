@@ -71,6 +71,8 @@ function makeProjection(input: {
       updatedAt: input.now,
       archivedAt: null,
       deletedAt: null,
+      settledOverride: null,
+      settledAt: null,
     },
     runs: [],
     attempts: [

@@ -20,6 +20,7 @@ import {
   TurnItemId,
 } from "./index.ts";
 import {
+  OrchestrationV2AppThread,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
   OrchestrationV2Command,
@@ -442,6 +443,8 @@ describe("orchestration V2 contracts", () => {
         updatedAt: now,
         archivedAt: null,
         deletedAt: null,
+        settledOverride: null,
+        settledAt: null,
       },
       runs: [],
       attempts: [],
@@ -678,8 +681,65 @@ describe("orchestration V2 contracts", () => {
       updatedAt: now,
       archivedAt: null,
       deletedAt: null,
+      settledOverride: null,
+      settledAt: null,
     });
 
     expect(shell.pendingBackgroundTasks).toEqual([]);
+    expect(shell.settledOverride).toBeNull();
+    expect(shell.settledAt).toBeNull();
+  });
+
+  it("decodes settle and unsettle commands and defaults settled fields on app threads", () => {
+    const settle = Schema.decodeUnknownSync(OrchestrationV2Command)({
+      type: "thread.settle",
+      commandId: "cmd-settle",
+      threadId: "thread-1",
+    });
+    expect(settle).toEqual({
+      type: "thread.settle",
+      commandId: "cmd-settle",
+      threadId: "thread-1",
+    });
+
+    const unsettle = Schema.decodeUnknownSync(OrchestrationV2Command)({
+      type: "thread.unsettle",
+      commandId: "cmd-unsettle",
+      threadId: "thread-1",
+      reason: "user",
+    });
+    expect(unsettle).toEqual({
+      type: "thread.unsettle",
+      commandId: "cmd-unsettle",
+      threadId: "thread-1",
+      reason: "user",
+    });
+
+    const thread = Schema.decodeUnknownSync(OrchestrationV2AppThread)({
+      createdBy: "user",
+      creationSource: "web",
+      id: "thread-1",
+      projectId: "project-1",
+      title: "Thread",
+      providerInstanceId: "codex",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: {
+        parentThreadId: null,
+        relationshipToParent: null,
+        rootThreadId: "thread-1",
+      },
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      deletedAt: null,
+    });
+    expect(thread.settledOverride).toBeNull();
+    expect(thread.settledAt).toBeNull();
   });
 });

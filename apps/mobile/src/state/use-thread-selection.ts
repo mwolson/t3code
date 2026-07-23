@@ -101,6 +101,8 @@ function threadDetailToShell(
     updatedAt: thread.updatedAt,
     archivedAt: thread.archivedAt,
     deletedAt: thread.deletedAt,
+    settledOverride: thread.settledOverride,
+    settledAt: thread.settledAt,
   });
 }
 

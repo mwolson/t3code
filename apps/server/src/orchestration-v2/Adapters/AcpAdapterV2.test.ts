@@ -437,6 +437,8 @@ function makeTurnInput(input: {
       updatedAt: input.now,
       archivedAt: null,
       deletedAt: null,
+      settledOverride: null,
+      settledAt: null,
     },
     threadId: input.threadId,
     runId: RunId.make(`run:${suffix}`),

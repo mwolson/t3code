@@ -433,9 +433,10 @@ export function useThreadActions() {
       }
       // reason "user" pins the thread active: auto-settle (PR merged /
       // inactivity) stays suppressed until real activity clears the pin.
+      // reason "user" is applied server-side by the unsettle command.
       return unsettleThreadMutation({
         environmentId: target.environmentId,
-        input: { threadId: target.threadId, reason: "user" },
+        input: { threadId: target.threadId },
       });
     },
     [unsettleThreadMutation],

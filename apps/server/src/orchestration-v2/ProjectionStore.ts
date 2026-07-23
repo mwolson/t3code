@@ -178,6 +178,8 @@ export function applyToProjection(
     case "thread.archived":
     case "thread.unarchived":
     case "thread.deleted":
+    case "thread.settled":
+    case "thread.unsettled":
     case "thread.metadata-updated":
     case "thread.runtime-mode-updated":
     case "thread.interaction-mode-updated":
@@ -802,6 +804,8 @@ export function threadShellFromProjection(
     updatedAt: projection.updatedAt,
     archivedAt: projection.thread.archivedAt,
     deletedAt: projection.thread.deletedAt,
+    settledOverride: projection.thread.settledOverride,
+    settledAt: projection.thread.settledAt,
   };
 }
 
@@ -960,6 +964,8 @@ function shellFromState(input: {
     updatedAt: input.state.updatedAt,
     archivedAt: input.state.thread.archivedAt,
     deletedAt: input.state.thread.deletedAt,
+    settledOverride: input.state.thread.settledOverride,
+    settledAt: input.state.thread.settledAt,
   };
 }
 
@@ -975,6 +981,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           case "thread.archived":
           case "thread.unarchived":
           case "thread.deleted":
+          case "thread.settled":
+          case "thread.unsettled":
           case "thread.metadata-updated":
           case "thread.runtime-mode-updated":
           case "thread.interaction-mode-updated":
@@ -996,6 +1004,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at,
                 archived_at,
                 deleted_at,
+                settled_override,
+                settled_at,
                 payload_json
               )
               VALUES (
@@ -1011,6 +1021,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${stringField(payload, "updatedAt")},
                 ${nullableStringField(payload, "archivedAt")},
                 ${nullableStringField(payload, "deletedAt")},
+                ${event.payload.settledOverride},
+                ${nullableStringField(payload, "settledAt")},
                 ${payloadJson}
               )
               ON CONFLICT(thread_id)
@@ -1026,6 +1038,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at = excluded.updated_at,
                 archived_at = excluded.archived_at,
                 deleted_at = excluded.deleted_at,
+                settled_override = excluded.settled_override,
+                settled_at = excluded.settled_at,
                 payload_json = excluded.payload_json
             `;
             break;
@@ -1744,6 +1758,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           event.type !== "thread.archived" &&
           event.type !== "thread.unarchived" &&
           event.type !== "thread.deleted" &&
+          event.type !== "thread.settled" &&
+          event.type !== "thread.unsettled" &&
           event.type !== "thread.metadata-updated" &&
           event.type !== "thread.runtime-mode-updated" &&
           event.type !== "thread.interaction-mode-updated" &&

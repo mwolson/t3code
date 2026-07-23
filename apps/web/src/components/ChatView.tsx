@@ -116,7 +116,7 @@ import {
 } from "../types";
 import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
-import { isCommandPaletteOpen } from "../commandPaletteContext";
+import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useElementWidth } from "../hooks/useElementWidth";
@@ -5476,7 +5476,7 @@ function ChatViewContent(props: ChatViewProps) {
         </header>
 
         {/* Error banner */}
-        <ProviderStatusBanner status={activeProviderStatus} />
+        <ProviderStatusBanner status={activeProviderStatus} onDismiss={() => {}} />
         <ThreadErrorBanner
           error={threadError}
           onDismiss={() => setThreadError(activeThread.id, null)}

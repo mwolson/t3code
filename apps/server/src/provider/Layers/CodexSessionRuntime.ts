@@ -281,12 +281,6 @@ function runtimeModeToThreadConfig(input: RuntimeMode): {
         sandbox: "workspace-write",
         approvalsReviewer: "user",
       };
-    case "auto":
-      return {
-        approvalPolicy: "on-request",
-        sandbox: "workspace-write",
-        approvalsReviewer: "auto_review",
-      };
     case "full-access":
     default:
       return {
@@ -323,7 +317,6 @@ function runtimeModeToTurnSandboxPolicy(
         type: "readOnly",
       };
     case "auto-accept-edits":
-    case "auto":
       return {
         type: "workspaceWrite",
       };

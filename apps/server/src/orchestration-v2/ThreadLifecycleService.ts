@@ -19,6 +19,8 @@ export class ThreadLifecycleError extends Schema.TaggedErrorClass<ThreadLifecycl
     operation: Schema.Literals([
       "archive",
       "unarchive",
+      "settle",
+      "unsettle",
       "delete",
       "update-metadata",
       "set-runtime-mode",
@@ -42,6 +44,14 @@ export class ThreadLifecycleService extends Context.Service<
       readonly threadId: ThreadId;
     }) => Effect.Effect<OrchestrationV2ThreadProjection, ThreadLifecycleError>;
     readonly unarchive: (input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+    }) => Effect.Effect<OrchestrationV2ThreadProjection, ThreadLifecycleError>;
+    readonly settle: (input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+    }) => Effect.Effect<OrchestrationV2ThreadProjection, ThreadLifecycleError>;
+    readonly unsettle: (input: {
       readonly commandId: CommandId;
       readonly threadId: ThreadId;
     }) => Effect.Effect<OrchestrationV2ThreadProjection, ThreadLifecycleError>;
@@ -99,6 +109,19 @@ export const make = Effect.gen(function* () {
         type: "thread.unarchive",
         commandId: input.commandId,
         threadId: input.threadId,
+      }),
+    settle: (input) =>
+      dispatch("settle", input.threadId, {
+        type: "thread.settle",
+        commandId: input.commandId,
+        threadId: input.threadId,
+      }),
+    unsettle: (input) =>
+      dispatch("unsettle", input.threadId, {
+        type: "thread.unsettle",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        reason: "user",
       }),
     delete: (input) =>
       dispatch("delete", input.threadId, {

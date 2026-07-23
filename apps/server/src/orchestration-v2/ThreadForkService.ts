@@ -83,6 +83,8 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
           updatedAt: input.createdAt,
           archivedAt: null,
           deletedAt: null,
+          settledOverride: null,
+          settledAt: null,
         };
         const transfer: OrchestrationV2ContextTransfer = {
           id: input.transferId,

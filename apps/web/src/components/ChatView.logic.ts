@@ -65,6 +65,8 @@ export function buildLocalDraftThread(
     updatedAt: timestamp,
     archivedAt: null,
     deletedAt: null,
+    settledOverride: null,
+    settledAt: null,
   });
 }
 

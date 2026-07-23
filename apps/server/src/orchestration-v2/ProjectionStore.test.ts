@@ -71,6 +71,8 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
         updatedAt: now,
         archivedAt: null,
         deletedAt: null,
+        settledOverride: null,
+        settledAt: null,
       });
       const session = {
         id: providerSessionId,
@@ -185,6 +187,8 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
           updatedAt: now,
           archivedAt: null,
           deletedAt: null,
+          settledOverride: null,
+          settledAt: null,
         },
       });
 
@@ -308,6 +312,8 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
           updatedAt: now,
           archivedAt: null,
           deletedAt: null,
+          settledOverride: null,
+          settledAt: null,
         },
       });
       yield* projectionStore.apply({
@@ -680,6 +686,8 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
           updatedAt: now,
           archivedAt: null,
           deletedAt: null,
+          settledOverride: null,
+          settledAt: null,
         },
       });
       yield* projectionStore.apply({
@@ -714,6 +722,8 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
           updatedAt: now,
           archivedAt: null,
           deletedAt: null,
+          settledOverride: null,
+          settledAt: null,
         },
       });
 

@@ -2,7 +2,7 @@ import type {
   EnvironmentProject,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
-import { EnvironmentId, ThreadId, type SidebarProjectGroupingMode } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { useFocusEffect } from "@react-navigation/native";
 import {
@@ -23,7 +23,6 @@ import {
 } from "react";
 import { useWindowDimensions, View } from "react-native";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
-import { AsyncResult } from "effect/unstable/reactivity";
 
 import {
   deriveFileInspectorPaneLayout,
@@ -36,12 +35,11 @@ import {
 } from "../../lib/layout";
 import { resolveThreadSelectionNavigationAction } from "../../lib/adaptive-navigation";
 import { scopedThreadKey } from "../../lib/scopedEntities";
-import { mobilePreferencesAtom } from "../../state/preferences";
 import {
   parseActiveThreadPath,
   useHardwareKeyboardCommand,
 } from "../keyboard/hardwareKeyboardCommands";
-import { HomeListOptionsProvider, resolveProjectGroupingMode } from "../home/home-list-options";
+import { HomeListOptionsProvider } from "../home/home-list-options";
 import { ThreadNavigationSidebar } from "../threads/ThreadNavigationSidebar";
 import { WORKSPACE_PANE_TIMING } from "./workspace-pane-animation";
 import { WorkspaceInspectorPane } from "./workspace-inspector-pane";
@@ -187,31 +185,6 @@ export function AdaptiveWorkspaceLayout(props: {
   readonly children: ReactNode;
   readonly pathname: string;
 }) {
-  const preferencesResult = useAtomValue(mobilePreferencesAtom);
-  if (!AsyncResult.isSuccess(preferencesResult)) {
-    return AsyncResult.isFailure(preferencesResult) ? (
-      <AdaptiveWorkspaceLayoutContent {...props} projectGroupingMode="repository" />
-    ) : null;
-  }
-  return (
-    <AdaptiveWorkspaceLayoutContent
-      {...props}
-      projectGroupingMode={resolveProjectGroupingMode(
-        preferencesResult.value.projectGroupingEnabled,
-      )}
-    />
-  );
-}
-
-function AdaptiveWorkspaceLayoutContent(
-  props: {
-    readonly children: ReactNode;
-    readonly pathname: string;
-  } & {
-    readonly projectGroupingMode: SidebarProjectGroupingMode;
-  },
-) {
-  const projectGroupingMode = props.projectGroupingMode;
   const { width, height } = useWindowDimensions();
   const pathname = props.pathname;
   const navigation = useNavigation();
@@ -502,7 +475,7 @@ function AdaptiveWorkspaceLayoutContent(
   );
 
   return (
-    <HomeListOptionsProvider projectGroupingMode={projectGroupingMode}>
+    <HomeListOptionsProvider>
       <AdaptiveWorkspaceContext.Provider value={contextValue}>
         <View testID="adaptive-workspace-layout" className="flex-1 flex-row">
           {shouldRenderPrimarySidebar && layout.listPaneWidth !== null ? (

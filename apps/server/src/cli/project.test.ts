@@ -8,6 +8,7 @@ import { assert, it } from "@effect/vitest";
 import { EnvironmentInternalError } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
 import { Command } from "effect/unstable/cli";
@@ -20,6 +21,7 @@ import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.t
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
+import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import {
   ProjectLiveServerDeclaredResponseError,
@@ -27,7 +29,14 @@ import {
   projectCommandErrorFromLiveServerRequest,
 } from "./project.ts";
 
-const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
+const T3ProjectFileLoaderTestLayer = Layer.succeed(T3ProjectFileLoader.T3ProjectFileLoader, {
+  load: () => Effect.succeed(Option.none()),
+});
+const CliRuntimeLayer = Layer.mergeAll(
+  NodeServices.layer,
+  NetService.layer,
+  T3ProjectFileLoaderTestLayer,
+);
 const runCli = (args: ReadonlyArray<string>) =>
   Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(CliRuntimeLayer));
 
@@ -127,5 +136,5 @@ it.effect("adds, renames, and removes projects through the V2 project CLI domain
 
     yield* runCli(["project", "remove", added?.id ?? "", "--base-dir", baseDir]);
     assert.deepEqual((yield* readProjects(baseDir)).projects, []);
-  }).pipe(Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.provide(CliRuntimeLayer)),
 );

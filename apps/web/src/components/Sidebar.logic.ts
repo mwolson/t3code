@@ -8,6 +8,7 @@ import {
   type ThreadSortInput,
 } from "../lib/threadSort";
 import type { SidebarThreadSummary, Thread } from "../types";
+import type { ThreadRouteTarget } from "../threadRoutes";
 import { cn } from "../lib/utils";
 import { isLatestRunSettled } from "../session-logic";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
@@ -33,6 +34,14 @@ type ScopedSidebarThread = ThreadSortInput & {
   environmentId: string;
   projectId: string;
   archivedAt: string | null;
+};
+
+type LogicalSidebarProject = SidebarProject & {
+  projectKey: string;
+  memberProjectRefs: readonly {
+    environmentId: string;
+    projectId: string;
+  }[];
 };
 
 export type ThreadTraversalDirection = "previous" | "next";
@@ -699,5 +708,125 @@ export function sortScopedProjectsForSidebar<
       left.title.localeCompare(right.title) ||
       left.environmentId.localeCompare(right.environmentId) ||
       left.id.localeCompare(right.id),
+  );
+}
+
+export function shouldNavigateAfterProjectRemoval(input: {
+  routeTarget: ThreadRouteTarget | null;
+  projectThreads: readonly {
+    environmentId: string;
+    id: string;
+  }[];
+  projectDraftId: string | null;
+}): boolean {
+  const { projectDraftId, projectThreads, routeTarget } = input;
+  if (routeTarget?.kind === "draft") {
+    return projectDraftId === routeTarget.draftId;
+  }
+  if (routeTarget?.kind !== "server") {
+    return false;
+  }
+  return projectThreads.some(
+    (thread) =>
+      thread.environmentId === routeTarget.threadRef.environmentId &&
+      thread.id === routeTarget.threadRef.threadId,
+  );
+}
+
+// ── Sidebar v2 status model ─────────────────────────────────────────
+export type SidebarV2Status = "approval" | "input" | "working" | "failed" | "ready";
+
+type SidebarV2StatusInput = Pick<
+  SidebarThreadSummary,
+  "hasPendingApprovals" | "hasPendingUserInput" | "runtime"
+>;
+
+export function resolveSidebarV2Status(thread: SidebarV2StatusInput): SidebarV2Status {
+  if (thread.hasPendingApprovals) {
+    return "approval";
+  }
+  if (thread.hasPendingUserInput) {
+    return "input";
+  }
+  const status = thread.runtime?.status;
+  if (
+    status === "running" ||
+    status === "waiting" ||
+    status === "preparing" ||
+    status === "starting" ||
+    status === "queued"
+  ) {
+    return "working";
+  }
+  if (status === "failed") {
+    return "failed";
+  }
+  return "ready";
+}
+
+/** NaN-safe Date.parse for sort comparators. */
+export function parseTimestampMs(isoDate: string): number {
+  const parsed = Date.parse(isoDate);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+/** First VALID timestamp wins among candidates. */
+export function firstValidTimestampMs(
+  ...candidates: ReadonlyArray<string | null | undefined>
+): number {
+  for (const candidate of candidates) {
+    if (candidate == null) continue;
+    const parsed = Date.parse(candidate);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return 0;
+}
+
+/** Static creation order for sidebar v2: newest thread on top. */
+export function sortThreadsForSidebarV2<
+  T extends { readonly id: string; readonly createdAt: string },
+>(threads: readonly T[]): T[] {
+  return [...threads].toSorted(
+    (left, right) =>
+      parseTimestampMs(right.createdAt) - parseTimestampMs(left.createdAt) ||
+      left.id.localeCompare(right.id),
+  );
+}
+
+export function sortLogicalProjectsForSidebar<
+  TProject extends LogicalSidebarProject,
+  TThread extends ScopedSidebarThread,
+>(
+  projects: readonly TProject[],
+  threads: readonly TThread[],
+  sortOrder: SidebarProjectSortOrder,
+): TProject[] {
+  const groupKeyByProjectRef = new Map(
+    projects.flatMap((project) =>
+      project.memberProjectRefs.map(
+        (projectRef) =>
+          [`${projectRef.environmentId}\0${projectRef.projectId}`, project.projectKey] as const,
+      ),
+    ),
+  );
+  const threadsByProjectKey = new Map<string, TThread[]>();
+  for (const thread of threads) {
+    if (thread.archivedAt !== null) continue;
+    const projectKey = groupKeyByProjectRef.get(`${thread.environmentId}\0${thread.projectId}`);
+    if (!projectKey) continue;
+    const existing = threadsByProjectKey.get(projectKey);
+    if (existing) {
+      existing.push(thread);
+    } else {
+      threadsByProjectKey.set(projectKey, [thread]);
+    }
+  }
+
+  return sortProjectsByActivity(
+    projects,
+    sortOrder,
+    (project) => threadsByProjectKey.get(project.projectKey) ?? [],
+    (left, right) =>
+      left.title.localeCompare(right.title) || left.projectKey.localeCompare(right.projectKey),
   );
 }

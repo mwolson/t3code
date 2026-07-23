@@ -43,7 +43,9 @@ import {
   promoteQueuedRun,
   reorderQueuedRun,
   revertThreadCheckpoint,
+  settleThread,
   startThreadTurn,
+  unsettleThread,
   updateThreadMetadata,
 } from "./commands.ts";
 
@@ -268,6 +270,32 @@ describe("V2 environment commands", () => {
 
       expect(commands).toEqual([
         { type: "thread.archive", commandId: "queued-command", threadId: "thread-1" },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("dispatches settle and unsettle as V2 thread lifecycle commands", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+
+      yield* settleThread({
+        commandId: CommandId.make("settle-1"),
+        threadId: ThreadId.make("thread-1"),
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      yield* unsettleThread({
+        commandId: CommandId.make("unsettle-1"),
+        threadId: ThreadId.make("thread-1"),
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(commands).toEqual([
+        { type: "thread.settle", commandId: "settle-1", threadId: "thread-1" },
+        {
+          type: "thread.unsettle",
+          commandId: "unsettle-1",
+          threadId: "thread-1",
+          reason: "user",
+        },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );

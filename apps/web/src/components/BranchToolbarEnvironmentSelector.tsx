@@ -24,7 +24,7 @@ interface BranchToolbarEnvironmentSelectorProps {
   envLocked: boolean;
   environmentId: EnvironmentId;
   availableEnvironments: readonly EnvironmentOption[];
-  onEnvironmentChange: (environmentId: EnvironmentId) => void;
+  onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   displayMode?: "toolbar" | "panel";
 }
 
@@ -74,7 +74,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
     <Select
       modal={false}
       value={environmentId}
-      onValueChange={(value) => onEnvironmentChange(value as EnvironmentId)}
+      onValueChange={(value) => onEnvironmentChange?.(value as EnvironmentId)}
       items={environmentItems}
     >
       <SelectTrigger

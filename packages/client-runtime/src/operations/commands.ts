@@ -335,6 +335,9 @@ function simpleThreadCommand(
   );
 }
 
+export type SettleThreadInput = ThreadCommandInput;
+export type UnsettleThreadInput = ThreadCommandInput;
+
 export const deleteThread = Effect.fn("EnvironmentCommands.deleteThread")(function* (
   input: DeleteThreadInput,
 ) {
@@ -351,6 +354,27 @@ export const unarchiveThread = Effect.fn("EnvironmentCommands.unarchiveThread")(
   input: UnarchiveThreadInput,
 ) {
   return yield* simpleThreadCommand("thread.unarchive", input);
+});
+
+export const settleThread = Effect.fn("EnvironmentCommands.settleThread")(function* (
+  input: SettleThreadInput,
+) {
+  return yield* dispatch({
+    type: "thread.settle",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+  });
+});
+
+export const unsettleThread = Effect.fn("EnvironmentCommands.unsettleThread")(function* (
+  input: UnsettleThreadInput,
+) {
+  return yield* dispatch({
+    type: "thread.unsettle",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    reason: "user",
+  });
 });
 
 export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadMetadata")(

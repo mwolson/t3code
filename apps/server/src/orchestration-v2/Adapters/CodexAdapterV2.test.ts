@@ -714,6 +714,8 @@ function makeCodexTestAppThread(input: {
     updatedAt: input.now,
     archivedAt: null,
     deletedAt: null,
+    settledOverride: null,
+    settledAt: null,
   };
 }
 

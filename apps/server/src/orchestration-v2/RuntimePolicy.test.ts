@@ -49,6 +49,8 @@ function makeThread(input: {
     updatedAt: input.now,
     archivedAt: null,
     deletedAt: null,
+    settledOverride: null,
+    settledAt: null,
   };
 }
 
@@ -66,6 +68,8 @@ const TestLayer = layerFromProjectRepository.pipe(
             createdAt: "2026-06-21T00:00:00.000Z",
             updatedAt: "2026-06-21T00:00:00.000Z",
             deletedAt: null,
+            settledOverride: null,
+            settledAt: null,
           }),
         ),
     }),

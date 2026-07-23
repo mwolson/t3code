@@ -175,6 +175,8 @@ function commandThreadId(command: OrchestrationV2Command): ThreadId {
     case "thread.create":
     case "thread.archive":
     case "thread.unarchive":
+    case "thread.settle":
+    case "thread.unsettle":
     case "thread.delete":
     case "thread.metadata.update":
     case "thread.runtime-mode.set":
@@ -768,6 +770,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       updatedAt: now,
       archivedAt: null,
       deletedAt: null,
+      settledOverride: null,
+      settledAt: null,
     };
 
     yield* emitEvent({
@@ -786,6 +790,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         readonly type:
           | "thread.archive"
           | "thread.unarchive"
+          | "thread.settle"
+          | "thread.unsettle"
           | "thread.delete"
           | "thread.metadata.update"
           | "thread.runtime-mode.set"
@@ -814,6 +820,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Thread ${command.threadId} is deleted.`,
       });
     }
+    if (
+      thread.archivedAt !== null &&
+      (command.type === "thread.settle" || command.type === "thread.unsettle")
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} is archived.`,
+      });
+    }
     if (command.type === "thread.archive" && thread.archivedAt !== null) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -827,6 +843,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandType: command.type,
         cause: `Thread ${command.threadId} is not archived.`,
       });
+    }
+    if (command.type === "thread.settle") {
+      const activeRun = projection.runs.find(isBlockingRun);
+      if (activeRun !== undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} has an active run and cannot be settled.`,
+        });
+      }
+      const pendingRequest = projection.runtimeRequests.find(
+        (request) => request.status === "pending",
+      );
+      if (pendingRequest !== undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} has a pending request and cannot be settled.`,
+        });
+      }
     }
 
     const providerSwitchPlan =
@@ -858,6 +894,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return { ...thread, archivedAt: now, updatedAt: now };
         case "thread.unarchive":
           return { ...thread, archivedAt: null, updatedAt: now };
+        case "thread.settle": {
+          const alreadySettled = thread.settledOverride === "settled" && thread.settledAt !== null;
+          return {
+            ...thread,
+            settledOverride: "settled" as const,
+            settledAt: alreadySettled ? thread.settledAt : now,
+            updatedAt: alreadySettled ? thread.updatedAt : now,
+          };
+        }
+        case "thread.unsettle": {
+          const alreadyPinnedActive = thread.settledOverride === "active";
+          return {
+            ...thread,
+            settledOverride: "active" as const,
+            settledAt: null,
+            updatedAt: alreadyPinnedActive ? thread.updatedAt : now,
+          };
+        }
         case "thread.delete":
           return { ...thread, deletedAt: thread.deletedAt ?? now, updatedAt: now };
         case "thread.metadata.update":
@@ -888,6 +942,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return "thread.archived" as const;
         case "thread.unarchive":
           return "thread.unarchived" as const;
+        case "thread.settle":
+          return "thread.settled" as const;
+        case "thread.unsettle":
+          return "thread.unsettled" as const;
         case "thread.delete":
           return "thread.deleted" as const;
         case "thread.metadata.update":
@@ -1968,6 +2026,30 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
     });
 
+  const clearSettledOverrideForActivity = (
+    command: OrchestrationV2Command & { readonly threadId: ThreadId },
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    thread: OrchestrationV2AppThread,
+    occurredAt: DateTime.Utc,
+  ) =>
+    thread.settledOverride === null
+      ? Effect.void
+      : emit(
+          events,
+          command,
+        )({
+          type: "thread.unsettled",
+          threadId: command.threadId,
+          providerInstanceId: thread.providerInstanceId,
+          occurredAt,
+          payload: {
+            ...thread,
+            settledOverride: null,
+            settledAt: null,
+            updatedAt: occurredAt,
+          },
+        });
+
   const dispatchMessage = (
     command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -1977,6 +2059,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const projection = yield* getProjectionWithPendingEvents(command.threadId, events);
       const modelSelection = command.modelSelection ?? projection.thread.modelSelection;
       const dispatchMode = command.dispatchMode;
+      // Real activity clears any settle pin (settled wakes, active unpins).
+      yield* clearSettledOverrideForActivity(
+        command,
+        events,
+        projection.thread,
+        yield* DateTime.now,
+      );
       const sourcePlanProjection =
         command.sourcePlanRef === undefined
           ? null
@@ -4976,6 +5065,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "thread.archive":
       case "thread.unarchive":
+      case "thread.settle":
+      case "thread.unsettle":
       case "thread.delete":
       case "thread.metadata.update":
       case "thread.runtime-mode.set":

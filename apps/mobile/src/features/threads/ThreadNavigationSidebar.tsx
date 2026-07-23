@@ -734,7 +734,7 @@ function ThreadNavigationSidebarPane(
                   ?.providers.find(
                     (provider) =>
                       provider.instanceId ===
-                      (thread.session?.providerInstanceId ?? thread.modelSelection.instanceId),
+                      (thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId),
                   )?.driver ?? null
               }
               environmentLabel={
@@ -874,7 +874,7 @@ function ThreadNavigationSidebarPane(
   // light the "customized" state while the beta is on.
   const filterCustomized = threadListV2Enabled
     ? options.selectedEnvironmentId !== null || selectedProjectKey !== null
-    : hasCustomHomeListOptions({ ...options, selectedProjectKey });
+    : hasCustomHomeListOptions(options);
   const filterIcon = filterCustomized
     ? "line.3.horizontal.decrease.circle.fill"
     : "line.3.horizontal.decrease.circle";

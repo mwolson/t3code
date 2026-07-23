@@ -43,6 +43,8 @@ export function makeThreadProjectionFixture(): OrchestrationV2ThreadProjection {
       updatedAt: now,
       archivedAt: null,
       deletedAt: null,
+      settledOverride: null,
+      settledAt: null,
     },
     runs: [],
     attempts: [],
@@ -122,6 +124,8 @@ export function makeThreadFixture(overrides: ThreadFixtureOverrides = {}): Threa
     updatedAt,
     archivedAt,
     deletedAt,
+    settledOverride: null,
+    settledAt: null,
   });
 
   return { ...shell, ...overrides };
