@@ -773,6 +773,7 @@ export const layer: Layer.Layer<
           );
           const rootTerminalSeen = yield* Ref.make(false);
           const rootRunFinalized = yield* Ref.make(false);
+          const providerThreadOwnerLost = yield* Ref.make(false);
           const activeChildProviderTurns = yield* Ref.make<ReadonlySet<ProviderTurnId>>(new Set());
           const activeChildSubagents = yield* Ref.make<ReadonlySet<NodeId>>(new Set());
           const activeBackgroundTurnItems = yield* Ref.make<
@@ -937,6 +938,9 @@ export const layer: Layer.Layer<
             if (terminal !== null && terminal.status !== "completed") {
               return true;
             }
+            if (yield* Ref.get(providerThreadOwnerLost)) {
+              return true;
+            }
             const childProviderTurns = yield* Ref.get(activeChildProviderTurns);
             if (childProviderTurns.size > 0) {
               return false;
@@ -954,7 +958,26 @@ export const layer: Layer.Layer<
             // item's non-terminal event before the root terminal; an item
             // first seen after the terminal is not pinned.
             const backgroundItems = yield* Ref.get(activeBackgroundTurnItems);
-            return backgroundItems.size === 0;
+            if (backgroundItems.size > 0) {
+              return false;
+            }
+            // Claude background Bash has no turn-item projection. Keep the
+            // stream open while this root's provider thread still reports
+            // pending roster work so late empty updates can clear Waiting.
+            // Use only the thread-scoped probe: session-wide pending work
+            // (siblings, wake buffers, session subagents) must not pin this
+            // root subscription. Session idle release still uses
+            // hasPendingBackgroundWork via ProviderSessionManager.
+            const latestProviderThreadSnapshot = yield* Ref.get(latestProviderThread);
+            if (input.session.hasPendingBackgroundWorkForThread !== undefined) {
+              const hasPendingWork = yield* input.session
+                .hasPendingBackgroundWorkForThread(latestProviderThreadSnapshot)
+                .pipe(Effect.catchCause(() => Effect.succeed(false)));
+              if (hasPendingWork) {
+                return false;
+              }
+            }
+            return true;
           });
           const eventSubscription =
             input.session.subscribeEvents === undefined
@@ -969,6 +992,16 @@ export const layer: Layer.Layer<
                 let storedEventCount = 0;
                 const shouldDeliver = shouldDeliverProviderEvent(event, assistantStreamingEnabled);
                 if (shouldDeliver) {
+                  // Root provider_thread.updated always uses an ownership gate:
+                  // pre-terminal writeIfRunCurrent (attempt still running), or
+                  // post-terminal writeIfProviderThreadOwner so late roster
+                  // clears still land while this run owns lastRunOrdinal, but
+                  // a completed run cannot clobber a newer run that claimed
+                  // the thread.
+                  const rootTerminalAlreadySeen = yield* Ref.get(rootTerminalSeen);
+                  const isRootProviderThreadUpdate =
+                    event.type === "provider_thread.updated" &&
+                    event.providerThread.id === input.providerThread.id;
                   const storedEvents = yield* providerEventIngestor.ingestNormalized({
                     providerSessionId: input.providerSessionId,
                     providerInstanceId: input.run.providerInstanceId,
@@ -976,18 +1009,33 @@ export const layer: Layer.Layer<
                     runId: input.run.id,
                     nodeId: input.rootNode.id,
                     event,
-                    ...(event.type === "provider_thread.updated" &&
-                    event.providerThread.id === input.providerThread.id
-                      ? {
-                          writeIfRunCurrent: {
-                            runId: input.run.id,
-                            activeAttemptId: input.attempt.id,
-                            expectedStatus: "running" as const,
-                          },
-                        }
+                    ...(isRootProviderThreadUpdate
+                      ? rootTerminalAlreadySeen
+                        ? {
+                            writeIfProviderThreadOwner: {
+                              providerThreadId: input.providerThread.id,
+                              expectedLastRunOrdinal: input.run.ordinal,
+                            },
+                          }
+                        : {
+                            writeIfRunCurrent: {
+                              runId: input.run.id,
+                              activeAttemptId: input.attempt.id,
+                              expectedStatus: "running" as const,
+                            },
+                          }
                       : {}),
                   });
                   storedEventCount = storedEvents.length;
+                  if (
+                    isRootProviderThreadUpdate &&
+                    rootTerminalAlreadySeen &&
+                    storedEventCount === 0
+                  ) {
+                    // Ownership lost (or thread row missing). Stop pinning the
+                    // stream on this run's background probe.
+                    yield* Ref.set(providerThreadOwnerLost, true);
+                  }
                 }
                 if (event.type === "provider_thread.updated") {
                   if (event.providerThread.id === input.providerThread.id && storedEventCount > 0) {

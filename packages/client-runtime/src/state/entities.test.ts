@@ -68,6 +68,99 @@ describe("V2 client presentation", () => {
     expect(shell.source).toBe(v2ThreadShell);
   });
 
+  it("parks presented runtime at idle when a settled shell has pending background tasks", () => {
+    const runId = RunId.make("run-completed");
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      latestRunId: runId,
+      activeRunId: null,
+      status: "completed",
+      pendingBackgroundTasks: [{ taskId: "bg-1", description: "sleep 20" }],
+    });
+
+    expect(shell.latestRun).toMatchObject({ runId, status: "completed" });
+    expect(shell.runtime).toMatchObject({
+      status: "idle",
+      activeRunId: null,
+    });
+    expect(shell.pendingBackgroundTasks).toEqual([{ taskId: "bg-1", description: "sleep 20" }]);
+  });
+
+  it("keeps terminal runtime completed when there are no pending background tasks", () => {
+    const runId = RunId.make("run-completed");
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      latestRunId: runId,
+      activeRunId: null,
+      status: "completed",
+      pendingBackgroundTasks: [],
+    });
+
+    expect(shell.latestRun).toMatchObject({ runId, status: "completed" });
+    expect(shell.runtime).toMatchObject({
+      status: "completed",
+      activeRunId: null,
+    });
+  });
+
+  it("keeps runtime running when there is no background roster", () => {
+    const runId = RunId.make("run-running");
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      latestRunId: runId,
+      activeRunId: runId,
+      status: "running",
+      pendingBackgroundTasks: [],
+    });
+
+    expect(shell.latestRun).toMatchObject({ runId, status: "running" });
+    expect(shell.runtime).toMatchObject({
+      status: "running",
+      activeRunId: runId,
+    });
+  });
+
+  it("parks runtime idle over stale shell running when the roster is nonempty", () => {
+    const runId = RunId.make("run-stale-running");
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      latestRunId: runId,
+      activeRunId: runId,
+      // Stale: server already projected a post-settlement roster, but shell
+      // status still says running (packaged orchestrator-v2 bug).
+      status: "running",
+      pendingBackgroundTasks: [{ taskId: "bg-1", description: "sleep 20" }],
+    });
+
+    expect(shell.latestRun).toMatchObject({ runId, status: "running" });
+    expect(shell.runtime).toMatchObject({
+      status: "idle",
+      activeRunId: runId,
+    });
+    expect(shell.pendingBackgroundTasks).toEqual([{ taskId: "bg-1", description: "sleep 20" }]);
+  });
+
+  it("parks runtime idle over stale checkpoint waiting when the roster is nonempty", () => {
+    const runId = RunId.make("run-stale-waiting");
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      latestRunId: runId,
+      activeRunId: runId,
+      // Stale: checkpoint-oriented waiting masks post-settlement background work.
+      status: "waiting",
+      pendingBackgroundTasks: [{ taskId: "bg-2", description: "background bash" }],
+    });
+
+    expect(shell.latestRun).toMatchObject({ runId, status: "waiting" });
+    expect(shell.runtime).toMatchObject({
+      status: "idle",
+      activeRunId: runId,
+    });
+    expect(shell.pendingBackgroundTasks).toEqual([
+      { taskId: "bg-2", description: "background bash" },
+    ]);
+  });
+
   it("derives execution summaries without wrapping or copying the projection", () => {
     const runId = RunId.make("run-1");
     const now = DateTime.makeUnsafe("2026-06-20T01:00:00.000Z");

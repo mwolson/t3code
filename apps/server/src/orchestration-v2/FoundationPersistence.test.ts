@@ -685,6 +685,138 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
     }),
   );
 
+  it.effect(
+    "rejects provider-thread writes when lastRunOrdinal no longer matches the expected owner",
+    () =>
+      Effect.gen(function* () {
+        const eventSink = yield* EventSinkV2;
+        const projectionStore = yield* ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread:foundation-provider-thread-owner");
+        const providerThreadId = ProviderThreadId.make(
+          "provider-thread:foundation-provider-thread-owner",
+        );
+        const thread = makeThread(threadId, now);
+        const baseProviderThread = {
+          id: providerThreadId,
+          driver: providerDriver,
+          providerInstanceId,
+          providerSessionId: null,
+          appThreadId: threadId,
+          ownerNodeId: null,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          status: "idle" as const,
+          firstRunOrdinal: 1,
+          lastRunOrdinal: 1,
+          handoffIds: [] as const,
+          forkedFrom: null,
+          pendingBackgroundTasks: [
+            { taskId: "bg-owner", description: "sleep 20", taskType: "local_bash" },
+          ],
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        yield* eventSink.write({
+          events: [
+            threadCreatedEvent({
+              id: "event:foundation-provider-thread-owner:thread",
+              thread,
+              now,
+            }),
+            {
+              id: EventId.make("event:foundation-provider-thread-owner:provider-thread"),
+              type: "provider-thread.updated",
+              threadId,
+              driver: providerDriver,
+              providerInstanceId,
+              occurredAt: now,
+              payload: baseProviderThread,
+            },
+          ],
+        });
+
+        const ownedClear = yield* eventSink.writeIfProviderThreadOwner({
+          providerThreadId,
+          expectedLastRunOrdinal: 1,
+          events: [
+            {
+              id: EventId.make("event:foundation-provider-thread-owner:clear"),
+              type: "provider-thread.updated",
+              threadId,
+              driver: providerDriver,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                ...baseProviderThread,
+                pendingBackgroundTasks: [],
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+        assert.isTrue(ownedClear.committed);
+        assert.equal(ownedClear.storedEvents.length, 1);
+
+        const afterOwner = yield* DateTime.now;
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make("event:foundation-provider-thread-owner:newer-run"),
+              type: "provider-thread.updated",
+              threadId,
+              driver: providerDriver,
+              providerInstanceId,
+              occurredAt: afterOwner,
+              payload: {
+                ...baseProviderThread,
+                lastRunOrdinal: 2,
+                status: "active",
+                pendingBackgroundTasks: [],
+                updatedAt: afterOwner,
+              },
+            },
+          ],
+        });
+
+        const staleWrite = yield* eventSink.writeIfProviderThreadOwner({
+          providerThreadId,
+          expectedLastRunOrdinal: 1,
+          events: [
+            {
+              id: EventId.make("event:foundation-provider-thread-owner:stale"),
+              type: "provider-thread.updated",
+              threadId,
+              driver: providerDriver,
+              providerInstanceId,
+              occurredAt: afterOwner,
+              payload: {
+                ...baseProviderThread,
+                lastRunOrdinal: 1,
+                status: "idle",
+                pendingBackgroundTasks: [
+                  { taskId: "bg-stale", description: "should not land", taskType: "local_bash" },
+                ],
+                updatedAt: afterOwner,
+              },
+            },
+          ],
+        });
+        assert.isFalse(staleWrite.committed);
+        assert.deepEqual(staleWrite.storedEvents, []);
+
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        const providerThread = projection.providerThreads.find(
+          (candidate) => candidate.id === providerThreadId,
+        );
+        assert.isDefined(providerThread);
+        assert.equal(providerThread?.lastRunOrdinal, 2);
+        assert.equal(providerThread?.status, "active");
+        assert.deepEqual(providerThread?.pendingBackgroundTasks ?? [], []);
+      }),
+  );
+
   it.effect("interrupts a running process-bound effect when it is cancelled", () =>
     Effect.gen(function* () {
       const outbox = yield* EffectOutboxV2;
