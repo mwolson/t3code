@@ -40,6 +40,26 @@ describe("resolveThreadListV2Status", () => {
     expect(resolveThreadListV2Status(thread)).toBe("approval");
   });
 
+  it("reports working when pending background tasks outlive a terminal run", () => {
+    expect(
+      resolveThreadListV2Status(
+        makeThread({
+          id: ThreadId.make("t"),
+          title: "t",
+          pendingBackgroundTasks: [{ taskId: "bg-1", description: "Run Codex review" }],
+          runtime: {
+            status: "completed",
+            activeRunId: null,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            providerName: "Codex",
+            lastError: null,
+            updatedAt: NOW,
+          },
+        }),
+      ),
+    ).toBe("working");
+  });
+
   it("resolves ready for quiescent threads", () => {
     expect(resolveThreadListV2Status(makeThread({ id: ThreadId.make("t"), title: "t" }))).toBe(
       "ready",
@@ -238,6 +258,52 @@ describe("buildThreadListV2Items", () => {
           id: ThreadId.make("older-created"),
           title: "Older",
           createdAt: "2026-06-01T08:00:00.000Z",
+          updatedAt: NOW,
+        }),
+        makeThread({
+          id: ThreadId.make("newer-created"),
+          title: "Newer",
+          createdAt: "2026-06-01T12:00:00.000Z",
+        }),
+      ],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+    });
+
+    expect(items.map((item) => item.thread.id)).toEqual(["newer-created", "older-created"]);
+  });
+
+  it("keeps settled threads in the tail and filters by search query", () => {
+    const { items } = buildThreadListV2Items({
+      threads: [
+        makeThread({ id: ThreadId.make("match"), title: "Fix login bug" }),
+        makeThread({ id: ThreadId.make("miss"), title: "Greeting" }),
+        makeThread({
+          id: ThreadId.make("settled"),
+          title: "Fix login again",
+          settledOverride: "settled",
+          settledAt: NOW,
+        }),
+      ],
+      environmentId: null,
+      searchQuery: "login",
+      now: NOW,
+    });
+
+    expect(items.map((item) => [item.thread.id, item.variant])).toEqual([
+      ["match", "card"],
+      ["settled", "slim"],
+    ]);
+  });
+
+  it("keeps cards in creation order while settled sorts by recency", () => {
+    const { items } = buildThreadListV2Items({
+      threads: [
+        makeThread({
+          id: ThreadId.make("older-created"),
+          title: "Older",
+          createdAt: "2026-06-01T08:00:00.000Z",
           updatedAt: NOW, // recent activity must NOT promote it
         }),
         makeThread({
@@ -360,6 +426,95 @@ describe("buildThreadListV2Items settled paging", () => {
     expect(layout.hiddenSettledCount).toBe(2);
     expect(layout.items.filter((item) => item.variant === "slim")).toHaveLength(2);
     // Most recent settled first — the hidden ones are the oldest.
+    expect(layout.items.map((item) => item.thread.id)).toEqual([
+      "active",
+      "settled-3",
+      "settled-2",
+    ]);
+  });
+
+  it("scopes the flat list to one project", () => {
+    const projectId = ProjectId.make("project-1");
+    const otherProjectId = ProjectId.make("project-2");
+    const { items } = buildThreadListV2Items({
+      threads: [
+        makeThread({ id: ThreadId.make("included"), projectId, title: "Included" }),
+        makeThread({
+          id: ThreadId.make("excluded"),
+          projectId: otherProjectId,
+          title: "Excluded",
+        }),
+      ],
+      environmentId: null,
+      projectRefs: [{ environmentId, projectId }],
+      searchQuery: "",
+      now: NOW,
+    });
+
+    expect(items.map((item) => item.thread.id)).toEqual(["included"]);
+  });
+
+  it("scopes the flat list to every environment member of a logical project", () => {
+    const projectId = ProjectId.make("project-1");
+    const remoteEnvironmentId = EnvironmentId.make("environment-remote");
+    const { items } = buildThreadListV2Items({
+      threads: [
+        makeThread({ id: ThreadId.make("local"), projectId, title: "Local" }),
+        makeThread({
+          environmentId: remoteEnvironmentId,
+          id: ThreadId.make("remote"),
+          projectId,
+          title: "Remote",
+        }),
+      ],
+      environmentId: null,
+      projectRefs: [
+        { environmentId, projectId },
+        { environmentId: remoteEnvironmentId, projectId },
+      ],
+      searchQuery: "",
+      now: NOW,
+    });
+
+    expect(items.map((item) => item.thread.id)).toEqual(["local", "remote"]);
+  });
+});
+
+describe("buildThreadListV2Items settled paging", () => {
+  it("caps the settled tail at settledLimit and reports the hidden count", () => {
+    const threads = [
+      makeThread({ id: ThreadId.make("active"), title: "Active" }),
+      ...Array.from({ length: 4 }, (_, index) =>
+        makeThread({
+          id: ThreadId.make(`settled-${index}`),
+          title: `Settled ${index}`,
+          settledOverride: "settled",
+          settledAt: NOW,
+          // Adopted latest run timestamps so the row is not a queued-turn start.
+          latestUserMessageAt: `2026-06-01T0${index}:00:00.000Z`,
+          latestRun: {
+            runId: ThreadId.make(`run-${index}`) as never,
+            status: "completed",
+            requestedAt: `2026-06-01T0${index}:00:00.000Z`,
+            startedAt: `2026-06-01T0${index}:00:00.000Z`,
+            completedAt: `2026-06-01T0${index}:10:00.000Z`,
+            assistantMessageId: null,
+          },
+        }),
+      ),
+    ];
+
+    const layout = buildThreadListV2Items({
+      threads,
+      environmentId: null,
+      searchQuery: "",
+      settledLimit: 2,
+      now: NOW,
+    });
+
+    expect(layout.hiddenSettledCount).toBe(2);
+    expect(layout.items.filter((item) => item.variant === "slim")).toHaveLength(2);
+    // Most recent settled first; the hidden ones are the oldest.
     expect(layout.items.map((item) => item.thread.id)).toEqual([
       "active",
       "settled-3",

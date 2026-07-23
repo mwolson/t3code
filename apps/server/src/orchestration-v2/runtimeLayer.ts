@@ -74,7 +74,7 @@ const legacyV1ThreadImporterProvided = legacyV1ThreadImporterLayer.pipe(
 );
 
 const providerEventIngestorProvided = providerEventIngestorLayer.pipe(
-  Layer.provide(Layer.mergeAll(eventSinkProvided, idAllocatorLayer)),
+  Layer.provide(Layer.mergeAll(eventSinkProvided, idAllocatorLayer, projectionStoreLayer)),
 );
 
 const checkpointServiceProvided = checkpointServiceLayer.pipe(Layer.provide(idAllocatorLayer));
@@ -244,6 +244,10 @@ export const OrchestrationV2LayerLive = Layer.mergeAll(
   providerRuntimeRecoveryProvided,
   projectionMaintenanceProvided,
   legacyV1ThreadImporterProvided,
+  // Expose the shared event sink + projection store so focused tests can inject
+  // projection state into the same write path the orchestrator settles against.
+  eventSinkProvided,
+  projectionStoreLayer,
 );
 
 export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(
