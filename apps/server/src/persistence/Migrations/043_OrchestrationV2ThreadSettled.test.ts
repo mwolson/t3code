@@ -27,7 +27,7 @@ const modelSelection = {
   model: "gpt-5.4",
 } satisfies ModelSelection;
 
-const encodeThreadPayload = Schema.encodeEffect(
+const decodeThreadPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
 );
 
@@ -35,30 +35,29 @@ const MigrationLayer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
 MigrationLayer("043_OrchestrationV2ThreadSettled", (it) => {
   it.effect(
-    "adds settled columns to a migration-042 V2 database and preserves settled projection reloads",
+    "upgrades a migration-042 V2 thread payload without settlement fields, then persists first settle",
     () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
 
-        // Stop before the V2 settled-column migration so we can plant a
-        // pre-043 projection_threads row with settled fields only in JSON.
-        // 042 is ScheduledTasks; 043 adds settled columns.
+        // Stop before the V2 settled-column migration. Seed a real pre-043
+        // projection_threads row whose payload_json omits settled fields.
         yield* runMigrations({ toMigrationInclusive: 42 });
 
         const threadId = ThreadId.make("thread:migration-043-settled");
         const projectId = ProjectId.make("project:migration-043-settled");
-        const now = DateTime.makeUnsafe("2026-07-01T12:00:00.000Z");
-        const settledAt = DateTime.makeUnsafe("2026-07-01T11:00:00.000Z");
-        const payload = {
-          createdBy: "user" as const,
-          creationSource: "web" as const,
+        const nowIso = "2026-07-01T12:00:00.000Z";
+        // Historical migration-042 shape: no settledOverride / settledAt keys.
+        const pre042PayloadJson = yield* Schema.encodeUnknownEffect(Schema.UnknownFromJsonString)({
+          createdBy: "user",
+          creationSource: "web",
           id: threadId,
           projectId,
-          title: "Pre-043 settled thread",
+          title: "Pre-043 V2 thread",
           providerInstanceId: modelSelection.instanceId,
           modelSelection,
-          runtimeMode: "full-access" as const,
-          interactionMode: "default" as const,
+          runtimeMode: "full-access",
+          interactionMode: "default",
           branch: null,
           worktreePath: null,
           activeProviderThreadId: null,
@@ -68,14 +67,11 @@ MigrationLayer("043_OrchestrationV2ThreadSettled", (it) => {
             rootThreadId: threadId,
           },
           forkedFrom: null,
-          createdAt: now,
-          updatedAt: now,
+          createdAt: nowIso,
+          updatedAt: nowIso,
           archivedAt: null,
           deletedAt: null,
-          settledOverride: "settled" as const,
-          settledAt,
-        } satisfies OrchestrationV2AppThread;
-        const payloadJson = yield* encodeThreadPayload(payload);
+        });
 
         const columnsBefore = yield* sql<{ readonly name: string }>`
           PRAGMA table_info(orchestration_v2_projection_threads)
@@ -101,17 +97,17 @@ MigrationLayer("043_OrchestrationV2ThreadSettled", (it) => {
           ) VALUES (
             ${threadId},
             ${projectId},
-            ${payload.title},
+            ${"Pre-043 V2 thread"},
             ${modelSelection.instanceId},
             ${modelSelection.instanceId},
-            ${payload.runtimeMode},
-            ${payload.interactionMode},
+            ${"full-access"},
+            ${"default"},
             NULL,
-            ${DateTime.formatIso(now)},
-            ${DateTime.formatIso(now)},
+            ${nowIso},
+            ${nowIso},
             NULL,
             NULL,
-            ${payloadJson}
+            ${pre042PayloadJson}
           )
         `;
 
@@ -123,16 +119,10 @@ MigrationLayer("043_OrchestrationV2ThreadSettled", (it) => {
         assert.ok(columnsAfter.some((column) => column.name === "settled_override"));
         assert.ok(columnsAfter.some((column) => column.name === "settled_at"));
 
-        // Columns exist but historical rows still carry pins in payload_json
-        // until the next thread write. Persist via columns then reload.
-        yield* sql`
-          UPDATE orchestration_v2_projection_threads
-          SET
-            settled_override = 'settled',
-            settled_at = ${DateTime.formatIso(settledAt)},
-            payload_json = ${payloadJson}
-          WHERE thread_id = ${threadId}
-        `;
+        // Decode defaults: historical JSON without settlement keys -> null pins.
+        const decoded = yield* decodeThreadPayload(pre042PayloadJson);
+        assert.isNull(decoded.settledOverride);
+        assert.isNull(decoded.settledAt);
 
         const projectionStoreLayerOnSql = projectionStoreLayer.pipe(
           Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
@@ -140,37 +130,34 @@ MigrationLayer("043_OrchestrationV2ThreadSettled", (it) => {
 
         yield* Effect.gen(function* () {
           const store = yield* ProjectionStoreV2;
-          const projection = yield* store.getThreadProjection(threadId);
-          assert.equal(projection.thread.settledOverride, "settled");
-          assert.equal(
-            projection.thread.settledAt === null
-              ? null
-              : DateTime.formatIso(projection.thread.settledAt),
-            DateTime.formatIso(settledAt),
-          );
+          const beforeSettle = yield* store.getThreadProjection(threadId);
+          assert.isNull(beforeSettle.thread.settledOverride);
+          assert.isNull(beforeSettle.thread.settledAt);
+          assert.equal(threadShellFromProjection(beforeSettle).settledOverride, null);
 
-          const shell = threadShellFromProjection(projection);
-          assert.equal(shell.settledOverride, "settled");
-          assert.equal(
-            shell.settledAt === null ? null : DateTime.formatIso(shell.settledAt),
-            DateTime.formatIso(settledAt),
-          );
-
-          // Round-trip a thread.settled apply so column write paths stay aligned.
+          // First real settle write after upgrade.
+          const settledAt = DateTime.makeUnsafe("2026-07-01T13:00:00.000Z");
           yield* store.apply({
-            id: EventId.make("event:migration-043-resettle"),
+            id: EventId.make("event:migration-043-first-settle"),
             type: "thread.settled",
             threadId,
-            occurredAt: now,
+            occurredAt: settledAt,
             payload: {
-              ...projection.thread,
+              ...beforeSettle.thread,
               settledOverride: "settled",
-              settledAt: now,
-              updatedAt: now,
-            },
+              settledAt,
+              updatedAt: settledAt,
+            } satisfies OrchestrationV2AppThread,
           });
+
           const reloaded = yield* store.getThreadProjection(threadId);
           assert.equal(reloaded.thread.settledOverride, "settled");
+          assert.equal(
+            reloaded.thread.settledAt === null
+              ? null
+              : DateTime.formatIso(reloaded.thread.settledAt),
+            DateTime.formatIso(settledAt),
+          );
           assert.equal(threadShellFromProjection(reloaded).settledOverride, "settled");
 
           const columns = yield* sql<{
@@ -182,7 +169,7 @@ MigrationLayer("043_OrchestrationV2ThreadSettled", (it) => {
             WHERE thread_id = ${threadId}
           `;
           assert.equal(columns[0]?.settled_override, "settled");
-          assert.isNotNull(columns[0]?.settled_at);
+          assert.equal(columns[0]?.settled_at, DateTime.formatIso(settledAt));
         }).pipe(Effect.provide(projectionStoreLayerOnSql));
       }),
   );
