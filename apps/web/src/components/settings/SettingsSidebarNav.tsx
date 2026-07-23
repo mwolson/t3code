@@ -3,7 +3,7 @@ import {
   ArchiveIcon,
   ArrowLeftIcon,
   BotIcon,
-  FlaskConicalIcon,
+  CalendarClockIcon,
   GitBranchIcon,
   KeyboardIcon,
   Link2Icon,
@@ -18,6 +18,7 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarSeparator,
   useSidebar,
 } from "../ui/sidebar";
 import { T3ConnectSidebarAvatar, T3ConnectSidebarSignIn } from "../clerk/T3ConnectSidebarSignIn";
@@ -26,9 +27,9 @@ export type SettingsSectionPath =
   | "/settings/general"
   | "/settings/keybindings"
   | "/settings/providers"
+  | "/settings/scheduled-tasks"
   | "/settings/source-control"
   | "/settings/connections"
-  | "/settings/beta"
   | "/settings/archived";
 
 export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
@@ -39,9 +40,9 @@ export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   { label: "General", to: "/settings/general", icon: Settings2Icon },
   { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
   { label: "Providers", to: "/settings/providers", icon: BotIcon },
+  { label: "Schedule Tasks", to: "/settings/scheduled-tasks", icon: CalendarClockIcon },
   { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
   { label: "Connections", to: "/settings/connections", icon: Link2Icon },
-  { label: "Beta", to: "/settings/beta", icon: FlaskConicalIcon },
   { label: "Archive", to: "/settings/archived", icon: ArchiveIcon },
 ];
 
@@ -84,16 +85,16 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                     isActive={isActive}
                     className={
                       isActive
-                        ? "h-8 items-center gap-2 rounded-md bg-sidebar-row-active px-2 py-1.5 text-left text-sm font-medium text-sidebar-foreground"
-                        : "h-8 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm font-medium text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+                        ? "gap-2.5 px-2.5 py-2 text-left text-[13px] font-medium text-foreground"
+                        : "gap-2.5 px-2.5 py-2 text-left text-[13px] text-muted-foreground/70 hover:text-foreground/80"
                     }
                     onClick={() => handleSectionClick(item.to)}
                   >
                     <Icon
                       className={
                         isActive
-                          ? "size-4 shrink-0 text-sidebar-foreground"
-                          : "size-4 shrink-0 text-sidebar-muted-foreground/60"
+                          ? "size-4 shrink-0 text-foreground"
+                          : "size-4 shrink-0 text-muted-foreground/60"
                       }
                     />
                     <span className="truncate">{item.label}</span>
@@ -104,6 +105,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
           </SidebarMenu>
         </SidebarGroup>
       </SidebarContent>
+
+      <SidebarSeparator />
       <SidebarFooter className="p-2">
         <T3ConnectSidebarSignIn />
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1">
@@ -111,7 +114,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
             <SidebarMenuItem>
               <SidebarMenuButton
                 size="sm"
-                className="h-8 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+                className="gap-2 px-2 py-2 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
                 onClick={handleBackClick}
               >
                 <ArrowLeftIcon className="size-4" />
