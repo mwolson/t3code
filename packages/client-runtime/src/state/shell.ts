@@ -23,7 +23,11 @@ import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
 import { subscribeDynamic } from "../rpc/client.ts";
 import { ShellSnapshotLoader } from "./shellSnapshotHttp.ts";
-import { applyShellStreamEvent, mergeShellSnapshotProjects, normalizeShellThreadMembership } from "./shellReducer.ts";
+import {
+  applyShellStreamEvent,
+  mergeShellSnapshotProjects,
+  normalizeShellThreadMembership,
+} from "./shellReducer.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 

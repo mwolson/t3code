@@ -2,7 +2,11 @@ import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { v2Project, v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
-import { applyShellStreamEvent, mergeShellSnapshotProjects, normalizeShellThreadMembership } from "./shellReducer.ts";
+import {
+  applyShellStreamEvent,
+  mergeShellSnapshotProjects,
+  normalizeShellThreadMembership,
+} from "./shellReducer.ts";
 
 const repositoryIdentity = {
   canonicalKey: "github.com/example/repo",
