@@ -16,7 +16,8 @@ const STALE = "2026-04-06T23:59:59.999Z";
 function makeShell(input: {
   readonly settledOverride?: "settled" | "active" | null;
   readonly activityAt: string | null;
-  readonly sessionStatus?: "starting" | "running" | "ready";
+  readonly sessionStatus?: "starting" | "running" | "ready" | "completed";
+  readonly pendingBackgroundTasks?: ReadonlyArray<{ readonly taskId: string }>;
   readonly pending?: "approval" | "user-input";
 }): SettledThreadView {
   return {
@@ -36,6 +37,9 @@ function makeShell(input: {
         : {
             status: input.sessionStatus,
           },
+    ...(input.pendingBackgroundTasks === undefined
+      ? {}
+      : { pendingBackgroundTasks: input.pendingBackgroundTasks }),
     latestUserMessageAt: null,
     hasPendingApprovals: input.pending === "approval",
     hasPendingUserInput: input.pending === "user-input",
@@ -292,6 +296,29 @@ describe("canSettle", () => {
     expect(canSettle(makeShell({ activityAt: FRESH, pending: "user-input" }), { now: NOW })).toBe(
       false,
     );
+  });
+
+  it("blocks settling while the shell waits on provider background tasks", () => {
+    const waiting = makeShell({
+      activityAt: FRESH,
+      sessionStatus: "completed",
+      pendingBackgroundTasks: [{ taskId: "bg-1" }],
+    });
+    expect(canSettle(waiting, { now: NOW })).toBe(false);
+    // The background wait also overrides an explicit settled pin, exactly
+    // like a running session: blocked-in-motion work must remain visible.
+    expect(
+      effectiveSettled(
+        { ...waiting, settledOverride: "settled", settledAt: NOW },
+        { now: NOW, autoSettleAfterDays: 3 },
+      ),
+    ).toBe(false);
+    const drained = makeShell({
+      activityAt: FRESH,
+      sessionStatus: "completed",
+      pendingBackgroundTasks: [],
+    });
+    expect(canSettle(drained, { now: NOW })).toBe(true);
   });
 
   it("blocks settling a queued turn start, only within the grace window", () => {

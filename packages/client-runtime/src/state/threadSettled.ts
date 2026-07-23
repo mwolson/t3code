@@ -35,6 +35,11 @@ export type SettledThreadView = {
   readonly runtime?: { readonly status: string } | null;
   /** @deprecated Prefer runtime; retained for transitional fixtures. */
   readonly session?: { readonly status: string } | null;
+  /**
+   * Provider background work that outlived the latest terminal run (V2 shell
+   * roster). Waiting threads are in motion and must not settle.
+   */
+  readonly pendingBackgroundTasks?: ReadonlyArray<{ readonly taskId: string }> | null;
   readonly settledOverride: "settled" | "active" | null;
   readonly settledAt: string | null;
   readonly hasPendingApprovals: boolean;
@@ -46,8 +51,21 @@ function activityTimestamps(shell: SettledThreadView): ReadonlyArray<string | nu
   return [shell.latestUserMessageAt, run?.requestedAt, run?.startedAt, run?.completedAt];
 }
 
+/**
+ * A shell waiting on provider background tasks (e.g. a Claude background
+ * shell that outlived its turn) is ready/completed on the wire but not done:
+ * the provider wakes it with a follow-up turn when the task finishes. Treated
+ * like a running session for settling purposes.
+ */
+export function hasPendingBackgroundTasks(
+  shell: Pick<SettledThreadView, "pendingBackgroundTasks">,
+): boolean {
+  return (shell.pendingBackgroundTasks?.length ?? 0) > 0;
+}
+
 function isBlockingWork(shell: SettledThreadView): boolean {
   if (shell.hasPendingApprovals || shell.hasPendingUserInput) return true;
+  if (hasPendingBackgroundTasks(shell)) return true;
   const runtimeStatus = shell.runtime?.status ?? shell.session?.status;
   if (runtimeStatus !== undefined && BLOCKING_RUNTIME_STATUSES.has(runtimeStatus)) {
     return true;

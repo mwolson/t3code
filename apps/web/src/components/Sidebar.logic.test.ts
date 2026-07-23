@@ -19,6 +19,7 @@ import {
   resolveSidebarNewThreadSeedContext,
   resolveSidebarNewThreadEnvMode,
   resolveSidebarStageBadgeLabel,
+  resolveSidebarV2Status,
   resolveThreadRowClassName,
   resolveThreadStatusPill,
   shouldClearThreadSelectionOnMouseDown,
@@ -1254,5 +1255,49 @@ describe("sortScopedProjectsForSidebar", () => {
       "Visible project",
       "Archived-only project",
     ]);
+  });
+});
+
+describe("resolveSidebarV2Status", () => {
+  const idle = {
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    pendingBackgroundTasks: [] as const,
+    runtime: null,
+  };
+
+  it("reports working for a terminal run waiting on background tasks", () => {
+    expect(
+      resolveSidebarV2Status({
+        ...idle,
+        pendingBackgroundTasks: [{ taskId: "bg-1", description: "Run Codex review" }],
+        runtime: {
+          status: "completed" as const,
+          providerName: "Codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          activeRunId: null,
+          lastError: null,
+          updatedAt: "2026-03-09T10:00:00.000Z",
+        },
+      }),
+    ).toBe("working");
+    expect(
+      resolveSidebarV2Status({
+        ...idle,
+        pendingBackgroundTasks: [],
+        runtime: {
+          status: "completed" as const,
+          providerName: "Codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          activeRunId: null,
+          lastError: null,
+          updatedAt: "2026-03-09T10:00:00.000Z",
+        },
+      }),
+    ).toBe("ready");
+  });
+
+  it("defaults to ready with no runtime", () => {
+    expect(resolveSidebarV2Status(idle)).toBe("ready");
   });
 });

@@ -25,6 +25,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
+import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -216,6 +217,16 @@ function isBlockingRun(run: OrchestrationV2Run): boolean {
     run.status === "running" ||
     run.status === "waiting"
   );
+}
+
+/**
+ * Settle-only guard: queued work is as blocked-on-progress as a live run for
+ * the settle action (mirrors client canSettle / hasQueuedTurnStart), but other
+ * callers of isBlockingRun intentionally leave queue slots free so the next
+ * queued run can start.
+ */
+function isSettleBlockingRun(run: OrchestrationV2Run): boolean {
+  return isBlockingRun(run) || run.status === "queued";
 }
 
 function delegatedTaskTerminalStatus(
@@ -845,12 +856,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     if (command.type === "thread.settle") {
-      const activeRun = projection.runs.find(isBlockingRun);
+      const activeRun = projection.runs.find(isSettleBlockingRun);
       if (activeRun !== undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
-          cause: `Thread ${command.threadId} has an active run and cannot be settled.`,
+          cause:
+            activeRun.status === "queued"
+              ? `Thread ${command.threadId} has a queued run and cannot be settled.`
+              : `Thread ${command.threadId} has an active run and cannot be settled.`,
         });
       }
       const pendingRequest = projection.runtimeRequests.find(
@@ -861,6 +875,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandId: command.commandId,
           commandType: command.type,
           cause: `Thread ${command.threadId} has a pending request and cannot be settled.`,
+        });
+      }
+      // Waiting on provider background tasks (a background shell/subagent that
+      // outlived its turn) is live work: the provider wakes the session when
+      // the task finishes, so settling now would hide it.
+      const pendingBackgroundTasks = derivePendingBackgroundWork({
+        latestRun: projection.runs.at(-1) ?? null,
+        providerThreads: projection.providerThreads,
+        turnItems: projection.turnItems,
+        activeProviderThreadId: projection.thread.activeProviderThreadId,
+      });
+      if (pendingBackgroundTasks.length > 0) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} is waiting on background tasks and cannot be settled.`,
         });
       }
     }

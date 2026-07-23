@@ -738,7 +738,7 @@ export type SidebarV2Status = "approval" | "input" | "working" | "failed" | "rea
 
 type SidebarV2StatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "runtime"
+  "hasPendingApprovals" | "hasPendingUserInput" | "pendingBackgroundTasks" | "runtime"
 >;
 
 export function resolveSidebarV2Status(thread: SidebarV2StatusInput): SidebarV2Status {
@@ -756,6 +756,12 @@ export function resolveSidebarV2Status(thread: SidebarV2StatusInput): SidebarV2S
     status === "starting" ||
     status === "queued"
   ) {
+    return "working";
+  }
+  // Ready/completed on the wire but waiting on provider background tasks
+  // (e.g. a backgrounded codex review that outlived its turn): the provider
+  // wakes the session when the task finishes, so the thread is still in motion.
+  if ((thread.pendingBackgroundTasks?.length ?? 0) > 0) {
     return "working";
   }
   if (status === "failed") {

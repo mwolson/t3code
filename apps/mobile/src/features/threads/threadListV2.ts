@@ -19,7 +19,10 @@ export const THREAD_LIST_V2_SETTLED_INITIAL_COUNT = 10;
 export const THREAD_LIST_V2_SETTLED_PAGE_COUNT = 25;
 
 export function resolveThreadListV2Status(
-  thread: Pick<EnvironmentThreadShell, "hasPendingApprovals" | "hasPendingUserInput" | "runtime">,
+  thread: Pick<
+    EnvironmentThreadShell,
+    "hasPendingApprovals" | "hasPendingUserInput" | "pendingBackgroundTasks" | "runtime"
+  >,
 ): ThreadListV2Status {
   if (thread.hasPendingApprovals) {
     return "approval";
@@ -35,6 +38,10 @@ export function resolveThreadListV2Status(
     status === "starting" ||
     status === "queued"
   ) {
+    return "working";
+  }
+  // Terminal root run with pending background work is still in motion.
+  if ((thread.pendingBackgroundTasks?.length ?? 0) > 0) {
     return "working";
   }
   if (status === "failed") {
