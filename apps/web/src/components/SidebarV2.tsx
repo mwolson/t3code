@@ -93,6 +93,7 @@ import { cn } from "~/lib/utils";
 import {
   firstValidTimestampMs,
   hasUnseenCompletion,
+  isSidebarV2ListThread,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   resolveAdjacentThreadId,
@@ -851,7 +852,12 @@ export default function SidebarV2() {
     ],
   );
   const projectGroups = useMemo(
-    () => sortLogicalProjectsForSidebar(unsortedProjectGroups, threads, sidebarProjectSortOrder),
+    () =>
+      sortLogicalProjectsForSidebar(
+        unsortedProjectGroups,
+        threads.filter((thread) => isSidebarV2ListThread(thread)),
+        sidebarProjectSortOrder,
+      ),
     [sidebarProjectSortOrder, threads, unsortedProjectGroups],
   );
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
@@ -1103,18 +1109,12 @@ export default function SidebarV2() {
   );
 
   // Settled threads stay in the live shell stream (settled ≠ archived), so
-  // the partition works directly off live shells: no archived-snapshot
-  // merging, no optimistic holds. Archived threads remain hidden here —
-  // archive keeps its original "remove from sidebar" meaning.
+  // the partition works directly off live shells. Project delete still counts
+  // raw shells so subagent cleanup remains intact.
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
   const { activeThreads, settledThreads } = useMemo(() => {
     const now = `${nowMinute}:00.000Z`;
-    const visible = threads.filter(
-      (thread) =>
-        thread.archivedAt === null &&
-        (scopedProjectKeys === null ||
-          scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
-    );
+    const visible = threads.filter((thread) => isSidebarV2ListThread(thread, scopedProjectKeys));
     const active: EnvironmentThreadShell[] = [];
     const settled: EnvironmentThreadShell[] = [];
     for (const thread of visible) {

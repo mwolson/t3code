@@ -13,6 +13,7 @@ import {
   hasUnseenCompletion,
   isContextMenuPointerDown,
   isSidebarSubagentThread,
+  isSidebarV2ListThread,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   resolveProjectStatusIndicator,
@@ -180,6 +181,77 @@ describe("sidebar thread lineage helpers", () => {
     expect(getSidebarForkParentThreadId(runFork)).toBe(parentId);
     expect(getSidebarForkParentThreadId(lineageFork)).toBe(fallbackParentId);
     expect(getSidebarForkParentThreadId(makeThreadFixture())).toBeNull();
+  });
+});
+
+describe("isSidebarV2ListThread", () => {
+  const parentId = ThreadId.make("thread-parent");
+  const projectId = ProjectId.make("project-visible");
+  const otherProjectId = ProjectId.make("project-other");
+  const scopedProjectKeys = new Set([`${localEnvironmentId}:${projectId}`]);
+
+  it("keeps root and fork threads, hides subagents and archived threads", () => {
+    const root = makeThreadFixture({
+      environmentId: localEnvironmentId,
+      projectId,
+    });
+    const fork = makeThreadFixture({
+      environmentId: localEnvironmentId,
+      id: ThreadId.make("thread-fork"),
+      projectId,
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: parentId,
+        relationshipToParent: "fork",
+      },
+    });
+    const subagent = makeThreadFixture({
+      environmentId: localEnvironmentId,
+      id: ThreadId.make("thread-subagent"),
+      projectId,
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: parentId,
+        relationshipToParent: "subagent",
+      },
+    });
+    const archived = makeThreadFixture({
+      environmentId: localEnvironmentId,
+      id: ThreadId.make("thread-archived"),
+      projectId,
+      archivedAt: "2026-03-09T10:00:00.000Z",
+    });
+
+    expect(isSidebarV2ListThread(root)).toBe(true);
+    expect(isSidebarV2ListThread(fork)).toBe(true);
+    expect(isSidebarV2ListThread(subagent)).toBe(false);
+    expect(isSidebarV2ListThread(archived)).toBe(false);
+  });
+
+  it("applies project scope without reintroducing subagent children", () => {
+    const inScope = makeThreadFixture({
+      environmentId: localEnvironmentId,
+      projectId,
+    });
+    const outOfScope = makeThreadFixture({
+      environmentId: localEnvironmentId,
+      id: ThreadId.make("thread-other-project"),
+      projectId: otherProjectId,
+    });
+    const inScopeSubagent = makeThreadFixture({
+      environmentId: localEnvironmentId,
+      id: ThreadId.make("thread-subagent-scoped"),
+      projectId,
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: parentId,
+        relationshipToParent: "subagent",
+      },
+    });
+
+    expect(isSidebarV2ListThread(inScope, scopedProjectKeys)).toBe(true);
+    expect(isSidebarV2ListThread(outOfScope, scopedProjectKeys)).toBe(false);
+    expect(isSidebarV2ListThread(inScopeSubagent, scopedProjectKeys)).toBe(false);
   });
 });
 
