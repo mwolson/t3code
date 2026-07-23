@@ -1287,6 +1287,10 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   deletedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  // Keep decoding default: pre-settle / migration-041 payloads omit settledAt.
+  settledAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
 }));
 export type OrchestrationV2AppThreadJson = typeof OrchestrationV2AppThreadJson.Type;
 
