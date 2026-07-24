@@ -26,7 +26,7 @@ interface QueuedThreadShell {
   readonly runtime?: SettlementRuntimeLike | null;
 }
 
-interface SettlementThreadShell extends QueuedThreadShell {
+export interface SettledThreadView extends QueuedThreadShell {
   readonly settledOverride: "settled" | "active" | null;
   readonly settledAt: string | null;
   readonly hasPendingApprovals: boolean;
@@ -37,6 +37,9 @@ interface SettlementThreadShell extends QueuedThreadShell {
    */
   readonly pendingBackgroundTasks?: ReadonlyArray<{ readonly taskId: string }> | null;
 }
+
+/** @deprecated Prefer SettledThreadView. */
+type SettlementThreadShell = SettledThreadView;
 
 export type ChangeRequestStateLike = "open" | "closed" | "merged";
 
