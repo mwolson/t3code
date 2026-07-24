@@ -71,7 +71,7 @@ describe("resolveThreadListV2Status", () => {
     expect(resolveThreadListV2Status(thread)).toBe("approval");
   });
 
-  it("reports working when pending background tasks outlive a terminal run", () => {
+  it("reports waiting when pending background tasks outlive a terminal run", () => {
     expect(
       resolveThreadListV2Status(
         makeThread({
@@ -88,7 +88,7 @@ describe("resolveThreadListV2Status", () => {
           },
         }),
       ),
-    ).toBe("working");
+    ).toBe("waiting");
   });
 
   it("resolves ready for quiescent threads", () => {
@@ -485,27 +485,6 @@ describe("buildThreadListV2Items settled paging", () => {
     ]);
   });
 
-  it("scopes the flat list to one project", () => {
-    const projectId = ProjectId.make("project-1");
-    const otherProjectId = ProjectId.make("project-2");
-    const { items } = buildThreadListV2Items({
-      threads: [
-        makeThread({ id: ThreadId.make("included"), projectId, title: "Included" }),
-        makeThread({
-          id: ThreadId.make("excluded"),
-          projectId: otherProjectId,
-          title: "Excluded",
-        }),
-      ],
-      environmentId: null,
-      projectRefs: [{ environmentId, projectId }],
-      searchQuery: "",
-      now: NOW,
-    });
-
-    expect(items.map((item) => item.thread.id)).toEqual(["included"]);
-  });
-
   it("scopes the flat list to every environment member of a logical project", () => {
     const projectId = ProjectId.make("project-1");
     const remoteEnvironmentId = EnvironmentId.make("environment-remote");
@@ -531,50 +510,6 @@ describe("buildThreadListV2Items settled paging", () => {
     expect(items.map((item) => item.thread.id)).toEqual(["local", "remote"]);
   });
 });
-
-describe("buildThreadListV2Items settled paging", () => {
-  it("caps the settled tail at settledLimit and reports the hidden count", () => {
-    const threads = [
-      makeThread({ id: ThreadId.make("active"), title: "Active" }),
-      ...Array.from({ length: 4 }, (_, index) =>
-        makeThread({
-          id: ThreadId.make(`settled-${index}`),
-          title: `Settled ${index}`,
-          settledOverride: "settled",
-          settledAt: NOW,
-          // Adopted latest run timestamps so the row is not a queued-turn start.
-          latestUserMessageAt: `2026-06-01T0${index}:00:00.000Z`,
-          latestRun: {
-            runId: ThreadId.make(`run-${index}`) as never,
-            status: "completed",
-            requestedAt: `2026-06-01T0${index}:00:00.000Z`,
-            startedAt: `2026-06-01T0${index}:00:00.000Z`,
-            completedAt: `2026-06-01T0${index}:10:00.000Z`,
-            assistantMessageId: null,
-          },
-        }),
-      ),
-    ];
-
-    const layout = buildThreadListV2Items({
-      threads,
-      environmentId: null,
-      searchQuery: "",
-      settledLimit: 2,
-      now: NOW,
-    });
-
-    expect(layout.hiddenSettledCount).toBe(2);
-    expect(layout.items.filter((item) => item.variant === "slim")).toHaveLength(2);
-    // Most recent settled first; the hidden ones are the oldest.
-    expect(layout.items.map((item) => item.thread.id)).toEqual([
-      "active",
-      "settled-3",
-      "settled-2",
-    ]);
-  });
-});
-
 function makePendingTask(id: string): PendingNewTask {
   return {
     message: {

@@ -664,32 +664,33 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 
-  it.effect("dispatches settle and unsettle commands without timestamps", () =>
+  it.effect("dispatches settle and unsettle as V2 thread lifecycle commands", () =>
     Effect.gen(function* () {
-      const dispatched: OrchestrationV2Command[] = [];
-      const supervisor = yield* makeSupervisor({ commands: dispatched, projects: [] });
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
 
       yield* settleThread({
-        commandId: CommandId.make("settle-command"),
+        commandId: CommandId.make("settle-1"),
         threadId: ThreadId.make("thread-1"),
       }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
       yield* unsettleThread({
-        commandId: CommandId.make("unsettle-command"),
+        commandId: CommandId.make("unsettle-1"),
         threadId: ThreadId.make("thread-1"),
         reason: "user",
       }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
 
-      expect(dispatched).toEqual([
-        {
-          type: "thread.settle",
-          commandId: "settle-command",
-          threadId: "thread-1",
-        },
+      expect(commands).toEqual([
+        { type: "thread.settle", commandId: "settle-1", threadId: "thread-1" },
         {
           type: "thread.unsettle",
-          commandId: "unsettle-command",
+          commandId: "unsettle-1",
           threadId: "thread-1",
           reason: "user",
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
   it.effect("dispatches run.interrupt from a supplied runId without getThreadProjection", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];
