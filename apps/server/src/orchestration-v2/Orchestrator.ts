@@ -783,10 +783,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       createdAt: now,
       updatedAt: now,
       archivedAt: null,
-      deletedAt: null,
       settledOverride: null,
       settledAt: null,
-
       snoozedUntil: null,
       snoozedAt: null,
       deletedAt: null,
