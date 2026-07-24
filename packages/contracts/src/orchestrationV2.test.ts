@@ -29,6 +29,9 @@ import {
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2ShellSnapshot,
   OrchestrationV2Subagent,
+  OrchestrationV2ThreadBoundedSnapshot,
+  OrchestrationV2ThreadDetailSnapshot,
+  OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadShell,
   OrchestrationV2TurnItem,
@@ -44,6 +47,15 @@ const LegacyShellStreamItem = Schema.Union([
 ]);
 const decodeLegacyShellStreamItem = Schema.decodeUnknownSync(LegacyShellStreamItem);
 const decodeOrchestrationV2Command = Schema.decodeUnknownSync(OrchestrationV2Command);
+const decodeOrchestrationV2ThreadBoundedSnapshot = Schema.decodeUnknownSync(
+  OrchestrationV2ThreadBoundedSnapshot,
+);
+const decodeOrchestrationV2ThreadDetailSnapshot = Schema.decodeUnknownSync(
+  OrchestrationV2ThreadDetailSnapshot,
+);
+const decodeOrchestrationV2ThreadHistoryPage = Schema.decodeUnknownSync(
+  OrchestrationV2ThreadHistoryPage,
+);
 const decodeOrchestrationV2TurnItem = Schema.decodeUnknownSync(OrchestrationV2TurnItem);
 
 describe("orchestration V2 contracts", () => {
@@ -514,6 +526,92 @@ describe("orchestration V2 contracts", () => {
     });
 
     expect(projection.turnItems.map((item) => item.type)).toEqual(["command_execution"]);
+  });
+
+  it("decodes mobile bounded thread snapshots and history pages", () => {
+    const bounded = decodeOrchestrationV2ThreadBoundedSnapshot({
+      snapshotSequence: 12,
+      projection: {
+        thread: {
+          createdBy: "user",
+          creationSource: "web",
+          id: "thread-1",
+          projectId: "project-1",
+          title: "Thread",
+          providerInstanceId: "codex",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: {
+            parentThreadId: null,
+            relationshipToParent: null,
+            rootThreadId: "thread-1",
+          },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          deletedAt: null,
+          settledOverride: null,
+          settledAt: null,
+        },
+        runs: [],
+        attempts: [],
+        nodes: [],
+        subagents: [],
+        providerSessions: [],
+        providerThreads: [],
+        providerTurns: [],
+        runtimeRequests: [],
+        messages: [],
+        plans: [],
+        turnItems: [],
+        checkpointScopes: [],
+        checkpoints: [],
+        contextHandoffs: [],
+        contextTransfers: [],
+        visibleTurnItems: [],
+        updatedAt: now,
+      },
+      historyCursor: "opaque-cursor-v1",
+      hasMoreHistory: true,
+      latestLocalTurnOrdinal: 17,
+    });
+    expect(bounded.snapshotSequence).toBe(12);
+    expect(bounded.hasMoreHistory).toBe(true);
+    expect(bounded.historyCursor).toBe("opaque-cursor-v1");
+    expect(bounded.latestLocalTurnOrdinal).toBe(17);
+
+    const history = decodeOrchestrationV2ThreadHistoryPage({
+      snapshotSequence: 12,
+      items: [],
+      nextCursor: null,
+      hasMoreHistory: false,
+    });
+    expect(history.hasMoreHistory).toBe(false);
+    expect(history.nextCursor).toBeNull();
+
+    const legacyDetail = decodeOrchestrationV2ThreadDetailSnapshot({
+      snapshotSequence: 3,
+      projection: bounded.projection,
+    });
+    expect(legacyDetail.historyCursor).toBeUndefined();
+    expect(legacyDetail.hasMoreHistory).toBeUndefined();
+    expect(legacyDetail.latestLocalTurnOrdinal).toBeUndefined();
+
+    const progressiveDetail = decodeOrchestrationV2ThreadDetailSnapshot({
+      snapshotSequence: 3,
+      projection: bounded.projection,
+      historyCursor: "opaque-cursor-v1",
+      hasMoreHistory: true,
+      latestLocalTurnOrdinal: 17,
+    });
+    expect(progressiveDetail.historyCursor).toBe("opaque-cursor-v1");
+    expect(progressiveDetail.hasMoreHistory).toBe(true);
+    expect(progressiveDetail.latestLocalTurnOrdinal).toBe(17);
   });
 
   it("decodes orchestration lifecycle turn items for compaction, handoff, and fork UI", () => {

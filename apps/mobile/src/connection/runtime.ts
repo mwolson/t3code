@@ -1,6 +1,9 @@
 import { Connection } from "@t3tools/client-runtime/connection";
 import { shellSnapshotLoaderLayer } from "@t3tools/client-runtime/state/shell";
-import { threadSnapshotLoaderLayer } from "@t3tools/client-runtime/state/threads";
+import {
+  mobileThreadSnapshotLoaderLayer,
+  threadHistoryControllerLayer,
+} from "@t3tools/client-runtime/state/threads";
 import * as Layer from "effect/Layer";
 import { Atom } from "effect/unstable/reactivity";
 
@@ -11,7 +14,13 @@ const providedConnectionPlatformLayer = connectionPlatformLayer.pipe(
   Layer.provide(runtimeContextLayer),
 );
 
-const snapshotLoaderLayer = Layer.merge(threadSnapshotLoaderLayer, shellSnapshotLoaderLayer);
+// Mobile uses the bounded snapshot loader so oversized threads hydrate without
+// the monolithic full projection path used by web.
+const snapshotLoaderLayer = Layer.mergeAll(
+  mobileThreadSnapshotLoaderLayer,
+  shellSnapshotLoaderLayer,
+  threadHistoryControllerLayer,
+);
 
 type ConnectionLayerSource =
   | typeof Connection.layer

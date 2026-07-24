@@ -5,8 +5,10 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   MessageId,
+  NodeId,
   ProjectId,
   ProviderInstanceId,
+  RunAttemptId,
   RunId,
   ThreadId,
   TurnItemId,
@@ -234,6 +236,405 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     const next = applyOrchestrationV2ProjectionEvent(projection, event);
     expect(next?.visibleTurnItems).toEqual([inheritedRow]);
     expect(next?.visibleTurnItems[0]).toBe(inheritedRow);
+  });
+
+  it("keeps prepended older history rows across live run and turn-item updates", () => {
+    const olderRunId = RunId.make("run-older");
+    const olderRun = { ...run, id: olderRunId, ordinal: 0 };
+    const older = commandItem("item-older");
+    const olderWithRun = { ...older, runId: olderRunId, ordinal: 0 };
+    const recent = commandItem("item-recent", "recent");
+    const olderRow = {
+      position: 0,
+      visibility: "local" as const,
+      sourceThreadId: threadId,
+      sourceItemId: olderWithRun.id,
+      item: olderWithRun,
+    };
+    const recentRow = {
+      position: 1,
+      visibility: "local" as const,
+      sourceThreadId: threadId,
+      sourceItemId: recent.id,
+      item: recent,
+    };
+    const projection = {
+      ...emptyProjection,
+      runs: [olderRun, run],
+      turnItems: [olderWithRun, recent],
+      visibleTurnItems: [olderRow, recentRow],
+    };
+
+    const runUpdated = applyOrchestrationV2ProjectionEvent(projection, {
+      id: "event-run-live",
+      type: "run.updated",
+      threadId,
+      runId,
+      occurredAt: now,
+      payload: { ...run, status: "running", completedAt: null },
+    } as OrchestrationV2DomainEvent);
+    expect(runUpdated?.visibleTurnItems.map((row) => row.sourceItemId)).toEqual([
+      olderWithRun.id,
+      recent.id,
+    ]);
+    expect(runUpdated?.visibleTurnItems[0]).toBe(olderRow);
+
+    const streamed = commandItem("item-recent", "streamed");
+    const itemUpdated = applyOrchestrationV2ProjectionEvent(runUpdated!, {
+      id: "event-item-live",
+      type: "turn-item.updated",
+      threadId,
+      runId,
+      occurredAt: now,
+      payload: streamed,
+    } as OrchestrationV2DomainEvent);
+    expect(itemUpdated?.visibleTurnItems.map((row) => row.sourceItemId)).toEqual([
+      olderWithRun.id,
+      recent.id,
+    ]);
+    expect(itemUpdated?.visibleTurnItems[0]?.item).toBe(olderWithRun);
+    expect(itemUpdated?.visibleTurnItems[1]?.item).toBe(streamed);
+
+    const attemptUpdated = applyOrchestrationV2ProjectionEvent(itemUpdated!, {
+      id: "event-attempt-live",
+      type: "run-attempt.updated",
+      threadId,
+      runId,
+      occurredAt: now,
+      payload: {
+        id: "attempt-1",
+        runId,
+        attemptOrdinal: 1,
+        rootNodeId: "node-root-1",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerThreadId: "provider-thread-1",
+        providerTurnId: null,
+        reason: "initial",
+        status: "running",
+        startedAt: now,
+        completedAt: null,
+      },
+    } as OrchestrationV2DomainEvent);
+    expect(attemptUpdated?.visibleTurnItems.map((row) => row.sourceItemId)).toEqual([
+      olderWithRun.id,
+      recent.id,
+    ]);
+    expect(attemptUpdated?.visibleTurnItems[0]?.sourceItemId).toBe(olderWithRun.id);
+  });
+
+  it("partialTimeline drops a missing older turn item instead of appending newest", () => {
+    const recentLow = commandItem("item-window-low");
+    const recentHigh = commandItem("item-window-high", "high");
+    // Bounded window only retained ordinals 10+.
+    const low = { ...recentLow, ordinal: 10 };
+    const high = { ...recentHigh, ordinal: 11 };
+    const lowRow = {
+      position: 0,
+      visibility: "local" as const,
+      sourceThreadId: threadId,
+      sourceItemId: low.id,
+      item: low,
+    };
+    const highRow = {
+      position: 1,
+      visibility: "local" as const,
+      sourceThreadId: threadId,
+      sourceItemId: high.id,
+      item: high,
+    };
+    const projection = {
+      ...emptyProjection,
+      runs: [run],
+      turnItems: [low, high],
+      visibleTurnItems: [lowRow, highRow],
+    };
+    const older = {
+      ...commandItem("item-older-outside"),
+      ordinal: 3,
+      output: "should-not-append",
+    };
+    const next = applyOrchestrationV2ProjectionEvent(
+      projection,
+      {
+        id: "event-old-item",
+        type: "turn-item.updated",
+        threadId,
+        runId,
+        occurredAt: now,
+        payload: older,
+      } as OrchestrationV2DomainEvent,
+      { partialTimeline: true },
+    );
+
+    expect(next).toBe(projection);
+    expect(next?.visibleTurnItems.map((row) => row.sourceItemId)).toEqual([low.id, high.id]);
+    expect(next?.turnItems.map((item) => item.id)).toEqual([low.id, high.id]);
+  });
+
+  it("partialTimeline watermark drops missing old items when no local rows remain", () => {
+    // Inherited-only visible window: oldestLocalTurnOrdinal is null without a watermark.
+    const inherited = {
+      ...commandItem("item-inherited"),
+      ordinal: 1,
+      threadId: ThreadId.make("parent-thread"),
+    };
+    const inheritedRow = {
+      position: 0,
+      visibility: "inherited" as const,
+      sourceThreadId: ThreadId.make("parent-thread"),
+      sourceItemId: inherited.id,
+      item: inherited,
+    };
+    const projection = {
+      ...emptyProjection,
+      runs: [run],
+      turnItems: [],
+      visibleTurnItems: [inheritedRow],
+    };
+    const olderLocal = {
+      ...commandItem("item-old-local"),
+      ordinal: 7,
+      output: "must-not-append",
+    };
+    const dropped = applyOrchestrationV2ProjectionEvent(
+      projection,
+      {
+        id: "event-old-local-watermark",
+        type: "turn-item.updated",
+        threadId,
+        runId,
+        occurredAt: now,
+        payload: olderLocal,
+      } as OrchestrationV2DomainEvent,
+      { partialTimeline: true, latestLocalTurnOrdinal: 20 },
+    );
+    expect(dropped).toBe(projection);
+
+    const newerLocal = {
+      ...commandItem("item-new-local"),
+      ordinal: 21,
+      output: "append-ok",
+    };
+    const appended = applyOrchestrationV2ProjectionEvent(
+      projection,
+      {
+        id: "event-new-local-watermark",
+        type: "turn-item.updated",
+        threadId,
+        runId,
+        occurredAt: now,
+        payload: newerLocal,
+      } as OrchestrationV2DomainEvent,
+      { partialTimeline: true, latestLocalTurnOrdinal: 20 },
+    );
+    expect(appended).not.toBe(projection);
+    expect(appended?.visibleTurnItems.map((row) => row.sourceItemId)).toEqual([
+      inherited.id,
+      newerLocal.id,
+    ]);
+  });
+
+  it("default full/web reducer still appends missing older turn items", () => {
+    const recent = { ...commandItem("item-window"), ordinal: 10 };
+    const recentRow = {
+      position: 0,
+      visibility: "local" as const,
+      sourceThreadId: threadId,
+      sourceItemId: recent.id,
+      item: recent,
+    };
+    const projection = {
+      ...emptyProjection,
+      runs: [run],
+      turnItems: [recent],
+      visibleTurnItems: [recentRow],
+    };
+    const older = {
+      ...commandItem("item-older-full"),
+      ordinal: 3,
+      output: "full-appends",
+    };
+    // No options: original append-on-miss behavior for full snapshots.
+    const next = applyOrchestrationV2ProjectionEvent(projection, {
+      id: "event-old-item-full",
+      type: "turn-item.updated",
+      threadId,
+      runId,
+      occurredAt: now,
+      payload: older,
+    } as OrchestrationV2DomainEvent);
+
+    expect(next?.visibleTurnItems.map((row) => row.sourceItemId)).toEqual([recent.id, older.id]);
+    expect(next?.turnItems.map((item) => item.id)).toEqual([recent.id, older.id]);
+  });
+
+  it("partialTimeline updates a retained out-of-window turn item without appending it", () => {
+    const recent = { ...commandItem("item-window"), ordinal: 10 };
+    const retained = {
+      ...commandItem("item-retained-dep"),
+      ordinal: 2,
+      output: "stale",
+    };
+    const recentRow = {
+      position: 0,
+      visibility: "local" as const,
+      sourceThreadId: threadId,
+      sourceItemId: recent.id,
+      item: recent,
+    };
+    const projection = {
+      ...emptyProjection,
+      runs: [run],
+      turnItems: [retained, recent],
+      visibleTurnItems: [recentRow],
+    };
+    const refreshed = { ...retained, output: "refreshed" };
+    const next = applyOrchestrationV2ProjectionEvent(
+      projection,
+      {
+        id: "event-retained-refresh",
+        type: "turn-item.updated",
+        threadId,
+        runId,
+        occurredAt: now,
+        payload: refreshed,
+      } as OrchestrationV2DomainEvent,
+      { partialTimeline: true },
+    );
+
+    expect(next?.visibleTurnItems.map((row) => row.sourceItemId)).toEqual([recent.id]);
+    expect(next?.turnItems.find((item) => item.id === retained.id)).toEqual(refreshed);
+  });
+
+  it("keeps a visible interrupt result when its request is only in turnItems outside the window", () => {
+    const nodeId = NodeId.make("node-interrupt");
+    const request = {
+      id: TurnItemId.make("item-interrupt-request"),
+      threadId,
+      runId,
+      nodeId,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "completed" as const,
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "run_interrupt_request" as const,
+      message: "Stopping",
+    } satisfies OrchestrationV2TurnItem;
+    const result = {
+      id: TurnItemId.make("item-interrupt-result"),
+      threadId,
+      runId,
+      nodeId,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed" as const,
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "run_interrupt_result" as const,
+      message: "Stopped",
+    } satisfies OrchestrationV2TurnItem;
+    const resultRow = {
+      position: 0,
+      visibility: "local" as const,
+      sourceThreadId: threadId,
+      sourceItemId: result.id,
+      item: result,
+    };
+    const attemptId = RunAttemptId.make("attempt-superseded");
+    // Bounded snapshot: request is retained in turnItems but not visibleTurnItems.
+    const projection = {
+      ...emptyProjection,
+      runs: [{ ...run, status: "running" as const, completedAt: null }],
+      attempts: [
+        {
+          id: attemptId,
+          runId,
+          attemptOrdinal: 1,
+          rootNodeId: nodeId,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          providerThreadId: "provider-thread-1" as never,
+          providerTurnId: null,
+          reason: "initial" as const,
+          status: "running" as const,
+          startedAt: now,
+          completedAt: null,
+        },
+      ],
+      turnItems: [request, result],
+      visibleTurnItems: [resultRow],
+    };
+
+    const attemptSuperseded = applyOrchestrationV2ProjectionEvent(projection, {
+      id: "event-attempt-superseded",
+      type: "run-attempt.updated",
+      threadId,
+      runId,
+      occurredAt: now,
+      payload: {
+        id: attemptId,
+        runId,
+        attemptOrdinal: 1,
+        rootNodeId: nodeId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerThreadId: "provider-thread-1",
+        providerTurnId: null,
+        reason: "initial",
+        status: "superseded",
+        startedAt: now,
+        completedAt: now,
+      },
+    } as OrchestrationV2DomainEvent);
+
+    expect(attemptSuperseded?.visibleTurnItems.map((row) => row.sourceItemId)).toEqual([result.id]);
+    expect(attemptSuperseded?.turnItems.map((item) => item.id)).toEqual([request.id, result.id]);
+
+    const runUpdated = applyOrchestrationV2ProjectionEvent(attemptSuperseded!, {
+      id: "event-run-live-after-interrupt",
+      type: "run.updated",
+      threadId,
+      runId,
+      occurredAt: now,
+      payload: { ...run, status: "running", completedAt: null },
+    } as OrchestrationV2DomainEvent);
+    expect(runUpdated?.visibleTurnItems.map((row) => row.sourceItemId)).toEqual([result.id]);
+
+    // Without the retained request, the same superseded attempt would hide the result.
+    const missingRequest = {
+      ...projection,
+      turnItems: [result],
+    };
+    const hidden = applyOrchestrationV2ProjectionEvent(missingRequest, {
+      id: "event-attempt-superseded-missing-request",
+      type: "run-attempt.updated",
+      threadId,
+      runId,
+      occurredAt: now,
+      payload: {
+        id: attemptId,
+        runId,
+        attemptOrdinal: 1,
+        rootNodeId: nodeId,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerThreadId: "provider-thread-1",
+        providerTurnId: null,
+        reason: "initial",
+        status: "superseded",
+        startedAt: now,
+        completedAt: now,
+      },
+    } as OrchestrationV2DomainEvent);
+    expect(hidden?.visibleTurnItems).toEqual([]);
   });
 
   it("merges only settlement fields so concurrent metadata survives unsettle payloads", () => {

@@ -7,6 +7,21 @@ import { reduceThreadSettlementEvent } from "@t3tools/shared/orchestrationV2Sett
 import { isOrchestrationV2TurnItemVisible } from "@t3tools/shared/orchestrationV2Timeline";
 import * as DateTime from "effect/DateTime";
 
+export type ApplyOrchestrationV2ProjectionEventOptions = {
+  /**
+   * Progressive/mobile partial timelines only. When true, brand-new turn items
+   * older than the retained local span are ignored instead of being appended at
+   * the newest end. Full/web callers omit this so append-on-miss is unchanged.
+   */
+  readonly partialTimeline?: boolean;
+  /**
+   * Max local turn ordinal known for the partial window (from the bounded
+   * snapshot or advanced by live events). When set, missing items at or below
+   * this watermark are dropped even if no local visible rows remain.
+   */
+  readonly latestLocalTurnOrdinal?: number | null;
+};
+
 function upsertEntity<T extends { readonly id: unknown }>(
   items: ReadonlyArray<T>,
   item: T,
@@ -62,9 +77,52 @@ function activeVisibleTurnItems(
   return next === null ? rows : renumberVisibleItems(next);
 }
 
+function oldestLocalTurnOrdinal(
+  rows: OrchestrationV2ThreadProjection["visibleTurnItems"],
+): number | null {
+  let oldest: number | null = null;
+  for (const row of rows) {
+    if (row.visibility !== "local") {
+      continue;
+    }
+    if (oldest === null || row.item.ordinal < oldest) {
+      oldest = row.item.ordinal;
+    }
+  }
+  return oldest;
+}
+
+/**
+ * True when `item` is absent from the visible timeline and should not be
+ * appended at the newest end of a partial progressive window. Uses the
+ * retained local span when present, and the latestLocalTurnOrdinal watermark
+ * when the window is inherited-only (no local rows).
+ */
+function shouldDropMissingPartialTurnItem(
+  projection: OrchestrationV2ThreadProjection,
+  item: OrchestrationV2TurnItem,
+  latestLocalTurnOrdinal: number | null | undefined,
+): boolean {
+  const visible = projection.visibleTurnItems.some((row) => row.sourceItemId === item.id);
+  if (visible) {
+    return false;
+  }
+  if (
+    latestLocalTurnOrdinal !== null &&
+    latestLocalTurnOrdinal !== undefined &&
+    item.ordinal <= latestLocalTurnOrdinal
+  ) {
+    return true;
+  }
+  const oldest = oldestLocalTurnOrdinal(projection.visibleTurnItems);
+  return oldest !== null && item.ordinal < oldest;
+}
+
 function upsertVisibleTurnItem(
   projection: OrchestrationV2ThreadProjection,
   item: OrchestrationV2TurnItem,
+  partialTimeline: boolean,
+  latestLocalTurnOrdinal: number | null | undefined,
 ): OrchestrationV2ThreadProjection["visibleTurnItems"] {
   const rows = projection.visibleTurnItems;
   const index = rows.findIndex((row) => row.sourceItemId === item.id);
@@ -75,7 +133,15 @@ function upsertVisibleTurnItem(
     sourceItemId: item.id,
     item,
   };
-  if (index === -1) return [...rows, next];
+  if (index === -1) {
+    if (
+      partialTimeline &&
+      shouldDropMissingPartialTurnItem(projection, item, latestLocalTurnOrdinal)
+    ) {
+      return rows;
+    }
+    return [...rows, next];
+  }
   const previous = rows[index]!;
   if (
     previous.visibility === next.visibility &&
@@ -94,9 +160,12 @@ function upsertVisibleTurnItem(
 export function applyOrchestrationV2ProjectionEvent(
   projection: OrchestrationV2ThreadProjection | null,
   event: OrchestrationV2DomainEvent,
+  options?: ApplyOrchestrationV2ProjectionEventOptions,
 ): OrchestrationV2ThreadProjection | null {
   if (projection === null || event.threadId !== projection.thread.id) return projection;
 
+  const partialTimeline = options?.partialTimeline === true;
+  const latestLocalTurnOrdinal = options?.latestLocalTurnOrdinal;
   const base = { ...projection, updatedAt: event.occurredAt };
   switch (event.type) {
     case "thread.created":
@@ -173,12 +242,27 @@ export function applyOrchestrationV2ProjectionEvent(
     case "plan.updated":
       return { ...base, plans: upsertEntity(base.plans, event.payload) };
     case "turn-item.updated": {
+      // Partial progressive timelines only: ignore brand-new updates for items
+      // older than the retained local span (or at/below the watermark) so they
+      // never appear at the newest end. Full/web callers omit partialTimeline
+      // and keep append-on-miss.
+      if (partialTimeline) {
+        const knownTurnItem = projection.turnItems.some(
+          (candidate) => candidate.id === event.payload.id,
+        );
+        if (
+          !knownTurnItem &&
+          shouldDropMissingPartialTurnItem(projection, event.payload, latestLocalTurnOrdinal)
+        ) {
+          return projection;
+        }
+      }
       const next = { ...base, turnItems: upsertEntity(base.turnItems, event.payload) };
       const visible = { ...next, visibleTurnItems: activeVisibleTurnItems(next) };
       return {
         ...next,
         visibleTurnItems: shouldShowLocalTurnItem(next, event.payload)
-          ? upsertVisibleTurnItem(visible, event.payload)
+          ? upsertVisibleTurnItem(visible, event.payload, partialTimeline, latestLocalTurnOrdinal)
           : removeVisibleItem(visible.visibleTurnItems, event.payload.id),
       };
     }

@@ -22,6 +22,17 @@ import { buildEnvironmentAuthHeaders, withEnvironmentCredentials } from "./envir
 const DEFAULT_THREAD_SNAPSHOT_TIMEOUT_MS = 6_000;
 
 /**
+ * Progressive history metadata returned by the mobile bounded snapshot loader.
+ * Full snapshot loaders omit this field.
+ */
+export type ThreadSnapshotHistoryMeta = {
+  readonly historyCursor: string | null;
+  readonly hasMoreHistory: boolean;
+  /** Max local turn ordinal from the full projection; optional on older servers. */
+  readonly latestLocalTurnOrdinal?: number | null;
+};
+
+/**
  * Outcome of an HTTP thread-detail snapshot load.
  *
  * - `present`: snapshot body is available (seed projection, resume via socket).
@@ -32,6 +43,7 @@ export type ThreadSnapshotLoadResult =
   | {
       readonly _tag: "present";
       readonly snapshot: OrchestrationV2ThreadDetailSnapshot;
+      readonly history?: ThreadSnapshotHistoryMeta;
     }
   | { readonly _tag: "missing" }
   | { readonly _tag: "unavailable" };
