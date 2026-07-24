@@ -119,6 +119,11 @@ export function isThreadListV2Thread(
 export function buildThreadListV2Items(input: {
   readonly threads: ReadonlyArray<EnvironmentThreadShell>;
   readonly environmentId: EnvironmentId | null;
+  /** @deprecated Prefer projectRefs for multi-environment logical projects. */
+  readonly projectRef?: {
+    readonly environmentId: EnvironmentId;
+    readonly projectId: ProjectId;
+  } | null;
   readonly projectRefs?: ReadonlyArray<{
     readonly environmentId: EnvironmentId;
     readonly projectId: ProjectId;
@@ -148,9 +153,11 @@ export function buildThreadListV2Items(input: {
   const snoozeNow = input.snoozeNow ?? now;
   const autoSettleAfterDays = input.autoSettleAfterDays ?? 3;
   const query = input.searchQuery.trim().toLocaleLowerCase();
-  const projectKeys = input.projectRefs
-    ? new Set(input.projectRefs.map((ref) => `${ref.environmentId}:${ref.projectId}`))
-    : null;
+  const projectRefs = input.projectRefs ?? (input.projectRef != null ? [input.projectRef] : null);
+  const projectKeys =
+    projectRefs === null
+      ? null
+      : new Set(projectRefs.map((ref) => `${ref.environmentId}:${ref.projectId}`));
 
   const active: EnvironmentThreadShell[] = [];
   const settled: EnvironmentThreadShell[] = [];
