@@ -40,7 +40,9 @@ describe("resolveThreadListV2Status", () => {
     expect(resolveThreadListV2Status(thread)).toBe("approval");
   });
 
-  it("reports waiting when pending background tasks outlive a terminal run", () => {
+  it("reports waiting when presentation parks runtime idle for background tasks", () => {
+    // #4415 reads runtime.idle; the #4378 client bridge parks completed shells
+    // with a nonempty roster at idle. Direct roster checks are not used here.
     expect(
       resolveThreadListV2Status(
         makeThread({
@@ -48,7 +50,7 @@ describe("resolveThreadListV2Status", () => {
           title: "t",
           pendingBackgroundTasks: [{ taskId: "bg-1", description: "Run Codex review" }],
           runtime: {
-            status: "completed",
+            status: "idle",
             activeRunId: null,
             providerInstanceId: ProviderInstanceId.make("codex"),
             providerName: "Codex",
