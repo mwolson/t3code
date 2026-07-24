@@ -8,8 +8,10 @@ import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
  *
  * Six visual states, three colors: color is reserved for "act now"
  * (approval), "in motion" (working), and "broken" (failed). Ready is the
- * unlabeled resting state; waiting (session status "idle") is the agent
+ * unlabeled resting state; waiting (runtime status "idle") is the agent
  * parked on open background tasks — grey like working, not a false Done.
+ * On orchestrator v2 the presentation bridge parks runtime at idle when the
+ * post-settlement background roster is nonempty.
  */
 export type ThreadListV2Status = "approval" | "input" | "working" | "waiting" | "failed" | "ready";
 
@@ -20,7 +22,7 @@ export const THREAD_LIST_V2_SETTLED_INITIAL_COUNT = 10;
 export const THREAD_LIST_V2_SETTLED_PAGE_COUNT = 25;
 
 export function resolveThreadListV2Status(
-  thread: Pick<EnvironmentThreadShell, "hasPendingApprovals" | "hasPendingUserInput" | "session">,
+  thread: Pick<EnvironmentThreadShell, "hasPendingApprovals" | "hasPendingUserInput" | "runtime">,
 ): ThreadListV2Status {
   if (thread.hasPendingApprovals) {
     return "approval";
@@ -28,13 +30,18 @@ export function resolveThreadListV2Status(
   if (thread.hasPendingUserInput) {
     return "input";
   }
-  if (thread.session?.status === "running" || thread.session?.status === "starting") {
+  if (
+    thread.runtime !== null &&
+    ["preparing", "queued", "starting", "running", "waiting"].includes(thread.runtime.status)
+  ) {
     return "working";
   }
-  if (thread.session?.status === "idle") {
+  // #4415 Waiting: main parks session.idle; CTM/orchestrator-v2 parks
+  // runtime.idle (via the client presentation bridge for background work).
+  if (thread.runtime?.status === "idle") {
     return "waiting";
   }
-  if (thread.session?.status === "error") {
+  if (thread.runtime?.status === "failed") {
     return "failed";
   }
   return "ready";

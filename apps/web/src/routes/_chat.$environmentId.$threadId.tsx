@@ -6,12 +6,7 @@ import { threadHasStarted } from "../components/ChatView.logic";
 import { finalizePromotedDraftThreadByRef, useComposerDraftStore } from "../composerDraftStore";
 import { resolveThreadRouteRef, resolveThreadRouteRenderState } from "../threadRoutes";
 import { SidebarInset } from "~/components/ui/sidebar";
-import {
-  useEnvironmentThreadRefs,
-  useThreadDetail,
-  useThreadShell,
-  useThreadStatus,
-} from "../state/entities";
+import { useEnvironmentThreadRefs, useThreadShell } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 
@@ -24,8 +19,6 @@ function ChatThreadRouteView() {
     threadRef === null ? null : environmentShell.stateAtom(threadRef.environmentId),
   );
   const serverThreadShell = useThreadShell(threadRef);
-  const serverThreadDetail = useThreadDetail(threadRef);
-  const serverThreadStatus = useThreadStatus(threadRef);
   const environmentThreadRefs = useEnvironmentThreadRefs(threadRef?.environmentId ?? null);
   const bootstrapComplete = shell.data?.snapshot._tag === "Some";
   const environmentHasServerThreads = environmentThreadRefs.length > 0;
@@ -43,12 +36,11 @@ function ChatThreadRouteView() {
   });
   const renderState = resolveThreadRouteRenderState({
     bootstrapComplete,
-    serverThreadShellExists: serverThreadShell !== null,
-    serverThreadDetailExists: serverThreadDetail !== null,
-    serverThreadDetailDeleted: serverThreadStatus === "deleted",
+    serverThreadExists: serverThreadShell !== null,
+    serverThreadDeleted: serverThreadShell?.deletedAt != null,
     draftThreadExists,
   });
-  const serverThreadStarted = threadHasStarted(serverThreadDetail);
+  const serverThreadStarted = threadHasStarted(serverThreadShell);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
 
   useEffect(() => {

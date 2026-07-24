@@ -9,8 +9,10 @@ import {
   getFallbackThreadIdAfterDelete,
   getVisibleThreadsForProject,
   getProjectSortTimestamp,
+  getSidebarForkParentThreadId,
   hasUnseenCompletion,
   isContextMenuPointerDown,
+  isSidebarSubagentThread,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   resolveProjectStatusIndicator,
@@ -25,24 +27,18 @@ import {
   sortLogicalProjectsForSidebar,
   sortSettledThreadsForSidebarV2,
   sortThreadsForSidebarV2,
-  sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
+  sortProjectsForSidebar,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
 } from "./Sidebar.logic";
-import {
-  EnvironmentId,
-  OrchestrationLatestTurn,
-  ProjectId,
-  ProviderInstanceId,
-  ThreadId,
-} from "@t3tools/contracts";
-
+import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   type Project,
   type Thread,
 } from "../types";
+import { makeThreadFixture, type ThreadFixtureOverrides } from "../test-fixtures";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
 
@@ -201,13 +197,53 @@ describe("resolveSidebarStageBadgeLabel", () => {
   });
 });
 
-function makeLatestTurn(overrides?: {
+describe("sidebar thread lineage helpers", () => {
+  it("identifies subagent threads so the sidebar can hide them", () => {
+    const parentId = ThreadId.make("thread-parent");
+    const subagent = makeThreadFixture({
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: parentId,
+        relationshipToParent: "subagent",
+      },
+    });
+
+    expect(isSidebarSubagentThread(subagent)).toBe(true);
+    expect(isSidebarSubagentThread(makeThreadFixture())).toBe(false);
+  });
+
+  it("resolves the parent thread for fork sidebar affordances", () => {
+    const parentId = ThreadId.make("thread-parent");
+    const fallbackParentId = ThreadId.make("thread-fallback-parent");
+    const runFork = makeThreadFixture({
+      forkedFrom: { type: "run", threadId: parentId, runId: "run-1" as never },
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: fallbackParentId,
+        relationshipToParent: "fork",
+      },
+    });
+    const lineageFork = makeThreadFixture({
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: fallbackParentId,
+        relationshipToParent: "fork",
+      },
+    });
+
+    expect(getSidebarForkParentThreadId(runFork)).toBe(parentId);
+    expect(getSidebarForkParentThreadId(lineageFork)).toBe(fallbackParentId);
+    expect(getSidebarForkParentThreadId(makeThreadFixture())).toBeNull();
+  });
+});
+
+function makeLatestRun(overrides?: {
   completedAt?: string | null;
   startedAt?: string | null;
-}): OrchestrationLatestTurn {
+}): NonNullable<Thread["latestRun"]> {
   return {
-    turnId: "turn-1" as never,
-    state: "completed",
+    runId: "turn-1" as never,
+    status: "completed",
     assistantMessageId: null,
     requestedAt: "2026-03-09T10:00:00.000Z",
     startedAt:
@@ -225,9 +261,9 @@ describe("hasUnseenCompletion", () => {
         hasPendingApprovals: false,
         hasPendingUserInput: false,
         interactionMode: "default",
-        latestTurn: makeLatestTurn(),
+        latestRun: makeLatestRun(),
         lastVisitedAt: "2026-03-09T10:04:00.000Z",
-        session: null,
+        runtime: null,
       }),
     ).toBe(true);
   });
@@ -239,9 +275,9 @@ describe("hasUnseenCompletion", () => {
         hasPendingApprovals: false,
         hasPendingUserInput: false,
         interactionMode: "default",
-        latestTurn: makeLatestTurn(),
+        latestRun: makeLatestRun(),
         lastVisitedAt: undefined,
-        session: null,
+        runtime: null,
       }),
     ).toBe(false);
   });
@@ -587,86 +623,78 @@ describe("isContextMenuPointerDown", () => {
 });
 
 describe("resolveSidebarV2Status", () => {
-  const session = {
-    threadId: ThreadId.make("thread-1"),
+  const runtime = {
     status: "running" as const,
-    providerName: "Codex",
+    activeRunId: null,
     providerInstanceId: ProviderInstanceId.make("codex"),
-    runtimeMode: DEFAULT_RUNTIME_MODE,
-    activeTurnId: "turn-1" as never,
+    providerName: "Codex",
     lastError: null,
     updatedAt: "2026-03-09T10:00:00.000Z",
   };
 
-  const idle = { hasPendingApprovals: false, hasPendingUserInput: false };
+  const idle = { hasPendingApprovals: false, hasPendingUserInput: false, runtime: null };
 
-  it("prioritizes approval over a running session", () => {
-    expect(resolveSidebarV2Status({ ...idle, hasPendingApprovals: true, session })).toBe(
+  it("prioritizes approval over a running runtime", () => {
+    expect(resolveSidebarV2Status({ ...idle, hasPendingApprovals: true, runtime })).toBe(
       "approval",
     );
   });
 
-  it("prioritizes awaiting input over a running session, below approval", () => {
-    expect(resolveSidebarV2Status({ ...idle, hasPendingUserInput: true, session })).toBe("input");
+  it("prioritizes awaiting input over a running runtime, below approval", () => {
+    expect(resolveSidebarV2Status({ ...idle, hasPendingUserInput: true, runtime })).toBe("input");
     expect(
       resolveSidebarV2Status({
         ...idle,
         hasPendingApprovals: true,
         hasPendingUserInput: true,
-        session,
+        runtime,
       }),
     ).toBe("approval");
   });
 
-  it("reports working for running and starting sessions", () => {
-    expect(resolveSidebarV2Status({ ...idle, session })).toBe("working");
+  it("reports working for running and starting runtimes", () => {
+    expect(resolveSidebarV2Status({ ...idle, runtime })).toBe("working");
     expect(
       resolveSidebarV2Status({
         ...idle,
-        session: { ...session, status: "starting" as const },
+        runtime: { ...runtime, status: "starting" as const },
       }),
     ).toBe("working");
   });
 
-  it("reports waiting for an idle session, below approval and input", () => {
+  it("reports waiting for an idle runtime, below approval and input", () => {
     expect(
       resolveSidebarV2Status({
         ...idle,
-        session: { ...session, status: "idle" as const, activeTurnId: null },
+        runtime: { ...runtime, status: "idle" as const, activeRunId: null },
       }),
     ).toBe("waiting");
     expect(
       resolveSidebarV2Status({
         ...idle,
         hasPendingApprovals: true,
-        session: { ...session, status: "idle" as const, activeTurnId: null },
+        runtime: { ...runtime, status: "idle" as const, activeRunId: null },
       }),
     ).toBe("approval");
   });
 
-  it("reports failed only while the session status is error", () => {
+  it("reports failed only while the latest run failed", () => {
     expect(
       resolveSidebarV2Status({
         ...idle,
-        session: { ...session, status: "error" as const, lastError: "boom" },
+        runtime: { ...runtime, status: "failed" as const, lastError: "boom" },
       }),
     ).toBe("failed");
     expect(
       resolveSidebarV2Status({
         ...idle,
-        session: { ...session, status: "stopped" as const, lastError: "persisted" },
-      }),
-    ).toBe("ready");
-    expect(
-      resolveSidebarV2Status({
-        ...idle,
-        session: { ...session, status: "ready" as const, lastError: "persisted" },
+        runtime: { ...runtime, status: "completed" as const, lastError: "persisted" },
       }),
     ).toBe("ready");
   });
 
-  it("defaults to ready with no session", () => {
-    expect(resolveSidebarV2Status({ ...idle, session: null })).toBe("ready");
+  it("defaults to ready with no runtime", () => {
+    expect(resolveSidebarV2Status(idle)).toBe("ready");
   });
 });
 
@@ -701,13 +729,13 @@ describe("sortSettledThreadsForSidebarV2", () => {
     id: string;
     settledAt?: string | null;
     latestUserMessageAt?: string | null;
-    latestTurn?: OrchestrationLatestTurn | null;
+    latestRun?: Thread["latestRun"];
     updatedAt?: string;
   }) => ({
     id: input.id,
     settledAt: input.settledAt ?? null,
     latestUserMessageAt: input.latestUserMessageAt ?? null,
-    latestTurn: input.latestTurn ?? null,
+    latestRun: input.latestRun ?? null,
     updatedAt: input.updatedAt ?? "2026-03-09T09:00:00.000Z",
   });
 
@@ -747,7 +775,7 @@ describe("sortSettledThreadsForSidebarV2", () => {
       settled({
         id: "completed-later",
         latestUserMessageAt: "2026-03-09T10:00:00.000Z",
-        latestTurn: makeLatestTurn({ completedAt: "2026-03-09T10:30:00.000Z" }),
+        latestRun: makeLatestRun({ completedAt: "2026-03-09T10:30:00.000Z" }),
       }),
     ]);
 
@@ -765,40 +793,38 @@ describe("sortSettledThreadsForSidebarV2", () => {
 });
 
 describe("resolveWorkingStartedAt", () => {
-  const session = {
-    threadId: ThreadId.make("thread-1"),
+  const runtime = {
     status: "running" as const,
     providerName: "Codex",
     providerInstanceId: ProviderInstanceId.make("codex"),
-    runtimeMode: DEFAULT_RUNTIME_MODE,
-    activeTurnId: "turn-1" as never,
+    activeRunId: RunId.make("run-1"),
     lastError: null,
     updatedAt: "2026-03-09T10:02:00.000Z",
   };
 
-  it("uses the running turn's start time", () => {
+  it("uses the running run's start time", () => {
     expect(
       resolveWorkingStartedAt({
-        latestTurn: makeLatestTurn({ completedAt: null }),
-        session,
+        latestRun: makeLatestRun({ completedAt: null }),
+        runtime,
       }),
     ).toBe("2026-03-09T10:00:00.000Z");
   });
 
-  it("uses the request time while a turn awaits adoption", () => {
+  it("uses the request time while a run awaits adoption", () => {
     expect(
       resolveWorkingStartedAt({
-        latestTurn: makeLatestTurn({ startedAt: null, completedAt: null }),
-        session,
+        latestRun: makeLatestRun({ startedAt: null, completedAt: null }),
+        runtime,
       }),
     ).toBe("2026-03-09T10:00:00.000Z");
   });
 
-  it("falls back to the session transition when the latest turn already completed", () => {
+  it("falls back to the runtime transition when the latest run already completed", () => {
     expect(
       resolveWorkingStartedAt({
-        latestTurn: makeLatestTurn(),
-        session,
+        latestRun: makeLatestRun(),
+        runtime,
       }),
     ).toBe("2026-03-09T10:02:00.000Z");
   });
@@ -806,14 +832,14 @@ describe("resolveWorkingStartedAt", () => {
   it("skips a malformed startedAt instead of returning it", () => {
     expect(
       resolveWorkingStartedAt({
-        latestTurn: makeLatestTurn({ startedAt: "not-a-date", completedAt: null }),
-        session,
+        latestRun: makeLatestRun({ startedAt: "not-a-date", completedAt: null }),
+        runtime,
       }),
     ).toBe("2026-03-09T10:00:00.000Z");
   });
 
-  it("returns null with neither a running turn nor a session", () => {
-    expect(resolveWorkingStartedAt({ latestTurn: null, session: null })).toBeNull();
+  it("returns null with neither a running run nor a runtime", () => {
+    expect(resolveWorkingStartedAt({ latestRun: null, runtime: null })).toBeNull();
   });
 });
 
@@ -837,15 +863,13 @@ describe("resolveThreadStatusPill", () => {
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     interactionMode: "plan" as const,
-    latestTurn: null,
+    latestRun: null,
     lastVisitedAt: undefined,
-    session: {
-      threadId: ThreadId.make("thread-1"),
+    runtime: {
       status: "running" as const,
       providerName: "Codex",
       providerInstanceId: ProviderInstanceId.make("codex"),
-      runtimeMode: DEFAULT_RUNTIME_MODE,
-      activeTurnId: "turn-1" as never,
+      activeRunId: "turn-1" as never,
       lastError: null,
       updatedAt: "2026-03-09T10:00:00.000Z",
     },
@@ -888,11 +912,11 @@ describe("resolveThreadStatusPill", () => {
         thread: {
           ...baseThread,
           hasActionableProposedPlan: true,
-          latestTurn: makeLatestTurn(),
-          session: {
-            ...baseThread.session,
-            status: "ready",
-            activeTurnId: null,
+          latestRun: makeLatestRun(),
+          runtime: {
+            ...baseThread.runtime,
+            status: "completed",
+            activeRunId: null,
           },
         },
       }),
@@ -904,11 +928,11 @@ describe("resolveThreadStatusPill", () => {
       resolveThreadStatusPill({
         thread: {
           ...baseThread,
-          latestTurn: makeLatestTurn(),
-          session: {
-            ...baseThread.session,
-            status: "ready",
-            activeTurnId: null,
+          latestRun: makeLatestRun(),
+          runtime: {
+            ...baseThread.runtime,
+            status: "completed",
+            activeRunId: null,
           },
         },
       }),
@@ -921,12 +945,12 @@ describe("resolveThreadStatusPill", () => {
         thread: {
           ...baseThread,
           interactionMode: "default",
-          latestTurn: makeLatestTurn(),
+          latestRun: makeLatestRun(),
           lastVisitedAt: "2026-03-09T10:04:00.000Z",
-          session: {
-            ...baseThread.session,
-            status: "ready",
-            activeTurnId: null,
+          runtime: {
+            ...baseThread.runtime,
+            status: "completed",
+            activeRunId: null,
           },
         },
       }),
@@ -1077,8 +1101,8 @@ function makeProject(overrides: Partial<Project> = {}): Project {
   };
 }
 
-function makeThread(overrides: Partial<Thread> = {}): Thread {
-  return {
+function makeThread(overrides: ThreadFixtureOverrides = {}): Thread {
+  return makeThreadFixture({
     id: ThreadId.make("thread-1"),
     environmentId: localEnvironmentId,
     projectId: ProjectId.make("project-1"),
@@ -1090,7 +1114,7 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     },
     runtimeMode: DEFAULT_RUNTIME_MODE,
     interactionMode: DEFAULT_INTERACTION_MODE,
-    session: null,
+    runtime: null,
     messages: [],
     proposedPlans: [],
     createdAt: "2026-03-09T10:00:00.000Z",
@@ -1099,13 +1123,11 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     settledAt: null,
     deletedAt: null,
     updatedAt: "2026-03-09T10:00:00.000Z",
-    latestTurn: null,
+    latestRun: null,
     branch: null,
     worktreePath: null,
-    checkpoints: [],
-    activities: [],
     ...overrides,
-  };
+  });
 }
 
 describe("getFallbackThreadIdAfterDelete", () => {
@@ -1189,7 +1211,7 @@ describe("sortProjectsForSidebar", () => {
             id: "message-1" as never,
             role: "user",
             text: "older project user message",
-            turnId: null,
+            runId: null,
             createdAt: "2026-03-09T10:01:00.000Z",
             updatedAt: "2026-03-09T10:01:00.000Z",
             streaming: false,
@@ -1205,7 +1227,7 @@ describe("sortProjectsForSidebar", () => {
             id: "message-2" as never,
             role: "user",
             text: "newer project user message",
-            turnId: null,
+            runId: null,
             createdAt: "2026-03-09T10:05:00.000Z",
             updatedAt: "2026-03-09T10:05:00.000Z",
             streaming: false,

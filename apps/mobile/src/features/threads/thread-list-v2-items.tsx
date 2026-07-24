@@ -254,7 +254,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         {thread.title}
       </Text>
       <View className="mt-1 flex-row items-center gap-2">
-        {status === "failed" && thread.session?.lastError ? (
+        {status === "failed" && thread.runtime?.lastError ? (
           <Text
             className={cn(
               "flex-1 text-xs",
@@ -264,7 +264,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             )}
             numberOfLines={1}
           >
-            {thread.session.lastError}
+            {thread.runtime.lastError}
           </Text>
         ) : thread.branch || props.environmentLabel ? (
           /* "branch · machine" share one truncating line. The machine sits
