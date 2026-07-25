@@ -16,7 +16,7 @@ import type {
 } from "@t3tools/contracts";
 import * as Haptics from "expo-haptics";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Platform, View, type GestureResponderEvent } from "react-native";
+import { Platform, View, type GestureResponderEvent, type LayoutChangeEvent } from "react-native";
 import { KeyboardController, KeyboardStickyView } from "react-native-keyboard-controller";
 import Animated, { FadeInDown, FadeOut } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -176,6 +176,11 @@ function useStreamingHaptics(threadId: ThreadId, feed: ReadonlyArray<ThreadFeedE
   }, [threadId, feed]);
 }
 
+// Extra list end-inset so the last message rests above the floating composer
+// instead of flush against (or under) it. Applied via heightAdjustment so both
+// the pre-layout estimate and the measured overlay height pick it up.
+const THREAD_FEED_COMPOSER_GAP = 24;
+
 export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: ThreadDetailScreenProps) {
   const insets = useSafeAreaInsets();
   const agentLabel = `${props.selectedThread.modelSelection.instanceId} agent`;
@@ -209,7 +214,27 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const selectedThreadFeed = props.selectedThreadFeed;
   const composerChrome = composerExpanded ? COMPOSER_EXPANDED_CHROME : COMPOSER_COLLAPSED_CHROME;
   const composerOverlapHeight = composerChrome + composerBottomInset;
+  // CTM renders the working indicator inside ThreadFeed, not in this composer
+  // overlay, so the overlay estimate carries no indicator height.
   const estimatedOverlayHeight = composerOverlapHeight;
+  const [composerOverlayHeight, setComposerOverlayHeight] = useState(estimatedOverlayHeight);
+  const estimatedOverlayHeightRef = useRef(estimatedOverlayHeight);
+  useEffect(() => {
+    estimatedOverlayHeightRef.current = estimatedOverlayHeight;
+  }, [estimatedOverlayHeight]);
+  useEffect(() => {
+    // A measured overlay can include approval or input cards that are not part
+    // of this baseline estimate. Keep that larger measurement until layout
+    // reports a new height, while ensuring chrome changes never under-estimate
+    // the composer inset.
+    setComposerOverlayHeight((current) => Math.max(current, estimatedOverlayHeight));
+  }, [estimatedOverlayHeight]);
+  useEffect(() => {
+    // Layout callbacks from the previous thread can arrive after navigation.
+    // Reset their larger measurement to this thread's known baseline; its own
+    // overlay layout will immediately replace it if it contains extra cards.
+    setComposerOverlayHeight(estimatedOverlayHeightRef.current);
+  }, [selectedThreadKey]);
   // The overlay's measured height includes the home-indicator inset (the
   // composer pads it), but contentInsetAdjustmentBehavior="automatic" makes
   // UIKit add the safe-area bottom to the content inset AGAIN — leaving a
@@ -219,11 +244,22 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   // its end-scroll math matches the real resting position.
   const nativeInsetOvercount =
     props.usesAutomaticContentInsets === true && Platform.OS === "ios" ? insets.bottom : 0;
+  // heightAdjustment is added to measured composer height. Keep the safe-area
+  // under-report (UIKit automatic insets) and add breathing room above chrome.
+  const composerEndHeightAdjustment = THREAD_FEED_COMPOSER_GAP - nativeInsetOvercount;
   const { contentInsetEndAdjustment, onComposerLayout } = useKeyboardChatComposerInset(
     listRef,
     composerOverlayRef,
-    Math.max(0, estimatedOverlayHeight - nativeInsetOvercount),
-    -nativeInsetOvercount,
+    Math.max(0, estimatedOverlayHeight + composerEndHeightAdjustment),
+    composerEndHeightAdjustment,
+  );
+  const handleComposerLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      onComposerLayout(event);
+      const height = event.nativeEvent.layout.height;
+      setComposerOverlayHeight((current) => (Math.abs(current - height) > 1 ? height : current));
+    },
+    [onComposerLayout],
   );
   const { freeze, scrollMessageToEnd } = useKeyboardScrollToEnd({ listRef });
   const showContent = props.showContent ?? true;
@@ -405,6 +441,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             freeze={freeze}
             anchorMessageId={anchorMessageId}
             contentInsetEndAdjustment={contentInsetEndAdjustment}
+            contentInsetEndEstimate={composerOverlayHeight + THREAD_FEED_COMPOSER_GAP}
             contentTopInset={0}
             contentBottomInset={estimatedOverlayHeight}
             contentMaxWidth={contentMaxWidth}
@@ -433,7 +470,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           {/* No paddingTop here: the overlay's measured height becomes the
               list's bottom inset, so any padding above the pill/composer
               pushes the resting content floor up by the same amount. */}
-          <View ref={composerOverlayRef} onLayout={onComposerLayout} className="w-full">
+          <View ref={composerOverlayRef} onLayout={handleComposerLayout} className="w-full">
             <View className="w-full self-center" style={{ maxWidth: contentMaxWidth }}>
               <ThreadQueueControl
                 environmentId={props.environmentId}

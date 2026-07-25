@@ -23,7 +23,7 @@ index 7bc3bb8..75ec120 100644
  } & React.RefAttributes<LegendListRef>) => React.ReactElement | null;
  
 diff --git a/keyboard.js b/keyboard.js
-index 736286a..8218172 100644
+index 736286a..fbf1814 100644
 --- a/keyboard.js
 +++ b/keyboard.js
 @@ -33,19 +33,19 @@ if (typeof __DEV__ !== "undefined" && __DEV__ && !reactNativeKeyboardController.
@@ -50,7 +50,7 @@ index 736286a..8218172 100644
    );
    React.useLayoutEffect(() => {
      var _a;
-@@ -84,9 +84,11 @@ function useKeyboardScrollToEnd({ freeze: freezeProp, listRef }) {
+@@ -84,14 +84,19 @@ function useKeyboardScrollToEnd({ freeze: freezeProp, listRef }) {
  }
  var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(props, forwardedRef) {
    const {
@@ -62,7 +62,15 @@ index 736286a..8218172 100644
      freeze,
      keyboardLiftBehavior,
      keyboardOffset,
-@@ -109,11 +111,15 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
+     ...rest
+   } = props;
++  // Keyboard scroll math must respect the list's adjusted top inset or short
++  // content gets pinned at offset 0 under a translucent header.
++  const contentInsetStartCompensation = typeof rest.contentInsetStartAdjustment === "number" && Number.isFinite(rest.contentInsetStartAdjustment) ? Math.max(0, rest.contentInsetStartAdjustment) : 0;
+   const refLegendList = React.useRef(null);
+   const combinedRef = useCombinedRef(forwardedRef, refLegendList);
+   const blankSpace = reactNativeReanimated.useSharedValue(0);
+@@ -109,11 +114,15 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
        includeInEndInset: true,
        onSizeChanged: (size) => {
          var _a;
@@ -80,15 +88,18 @@ index 736286a..8218172 100644
    const onContentInsetChange = React.useCallback((insets) => {
      var _a;
      (_a = refLegendList.current) == null ? void 0 : _a.reportContentInset(insets);
-@@ -124,6 +130,7 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
+@@ -124,8 +133,10 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
          reactNativeKeyboardController.KeyboardChatScrollView,
          {
            ...scrollProps,
 +          adjustedInsetCompensation,
            applyWorkaroundForContentInsetHitTestBug,
            blankSpace,
++          contentInsetStartCompensation,
            extraContentPadding: contentInsetEndAdjustment,
-@@ -135,6 +142,7 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
+           freeze,
+           keyboardLiftBehavior,
+@@ -135,9 +146,11 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
        );
      },
      [
@@ -96,7 +107,11 @@ index 736286a..8218172 100644
        applyWorkaroundForContentInsetHitTestBug,
        blankSpace,
        contentInsetEndAdjustment,
-@@ -149,6 +157,7 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
++      contentInsetStartCompensation,
+       freeze,
+       keyboardLiftBehavior,
+       keyboardOffset,
+@@ -149,6 +162,7 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
      AnimatedLegendListInternal,
      {
        anchoredEndSpace: anchoredEndSpaceWithBlankSpace,
@@ -105,7 +120,7 @@ index 736286a..8218172 100644
        renderScrollComponent: memoList,
        ...rest
 diff --git a/keyboard.mjs b/keyboard.mjs
-index c1dd270..cb0d142 100644
+index c1dd270..1df18da 100644
 --- a/keyboard.mjs
 +++ b/keyboard.mjs
 @@ -12,19 +12,19 @@ if (typeof __DEV__ !== "undefined" && __DEV__ && !KeyboardChatScrollView) {
@@ -132,7 +147,7 @@ index c1dd270..cb0d142 100644
    );
    useLayoutEffect(() => {
      var _a;
-@@ -63,9 +63,11 @@ function useKeyboardScrollToEnd({ freeze: freezeProp, listRef }) {
+@@ -63,14 +63,19 @@ function useKeyboardScrollToEnd({ freeze: freezeProp, listRef }) {
  }
  var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(props, forwardedRef) {
    const {
@@ -144,7 +159,15 @@ index c1dd270..cb0d142 100644
      freeze,
      keyboardLiftBehavior,
      keyboardOffset,
-@@ -88,11 +90,15 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
+     ...rest
+   } = props;
++  // Keyboard scroll math must respect the list's adjusted top inset or short
++  // content gets pinned at offset 0 under a translucent header.
++  const contentInsetStartCompensation = typeof rest.contentInsetStartAdjustment === "number" && Number.isFinite(rest.contentInsetStartAdjustment) ? Math.max(0, rest.contentInsetStartAdjustment) : 0;
+   const refLegendList = useRef(null);
+   const combinedRef = useCombinedRef(forwardedRef, refLegendList);
+   const blankSpace = useSharedValue(0);
+@@ -88,11 +93,15 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
        includeInEndInset: true,
        onSizeChanged: (size) => {
          var _a;
@@ -162,15 +185,18 @@ index c1dd270..cb0d142 100644
    const onContentInsetChange = useCallback((insets) => {
      var _a;
      (_a = refLegendList.current) == null ? void 0 : _a.reportContentInset(insets);
-@@ -103,6 +109,7 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
+@@ -103,8 +112,10 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
          KeyboardChatScrollView,
          {
            ...scrollProps,
 +          adjustedInsetCompensation,
            applyWorkaroundForContentInsetHitTestBug,
            blankSpace,
++          contentInsetStartCompensation,
            extraContentPadding: contentInsetEndAdjustment,
-@@ -114,6 +121,7 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
+           freeze,
+           keyboardLiftBehavior,
+@@ -114,9 +125,11 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
        );
      },
      [
@@ -178,7 +204,11 @@ index c1dd270..cb0d142 100644
        applyWorkaroundForContentInsetHitTestBug,
        blankSpace,
        contentInsetEndAdjustment,
-@@ -128,6 +136,7 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
++      contentInsetStartCompensation,
+       freeze,
+       keyboardLiftBehavior,
+       keyboardOffset,
+@@ -128,6 +141,7 @@ var KeyboardAwareLegendList = typedForwardRef(function KeyboardAwareLegendList2(
      AnimatedLegendListInternal,
      {
        anchoredEndSpace: anchoredEndSpaceWithBlankSpace,
