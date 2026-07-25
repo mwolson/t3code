@@ -295,7 +295,11 @@ function isClaudeSdkReplayMessage(frame: unknown): frame is SDKMessage {
     type === "user" ||
     type === "result" ||
     type === "system" ||
-    type === "rate_limit_event"
+    type === "rate_limit_event" ||
+    // The adapter opens every query with includePartialMessages, so the CLI
+    // interleaves stream_event frames with the message frames. Fixtures
+    // recorded before that option landed have none.
+    type === "stream_event"
   );
 }
 
@@ -1261,6 +1265,7 @@ async function recordClaudeActiveSteeringQuery(input: {
   readonly allowDangerouslySkipPermissions?: boolean;
   readonly enablePermissionCallback?: boolean;
   readonly permissionDecision?: ProviderApprovalDecision;
+  readonly steerAfter?: "tool_use";
 }): Promise<void> {
   if (input.prompts.length < 2) {
     throw new Error("Claude active steering replay recording requires at least two prompts.");
@@ -1350,6 +1355,17 @@ async function recordClaudeActiveSteeringQuery(input: {
   const iterator = queryRuntime[Symbol.asyncIterator]();
   try {
     offerPrompt(0);
+    if (input.steerAfter === "tool_use") {
+      // Steer while a tool is still running. The CLI queues the steer instead
+      // of aborting the stream, so its result carries a terminal reason other
+      // than aborted_streaming.
+      await recordMessagesUntilFirstToolUse({
+        iterator,
+        entries: input.entries,
+        scenario: input.scenario,
+      });
+      await Effect.runPromise(Effect.sleep(Duration.seconds(2)));
+    }
     offerSteeringPrompts();
     const completed = await recordMessagesUntilTurnResults({
       iterator,
@@ -2175,6 +2191,7 @@ export async function recordClaudeAgentSdkReplayTranscript(input: {
     | "fork_session_merge_back"
     | "fork_session_merge_back_siblings"
     | "active_steering"
+    | "active_steering_mid_tool"
     | "interrupt"
     | "interrupt_restart";
   readonly enableTools?: boolean;
@@ -2220,9 +2237,10 @@ export async function recordClaudeAgentSdkReplayTranscript(input: {
         ? {}
         : { permissionDecision: input.permissionDecision }),
     });
-  } else if (queryMode === "active_steering") {
+  } else if (queryMode === "active_steering" || queryMode === "active_steering_mid_tool") {
     await recordClaudeActiveSteeringQuery({
       scenario: input.scenario,
+      ...(queryMode === "active_steering_mid_tool" ? { steerAfter: "tool_use" as const } : {}),
       prompts: input.prompts,
       modelSelection: input.modelSelection,
       cwd: input.cwd,
