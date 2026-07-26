@@ -25,6 +25,7 @@ import {
 import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -1174,14 +1175,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly numTurns?: number;
     readonly origin?: { readonly kind: "task-notification" };
     readonly terminalReason?: string;
+    readonly subtype?: string;
+    readonly isError?: boolean;
+    readonly errors?: ReadonlyArray<string>;
   }) =>
     claudeSdkFrame({
       type: "result",
-      subtype: "success",
+      subtype: input.subtype ?? "success",
       ...(input.terminalReason === undefined ? {} : { terminal_reason: input.terminalReason }),
       duration_ms: 10,
       duration_api_ms: 10,
-      is_error: false,
+      is_error: input.isError ?? false,
       num_turns: input.numTurns ?? 1,
       result: input.result,
       stop_reason: "end_turn",
@@ -1197,6 +1201,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       uuid: input.uuid,
       session_id: WAKE_NATIVE_SESSION,
       ...(input.origin === undefined ? {} : { origin: input.origin }),
+      ...(input.errors === undefined ? {} : { errors: input.errors }),
     });
   const turnOneResult = makeResultFrame({
     uuid: "00000000-0000-4000-8000-000000000102",
@@ -1247,87 +1252,92 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       return yield* Effect.die(`Timed out waiting for ${label}.`);
     });
 
-  const makeWakeHarness = Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const idAllocator = yield* IdAllocatorV2;
-    const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
-      prefix: "t3-claude-v2-wake-",
-    });
-    const sdkMessages = yield* Queue.unbounded<SDKMessage>();
-    const offeredMessages: Array<SDKUserMessage> = [];
-    const continuationRequests: Array<ProviderContinuationRequest> = [];
-    const adapter = makeClaudeAdapterV2({
-      instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
-      settings: DEFAULT_CLAUDE_SETTINGS,
-      environment: {},
-      attachmentsDir,
-      fileSystem,
-      idAllocator,
-      continuationRequests: {
-        offer: (request) =>
+  const makeWakeHarnessWithOptions = (options?: {
+    readonly close?: (sdkMessages: Queue.Queue<SDKMessage>) => Effect.Effect<void>;
+    readonly interrupt?: Effect.Effect<void>;
+  }) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const idAllocator = yield* IdAllocatorV2;
+      const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-claude-v2-wake-",
+      });
+      const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+      const offeredMessages: Array<SDKUserMessage> = [];
+      const continuationRequests: Array<ProviderContinuationRequest> = [];
+      const adapter = makeClaudeAdapterV2({
+        instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+        settings: DEFAULT_CLAUDE_SETTINGS,
+        environment: {},
+        attachmentsDir,
+        fileSystem,
+        idAllocator,
+        continuationRequests: {
+          offer: (request) =>
+            Effect.sync(() => {
+              continuationRequests.push(request);
+            }),
+        },
+        queryRunner: {
+          allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
+          open: () =>
+            Effect.succeed({
+              messages: Stream.fromQueue(sdkMessages),
+              offer: (message) =>
+                Effect.sync(() => {
+                  offeredMessages.push(message);
+                }),
+              setModel: () => Effect.void,
+              interrupt: options?.interrupt ?? Effect.void,
+              close: options?.close?.(sdkMessages) ?? Effect.void,
+            }),
+          forkSession: () => Effect.die("unused forkSession"),
+          assertComplete: Effect.void,
+        },
+      });
+      const threadId = ThreadId.make("thread-claude-wake");
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("provider-session-claude-wake"),
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+      });
+      const events: Array<ProviderAdapterV2Event> = [];
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) =>
           Effect.sync(() => {
-            continuationRequests.push(request);
+            events.push(event);
           }),
-      },
-      queryRunner: {
-        allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
-        open: () =>
-          Effect.succeed({
-            messages: Stream.fromQueue(sdkMessages),
-            offer: (message) =>
-              Effect.sync(() => {
-                offeredMessages.push(message);
-              }),
-            setModel: () => Effect.void,
-            interrupt: Effect.void,
-            close: Effect.void,
-          }),
-        forkSession: () => Effect.die("unused forkSession"),
-        assertComplete: Effect.void,
-      },
-    });
-    const threadId = ThreadId.make("thread-claude-wake");
-    const runtime = yield* adapter.openSession({
-      threadId,
-      providerSessionId: ProviderSessionId.make("provider-session-claude-wake"),
-      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-      runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
-    });
-    const providerThread = yield* runtime.ensureThread({
-      threadId,
-      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-      runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
-    });
-    const events: Array<ProviderAdapterV2Event> = [];
-    yield* runtime.events.pipe(
-      Stream.runForEach((event) =>
-        Effect.sync(() => {
-          events.push(event);
-        }),
-      ),
-      Effect.forkScoped,
-    );
-    if (runtime.hasPendingBackgroundWork === undefined) {
-      throw new Error("Claude adapter runtime must expose hasPendingBackgroundWork.");
-    }
-    const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
-    const terminalEvents = () =>
-      events.filter(
-        (event): event is Extract<ProviderAdapterV2Event, { type: "turn.terminal" }> =>
-          event.type === "turn.terminal",
+        ),
+        Effect.forkScoped,
       );
-    return {
-      runtime,
-      providerThread,
-      threadId,
-      sdkMessages,
-      offeredMessages,
-      continuationRequests,
-      events,
-      terminalEvents,
-      hasPendingBackgroundWork,
-    };
-  });
+      if (runtime.hasPendingBackgroundWork === undefined) {
+        throw new Error("Claude adapter runtime must expose hasPendingBackgroundWork.");
+      }
+      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+      const terminalEvents = () =>
+        events.filter(
+          (event): event is Extract<ProviderAdapterV2Event, { type: "turn.terminal" }> =>
+            event.type === "turn.terminal",
+        );
+      return {
+        runtime,
+        providerThread,
+        threadId,
+        sdkMessages,
+        offeredMessages,
+        continuationRequests,
+        events,
+        terminalEvents,
+        hasPendingBackgroundWork,
+      };
+    });
+  const makeWakeHarness = makeWakeHarnessWithOptions();
 
   const providerThreadRosterEvents = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
     events.filter(
@@ -2484,7 +2494,107 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("ignores a live task-notification origin result during a normal user turn", () =>
+  it.effect("terminalizes an agent server wake from a positive task-notification result", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const wakeText = "The background command completed.";
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-agent-server-wake"),
+            text: "Background task completed.",
+            attachments: [],
+            messageCreatedBy: "agent",
+            messageCreationSource: "server",
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-00000000010b",
+            text: wakeText,
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-00000000010c",
+            result: wakeText,
+            numTurns: 154,
+            origin: { kind: "task-notification" },
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "server wake terminal");
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-agent-server-next"),
+            text: "What finished?",
+            attachments: [],
+            providerTurnOrdinal: 2,
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-00000000010d",
+            result: "The background command finished.",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 2, "queued turn terminal");
+        assert.equal(harness.terminalEvents()[1]?.status, "completed");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("terminalizes a user mobile turn from a positive task-notification result", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const fallbackText = "The ordinary mobile turn completed.";
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-mobile-notif-origin"),
+            text: "Complete this task.",
+            attachments: [],
+            messageCreationSource: "mobile",
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-00000000010e",
+            result: fallbackText,
+            numTurns: 60,
+            origin: { kind: "task-notification" },
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "mobile turn terminal");
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        assert.isTrue(
+          harness.events.some(
+            (event) => event.type === "message.updated" && event.message.text === fallbackText,
+          ),
+        );
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("ignores a zero-turn task-notification origin result during a normal user turn", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeWakeHarness;
@@ -2624,6 +2734,350 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         );
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("terminalizes a zero-turn task-notification result in a provider continuation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-zero-continuation-1"),
+            text: "Run the build in the background.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+        yield* Queue.offer(harness.sdkMessages, wakeNotification);
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-00000000010f",
+            result: "Wake result with no model turns.",
+            numTurns: 0,
+            origin: { kind: "task-notification" },
+          }),
+        );
+        yield* awaitUntil(() => harness.continuationRequests.length === 1, "continuation request");
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-zero-continuation-2"),
+            text: "Background task completed.",
+            attachments: [],
+            providerTurnOrdinal: 2,
+            messageCreatedBy: "agent",
+            messageCreationSource: "provider",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
+        assert.equal(harness.terminalEvents()[1]?.status, "completed");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("keeps a pending steer across zero-turn task-notification debris", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const idAllocator = yield* IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const attemptId = RunAttemptId.make("attempt-claude-steer-zero-notif");
+        const providerTurnId = idAllocator.derive.providerTurn({
+          driver: CLAUDE_PROVIDER,
+          nativeTurnId: `turn:${attemptId}`,
+        });
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId,
+            text: "Run the long command, then report.",
+            attachments: [],
+          }),
+        );
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: RunId.make("run-claude-steer-zero-notif"),
+          providerThread: harness.providerThread,
+          providerTurnId,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-claude-steer-zero-notif"),
+            text: "Actually, report now.",
+            attachments: [],
+          },
+        });
+        yield* awaitUntil(() => harness.offeredMessages.length === 2, "steer offered");
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000110",
+            result: "",
+            numTurns: 0,
+            origin: { kind: "task-notification" },
+            terminalReason: "aborted_tools",
+          }),
+        );
+        let debrisYields = 0;
+        yield* awaitUntil(() => debrisYields++ >= 50, "zero-turn debris consumed");
+        assert.lengthOf(harness.terminalEvents(), 0);
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000111",
+            result: "",
+            terminalReason: "aborted_tools",
+          }),
+        );
+        let handoffYields = 0;
+        yield* awaitUntil(() => handoffYields++ >= 50, "genuine handoff consumed");
+        assert.lengthOf(harness.terminalEvents(), 0);
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000112",
+            result: "Reporting now.",
+            terminalReason: "completed",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "steered turn terminal");
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("classifies positive task-notification results while a steer is pending", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const idAllocator = yield* IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const attemptId = RunAttemptId.make("attempt-claude-steer-positive-notif");
+        const providerTurnId = idAllocator.derive.providerTurn({
+          driver: CLAUDE_PROVIDER,
+          nativeTurnId: `turn:${attemptId}`,
+        });
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId,
+            text: "Run the long command, then report.",
+            attachments: [],
+          }),
+        );
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: RunId.make("run-claude-steer-positive-notif"),
+          providerThread: harness.providerThread,
+          providerTurnId,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-claude-steer-positive-notif"),
+            text: "Actually, report now.",
+            attachments: [],
+          },
+        });
+        yield* awaitUntil(() => harness.offeredMessages.length === 2, "steer offered");
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000113",
+            result: "",
+            numTurns: 7,
+            origin: { kind: "task-notification" },
+            terminalReason: "aborted_tools",
+          }),
+        );
+        let handoffYields = 0;
+        yield* awaitUntil(() => handoffYields++ >= 50, "positive handoff consumed");
+        assert.lengthOf(harness.terminalEvents(), 0);
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000114",
+            result: "The steered task is complete.",
+            numTurns: 7,
+            origin: { kind: "task-notification" },
+            terminalReason: "completed",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "steered turn terminal");
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect(
+    "emits one interrupted terminal for a positive task-notification result racing interrupt",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const closeGate = yield* Deferred.make<void>();
+          const testScope = yield* Scope.Scope;
+          yield* Scope.addFinalizer(testScope, Deferred.succeed(closeGate, undefined));
+          const interruptStarted = yield* Deferred.make<void>();
+          const harness = yield* makeWakeHarnessWithOptions({
+            close: (sdkMessages) =>
+              Deferred.await(closeGate).pipe(Effect.andThen(Queue.shutdown(sdkMessages))),
+            interrupt: Deferred.succeed(interruptStarted, undefined),
+          });
+          const idAllocator = yield* IdAllocatorV2;
+          const now = yield* DateTime.now;
+          const attemptId = RunAttemptId.make("attempt-claude-interrupt-positive-notif");
+          const providerTurnId = idAllocator.derive.providerTurn({
+            driver: CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${attemptId}`,
+          });
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId,
+              text: "Stop this task.",
+              attachments: [],
+            }),
+          );
+          yield* harness.runtime
+            .interruptTurn({ providerThread: harness.providerThread, providerTurnId })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(interruptStarted);
+          yield* Queue.offer(
+            harness.sdkMessages,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000115",
+              result: "Late result after interrupt.",
+              numTurns: 7,
+              origin: { kind: "task-notification" },
+            }),
+          );
+          const terminalized = Exit.isSuccess(
+            yield* awaitUntil(
+              () => harness.terminalEvents().length === 1,
+              "interrupted terminal",
+            ).pipe(Effect.exit),
+          );
+          yield* Deferred.succeed(closeGate, undefined);
+          assert.isTrue(terminalized);
+          assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
+          assert.lengthOf(harness.terminalEvents(), 1);
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect("drops zero-turn task-notification debris racing interrupt", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const closeGate = yield* Deferred.make<void>();
+        const testScope = yield* Scope.Scope;
+        yield* Scope.addFinalizer(testScope, Deferred.succeed(closeGate, undefined));
+        const interruptStarted = yield* Deferred.make<void>();
+        const harness = yield* makeWakeHarnessWithOptions({
+          close: (sdkMessages) =>
+            Deferred.await(closeGate).pipe(Effect.andThen(Queue.shutdown(sdkMessages))),
+          interrupt: Deferred.succeed(interruptStarted, undefined),
+        });
+        const idAllocator = yield* IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const attemptId = RunAttemptId.make("attempt-claude-interrupt-zero-notif");
+        const providerTurnId = idAllocator.derive.providerTurn({
+          driver: CLAUDE_PROVIDER,
+          nativeTurnId: `turn:${attemptId}`,
+        });
+        const staleText = "Zero-turn debris must not leak.";
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId,
+            text: "Stop this task.",
+            attachments: [],
+          }),
+        );
+        yield* harness.runtime
+          .interruptTurn({ providerThread: harness.providerThread, providerTurnId })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(interruptStarted);
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000116",
+            result: staleText,
+            numTurns: 0,
+            origin: { kind: "task-notification" },
+          }),
+        );
+        let debrisYields = 0;
+        yield* awaitUntil(() => debrisYields++ >= 50, "zero-turn debris consumed");
+        yield* Deferred.succeed(closeGate, undefined);
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "interrupted terminal");
+        assert.lengthOf(harness.terminalEvents(), 1);
+        assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
+        assert.isFalse(
+          harness.events.some(
+            (event) => event.type === "message.updated" && event.message.text === staleText,
+          ),
+        );
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("fails a positive task-notification error result", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-positive-notif-error"),
+            text: "Run the task.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000117",
+            result: "The task failed.",
+            numTurns: 7,
+            origin: { kind: "task-notification" },
+            subtype: "error_during_execution",
+            isError: true,
+            errors: ["The task failed."],
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "failed terminal");
+        assert.equal(harness.terminalEvents()[0]?.status, "failed");
       }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
     ),
   );
