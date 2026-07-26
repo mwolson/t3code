@@ -6,6 +6,7 @@ import {
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import { formatPendingBackgroundWorkLabel } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -248,6 +249,111 @@ describe("buildThreadFeed", () => {
       },
     ]);
     expect(deriveThreadFeedPresentation(presented, null, new Set())).toEqual([]);
+  });
+
+  it("appends waiting background work when no active work remains", () => {
+    const pendingBackgroundTasks = [{ taskId: "background-1", description: "Run checks" }];
+    const presented = deriveThreadFeedPresentation(
+      [],
+      null,
+      new Set(),
+      new Set(),
+      null,
+      pendingBackgroundTasks,
+    );
+
+    expect(presented).toEqual([
+      {
+        type: "waiting-background",
+        id: "waiting-background-row",
+        createdAt: null,
+        label: formatPendingBackgroundWorkLabel(pendingBackgroundTasks),
+      },
+    ]);
+  });
+
+  it("labels a described task, an anonymous task, and a multi-task roster", () => {
+    const label = (tasks: ReadonlyArray<{ taskId: string; description?: string }>) =>
+      deriveThreadFeedPresentation([], null, new Set(), new Set(), null, tasks).find(
+        (entry) => entry.type === "waiting-background",
+      )?.label;
+
+    expect(label([{ taskId: "background-1", description: "Run checks" }])).toBe(
+      "Waiting on background task: Run checks",
+    );
+    expect(label([{ taskId: "background-1" }])).toBe("Waiting on a background task");
+    expect(
+      label([
+        { taskId: "background-1", description: "Run checks" },
+        { taskId: "background-2", description: "Run tests" },
+      ]),
+    ).toBe("Waiting on 2 background tasks: Run checks, …");
+  });
+
+  it("drops the waiting row once the roster drains", () => {
+    const presented = deriveThreadFeedPresentation([], null, new Set(), new Set(), null, [
+      { taskId: "background-1", description: "Run checks" },
+    ]);
+    expect(presented.map((entry) => entry.type)).toEqual(["waiting-background"]);
+
+    expect(deriveThreadFeedPresentation(presented, null, new Set(), new Set(), null, [])).toEqual(
+      [],
+    );
+  });
+
+  it("appends the waiting row after real conversation content", () => {
+    const feed = buildThreadFeed([projected(userMessage(), 0), projected(command(), 1)]);
+    const presented = deriveThreadFeedPresentation(
+      feed,
+      { runId, status: "completed", startedAt: null, completedAt: null },
+      new Set([runId]),
+      new Set(),
+      null,
+      [{ taskId: "background-1", description: "Run checks" }],
+    );
+
+    expect(presented.at(-1)?.type).toBe("waiting-background");
+    expect(presented.filter((entry) => entry.type === "waiting-background")).toHaveLength(1);
+  });
+
+  it("prefers active work over waiting background work", () => {
+    const presented = deriveThreadFeedPresentation(
+      [],
+      null,
+      new Set(),
+      new Set(),
+      "2026-04-01T00:00:01.000Z",
+      [{ taskId: "background-1", description: "Run checks" }],
+    );
+
+    expect(presented.map((entry) => entry.type)).toEqual(["working"]);
+  });
+
+  it("does not append waiting background work for an empty roster", () => {
+    expect(deriveThreadFeedPresentation([], null, new Set())).toEqual([]);
+  });
+
+  it("keeps waiting background work idempotent under re-derivation", () => {
+    const pendingBackgroundTasks = [{ taskId: "background-1", description: "Run checks" }];
+    const presented = deriveThreadFeedPresentation(
+      [],
+      null,
+      new Set(),
+      new Set(),
+      null,
+      pendingBackgroundTasks,
+    );
+
+    expect(
+      deriveThreadFeedPresentation(
+        presented,
+        null,
+        new Set(),
+        new Set(),
+        null,
+        pendingBackgroundTasks,
+      ),
+    ).toEqual(presented);
   });
 
   it("models work-log overflow as list rows", () => {

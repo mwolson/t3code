@@ -17,6 +17,7 @@ import {
 } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import { deriveActiveWorkStartedAt } from "@t3tools/shared/orchestrationTiming";
+import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
 import {
@@ -42,6 +43,7 @@ import {
 } from "./use-composer-drafts";
 import { setPendingConnectionError } from "../state/use-remote-environment-registry";
 import {
+  useSelectedThreadDetailState,
   useSelectedThreadProjection,
   useSelectedThreadVisibleTurnItems,
 } from "../state/use-thread-detail";
@@ -83,6 +85,7 @@ export function useThreadDraftForThread(input: {
 export function useThreadComposerState() {
   const { selectedThread: selectedThreadShell } = useThreadSelection();
   const selectedThreadProjection = useSelectedThreadProjection();
+  const selectedThreadDetailStatus = useSelectedThreadDetailState().status;
   const selectedThreadVisibleTurnItems = useSelectedThreadVisibleTurnItems();
   const composerDrafts = useAtomValue(composerDraftsAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
@@ -143,6 +146,29 @@ export function useThreadComposerState() {
     }
     return deriveActiveWorkStartedAt(selectedThreadLatestRun, selectedThreadSessionActivity, null);
   }, [selectedThreadLatestRun, selectedThreadSessionActivity, selectedThreadShell]);
+
+  // Only a live projection may claim background work. A cached one is replayed
+  // from disk and can outlive the task it describes, which web cannot hit.
+  const pendingBackgroundTasks = useMemo(() => {
+    const projection = selectedThreadProjection?.projection;
+    if (!projection || selectedThreadDetailStatus !== "live") {
+      return [];
+    }
+    const latestRun =
+      projection.runs.length === 0
+        ? null
+        : projection.runs.reduce((latest, candidate) =>
+            candidate.ordinal > latest.ordinal ? candidate : latest,
+          );
+    return [
+      ...derivePendingBackgroundWork({
+        latestRun,
+        providerThreads: projection.providerThreads,
+        turnItems: projection.turnItems,
+        activeProviderThreadId: projection.thread.activeProviderThreadId,
+      }),
+    ];
+  }, [selectedThreadDetailStatus, selectedThreadProjection?.projection]);
 
   const activeThreadBusy = threadRuntimeIsActive(selectedThreadRuntime);
 
@@ -307,6 +333,7 @@ export function useThreadComposerState() {
     selectedThreadFeed,
     selectedThreadQueueCount,
     activeWorkStartedAt,
+    pendingBackgroundTasks,
     draftMessage,
     draftAttachments,
     modelSelection,

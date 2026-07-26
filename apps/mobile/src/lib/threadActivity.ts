@@ -8,6 +8,10 @@ import {
   type T3McpToolLogo,
   type T3McpToolPresentation,
 } from "@t3tools/shared/t3McpToolPresentation";
+import {
+  formatPendingBackgroundWorkLabel,
+  type PendingBackgroundWorkTask,
+} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import type {
   ChatAttachment,
   MessageId,
@@ -101,6 +105,12 @@ export type ThreadFeedEntry =
       readonly createdAt: string;
     }
   | {
+      readonly type: "waiting-background";
+      readonly id: string;
+      readonly createdAt: null;
+      readonly label: string;
+    }
+  | {
       readonly type: "activity-group";
       readonly id: string;
       readonly createdAt: string;
@@ -125,6 +135,11 @@ export type ThreadFeedEntry =
       readonly label: string;
       readonly expanded: boolean;
     };
+
+type SourceThreadFeedEntry = Exclude<
+  ThreadFeedEntry,
+  { readonly type: "run-fold" | "work-toggle" | "working" | "waiting-background" }
+>;
 
 export interface ThreadFeedLatestRun {
   readonly runId: RunId;
@@ -427,7 +442,7 @@ interface ThreadFeedRunFold {
 }
 
 function deriveThreadFeedRunFolds(
-  feed: ReadonlyArray<ThreadFeedEntry>,
+  feed: ReadonlyArray<SourceThreadFeedEntry>,
   latestRun: ThreadFeedLatestRun | null,
 ): ReadonlyMap<string, ThreadFeedRunFold> {
   const terminalAssistantMessageIdByRun = new Map<RunId, string>();
@@ -439,7 +454,7 @@ function deriveThreadFeedRunFolds(
 
   const groupsByRunId = new Map<
     RunId,
-    { entries: ThreadFeedEntry[]; startBoundary: string | null }
+    { entries: SourceThreadFeedEntry[]; startBoundary: string | null }
   >();
   let pendingUserBoundary: string | null = null;
   for (const entry of feed) {
@@ -529,10 +544,14 @@ export function deriveThreadFeedPresentation(
   expandedRunIds: ReadonlySet<RunId>,
   expandedWorkGroupIds: ReadonlySet<string> = new Set(),
   activeWorkStartedAt: string | null = null,
+  pendingBackgroundTasks: ReadonlyArray<PendingBackgroundWorkTask> = [],
 ): ThreadFeedEntry[] {
   const sourceFeed = feed.filter(
-    (entry) =>
-      entry.type !== "run-fold" && entry.type !== "work-toggle" && entry.type !== "working",
+    (entry): entry is SourceThreadFeedEntry =>
+      entry.type !== "run-fold" &&
+      entry.type !== "work-toggle" &&
+      entry.type !== "working" &&
+      entry.type !== "waiting-background",
   );
   const foldsByAnchorId = deriveThreadFeedRunFolds(sourceFeed, latestRun);
   const collapsedEntryIds = new Set<string>();
@@ -564,13 +583,21 @@ export function deriveThreadFeedPresentation(
       id: "working-indicator-row",
       createdAt: activeWorkStartedAt,
     });
+  } else if (pendingBackgroundTasks.length > 0) {
+    result.push({
+      type: "waiting-background",
+      id: "waiting-background-row",
+      createdAt: null,
+      label:
+        formatPendingBackgroundWorkLabel(pendingBackgroundTasks) ?? "Waiting on a background task",
+    });
   }
   return result;
 }
 
 function appendPresentedFeedEntry(
   result: ThreadFeedEntry[],
-  entry: Exclude<ThreadFeedEntry, { readonly type: "run-fold" | "work-toggle" | "working" }>,
+  entry: SourceThreadFeedEntry,
   expandedWorkGroupIds: ReadonlySet<string>,
 ): void {
   if (entry.type !== "activity-group") {
