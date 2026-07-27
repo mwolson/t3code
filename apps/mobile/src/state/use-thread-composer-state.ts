@@ -16,7 +16,6 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
-import { deriveActiveWorkStartedAt } from "@t3tools/shared/orchestrationTiming";
 
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
 import {
@@ -26,7 +25,11 @@ import {
 } from "../lib/composerImages";
 import type { DraftComposerImageAttachment } from "../lib/composerImages";
 import { scopedThreadKey } from "../lib/scopedEntities";
-import { buildThreadFeed } from "../lib/threadActivity";
+import {
+  buildThreadFeed,
+  deriveThreadPendingBackgroundWork,
+  deriveThreadWorkingStartedAt,
+} from "../lib/threadActivity";
 import { appAtomRegistry } from "../state/atom-registry";
 import {
   appendComposerDraftAttachments,
@@ -43,6 +46,7 @@ import {
 } from "./use-composer-drafts";
 import { setPendingConnectionError } from "../state/use-remote-environment-registry";
 import {
+  useSelectedThreadDetailState,
   useSelectedThreadProjection,
   useSelectedThreadVisibleTurnItems,
 } from "../state/use-thread-detail";
@@ -84,6 +88,7 @@ export function useThreadDraftForThread(input: {
 export function useThreadComposerState() {
   const { selectedThread: selectedThreadShell } = useThreadSelection();
   const selectedThreadProjection = useSelectedThreadProjection();
+  const selectedThreadDetailStatus = useSelectedThreadDetailState().status;
   const selectedThreadVisibleTurnItems = useSelectedThreadVisibleTurnItems();
   const composerDrafts = useAtomValue(composerDraftsAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
@@ -127,27 +132,22 @@ export function useThreadComposerState() {
     [selectedThreadProjection, selectedThreadShell?.latestRun],
   );
 
-  const selectedThreadSessionActivity = useMemo(() => {
-    if (!selectedThreadRuntime) {
-      return null;
-    }
-
-    return {
-      orchestrationStatus: selectedThreadRuntime.status,
-      activeRunId: selectedThreadRuntime.activeRunId ?? undefined,
-    };
-  }, [selectedThreadRuntime]);
-
   const activeWorkStartedAt = useMemo(() => {
     if (!selectedThreadShell) {
       return null;
     }
-    return deriveActiveWorkStartedAt(
-      selectedThreadActivityRun,
-      selectedThreadSessionActivity,
-      null,
-    );
-  }, [selectedThreadActivityRun, selectedThreadSessionActivity, selectedThreadShell]);
+    return deriveThreadWorkingStartedAt(selectedThreadActivityRun, selectedThreadRuntime, null);
+  }, [selectedThreadActivityRun, selectedThreadRuntime, selectedThreadShell]);
+
+  const pendingBackgroundTasks = useMemo(
+    () => [
+      ...deriveThreadPendingBackgroundWork(
+        selectedThreadProjection?.projection,
+        selectedThreadDetailStatus,
+      ),
+    ],
+    [selectedThreadDetailStatus, selectedThreadProjection?.projection],
+  );
 
   const activeThreadBusy = threadRuntimeIsActive(selectedThreadRuntime);
   const interruptibleRunId = selectedThreadRuntime?.activeRunId ?? null;
@@ -323,6 +323,7 @@ export function useThreadComposerState() {
     selectedThreadActivityRun,
     selectedThreadQueueCount,
     activeWorkStartedAt,
+    pendingBackgroundTasks,
     draftMessage,
     draftAttachments,
     modelSelection,

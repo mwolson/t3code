@@ -1,17 +1,24 @@
 import {
   MessageId,
+  ProviderInstanceId,
   RunId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2RunStatus,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import { formatPendingBackgroundWorkLabel } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
+
+import type { ThreadRuntimeSummary } from "@t3tools/client-runtime/state/models";
 
 import {
   buildThreadFeed,
   deriveThreadFeedPresentation,
+  deriveThreadPendingBackgroundWork,
+  deriveThreadWorkingStartedAt,
   threadFeedRunIsUnsettled,
   type ThreadFeedActivity,
   type ThreadFeedEntry,
@@ -293,6 +300,111 @@ describe("buildThreadFeed", () => {
     expect(deriveThreadFeedPresentation(presented, null, new Set())).toEqual([]);
   });
 
+  it("appends waiting background work when no active work remains", () => {
+    const pendingBackgroundTasks = [{ taskId: "background-1", description: "Run checks" }];
+    const presented = deriveThreadFeedPresentation(
+      [],
+      null,
+      new Set(),
+      new Set(),
+      null,
+      pendingBackgroundTasks,
+    );
+
+    expect(presented).toEqual([
+      {
+        type: "waiting-background",
+        id: "waiting-background-row",
+        createdAt: null,
+        label: formatPendingBackgroundWorkLabel(pendingBackgroundTasks),
+      },
+    ]);
+  });
+
+  it("labels a described task, an anonymous task, and a multi-task roster", () => {
+    const label = (tasks: ReadonlyArray<{ taskId: string; description?: string }>) =>
+      deriveThreadFeedPresentation([], null, new Set(), new Set(), null, tasks).find(
+        (entry) => entry.type === "waiting-background",
+      )?.label;
+
+    expect(label([{ taskId: "background-1", description: "Run checks" }])).toBe(
+      "Waiting on background task: Run checks",
+    );
+    expect(label([{ taskId: "background-1" }])).toBe("Waiting on a background task");
+    expect(
+      label([
+        { taskId: "background-1", description: "Run checks" },
+        { taskId: "background-2", description: "Run tests" },
+      ]),
+    ).toBe("Waiting on 2 background tasks: Run checks, …");
+  });
+
+  it("drops the waiting row once the roster drains", () => {
+    const presented = deriveThreadFeedPresentation([], null, new Set(), new Set(), null, [
+      { taskId: "background-1", description: "Run checks" },
+    ]);
+    expect(presented.map((entry) => entry.type)).toEqual(["waiting-background"]);
+
+    expect(deriveThreadFeedPresentation(presented, null, new Set(), new Set(), null, [])).toEqual(
+      [],
+    );
+  });
+
+  it("appends the waiting row after real conversation content", () => {
+    const feed = buildThreadFeed([projected(userMessage(), 0), projected(command(), 1)]);
+    const presented = deriveThreadFeedPresentation(
+      feed,
+      { runId, status: "completed", startedAt: null, completedAt: null },
+      new Set([runId]),
+      new Set(),
+      null,
+      [{ taskId: "background-1", description: "Run checks" }],
+    );
+
+    expect(presented.at(-1)?.type).toBe("waiting-background");
+    expect(presented.filter((entry) => entry.type === "waiting-background")).toHaveLength(1);
+  });
+
+  it("prefers active work over waiting background work", () => {
+    const presented = deriveThreadFeedPresentation(
+      [],
+      null,
+      new Set(),
+      new Set(),
+      "2026-04-01T00:00:01.000Z",
+      [{ taskId: "background-1", description: "Run checks" }],
+    );
+
+    expect(presented.map((entry) => entry.type)).toEqual(["working"]);
+  });
+
+  it("does not append waiting background work for an empty roster", () => {
+    expect(deriveThreadFeedPresentation([], null, new Set())).toEqual([]);
+  });
+
+  it("keeps waiting background work idempotent under re-derivation", () => {
+    const pendingBackgroundTasks = [{ taskId: "background-1", description: "Run checks" }];
+    const presented = deriveThreadFeedPresentation(
+      [],
+      null,
+      new Set(),
+      new Set(),
+      null,
+      pendingBackgroundTasks,
+    );
+
+    expect(
+      deriveThreadFeedPresentation(
+        presented,
+        null,
+        new Set(),
+        new Set(),
+        null,
+        pendingBackgroundTasks,
+      ),
+    ).toEqual(presented);
+  });
+
   it("models work-log overflow as list rows", () => {
     const activity = (
       id: string,
@@ -366,5 +478,123 @@ describe("buildThreadFeed", () => {
     expect(activity?.summary).toBe("Read a T3 thread");
     expect(activity?.logo).toBe("t3-code");
     expect(activity?.getCopyText().split("\n")[0]).toBe("Read a T3 thread");
+  });
+});
+
+describe("deriveThreadPendingBackgroundWork", () => {
+  const backgroundRunId = RunId.make("run-background");
+  const rolledBackRunId = RunId.make("run-rolled-back");
+
+  function subagentItem(id: string, itemRunId: RunId) {
+    return {
+      id: TurnItemId.make(id),
+      type: "subagent" as const,
+      status: "running" as const,
+      title: "Investigate the failure",
+      runId: itemRunId,
+    };
+  }
+
+  function projection(options: {
+    readonly runs: ReadonlyArray<{
+      readonly id: RunId;
+      readonly ordinal: number;
+      readonly status: OrchestrationV2RunStatus;
+    }>;
+    readonly turnItems: ReadonlyArray<ReturnType<typeof subagentItem>>;
+  }) {
+    return {
+      providerThreads: [],
+      runs: options.runs,
+      turnItems: options.turnItems,
+      thread: { activeProviderThreadId: null },
+    };
+  }
+
+  it("surfaces a nonterminal background item once its run has settled", () => {
+    const tasks = deriveThreadPendingBackgroundWork(
+      projection({
+        runs: [{ id: backgroundRunId, ordinal: 1, status: "completed" }],
+        turnItems: [subagentItem("item-background", backgroundRunId)],
+      }),
+      "live",
+    );
+
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({ taskId: "item-background", taskType: "subagent" });
+  });
+
+  it("abandons background items owned by a rolled back run", () => {
+    const tasks = deriveThreadPendingBackgroundWork(
+      projection({
+        runs: [
+          { id: rolledBackRunId, ordinal: 1, status: "rolled_back" },
+          { id: backgroundRunId, ordinal: 2, status: "completed" },
+        ],
+        turnItems: [subagentItem("item-rolled-back", rolledBackRunId)],
+      }),
+      "live",
+    );
+
+    expect(tasks).toEqual([]);
+  });
+
+  it("stays quiet while the latest run is still active", () => {
+    const tasks = deriveThreadPendingBackgroundWork(
+      projection({
+        runs: [{ id: backgroundRunId, ordinal: 1, status: "running" }],
+        turnItems: [subagentItem("item-background", backgroundRunId)],
+      }),
+      "live",
+    );
+
+    expect(tasks).toEqual([]);
+  });
+
+  it("refuses to claim background work from a cached projection", () => {
+    const cached = projection({
+      runs: [{ id: backgroundRunId, ordinal: 1, status: "completed" }],
+      turnItems: [subagentItem("item-background", backgroundRunId)],
+    });
+
+    expect(deriveThreadPendingBackgroundWork(cached, "cached")).toEqual([]);
+    expect(deriveThreadPendingBackgroundWork(undefined, "live")).toEqual([]);
+  });
+});
+
+describe("deriveThreadWorkingStartedAt", () => {
+  const startedAt = "2026-04-01T00:00:01.000Z";
+  const waitingRun = { runId: String(runId), startedAt, completedAt: null };
+
+  function runtime(status: ThreadRuntimeSummary["status"]): ThreadRuntimeSummary {
+    return {
+      status,
+      activeRunId: null,
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      providerName: null,
+      lastError: null,
+      updatedAt: startedAt,
+    };
+  }
+
+  it("reports working while a turn is actually running", () => {
+    expect(deriveThreadWorkingStartedAt(waitingRun, runtime("running"), null)).toBe(startedAt);
+  });
+
+  // The regression this pins: a successful run persists as `waiting` with a
+  // null completedAt until checkpoint capture lands, so the raw timing helper
+  // keeps reporting a start time. The roster parks the runtime at idle, and
+  // without honouring that park the feed shows Working for the whole capture
+  // window, hiding Waiting exactly when it should first appear.
+  it("stays quiet once the roster has parked the runtime at idle", () => {
+    expect(deriveThreadWorkingStartedAt(waitingRun, runtime("idle"), null)).toBeNull();
+  });
+
+  it("still reports working for a waiting run with no roster behind it", () => {
+    expect(deriveThreadWorkingStartedAt(waitingRun, runtime("waiting"), null)).toBe(startedAt);
+  });
+
+  it("has no working row without a runtime", () => {
+    expect(deriveThreadWorkingStartedAt(waitingRun, null, null)).toBeNull();
   });
 });

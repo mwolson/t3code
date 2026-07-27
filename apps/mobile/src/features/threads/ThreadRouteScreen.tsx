@@ -751,6 +751,7 @@ function ThreadRouteContent(
           selectedThreadFeed={composer.selectedThreadFeed}
           activityRun={composer.selectedThreadActivityRun}
           activeWorkStartedAt={composer.activeWorkStartedAt}
+          pendingBackgroundTasks={composer.pendingBackgroundTasks}
           activePendingApproval={requests.activePendingApproval}
           respondingApprovalId={requests.respondingApprovalId}
           activePendingUserInput={requests.activePendingUserInput}
