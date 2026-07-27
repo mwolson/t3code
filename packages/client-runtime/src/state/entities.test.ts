@@ -303,7 +303,7 @@ describe("V2 client presentation", () => {
       }),
     ).toMatchObject({
       status: "idle",
-      activeRunId: runId,
+      activeRunId: null,
     });
     expect(
       deriveThreadRuntime({
