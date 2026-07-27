@@ -535,7 +535,9 @@ describe("deriveThreadWorkingStartedAt", () => {
   }
 
   it("reports working while a turn is actually running", () => {
-    expect(deriveThreadWorkingStartedAt(waitingRun, runtime("running"), null)).toBe(startedAt);
+    expect(
+      deriveThreadWorkingStartedAt(waitingRun, runtime("running"), runtime("idle"), "live", null),
+    ).toBe(startedAt);
   });
 
   // The regression this pins: a successful run persists as `waiting` with a
@@ -544,14 +546,33 @@ describe("deriveThreadWorkingStartedAt", () => {
   // without honouring that park the feed shows Working for the whole capture
   // window, hiding Waiting exactly when it should first appear.
   it("stays quiet once the roster has parked the runtime at idle", () => {
-    expect(deriveThreadWorkingStartedAt(waitingRun, runtime("idle"), null)).toBeNull();
+    expect(
+      deriveThreadWorkingStartedAt(waitingRun, runtime("idle"), runtime("waiting"), "live", null),
+    ).toBeNull();
   });
 
   it("still reports working for a waiting run with no roster behind it", () => {
-    expect(deriveThreadWorkingStartedAt(waitingRun, runtime("waiting"), null)).toBe(startedAt);
+    expect(
+      deriveThreadWorkingStartedAt(waitingRun, runtime("waiting"), runtime("idle"), "live", null),
+    ).toBe(startedAt);
+  });
+
+  it("uses active shell work while the parked detail projection is stale", () => {
+    expect(
+      deriveThreadWorkingStartedAt(waitingRun, runtime("idle"), runtime("running"), "cached", null),
+    ).toBe(startedAt);
+    expect(
+      deriveThreadWorkingStartedAt(
+        waitingRun,
+        runtime("idle"),
+        runtime("running"),
+        "synchronizing",
+        null,
+      ),
+    ).toBe(startedAt);
   });
 
   it("has no working row without a runtime", () => {
-    expect(deriveThreadWorkingStartedAt(waitingRun, null, null)).toBeNull();
+    expect(deriveThreadWorkingStartedAt(waitingRun, null, null, "live", null)).toBeNull();
   });
 });
