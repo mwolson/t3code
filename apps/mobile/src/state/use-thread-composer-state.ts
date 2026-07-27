@@ -136,8 +136,19 @@ export function useThreadComposerState() {
     if (!selectedThreadShell) {
       return null;
     }
-    return deriveThreadWorkingStartedAt(selectedThreadActivityRun, selectedThreadRuntime, null);
-  }, [selectedThreadActivityRun, selectedThreadRuntime, selectedThreadShell]);
+    return deriveThreadWorkingStartedAt(
+      selectedThreadActivityRun,
+      selectedThreadRuntime,
+      selectedThreadShell.runtime,
+      selectedThreadDetailStatus,
+      null,
+    );
+  }, [
+    selectedThreadDetailStatus,
+    selectedThreadActivityRun,
+    selectedThreadRuntime,
+    selectedThreadShell,
+  ]);
 
   const pendingBackgroundTasks = useMemo(
     () => [
