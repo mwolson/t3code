@@ -192,57 +192,114 @@ it.effect("uses the same reconciliation path to cancel runtime requests during s
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("preserves a waiting run while its replay-safe checkpoint capture is unsettled", () => {
-  const threadId = ThreadId.make("thread_waiting_checkpoint");
-  const runId = RunId.make("run_waiting_checkpoint");
-  const committed = vi.fn(() => Effect.succeed({ committed: true } as never));
-  const projection = {
-    thread: { id: threadId },
-    runtimeRequests: [],
-    providerSessions: [],
-    providerThreads: [],
-    runs: [{ id: runId, status: "waiting" }],
-  } as unknown as OrchestrationV2ThreadProjection;
-  const layer = ProviderRuntimeRecovery.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        Layer.mock(ProjectionStore.ProjectionStoreV2)({
-          getShellSnapshot: () =>
-            Effect.succeed({
-              schemaVersion: 2,
-              snapshotSequence: 0,
-              threads: [{ id: threadId }],
-              archivedThreads: [],
-            } as never),
-          getThreadProjection: () => Effect.succeed(projection),
-        }),
-        Layer.mock(EventSink.EventSinkV2)({ commitCommand: committed }),
-        IdAllocator.layer,
-        Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({ runOnce: Effect.succeed(false) }),
-        Layer.mock(EffectOutbox.EffectOutboxV2)({
-          listByCommandId: () =>
-            Effect.succeed([
-              {
-                request: { type: "checkpoint.capture", runId },
-                status: "running",
-              },
-            ] as never),
-          cancelUnsettled: () => Effect.succeed([]),
-          signalCancellations: () => Effect.void,
-          reconcileAfterProcessLoss: Effect.succeed({ requeued: 1, cancelled: 0 }),
-        }),
+it.effect(
+  "preserves a replayable waiting run while cancelling its process-bound background work",
+  () => {
+    const threadId = ThreadId.make("thread_waiting_checkpoint");
+    const runId = RunId.make("run_waiting_checkpoint");
+    const providerThreadId = ProviderThreadId.make("provider_thread_waiting_checkpoint");
+    const providerInstanceId = ProviderInstanceId.make("claude");
+    const backgroundItemId = TurnItemId.make("turn_item_waiting_checkpoint");
+    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+      null;
+    const projection = {
+      thread: { id: threadId },
+      runtimeRequests: [],
+      providerSessions: [],
+      providerThreads: [
+        {
+          id: providerThreadId,
+          driver: ProviderDriverKind.make("claude"),
+          providerInstanceId,
+          status: "idle",
+          pendingBackgroundTasks: [
+            { taskId: String(backgroundItemId), description: "Finish background task" },
+          ],
+        },
+      ],
+      runs: [{ id: runId, status: "waiting", providerInstanceId }],
+      attempts: [],
+      nodes: [],
+      subagents: [],
+      messages: [],
+      turnItems: [
+        {
+          id: backgroundItemId,
+          runId,
+          nodeId: null,
+          providerThreadId,
+          type: "command_execution",
+          status: "running",
+        },
+      ],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const layer = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getShellSnapshot: () =>
+              Effect.succeed({
+                schemaVersion: 2,
+                snapshotSequence: 0,
+                threads: [{ id: threadId }],
+                archivedThreads: [],
+              } as never),
+            getThreadProjection: () => Effect.succeed(projection),
+          }),
+          Layer.mock(EventSink.EventSinkV2)({
+            commitCommand: (input) => {
+              committedInput = input;
+              return Effect.succeed({
+                committed: true,
+                cancelledEffectCount: 0,
+              } as never);
+            },
+          }),
+          IdAllocator.layer,
+          Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({ runOnce: Effect.succeed(false) }),
+          Layer.mock(EffectOutbox.EffectOutboxV2)({
+            listByCommandId: () =>
+              Effect.succeed([
+                {
+                  request: { type: "checkpoint.capture", runId },
+                  status: "running",
+                },
+              ] as never),
+            reconcileAfterProcessLoss: Effect.succeed({ requeued: 1, cancelled: 0 }),
+          }),
+        ),
       ),
-    ),
-  );
+    );
 
-  return Effect.gen(function* () {
-    const summary =
-      yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile("startup");
-    assert.equal(summary.terminalizedRuns, 0);
-    assert.equal(summary.requeuedEffects, 1);
-    assert.equal(committed.mock.calls.length, 0);
-  }).pipe(Effect.provide(layer));
-});
+    return Effect.gen(function* () {
+      const summary =
+        yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile("startup");
+      assert.equal(summary.terminalizedRuns, 0);
+      assert.equal(summary.requeuedEffects, 1);
+
+      const command = committedInput;
+      assert.isNotNull(command);
+      if (command === null) return;
+      assert.isFalse(command.events.some((event) => event.type === "run.updated"));
+      assert.isTrue(
+        command.events.some(
+          (event) =>
+            event.type === "turn-item.updated" &&
+            event.payload.id === backgroundItemId &&
+            event.payload.status === "cancelled",
+        ),
+      );
+      assert.isTrue(
+        command.events.some(
+          (event) =>
+            event.type === "provider-thread.updated" &&
+            event.payload.id === providerThreadId &&
+            event.payload.pendingBackgroundTasks?.length === 0,
+        ),
+      );
+    }).pipe(Effect.provide(layer));
+  },
+);
 
 it.effect("cancels a stale waiting run when no checkpoint capture can finish it", () => {
   const threadId = ThreadId.make("thread_stale_waiting");
