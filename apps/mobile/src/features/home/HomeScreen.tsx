@@ -848,9 +848,13 @@ export function HomeScreen(props: HomeScreenProps) {
   // The signal must ignore the search/environment filters: an active query
   // that matches nothing needs the in-list "No results" state, not the
   // full-page "No threads yet". Settled threads are unarchived live shells,
-  // so the v1 check already covers v2.
+  // so the v1 check already covers v2. Subagent children are excluded to match
+  // buildThreadListV2Items: counting them here shows the in-list "No results"
+  // state to a user whose only threads are delegated children.
   const hasAnyThreads =
-    props.threads.some((thread) => thread.archivedAt === null) || props.pendingTasks.length > 0;
+    props.threads.some(
+      (thread) => thread.archivedAt === null && thread.lineage.relationshipToParent !== "subagent",
+    ) || props.pendingTasks.length > 0;
   const hasResults = projectGroups.length > 0;
   const selectedEnvironmentLabel =
     props.selectedEnvironmentId === null
