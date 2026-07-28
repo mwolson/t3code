@@ -1389,7 +1389,6 @@ function ThreadFeedPlaceholder(props: {
   readonly bottomInset: number;
   readonly detail: string;
   readonly horizontalPadding: number;
-  readonly loading?: boolean;
   readonly title: string;
   readonly topInset: number;
 }) {
@@ -1406,7 +1405,6 @@ function ThreadFeedPlaceholder(props: {
       }}
     >
       <View className="max-w-[320px] items-center gap-2">
-        {props.loading ? <ActivityIndicator size="small" /> : null}
         <Text className="text-center font-t3-bold text-lg text-foreground">{props.title}</Text>
         <Text className="text-center text-sm leading-normal text-foreground-secondary">
           {props.detail}
@@ -1996,18 +1994,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
               topInset={topContentInset}
               bottomInset={bottomContentInset}
               horizontalPadding={horizontalPadding}
-            />
-          </View>
-        ) : null}
-        {props.contentPresentation.kind === "loading" ? (
-          <View pointerEvents="none" className="bg-screen" style={StyleSheet.absoluteFill}>
-            <ThreadFeedPlaceholder
-              title="Loading messages"
-              detail="Catching up this thread before showing the conversation."
-              topInset={topContentInset}
-              bottomInset={bottomContentInset}
-              horizontalPadding={horizontalPadding}
-              loading
             />
           </View>
         ) : null}
