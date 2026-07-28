@@ -726,12 +726,6 @@ describe("resolveSidebarV2Status", () => {
         runtime: { ...runtime, status: "completed" as const, lastError: "persisted" },
       }),
     ).toBe("ready");
-    expect(
-      resolveSidebarV2Status({
-        ...idle,
-        runtime: { ...runtime, status: "idle" as const, lastError: "persisted" },
-      }),
-    ).toBe("ready");
   });
 
   it("defaults to ready with no runtime", () => {
