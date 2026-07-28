@@ -1,8 +1,11 @@
+import type { SessionPendingInfo, ShellInfoV2 } from "@opencode-ai/sdk-next/v2";
 import { assert, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
 import { describe } from "vite-plus/test";
 
 import {
   openCode2AutoPermissionReply,
+  openCode2PendingWorkForSession,
   openCode2QuestionId,
   unwrapOpenCode2Data,
 } from "./OpenCode2AdapterV2.ts";
@@ -106,4 +109,61 @@ describe("openCode2AutoPermissionReply", () => {
       null,
     );
   });
+});
+
+describe("openCode2PendingWorkForSession", () => {
+  const sessionID = "ses_target";
+  const pending = (owner: string): SessionPendingInfo => ({
+    admittedSeq: 1,
+    id: "pending-1",
+    sessionID: owner,
+    timeCreated: 1,
+    type: "compaction",
+  });
+  const shell = (owner: string, status: ShellInfoV2["status"]): ShellInfoV2 => ({
+    id: "shell-1",
+    status,
+    command: "sleep 20",
+    cwd: "/workspace",
+    shell: "/bin/bash",
+    file: "/workspace/shell.out",
+    metadata: { sessionID: owner },
+    time: { started: 1 },
+  });
+
+  it.effect("pins the thread for its durable pending input without listing shells", () =>
+    Effect.gen(function* () {
+      let listedShells = false;
+      const result = yield* openCode2PendingWorkForSession({
+        sessionID,
+        pending: Effect.succeed([pending(sessionID)]),
+        shells: Effect.sync(() => {
+          listedShells = true;
+          return [];
+        }),
+      });
+
+      assert.isTrue(result);
+      assert.isFalse(listedShells);
+    }),
+  );
+
+  it.effect("pins only running shells owned by the same native session", () =>
+    Effect.gen(function* () {
+      assert.isTrue(
+        yield* openCode2PendingWorkForSession({
+          sessionID,
+          pending: Effect.succeed([]),
+          shells: Effect.succeed([shell(sessionID, "running")]),
+        }),
+      );
+      assert.isFalse(
+        yield* openCode2PendingWorkForSession({
+          sessionID,
+          pending: Effect.succeed([pending("ses_sibling")]),
+          shells: Effect.succeed([shell("ses_sibling", "running"), shell(sessionID, "exited")]),
+        }),
+      );
+    }),
+  );
 });

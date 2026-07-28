@@ -27,6 +27,8 @@ import type {
   QuestionV2Info,
   SessionInfoV2,
   SessionMessageInfo,
+  SessionPendingInfo,
+  ShellInfoV2,
   V2Event,
 } from "@opencode-ai/sdk-next/v2";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
@@ -280,6 +282,7 @@ interface ActiveOpenCode2Turn {
 
 interface OpenCode2ThreadState {
   readonly nativeSessionId: string;
+  location: SessionInfoV2["location"];
   providerThread: OrchestrationV2ProviderThread;
   appThread: OrchestrationV2AppThread | null;
   activeTurn: ActiveOpenCode2Turn | null;
@@ -312,6 +315,21 @@ export interface OpenCode2AdapterV2Options {
   readonly serverConfig: ServerConfig["Service"];
   readonly nativeEventLogger?: EventNdjsonLogger;
 }
+
+export const openCode2PendingWorkForSession = Effect.fnUntraced(function* (input: {
+  readonly sessionID: string;
+  readonly pending: Effect.Effect<ReadonlyArray<SessionPendingInfo>, OpenCode2RuntimeError>;
+  readonly shells: Effect.Effect<ReadonlyArray<ShellInfoV2>, OpenCode2RuntimeError>;
+}) {
+  const pending = yield* input.pending;
+  if (pending.some((item) => item.sessionID === input.sessionID)) {
+    return true;
+  }
+  const shells = yield* input.shells;
+  return shells.some(
+    (shell) => shell.status === "running" && shell.metadata.sessionID === input.sessionID,
+  );
+});
 
 export interface OpenCode2ProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";
@@ -618,6 +636,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         };
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         const threads = new Map<string, OpenCode2ThreadState>();
+        const shellSessionIds = new Map<string, string>();
         const pendingRequests = new Map<string, PendingOpenCode2Request>();
         const pendingRequestsByNativeId = new Map<string, PendingOpenCode2Request>();
         const abortController = new AbortController();
@@ -1372,6 +1391,30 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             payload: event,
           });
           switch (event.type) {
+            case "session.input.promoted": {
+              const state = threads.get(event.data.sessionID);
+              if (state !== undefined && state.activeTurn === null) {
+                yield* updateProviderThread(state, {});
+              }
+              return;
+            }
+            case "shell.created": {
+              const sessionID = recordString(event.data.info.metadata, "sessionID");
+              if (sessionID === undefined) return;
+              shellSessionIds.set(event.data.info.id, sessionID);
+              const state = threads.get(sessionID);
+              if (state !== undefined) yield* updateProviderThread(state, {});
+              return;
+            }
+            case "shell.exited":
+            case "shell.deleted": {
+              const sessionID = shellSessionIds.get(event.data.id);
+              if (sessionID === undefined) return;
+              if (event.type === "shell.deleted") shellSessionIds.delete(event.data.id);
+              const state = threads.get(sessionID);
+              if (state !== undefined) yield* updateProviderThread(state, {});
+              return;
+            }
             case "session.input.admitted": {
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
@@ -1610,11 +1653,13 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         ): OpenCode2ThreadState => {
           const existing = threads.get(nativeSession.id);
           if (existing !== undefined) {
+            existing.location = nativeSession.location;
             existing.providerThread = providerThread;
             return existing;
           }
           const state: OpenCode2ThreadState = {
             nativeSessionId: nativeSession.id,
+            location: nativeSession.location,
             providerThread,
             appThread: null,
             activeTurn: null,
@@ -1757,6 +1802,53 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           providerSessionId: input.providerSessionId,
           providerSession: sessionEntity,
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          hasPendingBackgroundWorkForThread: (providerThread) =>
+            Effect.gen(function* () {
+              const sessionID = nativeThreadId(providerThread);
+              const state = threads.get(sessionID);
+              if (state === undefined) {
+                return yield* protocolError(
+                  `OpenCode 2 session ${sessionID} is not registered for pending-work inspection`,
+                );
+              }
+              return yield* openCode2PendingWorkForSession({
+                sessionID,
+                pending: sdkCall("session.pending.list", { sessionID }, () =>
+                  client.v2.session.pending.list({ sessionID }),
+                ).pipe(
+                  Effect.map((response) =>
+                    unwrapOpenCode2Data<Array<SessionPendingInfo>>(
+                      "session.pending.list",
+                      response,
+                    ),
+                  ),
+                ),
+                shells: sdkCall("shell.list", { location: state.location }, () =>
+                  client.v2.shell.list({ location: state.location }),
+                ).pipe(
+                  Effect.map((response) =>
+                    unwrapOpenCode2Data<Array<ShellInfoV2>>("shell.list", response),
+                  ),
+                  Effect.tap((shells) =>
+                    Effect.sync(() => {
+                      for (const shell of shells) {
+                        if (shell.metadata.sessionID === sessionID) {
+                          shellSessionIds.set(shell.id, sessionID);
+                        }
+                      }
+                    }),
+                  ),
+                ),
+              });
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Failed to inspect OpenCode 2 pending background work.", {
+                  errorTag: causeErrorTag(cause),
+                  provider: OPENCODE2_PROVIDER,
+                  providerThreadId: providerThread.id,
+                }).pipe(Effect.as(false)),
+              ),
+            ),
           ensureThread: (threadInput) =>
             Effect.gen(function* () {
               if (threadInput.existingProviderThread !== undefined) {
