@@ -70,6 +70,7 @@ export class ElectronApp extends Context.Service<
     readonly onBeforeQuitForUpdate: (
       listener: () => void,
     ) => Effect.Effect<void, never, Scope.Scope>;
+    readonly removeCommandLineSwitch: (switchName: string) => Effect.Effect<void>;
     readonly on: <Args extends ReadonlyArray<unknown>>(
       eventName: string,
       listener: (...args: Args) => void,
@@ -193,6 +194,10 @@ export const make = ElectronApp.of({
           Electron.autoUpdater.removeListener("before-quit-for-update", listener);
         }),
     ).pipe(Effect.asVoid),
+  removeCommandLineSwitch: (switchName) =>
+    Effect.sync(() => {
+      Electron.app.commandLine.removeSwitch(switchName);
+    }),
   on: addScopedAppListener,
 });
 
