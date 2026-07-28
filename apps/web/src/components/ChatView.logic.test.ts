@@ -12,19 +12,21 @@ import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { Thread } from "../types";
-import { makeThreadFixture } from "../test-fixtures";
+import { makeThreadFixture, makeThreadProjectionFixture } from "../test-fixtures";
 import {
   MAX_HIDDEN_MOUNTED_PREVIEW_THREADS,
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
   createLocalDispatchSnapshot,
+  deriveChatViewThreadExecution,
   deriveCommittedServerUserMessageIds,
   deriveComposerSendState,
   dismissBranchMismatchForSession,
   getStartedThreadModelChangeBlockReason,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
+  isChatViewThreadWorking,
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
@@ -39,6 +41,52 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+
+describe("deriveChatViewThreadExecution", () => {
+  it("keeps web activity on a running turn when a newer turn is queued", () => {
+    const projection = makeThreadProjectionFixture();
+    const timestamp = DateTime.makeUnsafe(now);
+    const runningRunId = RunId.make("run-running");
+    const queuedRunId = RunId.make("run-queued");
+    const makeRun = (runId: RunId, ordinal: number, status: "queued" | "running") => ({
+      id: runId,
+      threadId: projection.thread.id,
+      ordinal,
+      providerInstanceId: projection.thread.providerInstanceId,
+      modelSelection: projection.thread.modelSelection,
+      providerThreadId: null,
+      userMessageId: MessageId.make(`message-${runId}`),
+      rootNodeId: null,
+      activeAttemptId: null,
+      status,
+      requestedAt: timestamp,
+      startedAt: status === "queued" ? null : timestamp,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    });
+    const execution = deriveChatViewThreadExecution({
+      ...projection,
+      runs: [makeRun(queuedRunId, 2, "queued"), makeRun(runningRunId, 1, "running")],
+      updatedAt: timestamp,
+    });
+
+    expect(execution.latestRun).toMatchObject({
+      runId: queuedRunId,
+      status: "queued",
+    });
+    expect(execution.activityRun).toMatchObject({
+      runId: runningRunId,
+      status: "running",
+    });
+    expect(execution.runtime).toMatchObject({
+      status: "queued",
+      activeRunId: runningRunId,
+    });
+    expect(isChatViewThreadWorking("connecting", execution.runtime)).toBe(true);
+    expect(isChatViewThreadWorking("connecting", { activeRunId: null })).toBe(false);
+  });
+});
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
   return makeThreadFixture({

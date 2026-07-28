@@ -592,7 +592,12 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if (thread.runtime?.status === "running" || thread.runtime?.status === "waiting") {
+  if (
+    thread.runtime !== null &&
+    (thread.runtime.status === "running" ||
+      thread.runtime.status === "waiting" ||
+      (thread.runtime.status === "queued" && thread.runtime.activeRunId !== null))
+  ) {
     return {
       label: "Working",
       colorClass: "text-sky-600 dark:text-sky-300/80",

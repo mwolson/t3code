@@ -26,10 +26,6 @@ import {
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
 import { effectiveSettled, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
-import {
-  deriveLatestThreadRun,
-  deriveThreadRuntime,
-} from "@t3tools/client-runtime/state/thread-execution";
 import { resolveThreadProviderSession } from "@t3tools/client-runtime/state/thread-workflows";
 import { derivePendingThreadRequests } from "@t3tools/client-runtime/state/thread-requests";
 import {
@@ -277,9 +273,11 @@ import {
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
   deriveCommittedServerUserMessageIds,
+  deriveChatViewThreadExecution,
   deriveComposerSendState,
   dismissBranchMismatchForSession,
   hasServerAcknowledgedLocalDispatch,
+  isChatViewThreadWorking,
   isBranchMismatchDismissedForSession,
   shouldShowBranchMismatchBanner,
   getStartedThreadModelChangeBlockReason,
@@ -1468,12 +1466,8 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const isServerThread = serverThread !== null;
   const activeThread = isServerThread ? serverThread : localDraftThread;
-  const serverLatestRun = useMemo(
-    () => (serverProjection === null ? null : deriveLatestThreadRun(serverProjection)),
-    [serverProjection],
-  );
-  const serverRuntime = useMemo(
-    () => (serverProjection === null ? null : deriveThreadRuntime(serverProjection)),
+  const serverExecution = useMemo(
+    () => (serverProjection === null ? null : deriveChatViewThreadExecution(serverProjection)),
     [serverProjection],
   );
   const activeProviderSession = useMemo(
@@ -1482,8 +1476,15 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const supportsProviderSwitchingViaHandoff =
     activeProviderSession?.capabilities.sessions.supportsProviderSwitchingViaHandoff === true;
-  const activeLatestRun = isServerThread ? serverLatestRun : (activeThread?.latestRun ?? null);
-  const activeRuntime = isServerThread ? serverRuntime : (activeThread?.runtime ?? null);
+  const activeLatestRun = isServerThread
+    ? (serverExecution?.latestRun ?? null)
+    : (activeThread?.latestRun ?? null);
+  const activeActivityRun = isServerThread
+    ? (serverExecution?.activityRun ?? null)
+    : (activeThread?.latestRun ?? null);
+  const activeRuntime = isServerThread
+    ? (serverExecution?.runtime ?? null)
+    : (activeThread?.runtime ?? null);
   const parentSubagentThreadId =
     activeThread?.lineage.relationshipToParent === "subagent"
       ? activeThread.lineage.parentThreadId
@@ -1507,7 +1508,7 @@ function ChatViewContent(props: ChatViewProps) {
     [parentSubagentThread?.title, parentSubagentThreadRef],
   );
   const threadError = isServerThread
-    ? (localServerError ?? serverRuntime?.lastError ?? null)
+    ? (localServerError ?? serverExecution?.runtime?.lastError ?? null)
     : localDraftError;
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode =
@@ -1681,7 +1682,7 @@ function ChatViewContent(props: ChatViewProps) {
         : nextThreadIds;
     });
   }, [activeThreadKey, existingOpenTerminalThreadKeys, terminalUiState.terminalOpen]);
-  const latestRunSettled = isLatestRunSettled(activeLatestRun, activeRuntime);
+  const latestRunSettled = isLatestRunSettled(activeActivityRun, activeRuntime);
   const activeProjectRef = activeThread
     ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
     : null;
@@ -2161,9 +2162,13 @@ function ChatViewContent(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
-  const isWorking = phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint;
+  const isWorking =
+    isChatViewThreadWorking(phase, activeRuntime) ||
+    isSendBusy ||
+    isConnecting ||
+    isRevertingCheckpoint;
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
-    activeLatestRun,
+    activeActivityRun,
     activeRuntime,
     localDispatchStartedAt,
   );
@@ -6020,7 +6025,7 @@ function ChatViewContent(props: ChatViewProps) {
                 activeTurnStartedAt={activeWorkStartedAt}
                 listRef={legendListRef}
                 timelineEntries={timelineEntries}
-                latestRun={activeLatestRun}
+                latestRun={activeActivityRun}
                 turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
                 activeThreadEnvironmentId={activeThread.environmentId}
                 routeThreadKey={routeThreadKey}

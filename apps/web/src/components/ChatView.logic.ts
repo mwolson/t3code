@@ -3,6 +3,7 @@ import {
   isProviderDriverKind,
   ProjectId,
   type ModelSelection,
+  type OrchestrationV2ThreadProjection,
   type OrchestrationV2ProjectedTurnItem,
   type ProviderDriverKind,
   type ServerProvider,
@@ -12,7 +13,12 @@ import {
   type RunId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
-import { presentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { presentThreadShell, type ThreadRuntimeSummary } from "@t3tools/client-runtime/state/shell";
+import {
+  deriveLatestThreadRun,
+  deriveThreadActivityRun,
+  deriveThreadRuntime,
+} from "@t3tools/client-runtime/state/thread-execution";
 import { type ChatMessage, type SessionPhase, type Thread } from "../types";
 import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
 import * as Schema from "effect/Schema";
@@ -31,6 +37,23 @@ export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
+
+export function deriveChatViewThreadExecution(projection: OrchestrationV2ThreadProjection) {
+  return {
+    activityRun: deriveThreadActivityRun(projection),
+    latestRun: deriveLatestThreadRun(projection),
+    runtime: deriveThreadRuntime(projection),
+  };
+}
+
+export function isChatViewThreadWorking(
+  phase: SessionPhase,
+  runtime: Pick<ThreadRuntimeSummary, "activeRunId"> | null,
+): boolean {
+  return (
+    phase === "running" || (runtime?.activeRunId !== null && runtime?.activeRunId !== undefined)
+  );
+}
 
 export function startNewThreadForProject(
   projectRef: ScopedProjectRef | null,

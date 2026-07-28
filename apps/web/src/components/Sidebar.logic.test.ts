@@ -947,6 +947,35 @@ describe("resolveThreadStatusPill", () => {
     ).toMatchObject({ label: "Working", pulse: true });
   });
 
+  it("stays working when a newer run is queued behind the active run", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          runtime: {
+            ...baseThread.runtime,
+            status: "queued",
+          },
+        },
+      }),
+    ).toMatchObject({ label: "Working", pulse: true });
+  });
+
+  it("shows connecting when a queued run has no active provider work", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          runtime: {
+            ...baseThread.runtime,
+            activeRunId: null,
+            status: "queued",
+          },
+        },
+      }),
+    ).toMatchObject({ label: "Connecting", pulse: true });
+  });
+
   it("shows plan ready when a settled plan turn has a proposed plan ready for follow-up", () => {
     expect(
       resolveThreadStatusPill({
