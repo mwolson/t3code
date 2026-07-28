@@ -442,6 +442,14 @@ export type OpenCodeSettings = typeof OpenCodeSettings.Type;
  * no unauthenticated mode, so it is required when pointing at an external
  * server and unused when T3 Code spawns one, because a spawned server prints a
  * freshly minted password that the runtime reads off its own output.
+ *
+ * Deliberately absent from `ServerSettings["providers"]`. That struct is the
+ * legacy single-instance mirror kept for drivers that predate
+ * `providerInstances`, and `deriveProviderInstanceConfigMap` synthesizes a
+ * default instance for every driver that has a slot in it. A driver shipping
+ * behind a Beta gate should not appear until a user adds it, so this schema is
+ * only ever reached as a `providerInstances` config blob — the same shape
+ * `acpRegistry` uses.
  */
 export const OpenCode2Settings = makeProviderSettingsSchema(
   {
@@ -613,7 +621,6 @@ export const ServerSettings = Schema.Struct({
     cursor: CursorSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
-    opencode2: OpenCode2Settings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
   // are `ProviderInstanceConfig` envelopes. The driver-specific config blob
@@ -715,14 +722,6 @@ const OpenCodeSettingsPatch = Schema.Struct({
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
-const OpenCode2SettingsPatch = Schema.Struct({
-  enabled: Schema.optionalKey(Schema.Boolean),
-  binaryPath: Schema.optionalKey(TrimmedString),
-  serverUrl: Schema.optionalKey(TrimmedString),
-  serverPassword: Schema.optionalKey(TrimmedString),
-  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
-});
-
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),
@@ -763,7 +762,6 @@ export const ServerSettingsPatch = Schema.Struct({
       cursor: Schema.optionalKey(CursorSettingsPatch),
       grok: Schema.optionalKey(GrokSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
-      opencode2: Schema.optionalKey(OpenCode2SettingsPatch),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual
