@@ -737,6 +737,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES = [
         modelSelection: ACP_REGISTRY_MODEL_SELECTION,
         assertOutput: assertQueuedTurnOutput,
       },
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL("./queued_turn/opencode2_transcript.ndjson", import.meta.url),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertQueuedTurnOutput,
+      },
     ],
   },
   {

@@ -89,6 +89,7 @@ import {
   parseOpenCodeModelSlug,
 } from "../../provider/opencodeRuntime.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
+import { applyOpenCode2ProviderEnvironment } from "../../provider/OpenCode2ProviderEnvironment.ts";
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../../provider/T3OrchestrationInstructions.ts";
 import { IdAllocatorV2, type IdAllocatorV2Shape } from "../IdAllocator.ts";
 import { makeProviderFailure } from "../ProviderFailure.ts";
@@ -3114,7 +3115,10 @@ export const OpenCode2AdapterV2Driver: ProviderAdapterDriver<
       return makeOpenCode2AdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment: applyOpenCode2ProviderEnvironment(
+          input.config,
+          mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        ),
         runtime: openCode2Runtime,
         idAllocator,
         serverConfig,

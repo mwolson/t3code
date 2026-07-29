@@ -31,6 +31,7 @@ import {
   makePendingOpenCode2Provider,
 } from "../Layers/OpenCode2Provider.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
+import { applyOpenCode2ProviderEnvironment } from "../OpenCode2ProviderEnvironment.ts";
 import { OpenCode2Runtime } from "../opencode2Runtime.ts";
 import { OpenCodeRuntime } from "../opencodeRuntime.ts";
 import {
@@ -89,7 +90,11 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
       const openCodeRuntime = yield* OpenCodeRuntime;
       const serverConfig = yield* ServerConfig;
       const serverSettings = yield* ServerSettingsService;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
+      const effectiveConfig = { ...config, enabled } satisfies OpenCode2Settings;
+      const processEnv = applyOpenCode2ProviderEnvironment(
+        effectiveConfig,
+        mergeProviderInstanceEnvironment(environment),
+      );
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
@@ -100,7 +105,6 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
       });
-      const effectiveConfig = { ...config, enabled } satisfies OpenCode2Settings;
 
       const orchestrationAdapter = yield* OpenCode2AdapterV2Driver.create({
         instanceId,
