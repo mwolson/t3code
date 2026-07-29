@@ -30,6 +30,8 @@ import { openCode2CompactionInput } from "./opencode2_compaction/input.ts";
 import { assertOpenCode2CompactionOutput } from "./opencode2_compaction/output.ts";
 import { openCode2PermissionSessionInput } from "./opencode2_permission_session/input.ts";
 import { assertOpenCode2PermissionSessionOutput } from "./opencode2_permission_session/output.ts";
+import { openCode2RetryInput } from "./opencode2_retry/input.ts";
+import { assertOpenCode2RetryOutput } from "./opencode2_retry/output.ts";
 import { openCode2ShellProjectionInput } from "./opencode2_shell_projection/input.ts";
 import { assertOpenCode2ShellProjectionOutput } from "./opencode2_shell_projection/output.ts";
 import { openCode2ShellTerminalsInput } from "./opencode2_shell_terminals/input.ts";
@@ -585,6 +587,18 @@ export const ORCHESTRATOR_REPLAY_FIXTURES = [
         modelSelection: OPENCODE2_MODEL_SELECTION,
         runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
         assertOutput: assertOpenCode2PermissionSessionOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_retry",
+    buildInput: openCode2RetryInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL("./opencode2_retry/opencode2_transcript.ndjson", import.meta.url),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertOpenCode2RetryOutput,
       },
     ],
   },
