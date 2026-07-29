@@ -23,6 +23,7 @@
  * @module orchestration-v2/Adapters/OpenCode2AdapterV2
  */
 import type {
+  McpServer,
   PromptInputFileAttachment,
   QuestionV2Info,
   SessionInfoV2,
@@ -70,6 +71,7 @@ import * as NodeURL from "node:url";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import type { EventNdjsonLogger } from "../../provider/Layers/EventNdjsonLogger.ts";
 import { ProviderEventLoggers } from "../../provider/Layers/ProviderEventLoggers.ts";
 import {
@@ -87,6 +89,7 @@ import {
   parseOpenCodeModelSlug,
 } from "../../provider/opencodeRuntime.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
+import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../../provider/T3OrchestrationInstructions.ts";
 import { IdAllocatorV2, type IdAllocatorV2Shape } from "../IdAllocator.ts";
 import { randomUuidV4 } from "../RandomUuid.ts";
 import { makeProviderFailure } from "../ProviderFailure.ts";
@@ -131,6 +134,13 @@ export const OPENCODE2_PROVIDER = ProviderDriverKind.make("opencode2");
 export const OPENCODE2_DRIVER_KIND = OPENCODE2_PROVIDER;
 export const OPENCODE2_SDK_PROTOCOL = "opencode2-sdk.sse" as const;
 const DEFAULT_OPENCODE2_SETTINGS = Schema.decodeSync(OpenCode2SettingsSchema)({});
+const OPENCODE2_T3_MCP_NAME = "t3-code";
+const OPENCODE2_T3_INSTRUCTION_KEY = "t3-code.orchestration";
+const OpenCode2InlineConfig = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown));
+const OpenCode2McpConfig = Schema.Record(Schema.String, Schema.Unknown);
+const decodeOpenCode2InlineConfig = Schema.decodeUnknownEffect(OpenCode2InlineConfig);
+const decodeOpenCode2McpConfig = Schema.decodeUnknownEffect(OpenCode2McpConfig);
+const encodeOpenCode2InlineConfig = Schema.encodeEffect(OpenCode2InlineConfig);
 
 /**
  * 2.x keeps 1.x's durable session/message identifiers and adds a durable
@@ -628,6 +638,35 @@ export function openCode2QuestionId(index: number, header: string): string {
 }
 
 /**
+ * Add T3's per-thread MCP server to a spawned OpenCode 2 process without
+ * writing the user's global or project configuration.
+ *
+ * @internal exported for tests
+ */
+export const openCode2EnvironmentWithT3Mcp = Effect.fn(
+  "OpenCode2AdapterV2.openCode2EnvironmentWithT3Mcp",
+)(function* (environment: NodeJS.ProcessEnv, session: McpProviderSession.McpProviderSessionConfig) {
+  const config = yield* decodeOpenCode2InlineConfig(environment.OPENCODE_CONFIG_CONTENT ?? "{}");
+  const mcp = yield* decodeOpenCode2McpConfig(config.mcp ?? {});
+  const content = yield* encodeOpenCode2InlineConfig({
+    ...config,
+    mcp: {
+      ...mcp,
+      [OPENCODE2_T3_MCP_NAME]: {
+        type: "remote",
+        url: session.endpoint,
+        headers: { Authorization: session.authorizationHeader },
+        oauth: false,
+      },
+    },
+  });
+  return {
+    ...environment,
+    OPENCODE_CONFIG_CONTENT: content,
+  } satisfies NodeJS.ProcessEnv;
+});
+
+/**
  * 2.x has no session-scoped permission ruleset — `session.create` accepts none
  * and its native `always` reply persists project-wide — so T3 evaluates each
  * request against the same rules used by the 1.x adapter and replies only for
@@ -824,11 +863,17 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
       function* (input: ProviderAdapterV2OpenSessionInput) {
         const scope = yield* Effect.scope;
         const cwd = input.runtimePolicy.cwd ?? serverConfig.cwd;
+        const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const hasT3Mcp = mcpSession !== undefined && !(options.settings.serverUrl?.trim() ?? "");
+        const environment =
+          hasT3Mcp && mcpSession !== undefined
+            ? yield* openCode2EnvironmentWithT3Mcp(options.environment, mcpSession)
+            : options.environment;
         const connection = yield* runtime.connectToOpenCode2Server({
           binaryPath: options.settings.binaryPath,
           serverUrl: options.settings.serverUrl,
           serverPassword: options.settings.serverPassword,
-          environment: options.environment,
+          environment,
         });
         const client = runtime.createOpenCode2SdkClient({
           baseUrl: connection.url,
@@ -2507,6 +2552,46 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             ),
           );
 
+        const waitForT3Mcp = Effect.fnUntraced(function* () {
+          if (!hasT3Mcp) return;
+          let lastStatus = "missing";
+          for (let attempt = 0; attempt < 50; attempt++) {
+            const response = yield* sdkCall("mcp.list", {}, () => client.v2.mcp.list());
+            const servers = unwrapOpenCode2Data<ReadonlyArray<McpServer>>("mcp.list", response);
+            const server = servers.find((candidate) => candidate.name === OPENCODE2_T3_MCP_NAME);
+            lastStatus = server?.status.status ?? "missing";
+            if (lastStatus === "connected") return;
+            if (lastStatus !== "missing" && lastStatus !== "pending") {
+              return yield* new OpenCode2RuntimeError({
+                operation: "mcp.list",
+                detail: `T3 MCP server failed to connect (status: ${lastStatus}).`,
+                cause: server?.status,
+              });
+            }
+            if (attempt < 49) yield* Effect.sleep("100 millis");
+          }
+          return yield* new OpenCode2RuntimeError({
+            operation: "mcp.list",
+            detail: `Timed out waiting for T3 MCP server connection (last status: ${lastStatus}).`,
+          });
+        });
+
+        const installT3OrchestrationInstructions = Effect.fnUntraced(function* (sessionID: string) {
+          if (!hasT3Mcp) return;
+          yield* sdkCall(
+            "session.instructions.entry.put",
+            { sessionID, key: OPENCODE2_T3_INSTRUCTION_KEY },
+            () =>
+              client.v2.session.instructions.entry.put({
+                sessionID,
+                key: OPENCODE2_T3_INSTRUCTION_KEY,
+                value: T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+              }),
+          );
+        });
+
+        yield* waitForT3Mcp();
+
         const runtimeSession: ProviderAdapterV2SessionRuntime = {
           instanceId: options.instanceId,
           driver: OPENCODE2_PROVIDER,
@@ -2555,6 +2640,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 client.v2.session.create(parameters),
               );
               const nativeSession = unwrapOpenCode2Data<SessionInfoV2>("session.create", response);
+              yield* installT3OrchestrationInstructions(nativeSession.id);
               const createdAt = yield* DateTime.now;
               const providerThread = makeProviderThread({
                 idAllocator,
@@ -2585,6 +2671,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 client.v2.session.get({ sessionID }),
               );
               const nativeSession = unwrapOpenCode2Data<SessionInfoV2>("session.get", response);
+              yield* installT3OrchestrationInstructions(sessionID);
               const resumedAt = yield* DateTime.now;
               const providerThread = {
                 ...threadInput.providerThread,
@@ -2958,6 +3045,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 client.v2.session.fork(parameters),
               );
               const nativeSession = unwrapOpenCode2Data<SessionInfoV2>("session.fork", response);
+              yield* installT3OrchestrationInstructions(nativeSession.id);
               const forkedAt = yield* DateTime.now;
               const providerThread = makeProviderThread({
                 idAllocator,

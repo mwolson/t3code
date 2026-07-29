@@ -1,10 +1,13 @@
 import type { SessionPendingInfo, ShellInfoV2 } from "@opencode-ai/sdk-next/v2";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { describe } from "vite-plus/test";
 
 import {
   openCode2AutoPermissionReply,
+  openCode2EnvironmentWithT3Mcp,
   openCode2InterruptedThreadDisposition,
   openCode2PendingWorkForSession,
   openCode2QuestionId,
@@ -16,6 +19,17 @@ import {
   removeOpenCode2Session,
   unwrapOpenCode2Data,
 } from "./OpenCode2AdapterV2.ts";
+
+const t3McpSession = {
+  environmentId: EnvironmentId.make("environment:test"),
+  threadId: ThreadId.make("thread:test"),
+  providerSessionId: "provider-session:test",
+  providerInstanceId: ProviderInstanceId.make("opencode2"),
+  endpoint: "http://127.0.0.1:43123/mcp",
+  authorizationHeader: "Bearer test-token",
+};
+const decodeJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeSync(Schema.UnknownFromJsonString);
 
 /**
  * `OpenCode2RuntimeError` is a `Data.TaggedError` whose text lives on `detail`,
@@ -94,6 +108,56 @@ describe("openCode2QuestionId", () => {
   it("falls back to the index when the header carries no usable characters", () => {
     assert.strictEqual(openCode2QuestionId(2, "  ???  "), "question-2");
   });
+});
+
+describe("openCode2EnvironmentWithT3Mcp", () => {
+  it.effect("merges a per-thread server into process-local inline config", () =>
+    Effect.gen(function* () {
+      const environment = {
+        CUSTOM_ENV: "preserved",
+        OPENCODE_CONFIG_CONTENT: encodeJson({
+          agent: { build: { mode: "primary" } },
+          mcp: {
+            existing: {
+              type: "local",
+              command: ["existing-mcp"],
+            },
+          },
+        }),
+      };
+      const result = yield* openCode2EnvironmentWithT3Mcp(environment, t3McpSession);
+      const resultEnvironment: NodeJS.ProcessEnv = result;
+
+      assert.strictEqual(resultEnvironment.CUSTOM_ENV, "preserved");
+      assert.deepStrictEqual(decodeJson(result.OPENCODE_CONFIG_CONTENT ?? ""), {
+        agent: { build: { mode: "primary" } },
+        mcp: {
+          existing: {
+            type: "local",
+            command: ["existing-mcp"],
+          },
+          "t3-code": {
+            type: "remote",
+            url: t3McpSession.endpoint,
+            headers: { Authorization: t3McpSession.authorizationHeader },
+            oauth: false,
+          },
+        },
+      });
+      assert.notStrictEqual(result, environment);
+    }),
+  );
+
+  it.effect("rejects inline config whose MCP field cannot be merged safely", () =>
+    Effect.gen(function* () {
+      const failure = yield* openCode2EnvironmentWithT3Mcp(
+        { OPENCODE_CONFIG_CONTENT: encodeJson({ mcp: false }) },
+        t3McpSession,
+      ).pipe(Effect.flip);
+
+      assert.isDefined(failure);
+    }),
+  );
 });
 
 describe("openCode2AutoPermissionReply", () => {
