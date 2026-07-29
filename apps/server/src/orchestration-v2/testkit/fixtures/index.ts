@@ -26,6 +26,8 @@ import { assertOpenCodeInterruptErrorCleanupOutput } from "./opencode_interrupt_
 import { assertOpenCodeInterruptErrorCleanupAbortedToolOutput } from "./opencode_interrupt_error_cleanup_aborted_tool/output.ts";
 import { openCode2BackgroundStopInput } from "./opencode2_background_stop/input.ts";
 import { assertOpenCode2BackgroundStopOutput } from "./opencode2_background_stop/output.ts";
+import { openCode2PermissionSessionInput } from "./opencode2_permission_session/input.ts";
+import { assertOpenCode2PermissionSessionOutput } from "./opencode2_permission_session/output.ts";
 import { openCode2ShellProjectionInput } from "./opencode2_shell_projection/input.ts";
 import { assertOpenCode2ShellProjectionOutput } from "./opencode2_shell_projection/output.ts";
 import { openCode2ShellTerminalsInput } from "./opencode2_shell_terminals/input.ts";
@@ -550,6 +552,22 @@ export const ORCHESTRATOR_REPLAY_FIXTURES = [
         ),
         modelSelection: OPENCODE2_MODEL_SELECTION,
         assertOutput: assertOpenCode2BackgroundStopOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_permission_session",
+    buildInput: openCode2PermissionSessionInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_permission_session/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
+        assertOutput: assertOpenCode2PermissionSessionOutput,
       },
     ],
   },

@@ -74,26 +74,24 @@ describe("openCode2AutoPermissionReply", () => {
       interactionMode: "default",
       ...overrides,
     }) as never;
+  const reply = (
+    overrides: Record<string, unknown>,
+    action: string,
+    resources: ReadonlyArray<string> = ["*"],
+  ) => openCode2AutoPermissionReply(policy(overrides), { action, resources });
 
-  it("auto-approves in full-access mode, since 2.x has no session permission ruleset", () => {
-    assert.strictEqual(
-      openCode2AutoPermissionReply(policy({ runtimeMode: "full-access" })),
-      "always",
-    );
+  it("approves only the current request in full-access mode", () => {
+    assert.strictEqual(reply({ runtimeMode: "full-access" }, "bash"), "once");
   });
 
-  it("auto-approves when the approval policy is explicitly never", () => {
-    assert.strictEqual(
-      openCode2AutoPermissionReply(policy({ runtimeMode: "default", approvalPolicy: "never" })),
-      "always",
-    );
+  it("does not turn approval never into implicit full access", () => {
+    assert.strictEqual(reply({ runtimeMode: "auto", approvalPolicy: "never" }, "bash"), "reject");
+    assert.strictEqual(reply({ runtimeMode: "auto", approvalPolicy: "never" }, "read"), "once");
   });
 
   it("surfaces the request when an approval policy asks for one", () => {
     assert.strictEqual(
-      openCode2AutoPermissionReply(
-        policy({ runtimeMode: "full-access", approvalPolicy: "always" }),
-      ),
+      reply({ runtimeMode: "full-access", approvalPolicy: "always" }, "bash"),
       null,
     );
   });
@@ -102,18 +100,35 @@ describe("openCode2AutoPermissionReply", () => {
   // full-access must not silently override it.
   it("surfaces the request for a structured approval policy", () => {
     assert.strictEqual(
-      openCode2AutoPermissionReply(
-        policy({ runtimeMode: "full-access", approvalPolicy: { type: "onRequest" } }),
-      ),
+      reply({ runtimeMode: "full-access", approvalPolicy: { type: "onRequest" } }, "bash"),
       null,
     );
   });
 
-  it("surfaces the request outside full-access", () => {
+  it("auto-accepts edits but still asks for shell access", () => {
+    assert.strictEqual(reply({ runtimeMode: "auto-accept-edits" }, "edit"), "once");
+    assert.strictEqual(reply({ runtimeMode: "auto-accept-edits" }, "bash"), null);
+  });
+
+  it("enforces workspace-write and network policy without native persistent grants", () => {
+    const sandboxPolicy = {
+      type: "workspaceWrite",
+      networkAccess: true,
+      writableRoots: ["/workspace/shared"],
+    };
+    const overrides = {
+      runtimeMode: "auto",
+      approvalPolicy: "never",
+      sandboxPolicy,
+    };
+    assert.strictEqual(reply(overrides, "edit"), "once");
+    assert.strictEqual(reply(overrides, "bash"), "reject");
+    assert.strictEqual(reply(overrides, "websearch"), "once");
     assert.strictEqual(
-      openCode2AutoPermissionReply(policy({ runtimeMode: "auto-accept-edits" })),
-      null,
+      reply(overrides, "external_directory", ["/workspace/shared/file.txt"]),
+      "once",
     );
+    assert.strictEqual(reply(overrides, "external_directory", ["/outside/file.txt"]), "reject");
   });
 });
 

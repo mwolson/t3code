@@ -120,6 +120,7 @@ import {
 import {
   openCodeBoundaryAfterProviderTurn,
   openCodePermissionRequestKind,
+  openCodePermissionRules,
   openCodeToolProjectionKind,
   terminalToolStatus,
 } from "./OpenCodeAdapterV2.ts";
@@ -313,8 +314,17 @@ interface PendingOpenCode2Request {
   readonly turnItemId: OrchestrationV2TurnItem["id"];
   readonly requestKind: OrchestrationV2RuntimeRequest["kind"];
   readonly createdAt: DateTime.Utc;
-  readonly permission?: { readonly action: string; readonly resources: ReadonlyArray<string> };
+  readonly permission?: {
+    readonly action: string;
+    readonly resources: ReadonlyArray<string>;
+    readonly save: ReadonlyArray<string>;
+  };
   readonly questions?: ReadonlyArray<QuestionV2Info>;
+}
+
+interface OpenCode2SessionPermission {
+  readonly action: string;
+  readonly resources: ReadonlyArray<string>;
 }
 
 export interface OpenCode2AdapterV2Options {
@@ -586,21 +596,78 @@ export function openCode2QuestionId(index: number, header: string): string {
 
 /**
  * 2.x has no session-scoped permission ruleset — `session.create` accepts none
- * and saved permissions are project-wide — so a non-interactive policy has to
- * be expressed by answering requests as they arrive. `always` rather than
- * `once` keeps a long run from re-asking for every repeat of the same action.
+ * and its native `always` reply persists project-wide — so T3 evaluates each
+ * request against the same rules used by the 1.x adapter and replies only for
+ * that request. Session grants are remembered by the adapter instead.
  *
  * @internal exported for tests
  */
 export function openCode2AutoPermissionReply(
   runtimePolicy: ProviderAdapterV2TurnInput["runtimePolicy"],
-): "always" | null {
-  const approvalPolicy = nonEmptyString(runtimePolicy.approvalPolicy);
-  if (approvalPolicy !== undefined) return approvalPolicy === "never" ? "always" : null;
-  if (typeof runtimePolicy.approvalPolicy === "object" && runtimePolicy.approvalPolicy !== null) {
-    return null;
+  request: {
+    readonly action: string;
+    readonly resources: ReadonlyArray<string>;
+  },
+): "once" | "reject" | null {
+  const rules = openCodePermissionRules(runtimePolicy);
+  const resources = request.resources.length === 0 ? ["*"] : request.resources;
+  let needsApproval = false;
+  for (const resource of resources) {
+    const rule = rules.findLast(
+      (candidate) =>
+        openCode2WildcardMatch(candidate.permission, request.action) &&
+        openCode2WildcardMatch(candidate.pattern, resource),
+    );
+    const effect = rule?.action ?? "ask";
+    if (effect === "deny") return "reject";
+    if (effect === "ask") needsApproval = true;
   }
-  return runtimePolicy.runtimeMode === "full-access" ? "always" : null;
+  return needsApproval ? null : "once";
+}
+
+function openCode2WildcardMatch(pattern: string, value: string): boolean {
+  if (pattern === "*") return true;
+  const expression = pattern
+    .split("*")
+    .map((part) => part.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${expression}$`).test(value);
+}
+
+function openCode2SessionPermissionMatches(
+  permission: OpenCode2SessionPermission,
+  request: {
+    readonly action: string;
+    readonly resources: ReadonlyArray<string>;
+  },
+): boolean {
+  if (!openCode2WildcardMatch(permission.action, request.action)) return false;
+  const resources = request.resources.length === 0 ? ["*"] : request.resources;
+  return resources.every((resource) =>
+    permission.resources.some((pattern) => openCode2WildcardMatch(pattern, resource)),
+  );
+}
+
+function rememberOpenCode2SessionPermission(
+  permissions: Array<OpenCode2SessionPermission>,
+  permission: PendingOpenCode2Request["permission"],
+): void {
+  if (permission === undefined) return;
+  const remembered = {
+    action: permission.action,
+    resources: permission.save.length === 0 ? permission.resources : permission.save,
+  };
+  if (
+    permissions.some(
+      (existing) =>
+        existing.action === remembered.action &&
+        existing.resources.length === remembered.resources.length &&
+        existing.resources.every((resource, index) => resource === remembered.resources[index]),
+    )
+  ) {
+    return;
+  }
+  permissions.push(remembered);
 }
 
 function toOpenCode2FileAttachments(input: {
@@ -727,6 +794,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const shellSessionIds = new Map<string, string>();
         const pendingRequests = new Map<string, PendingOpenCode2Request>();
         const pendingRequestsByNativeId = new Map<string, PendingOpenCode2Request>();
+        const sessionPermissions: Array<OpenCode2SessionPermission> = [];
         const abortController = new AbortController();
 
         const emitProviderEvent = (event: ProviderAdapterV2Event) =>
@@ -1152,6 +1220,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 readonly type: "permission";
                 readonly action: string;
                 readonly resources: ReadonlyArray<string>;
+                readonly save: ReadonlyArray<string>;
               }
             | { readonly type: "question"; readonly questions: ReadonlyArray<QuestionV2Info> },
         ) {
@@ -1178,7 +1247,13 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             requestKind,
             createdAt,
             ...(request.type === "permission"
-              ? { permission: { action: request.action, resources: request.resources } }
+              ? {
+                  permission: {
+                    action: request.action,
+                    resources: request.resources,
+                    save: request.save,
+                  },
+                }
               : { questions: request.questions }),
           };
           pendingRequests.set(String(requestId), pending);
@@ -1643,13 +1718,13 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const autoReplyPermission = Effect.fnUntraced(function* (
           sessionID: string,
           requestID: string,
-          reply: "always",
+          reply: "once" | "reject",
         ) {
           yield* sdkCall("session.permission.reply", { sessionID, requestID, reply }, () =>
             client.v2.session.permission.reply({ sessionID, requestID, reply }),
           ).pipe(
             Effect.catch((cause: OpenCode2RuntimeError) =>
-              Effect.logWarning("Failed to auto-approve an OpenCode 2 permission request.", {
+              Effect.logWarning("Failed to answer an OpenCode 2 permission request.", {
                 provider: OPENCODE2_PROVIDER,
                 detail: openCodeRuntimeErrorDetail(cause),
               }),
@@ -1837,7 +1912,15 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             case "permission.v2.asked": {
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
-              const autoReply = openCode2AutoPermissionReply(input.runtimePolicy);
+              const permission = {
+                action: event.data.action,
+                resources: event.data.resources,
+              };
+              const autoReply = sessionPermissions.some((remembered) =>
+                openCode2SessionPermissionMatches(remembered, permission),
+              )
+                ? "once"
+                : openCode2AutoPermissionReply(input.runtimePolicy, permission);
               if (autoReply !== null) {
                 yield* autoReplyPermission(event.data.sessionID, event.data.id, autoReply);
                 return;
@@ -1846,6 +1929,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 type: "permission",
                 action: event.data.action,
                 resources: event.data.resources,
+                save: event.data.save ?? [],
               });
               return;
             }
@@ -2487,12 +2571,13 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   `OpenCode 2 approval request ${requestInput.requestId} requires a decision`,
                 );
               }
+              if (requestInput.decision === "acceptForSession") {
+                rememberOpenCode2SessionPermission(sessionPermissions, pending.permission);
+              }
               const reply =
-                requestInput.decision === "accept"
+                requestInput.decision === "accept" || requestInput.decision === "acceptForSession"
                   ? ("once" as const)
-                  : requestInput.decision === "acceptForSession"
-                    ? ("always" as const)
-                    : ("reject" as const);
+                  : ("reject" as const);
               yield* sdkCall("session.permission.reply", { sessionID, requestID, reply }, () =>
                 client.v2.session.permission.reply({ sessionID, requestID, reply }),
               );
