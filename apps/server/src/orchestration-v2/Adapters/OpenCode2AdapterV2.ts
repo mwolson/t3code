@@ -1617,6 +1617,29 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           yield* emitToolPart(projection.state, projection.turn, projection.part);
         });
 
+        const removeRunningShellsForTurn = Effect.fnUntraced(function* (turn: ActiveOpenCode2Turn) {
+          const running = Array.from(shellProjections.values()).filter(
+            (projection) => projection.turn === turn && projection.status === "running",
+          );
+          for (const projection of running) {
+            const parameters = {
+              id: projection.shellId,
+              location: projection.location,
+            };
+            yield* sdkCall("shell.remove", parameters, () =>
+              client.v2.shell.remove(parameters),
+            ).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Failed to stop an interrupted OpenCode 2 shell.", {
+                  errorTag: causeErrorTag(cause),
+                  provider: OPENCODE2_PROVIDER,
+                  shellId: projection.shellId,
+                }),
+              ),
+            );
+          }
+        });
+
         const autoReplyPermission = Effect.fnUntraced(function* (
           sessionID: string,
           requestID: string,
@@ -2411,6 +2434,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               yield* sdkCall("session.interrupt", { sessionID }, () =>
                 client.v2.session.interrupt({ sessionID }),
               ).pipe(Effect.tapError(() => Effect.sync(() => (turn.interrupted = false))));
+              yield* removeRunningShellsForTurn(turn);
             }).pipe(
               Effect.mapError(
                 (cause) =>

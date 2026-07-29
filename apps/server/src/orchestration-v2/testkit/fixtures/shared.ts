@@ -58,6 +58,8 @@ export const OPENCODE2_SHELL_FAILURE_PROMPT =
   "Run a shell command that exits with status 7, move it to background observation, then respond exactly: shell failure fixture complete";
 export const OPENCODE2_SHELL_DELETION_PROMPT =
   "Run a long shell command, move it to background observation, then respond exactly: shell deletion fixture complete";
+export const OPENCODE2_BACKGROUND_STOP_PROMPT =
+  "Run this shell command and wait for it: sleep 30 && echo background stop should not finish. Do not respond before it completes.";
 export const SUBAGENT_CONTINUE_PROMPT =
   "Spawn one subagent and have it reply exactly: initial subagent response";
 export const SUBAGENT_CONTINUE_PARENT_PROMPT =
