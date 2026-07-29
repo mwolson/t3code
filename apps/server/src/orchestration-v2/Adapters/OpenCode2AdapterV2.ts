@@ -277,6 +277,7 @@ interface ActiveOpenCode2Turn {
   readonly providerTurn: OrchestrationV2ProviderTurn;
   nextItemOrdinal: number;
   nativeInputId: string | null;
+  executionStarted: boolean;
   interrupted: boolean;
   finalized: boolean;
 }
@@ -371,6 +372,16 @@ export function openCode2InterruptedThreadDisposition(
   reason: Extract<V2Event, { type: "session.execution.interrupted" }>["data"]["reason"],
 ): "reusable" | "broken" {
   return reason === "shutdown" ? "broken" : "reusable";
+}
+
+export function openCode2ShouldSettleTurn(
+  source: "execution-terminal" | "execution-interrupted" | "idle",
+  executionStarted: boolean,
+  interruptRequested = false,
+): boolean {
+  if (source === "idle") return !executionStarted;
+  if (source === "execution-interrupted") return executionStarted || interruptRequested;
+  return executionStarted;
 }
 
 export interface OpenCode2ProtocolLogEvent {
@@ -1609,9 +1620,27 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             case "question.v2.rejected":
               yield* resolveRuntimeRequest(event.data.requestID, "cancelled");
               return;
+            case "session.execution.started": {
+              const active = activeFor(event.data.sessionID);
+              if (active === null) return;
+              // Execution terminals carry only a session id. This start event
+              // is the correlation barrier that keeps a late prior terminal
+              // from settling the new active turn.
+              active.turn.executionStarted = true;
+              return;
+            }
             case "session.execution.succeeded": {
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
+              if (
+                !openCode2ShouldSettleTurn(
+                  "execution-interrupted",
+                  active.turn.executionStarted,
+                  active.turn.interrupted,
+                )
+              ) {
+                return;
+              }
               yield* finalizeTurn(
                 active.state,
                 active.turn,
@@ -1622,6 +1651,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             case "session.execution.interrupted": {
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
+              if (!openCode2ShouldSettleTurn("execution-terminal", active.turn.executionStarted)) {
+                return;
+              }
               active.turn.interrupted = true;
               yield* finalizeTurn(active.state, active.turn, "interrupted", {
                 threadDisposition: openCode2InterruptedThreadDisposition(event.data.reason),
@@ -1631,6 +1663,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             case "session.execution.failed": {
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
+              if (!openCode2ShouldSettleTurn("execution-terminal", active.turn.executionStarted)) {
+                return;
+              }
               const message = event.data.error.message;
               yield* updateProviderSession("error", message);
               yield* finalizeTurn(active.state, active.turn, "failed", {
@@ -1642,11 +1677,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               });
               return;
             }
-            // 2.x settles on `session.execution.*`; `session.idle` is a
-            // backstop for builds that emit one without the other.
+            // 2.x settles on `session.execution.*`; `session.idle` is only a
+            // backstop for builds that never enter the authoritative lifecycle.
             case "session.idle": {
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
+              if (!openCode2ShouldSettleTurn("idle", active.turn.executionStarted)) return;
               yield* finalizeTurn(
                 active.state,
                 active.turn,
@@ -2059,6 +2095,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 providerTurn,
                 nextItemOrdinal: turnInput.providerTurnOrdinal * 100 + 1,
                 nativeInputId: null,
+                executionStarted: false,
                 interrupted: false,
                 finalized: false,
               };

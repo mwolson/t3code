@@ -11,6 +11,7 @@ import {
   openCode2SessionErrorMessage,
   openCode2SessionErrorStatus,
   openCode2SessionErrorTargetSessionIds,
+  openCode2ShouldSettleTurn,
   openCode2ToolNeedsTerminalOverride,
   unwrapOpenCode2Data,
 } from "./OpenCode2AdapterV2.ts";
@@ -250,5 +251,15 @@ describe("OpenCode 2 session errors", () => {
     assert.strictEqual(openCode2InterruptedThreadDisposition("user"), "reusable");
     assert.strictEqual(openCode2InterruptedThreadDisposition("superseded"), "reusable");
     assert.strictEqual(openCode2InterruptedThreadDisposition("shutdown"), "broken");
+  });
+
+  it("uses idle only before the authoritative execution lifecycle starts", () => {
+    assert.isTrue(openCode2ShouldSettleTurn("idle", false));
+    assert.isFalse(openCode2ShouldSettleTurn("execution-terminal", false));
+    assert.isFalse(openCode2ShouldSettleTurn("execution-interrupted", false));
+    assert.isTrue(openCode2ShouldSettleTurn("execution-interrupted", false, true));
+    assert.isFalse(openCode2ShouldSettleTurn("idle", true));
+    assert.isTrue(openCode2ShouldSettleTurn("execution-terminal", true));
+    assert.isTrue(openCode2ShouldSettleTurn("execution-interrupted", true));
   });
 });
