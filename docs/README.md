@@ -7,6 +7,7 @@
 - [Keyboard shortcuts](./user/keybindings.md)
 - [Remote access](./user/remote-access.md)
 - [Appearance](./user/appearance.md)
+- [Interaction sounds](./user/interaction-sounds.md)
 - [Keeping app and server in sync](./user/updating.md)
 - [Source control integrations](./user/source-control.md)
 - [Background service (Linux)](./user/background-service.md)

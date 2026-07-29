@@ -530,9 +530,21 @@ function ConfiguredSettingsRouteScreen() {
 }
 
 function GeneralSettingsSection() {
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
+  const completionSoundEnabled = AsyncResult.isSuccess(preferencesResult)
+    ? preferencesResult.value.completionSoundEnabled !== false
+    : true;
+
   return (
     <SettingsSection title="General">
       <SettingsRow icon="folder" label="Project Grouping" target="SettingsProjectGrouping" />
+      <SettingsSwitchRow
+        icon="speaker.wave.2"
+        label="Completion Sound"
+        value={completionSoundEnabled}
+        onValueChange={(value) => savePreferences({ completionSoundEnabled: value })}
+      />
     </SettingsSection>
   );
 }
