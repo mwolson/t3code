@@ -88,9 +88,11 @@ import {
 } from "../../provider/opencodeRuntime.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
 import { IdAllocatorV2, type IdAllocatorV2Shape } from "../IdAllocator.ts";
+import { randomUuidV4 } from "../RandomUuid.ts";
 import { makeProviderFailure } from "../ProviderFailure.ts";
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
 import {
+  ProviderAdapterCompactThreadError,
   ProviderAdapterEnsureThreadError,
   ProviderAdapterForkThreadError,
   ProviderAdapterInterruptError,
@@ -149,6 +151,7 @@ export const OpenCode2ProviderCapabilitiesV2 = {
     pendingRequestsSurviveRestart: false,
   },
   threads: {
+    canCompactThread: true,
     canCreateEmptyThread: true,
     canReadThreadSnapshot: true,
     canRollbackThread: true,
@@ -2598,6 +2601,29 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                     driver: OPENCODE2_PROVIDER,
                     providerSessionId: input.providerSessionId,
                     providerThreadId: threadInput.providerThread.id,
+                    cause,
+                  }),
+              ),
+            ),
+          compactThread: (providerThread) =>
+            Effect.gen(function* () {
+              const sessionID = nativeThreadId(providerThread);
+              if (!threads.has(sessionID)) {
+                return yield* protocolError(`OpenCode 2 session ${sessionID} is not registered`);
+              }
+              const id = `msg_t3_compact_${(yield* randomUuidV4).replaceAll("-", "")}`;
+              yield* sdkCall("session.compact", { sessionID, id }, () =>
+                client.v2.session.compact({ sessionID, id }),
+              );
+              yield* sdkCall("session.wait", { sessionID }, () =>
+                client.v2.session.wait({ sessionID }),
+              );
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterCompactThreadError({
+                    driver: OPENCODE2_PROVIDER,
+                    providerThreadId: providerThread.id,
                     cause,
                   }),
               ),

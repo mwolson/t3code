@@ -125,6 +125,7 @@ export const OpenCodeProviderCapabilitiesV2 = {
     pendingRequestsSurviveRestart: false,
   },
   threads: {
+    canCompactThread: false,
     canCreateEmptyThread: true,
     canReadThreadSnapshot: true,
     canRollbackThread: true,

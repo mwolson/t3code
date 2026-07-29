@@ -386,6 +386,7 @@ export const AcpProviderCapabilitiesV2 = {
     pendingRequestsSurviveRestart: false,
   },
   threads: {
+    canCompactThread: false,
     canCreateEmptyThread: true,
     canReadThreadSnapshot: false,
     canRollbackThread: false,

@@ -53,6 +53,7 @@ export const CommandPolicyCapability = Schema.Literals([
   "interrupt_restart_steering",
   "native_fork",
   "fork_from_turn",
+  "manual_compaction",
   "rollback",
   "rollback_snapshot",
   "context_handoff",
@@ -152,6 +153,9 @@ export interface CommandPolicyV2Shape {
     },
   ) => Effect.Effect<ForkExecutionPolicyV2, CommandPolicyV2Error>;
   readonly ensureRollback: (
+    input: CapabilityCheckInput,
+  ) => Effect.Effect<void, CommandPolicyV2Error>;
+  readonly ensureManualCompaction: (
     input: CapabilityCheckInput,
   ) => Effect.Effect<void, CommandPolicyV2Error>;
   readonly ensureContextHandoff: (
@@ -263,6 +267,17 @@ const ensureRollback: CommandPolicyV2Shape["ensureRollback"] = (input) => {
   }
   return Effect.void;
 };
+
+const ensureManualCompaction: CommandPolicyV2Shape["ensureManualCompaction"] = (input) =>
+  input.capabilities.threads.canCompactThread
+    ? Effect.void
+    : Effect.fail(
+        unsupported(
+          input,
+          "manual_compaction",
+          "providerInstanceId does not support manual thread compaction",
+        ),
+      );
 
 const ensureContextHandoff: CommandPolicyV2Shape["ensureContextHandoff"] = (input) => {
   if (!input.capabilities.context.canConsumeHandoffSummaries) {
@@ -423,6 +438,7 @@ export const layer: Layer.Layer<CommandPolicyV2> = Layer.succeed(CommandPolicyV2
   ensureInterrupt,
   ensureNativeFork,
   decideForkExecution,
+  ensureManualCompaction,
   ensureRollback,
   ensureContextHandoff,
 });

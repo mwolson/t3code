@@ -34,6 +34,10 @@ export function assertOpenCode2CompactionOutput(
     OPENCODE2_COMPACTION_INTERRUPT_PROMPT,
   ]);
   assertAssistantTextIncludes(projection, "compaction fixture complete");
+  assert.isTrue(
+    result.domainEvents.some((event) => event.type === "provider-thread.compaction-requested"),
+  );
+  assert.isTrue(result.domainEvents.some((event) => event.type === "provider-thread.compacted"));
 
   const compactions = projection.turnItems.filter((item) => item.type === "compaction");
   assert.equal(compactions.length, 2, "each lifecycle must retain one stable compaction row");

@@ -276,6 +276,7 @@ function makeReplayClient(controller: OpenCode2ReplayController): OpencodeClient
         list: (input: unknown) => request("message.list", input),
       },
       session: {
+        compact: (input: unknown) => request("session.compact", input),
         create: (input: unknown) => request("session.create", input),
         fork: (input: unknown) => request("session.fork", input),
         get: (input: unknown) => request("session.get", input),
@@ -297,6 +298,7 @@ function makeReplayClient(controller: OpenCode2ReplayController): OpencodeClient
         },
         switchAgent: (input: unknown) => request("session.switchAgent", input),
         switchModel: (input: unknown) => request("session.switchModel", input),
+        wait: (input: unknown) => request("session.wait", input),
       },
       shell: {
         list: (input: unknown) => request("shell.list", input),

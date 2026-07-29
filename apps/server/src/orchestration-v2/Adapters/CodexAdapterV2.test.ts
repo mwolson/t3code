@@ -897,11 +897,9 @@ function makeCodexReplayTurn(input: {
   };
 }
 
-function codexReplayPreamble(input: {
-  readonly nativeThreadId: string;
-  readonly nativeTurnId: string;
-  readonly prompt: string;
-}): Array<CodexReplay.CodexAppServerReplayEntry> {
+function codexReplaySessionPreamble(
+  nativeThreadId: string,
+): Array<CodexReplay.CodexAppServerReplayEntry> {
   return [
     {
       type: "expect_outbound",
@@ -941,8 +939,8 @@ function codexReplayPreamble(input: {
         id: 2,
         result: {
           thread: {
-            id: input.nativeThreadId,
-            sessionId: input.nativeThreadId,
+            id: nativeThreadId,
+            sessionId: nativeThreadId,
             forkedFromId: null,
             preview: "",
             ephemeral: false,
@@ -950,7 +948,7 @@ function codexReplayPreamble(input: {
             createdAt: 1782622440,
             updatedAt: 1782622440,
             status: { type: "idle" },
-            path: `/tmp/${input.nativeThreadId}.jsonl`,
+            path: `/tmp/${nativeThreadId}.jsonl`,
             cwd: "/workspace",
             cliVersion: "0.144.0",
             source: "vscode",
@@ -973,6 +971,16 @@ function codexReplayPreamble(input: {
         },
       },
     },
+  ];
+}
+
+function codexReplayPreamble(input: {
+  readonly nativeThreadId: string;
+  readonly nativeTurnId: string;
+  readonly prompt: string;
+}): Array<CodexReplay.CodexAppServerReplayEntry> {
+  return [
+    ...codexReplaySessionPreamble(input.nativeThreadId),
     {
       type: "expect_outbound",
       label: "turn/start",
@@ -1204,6 +1212,57 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(retryItems[1]?.id, retryItems[0]?.id);
         assert.equal(retryItems[1]?.status, "completed");
         assert.equal(retryItems[1]?.title, "Provider recovered");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("waits for context compaction to complete", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-manual-compaction";
+        const nativeThreadId = `native-${scenario}-thread`;
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...codexReplaySessionPreamble(nativeThreadId),
+            {
+              type: "expect_outbound",
+              label: "thread/compact/start",
+              frame: {
+                id: 3,
+                method: "thread/compact/start",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "thread/compact/start",
+              frame: { id: 3, result: {} },
+            },
+            {
+              type: "emit_inbound",
+              label: "item/completed/contextCompaction",
+              frame: {
+                method: "item/completed",
+                params: {
+                  completedAtMs: 1782622441000,
+                  item: {
+                    id: "context-compaction-1",
+                    type: "contextCompaction",
+                  },
+                  threadId: nativeThreadId,
+                  turnId: "compact-turn-1",
+                },
+              },
+            },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        if (harness.runtime.compactThread === undefined) {
+          return yield* Effect.die("Codex adapter runtime must expose compactThread.");
+        }
+
+        yield* harness.runtime.compactThread(harness.providerThread);
       }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
     ),
   );

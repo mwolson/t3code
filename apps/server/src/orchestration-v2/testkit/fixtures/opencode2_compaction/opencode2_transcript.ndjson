@@ -18,6 +18,17 @@
 {"type":"emit_inbound","label":"session.pending.list.response","frame":{"type":"sdk.response","operation":"session.pending.list","data":[]}}
 {"type":"expect_outbound","label":"shell.list","frame":{"type":"shell.list","input":{"location":{"directory":"/private/tmp/t3-opencode2-compaction-replay"}}}}
 {"type":"emit_inbound","label":"shell.list.response","frame":{"type":"sdk.response","operation":"shell.list","data":[]}}
+{"type":"expect_outbound","label":"session.pending.list.idle-release","frame":{"type":"session.pending.list","input":{"sessionID":"ses_opencode2_compaction"}}}
+{"type":"emit_inbound","label":"session.pending.list.idle-release.response","frame":{"type":"sdk.response","operation":"session.pending.list","data":[]}}
+{"type":"expect_outbound","label":"shell.list.idle-release","frame":{"type":"shell.list","input":{"location":{"directory":"/private/tmp/t3-opencode2-compaction-replay"}}}}
+{"type":"emit_inbound","label":"shell.list.idle-release.response","frame":{"type":"sdk.response","operation":"shell.list","data":[]}}
+{"type":"expect_outbound","label":"event.subscribe.manual-compaction-resume","frame":{"type":"event.subscribe"}}
+{"type":"expect_outbound","label":"session.get.manual-compaction","frame":{"type":"session.get","input":{"sessionID":"ses_opencode2_compaction"}}}
+{"type":"emit_inbound","label":"session.get.manual-compaction.response","frame":{"type":"sdk.response","operation":"session.get","data":{"id":"ses_opencode2_compaction","projectID":"global","model":{"id":"big-pickle","providerID":"opencode"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1785297600000,"updated":1785297600000},"title":"T3 OpenCode 2 compaction replay","location":{"directory":"/private/tmp/t3-opencode2-compaction-replay"}}}}
+{"type":"expect_outbound","label":"session.compact.manual","frame":{"type":"session.compact","input":{"sessionID":"ses_opencode2_compaction","id":"<any>"}}}
+{"type":"emit_inbound","label":"session.compact.manual.response","frame":{"type":"sdk.response","operation":"session.compact","data":true}}
+{"type":"expect_outbound","label":"session.wait.manual","frame":{"type":"session.wait","input":{"sessionID":"ses_opencode2_compaction"}}}
+{"type":"emit_inbound","label":"session.wait.manual.response","frame":{"type":"sdk.response","operation":"session.wait","data":true}}
 {"type":"expect_outbound","label":"session.prompt.interrupt","frame":{"type":"session.prompt","input":{"sessionID":"ses_opencode2_compaction","text":"Begin compacting the current context and wait for it to finish."}}}
 {"type":"emit_inbound","label":"session.prompt.interrupt.response","frame":{"type":"sdk.response","operation":"session.prompt","data":{"id":"input_opencode2_compaction_interrupt"}}}
 {"type":"emit_inbound","label":"session.input.admitted.interrupt","frame":{"type":"sdk.event","event":{"type":"session.input.admitted","data":{"sessionID":"ses_opencode2_compaction","inputID":"input_opencode2_compaction_interrupt","input":{"id":"input_opencode2_compaction_interrupt","type":"user"}}}}}

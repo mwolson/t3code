@@ -74,6 +74,7 @@ import {
 import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailure.ts";
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
 import {
+  ProviderAdapterCompactThreadError,
   ProviderAdapterEnsureThreadError,
   ProviderAdapterForkThreadError,
   ProviderAdapterInterruptError,
@@ -142,6 +143,7 @@ export const CodexProviderCapabilitiesV2 = {
     pendingRequestsSurviveRestart: false,
   },
   threads: {
+    canCompactThread: true,
     canCreateEmptyThread: true,
     canReadThreadSnapshot: true,
     canRollbackThread: true,
@@ -1459,6 +1461,9 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         const activeTurns = yield* Ref.make(new Map<string, ActiveCodexTurnContext>());
         const pendingRootTurns = yield* Ref.make(new Map<string, ProviderAdapterV2TurnInput>());
         const turnWaiters = yield* Ref.make(new Map<string, Deferred.Deferred<void, never>>());
+        const compactionWaiters = yield* Ref.make(
+          new Map<string, Deferred.Deferred<void, never>>(),
+        );
         const subagentThreads = yield* Ref.make(new Map<string, CodexSubagentThreadContext>());
         const pendingSubagentTurns = yield* Ref.make(
           new Map<string, ReadonlyArray<PendingCodexSubagentTurnStarted>>(),
@@ -3357,6 +3362,12 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
 
         yield* client.handleServerNotification("item/completed", (payload) =>
           Effect.gen(function* () {
+            if (payload.item.type === "contextCompaction") {
+              const waiter = (yield* Ref.get(compactionWaiters)).get(payload.threadId);
+              if (waiter !== undefined) {
+                yield* Deferred.succeed(waiter, undefined);
+              }
+            }
             const resolved = yield* resolveItemEventContext(payload.turnId);
             if (resolved === undefined) {
               return;
@@ -4384,6 +4395,47 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                     driver: CODEX_PROVIDER,
                     providerSessionId: input.providerSessionId,
                     providerThreadId: threadInput.providerThread.id,
+                    cause: normalizeCodexCause(cause),
+                  }),
+              ),
+            ),
+          compactThread: (providerThread) =>
+            Effect.gen(function* () {
+              const threadId = yield* getNativeThreadId(providerThread);
+              const completion = yield* Deferred.make<void>();
+              const claimed = yield* Ref.modify(compactionWaiters, (current) => {
+                if (current.has(threadId)) {
+                  return [false, current] as const;
+                }
+                const updated = new Map(current);
+                updated.set(threadId, completion);
+                return [true, updated] as const;
+              });
+              if (!claimed) {
+                return yield* toProtocolError(`Codex thread ${threadId} is already compacting`);
+              }
+              yield* Effect.gen(function* () {
+                yield* ensureInitialized;
+                yield* client.request("thread/compact/start", { threadId });
+                yield* Deferred.await(completion);
+              }).pipe(
+                Effect.ensuring(
+                  Ref.update(compactionWaiters, (current) => {
+                    if (current.get(threadId) !== completion) {
+                      return current;
+                    }
+                    const updated = new Map(current);
+                    updated.delete(threadId);
+                    return updated;
+                  }),
+                ),
+              );
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterCompactThreadError({
+                    driver: CODEX_PROVIDER,
+                    providerThreadId: providerThread.id,
                     cause: normalizeCodexCause(cause),
                   }),
               ),

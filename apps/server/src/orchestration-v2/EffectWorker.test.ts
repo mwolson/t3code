@@ -33,6 +33,7 @@ import {
 } from "./EffectWorker.ts";
 import { RunFinalizationService } from "./RunFinalizationService.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
+import { ProviderThreadCompactionServiceV2 } from "./ProviderThreadCompactionService.ts";
 import { ProviderTurnControlServiceV2 } from "./ProviderTurnControlService.ts";
 import { ProviderTurnStartError, ProviderTurnStartServiceV2 } from "./ProviderTurnStartService.ts";
 import { RuntimeRequestServiceV2 } from "./RuntimeRequestService.ts";
@@ -137,6 +138,10 @@ function makeExecutorLayer(input: {
     Layer.succeed(
       CheckpointRollbackServiceV2,
       CheckpointRollbackServiceV2.of({ execute: () => Effect.void }),
+    ),
+    Layer.succeed(
+      ProviderThreadCompactionServiceV2,
+      ProviderThreadCompactionServiceV2.of({ execute: () => Effect.void }),
     ),
     Layer.succeed(
       RuntimeRequestServiceV2,

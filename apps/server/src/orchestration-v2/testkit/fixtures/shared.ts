@@ -209,6 +209,13 @@ export type OrchestratorFixtureInputStep =
       readonly type: "delete";
     }
   | {
+      readonly type: "compact";
+    }
+  | {
+      readonly type: "await_provider_session_status";
+      readonly status: OrchestrationV2ThreadProjection["providerSessions"][number]["status"];
+    }
+  | {
       readonly type: "approve_next_runtime_request";
       readonly decision?: Extract<
         OrchestrationV2Command,
@@ -693,6 +700,32 @@ export function materializeFixtureInput(input: {
               fixtureName: input.scenario,
               commandName: "thread-delete",
             }),
+            threadId: ids.threadId,
+          });
+          break;
+        case "compact":
+          {
+            const commandId = yield* idAllocator.allocate.command({
+              fixtureName: input.scenario,
+              commandName: "thread-compact",
+            });
+            pushDispatch({
+              type: "thread.compact",
+              commandId,
+              threadId: ids.threadId,
+            });
+            steps.push({
+              type: "await_stored_event",
+              commandId,
+              eventType: "provider-thread.compacted",
+              threadId: ids.threadId,
+            });
+          }
+          break;
+        case "await_provider_session_status":
+          steps.push({
+            type: "await_provider_session_status",
+            status: step.status,
             threadId: ids.threadId,
           });
           break;

@@ -24,6 +24,7 @@ import {
 } from "./EffectOutbox.ts";
 import { CheckpointRollbackServiceV2 } from "./CheckpointRollbackService.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
+import { ProviderThreadCompactionServiceV2 } from "./ProviderThreadCompactionService.ts";
 import { ProviderTurnControlServiceV2 } from "./ProviderTurnControlService.ts";
 import { ProviderTurnStartServiceV2 } from "./ProviderTurnStartService.ts";
 import { RuntimeRequestServiceV2 } from "./RuntimeRequestService.ts";
@@ -76,6 +77,7 @@ export const executorLayer: Layer.Layer<
   OrchestrationEffectExecutorV2,
   never,
   | ProviderSessionManagerV2
+  | ProviderThreadCompactionServiceV2
   | RunFinalizationService
   | CheckpointRollbackServiceV2
   | ProviderTurnControlServiceV2
@@ -88,6 +90,7 @@ export const executorLayer: Layer.Layer<
     const resourceCleanup = yield* ResourceCleanupService;
     const checkpointRollback = yield* CheckpointRollbackServiceV2;
     const providerSessions = yield* ProviderSessionManagerV2;
+    const providerThreadCompaction = yield* ProviderThreadCompactionServiceV2;
     const providerTurnControl = yield* ProviderTurnControlServiceV2;
     const providerTurnStart = yield* ProviderTurnStartServiceV2;
     const runtimeRequests = yield* RuntimeRequestServiceV2;
@@ -129,6 +132,23 @@ export const executorLayer: Layer.Layer<
           case "provider-turn.start":
             return providerTurnStart
               .start({ threadId: effect.threadId, runId: effect.request.runId })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
+          case "provider-thread.compact":
+            return providerThreadCompaction
+              .execute({
+                commandId: effect.commandId,
+                threadId: effect.threadId,
+                providerThreadId: effect.request.providerThreadId,
+              })
               .pipe(
                 Effect.mapError(
                   (cause) =>

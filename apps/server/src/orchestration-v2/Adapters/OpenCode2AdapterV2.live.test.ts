@@ -7,7 +7,6 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
-import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -165,6 +164,8 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
       () =>
         Effect.scoped(
           Effect.gen(function* () {
+            const serverConfig = yield* ServerConfig;
+            const idAllocator = yield* IdAllocatorV2;
             const runtime = yield* OpenCode2Runtime;
             const server = yield* runtime.startOpenCode2ServerProcess({
               binaryPath: "opencode2",
@@ -174,22 +175,61 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
               directory: process.cwd(),
               serverPassword: server.password,
             });
+            const instanceId = ProviderInstanceId.make("opencode2-live-compaction-test");
+            const modelSelection = {
+              instanceId,
+              model: "opencode/glm-5.2",
+              options: [],
+            };
+            const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: process.cwd(),
+            });
+            const adapter = makeOpenCode2AdapterV2({
+              instanceId,
+              settings: yield* decodeOpenCode2Settings({
+                binaryPath: "opencode2",
+                serverUrl: server.url,
+                serverPassword: server.password,
+              }),
+              environment: process.env,
+              runtime,
+              idAllocator,
+              serverConfig,
+            });
+            const adapterSession = yield* adapter.openSession({
+              threadId: ThreadId.make("thread-opencode2-live-compaction-test"),
+              providerSessionId: ProviderSessionId.make(
+                "provider-session-opencode2-live-compaction-test",
+              ),
+              modelSelection,
+              runtimePolicy,
+            });
+            const providerThread = yield* adapterSession.ensureThread({
+              threadId: ThreadId.make("thread-opencode2-live-compaction-test"),
+              modelSelection,
+              runtimePolicy,
+            });
+            const sessionID = providerThread.nativeThreadRef?.nativeId;
+            if (typeof sessionID !== "string") {
+              return yield* Effect.die(
+                "OpenCode 2 provider thread must expose a native session id.",
+              );
+            }
+            const compactThread = adapterSession.compactThread;
+            if (compactThread === undefined) {
+              return yield* Effect.die("OpenCode 2 adapter runtime must expose compactThread.");
+            }
+            yield* Effect.addFinalizer(() =>
+              runOpenCode2Sdk("session.remove", () => client.v2.session.remove({ sessionID })).pipe(
+                Effect.ignore,
+              ),
+            );
             const abortController = new AbortController();
             yield* Effect.addFinalizer(() => Effect.sync(() => abortController.abort()));
             const subscription = yield* runOpenCode2Sdk("event.subscribe", () =>
               client.v2.event.subscribe({ signal: abortController.signal }),
-            );
-            const created = yield* runOpenCode2Sdk("session.create", () =>
-              client.v2.session.create({
-                location: { directory: process.cwd() },
-                model: { providerID: "opencode", id: "glm-5.2" },
-              }),
-            );
-            const session = unwrapOpenCode2Data<{ readonly id: string }>("session.create", created);
-            yield* Effect.addFinalizer(() =>
-              runOpenCode2Sdk("session.remove", () =>
-                client.v2.session.remove({ sessionID: session.id }),
-              ).pipe(Effect.ignore),
             );
             const eventFiber = yield* Stream.fromAsyncIterable(
               subscription.stream,
@@ -202,7 +242,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             ).pipe(
               Stream.filter(
                 (event): event is OpenCode2CompactionEvent =>
-                  isOpenCode2CompactionEvent(event) && event.data.sessionID === session.id,
+                  isOpenCode2CompactionEvent(event) && event.data.sessionID === sessionID,
               ),
               Stream.takeUntil(
                 (event) =>
@@ -215,23 +255,12 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
 
             yield* runOpenCode2Sdk("session.prompt", () =>
               client.v2.session.prompt({
-                sessionID: session.id,
+                sessionID,
                 text: "Remember this sentence: native compaction fixture context.",
               }),
             );
-            yield* runOpenCode2Sdk("session.wait", () =>
-              client.v2.session.wait({ sessionID: session.id }),
-            );
-            const compactionId = `msg_t3_live_compaction_${yield* Clock.currentTimeMillis}`;
-            yield* runOpenCode2Sdk("session.compact", () =>
-              client.v2.session.compact({
-                sessionID: session.id,
-                id: compactionId,
-              }),
-            );
-            yield* runOpenCode2Sdk("session.wait", () =>
-              client.v2.session.wait({ sessionID: session.id }),
-            );
+            yield* runOpenCode2Sdk("session.wait", () => client.v2.session.wait({ sessionID }));
+            yield* compactThread(providerThread);
 
             const events = Array.from(
               yield* Fiber.join(eventFiber).pipe(Effect.timeout("60 seconds")),

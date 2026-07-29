@@ -129,6 +129,7 @@ export const ClaudeProviderCapabilitiesV2 = {
     pendingRequestsSurviveRestart: false,
   },
   threads: {
+    canCompactThread: false,
     canCreateEmptyThread: true,
     canReadThreadSnapshot: false,
     canRollbackThread: true,

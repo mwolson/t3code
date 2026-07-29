@@ -188,6 +188,7 @@ function commandThreadId(command: OrchestrationV2Command): ThreadId {
   switch (command.type) {
     case "thread.create":
     case "thread.archive":
+    case "thread.compact":
     case "thread.unarchive":
     case "thread.settle":
     case "thread.unsettle":
@@ -5473,6 +5474,84 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
     });
 
+  const dispatchThreadCompaction = (
+    command: Extract<OrchestrationV2Command, { readonly type: "thread.compact" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) =>
+    Effect.gen(function* () {
+      const projection = yield* loadProjectionForCommand(command);
+      if (projection.runs.some(isSettleBlockingRun)) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} has active or queued work and cannot be compacted.`,
+        });
+      }
+      const providerThread = projection.providerThreads.find(
+        (candidate) => candidate.id === projection.thread.activeProviderThreadId,
+      );
+      if (providerThread === undefined || providerThread.providerSessionId === null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} has no active provider thread to compact.`,
+        });
+      }
+      const modelSelection = projection.thread.modelSelection;
+      if (modelSelection.instanceId !== providerThread.providerInstanceId) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Provider thread ${providerThread.id} does not belong to the active provider instance.`,
+        });
+      }
+      const capabilities = yield* providerAdapters.get(modelSelection.instanceId).pipe(
+        Effect.flatMap((adapter) => adapter.getCapabilities()),
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorProviderAdapterError({
+              commandId: command.commandId,
+              providerInstanceId: modelSelection.instanceId,
+              cause,
+            }),
+        ),
+      );
+      yield* enforceCommandPolicy(command)(
+        commandPolicy.ensureManualCompaction({
+          commandId: command.commandId,
+          threadId: command.threadId,
+          providerInstanceId: modelSelection.instanceId,
+          capabilities,
+        }),
+      );
+
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "provider-thread.compaction-requested",
+        threadId: command.threadId,
+        driver: providerThread.driver,
+        providerInstanceId: providerThread.providerInstanceId,
+        occurredAt: now,
+        payload: providerThread,
+      });
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${command.commandId}:provider-thread.compact:${providerThread.id}`,
+          commandId: command.commandId,
+          threadId: command.threadId,
+          request: {
+            type: "provider-thread.compact",
+            providerThreadId: providerThread.id,
+          },
+        } satisfies PendingOrchestrationEffectV2,
+      ]);
+    });
+
   /**
    * Parent thread of an app-owned delegated child, or undefined when the
    * thread is not one. Thread lineage and fork origin are immutable, so this
@@ -5787,6 +5866,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.model-selection.set":
       case "provider.switch":
         yield* dispatchThreadMutation(command, events, effects);
+        break;
+      case "thread.compact":
+        yield* dispatchThreadCompaction(command, events, effects);
         break;
       case "provider-session.detach":
         yield* dispatchProviderSessionDetach(command, events, effects);
