@@ -532,6 +532,12 @@ function GeneralSettingsSection() {
   const autoSettleOnMerge =
     !AsyncResult.isSuccess(preferencesResult) ||
     preferencesResult.value.autoSettleOnMerge !== false;
+  const autoSettlePreferences = resolveMobileAutoSettlePreferences(
+    AsyncResult.isSuccess(preferencesResult) ? preferencesResult.value : {},
+  );
+  const completionSoundEnabled = AsyncResult.isSuccess(preferencesResult)
+    ? preferencesResult.value.completionSoundEnabled !== false
+    : true;
 
   return (
     <SettingsSection title="General">
@@ -543,6 +549,12 @@ function GeneralSettingsSection() {
         onValueChange={(value) => savePreferences({ autoSettleOnMerge: value })}
       />
       <SettingsRow icon="chart.bar.xaxis" label="Usage" target="SettingsUsage" />
+      <SettingsSwitchRow
+        icon="speaker.wave.2"
+        label="Completion Sound"
+        value={completionSoundEnabled}
+        onValueChange={(value) => savePreferences({ completionSoundEnabled: value })}
+      />
     </SettingsSection>
   );
 }
