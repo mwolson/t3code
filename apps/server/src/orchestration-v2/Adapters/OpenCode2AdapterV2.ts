@@ -270,6 +270,14 @@ interface OpenCode2ShellProjection {
   status: ShellInfoV2["status"];
 }
 
+interface OpenCode2Compaction {
+  readonly id: string;
+  readonly startedAt: DateTime.Utc;
+  summary: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  completedAt: DateTime.Utc | null;
+}
+
 type OpenCode2Part = OpenCode2TextPart | OpenCode2ToolPart;
 
 interface ActiveOpenCode2Turn {
@@ -287,6 +295,7 @@ interface ActiveOpenCode2Turn {
   readonly providerTurn: OrchestrationV2ProviderTurn;
   nextItemOrdinal: number;
   nativeInputId: string | null;
+  activeCompaction: OpenCode2Compaction | null;
   executionStarted: boolean;
   interrupted: boolean;
   finalized: boolean;
@@ -1144,6 +1153,76 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           });
         });
 
+        const emitCompaction = Effect.fnUntraced(function* (
+          state: OpenCode2ThreadState,
+          turn: ActiveOpenCode2Turn,
+          compaction: OpenCode2Compaction,
+        ) {
+          const emittedAt = yield* DateTime.now;
+          const completedAt =
+            compaction.status === "running" ? null : (compaction.completedAt ?? emittedAt);
+          const nativeItemRef = providerRef(compaction.id);
+          const nodeId = idAllocator.derive.nodeFromProviderItem({
+            driver: OPENCODE2_PROVIDER,
+            nativeItemId: compaction.id,
+          });
+          const turnItemId = idAllocator.derive.turnItemFromProviderItem({
+            driver: OPENCODE2_PROVIDER,
+            nativeItemId: compaction.id,
+          });
+          yield* emitProviderEvent({
+            type: "node.updated",
+            driver: OPENCODE2_PROVIDER,
+            node: {
+              id: nodeId,
+              threadId: turn.threadId,
+              runId: turn.runId,
+              parentNodeId: turn.rootNodeId,
+              rootNodeId: turn.rootNodeId,
+              kind: "system",
+              status: compaction.status,
+              countsForRun: false,
+              providerThreadId: state.providerThread.id,
+              providerTurnId: turn.providerTurnId,
+              nativeItemRef,
+              runtimeRequestId: null,
+              checkpointScopeId: null,
+              startedAt: compaction.startedAt,
+              completedAt,
+            },
+          });
+          yield* emitProviderEvent({
+            type: "turn_item.updated",
+            driver: OPENCODE2_PROVIDER,
+            turnItem: {
+              id: turnItemId,
+              threadId: turn.threadId,
+              runId: turn.runId,
+              nodeId,
+              providerThreadId: state.providerThread.id,
+              providerTurnId: turn.providerTurnId,
+              nativeItemRef,
+              parentItemId: null,
+              ordinal: itemOrdinal(turn, compaction.id),
+              status: compaction.status,
+              title:
+                compaction.status === "running"
+                  ? "Compacting context..."
+                  : compaction.status === "completed"
+                    ? "Context compacted"
+                    : compaction.status === "failed"
+                      ? "Context compaction failed"
+                      : "Context compaction stopped",
+              startedAt: compaction.startedAt,
+              completedAt,
+              updatedAt: emittedAt,
+              type: "compaction",
+              driver: OPENCODE2_PROVIDER,
+              ...(compaction.summary.length === 0 ? {} : { summary: compaction.summary }),
+            },
+          });
+        });
+
         const runningShellForPart = (
           turn: ActiveOpenCode2Turn,
           part: OpenCode2ToolPart,
@@ -1385,6 +1464,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               continue;
             }
             yield* emitTextPart(state, turn, part, true);
+          }
+          if (turn.activeCompaction?.status === "running") {
+            turn.activeCompaction.status =
+              status === "completed" ? "completed" : status === "failed" ? "failed" : "cancelled";
+            turn.activeCompaction.completedAt = completedAt;
+            yield* emitCompaction(state, turn, turn.activeCompaction);
           }
           for (const pending of Array.from(pendingRequests.values())) {
             if (pending.turn.providerTurnId === turn.providerTurnId) {
@@ -1849,6 +1934,93 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 ...("text" in event.data ? { text: event.data.text } : {}),
                 ...(event.type === "session.reasoning.ended" ? { completed: true } : {}),
               });
+              return;
+            }
+            case "session.compaction.started": {
+              const active = activeFor(event.data.sessionID);
+              if (active === null) return;
+              const now = yield* DateTime.now;
+              const nativeItemId = event.data.inputID ?? event.id;
+              const current = active.turn.activeCompaction;
+              if (current !== null && current.id !== nativeItemId && current.status === "running") {
+                current.status = "cancelled";
+                current.completedAt = now;
+                yield* emitCompaction(active.state, active.turn, current);
+              }
+              const compaction: OpenCode2Compaction =
+                current?.id === nativeItemId
+                  ? current
+                  : {
+                      id: nativeItemId,
+                      startedAt: dateTimeFromEpoch(event.created, now),
+                      summary: "",
+                      status: "running",
+                      completedAt: null,
+                    };
+              compaction.status = "running";
+              compaction.completedAt = null;
+              active.turn.activeCompaction = compaction;
+              yield* emitCompaction(active.state, active.turn, compaction);
+              return;
+            }
+            case "session.compaction.delta": {
+              const active = activeFor(event.data.sessionID);
+              if (active === null) return;
+              const now = yield* DateTime.now;
+              const compaction =
+                active.turn.activeCompaction ??
+                ({
+                  id: event.id,
+                  startedAt: dateTimeFromEpoch(event.created, now),
+                  summary: "",
+                  status: "running",
+                  completedAt: null,
+                } satisfies OpenCode2Compaction);
+              compaction.summary += event.data.text;
+              active.turn.activeCompaction = compaction;
+              yield* emitCompaction(active.state, active.turn, compaction);
+              return;
+            }
+            case "session.compaction.ended": {
+              const active = activeFor(event.data.sessionID);
+              if (active === null) return;
+              const now = yield* DateTime.now;
+              const compaction =
+                active.turn.activeCompaction ??
+                ({
+                  id: event.id,
+                  startedAt: dateTimeFromEpoch(event.created, now),
+                  summary: "",
+                  status: "running",
+                  completedAt: null,
+                } satisfies OpenCode2Compaction);
+              compaction.summary = event.data.text;
+              compaction.status = "completed";
+              compaction.completedAt = dateTimeFromEpoch(event.created, now);
+              active.turn.activeCompaction = compaction;
+              yield* emitCompaction(active.state, active.turn, compaction);
+              return;
+            }
+            case "session.compaction.failed": {
+              const active = activeFor(event.data.sessionID);
+              if (active === null) return;
+              const now = yield* DateTime.now;
+              const compaction =
+                active.turn.activeCompaction ??
+                ({
+                  id: event.data.inputID ?? event.id,
+                  startedAt: dateTimeFromEpoch(event.created, now),
+                  summary: "",
+                  status: "running",
+                  completedAt: null,
+                } satisfies OpenCode2Compaction);
+              if (compaction.summary.length === 0) {
+                compaction.summary = event.data.error.message;
+              }
+              compaction.status = "failed";
+              compaction.completedAt = dateTimeFromEpoch(event.created, now);
+              active.turn.activeCompaction = compaction;
+              yield* emitCompaction(active.state, active.turn, compaction);
               return;
             }
             case "session.tool.input.started": {
@@ -2426,6 +2598,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 providerTurn,
                 nextItemOrdinal: turnInput.providerTurnOrdinal * 100 + 1,
                 nativeInputId: null,
+                activeCompaction: null,
                 executionStarted: false,
                 interrupted: false,
                 finalized: false,

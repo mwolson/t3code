@@ -1,3 +1,4 @@
+import type { V2Event } from "@opencode-ai/sdk-next/v2";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   OpenCode2Settings,
@@ -6,7 +7,9 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -16,6 +19,7 @@ import { describe } from "vite-plus/test";
 import { ServerConfig } from "../../config.ts";
 import {
   OpenCode2Runtime,
+  OpenCode2RuntimeError,
   OpenCode2RuntimeLive,
   runOpenCode2Sdk,
 } from "../../provider/opencode2Runtime.ts";
@@ -32,6 +36,28 @@ const layer = Layer.mergeAll(
   idAllocatorLayer,
   serverConfigLayer,
 );
+
+type OpenCode2CompactionEvent = Extract<
+  V2Event,
+  {
+    type:
+      | "session.compaction.admitted"
+      | "session.compaction.started"
+      | "session.compaction.delta"
+      | "session.compaction.ended"
+      | "session.compaction.failed";
+  }
+>;
+
+function isOpenCode2CompactionEvent(event: V2Event): event is OpenCode2CompactionEvent {
+  return (
+    event.type === "session.compaction.admitted" ||
+    event.type === "session.compaction.started" ||
+    event.type === "session.compaction.delta" ||
+    event.type === "session.compaction.ended" ||
+    event.type === "session.compaction.failed"
+  );
+}
 
 describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
   "OpenCode 2 adapter pending work (live)",
@@ -127,6 +153,100 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
           }),
         ).pipe(Effect.provide(layer)),
       { timeout: 60_000 },
+    );
+
+    it.live(
+      "observes the native compaction lifecycle used by the adapter projection",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const runtime = yield* OpenCode2Runtime;
+            const server = yield* runtime.startOpenCode2ServerProcess({
+              binaryPath: "opencode2",
+            });
+            const client = runtime.createOpenCode2SdkClient({
+              baseUrl: server.url,
+              directory: process.cwd(),
+              serverPassword: server.password,
+            });
+            const abortController = new AbortController();
+            yield* Effect.addFinalizer(() => Effect.sync(() => abortController.abort()));
+            const subscription = yield* runOpenCode2Sdk("event.subscribe", () =>
+              client.v2.event.subscribe({ signal: abortController.signal }),
+            );
+            const created = yield* runOpenCode2Sdk("session.create", () =>
+              client.v2.session.create({
+                location: { directory: process.cwd() },
+                model: { providerID: "opencode", id: "glm-5.2" },
+              }),
+            );
+            const session = unwrapOpenCode2Data<{ readonly id: string }>("session.create", created);
+            yield* Effect.addFinalizer(() =>
+              runOpenCode2Sdk("session.remove", () =>
+                client.v2.session.remove({ sessionID: session.id }),
+              ).pipe(Effect.ignore),
+            );
+            const eventFiber = yield* Stream.fromAsyncIterable(
+              subscription.stream,
+              (cause) =>
+                new OpenCode2RuntimeError({
+                  operation: "event.subscribe",
+                  detail: String(cause),
+                  cause,
+                }),
+            ).pipe(
+              Stream.filter(
+                (event): event is OpenCode2CompactionEvent =>
+                  isOpenCode2CompactionEvent(event) && event.data.sessionID === session.id,
+              ),
+              Stream.takeUntil(
+                (event) =>
+                  event.type === "session.compaction.ended" ||
+                  event.type === "session.compaction.failed",
+              ),
+              Stream.runCollect,
+              Effect.forkScoped,
+            );
+
+            yield* runOpenCode2Sdk("session.prompt", () =>
+              client.v2.session.prompt({
+                sessionID: session.id,
+                text: "Remember this sentence: native compaction fixture context.",
+              }),
+            );
+            yield* runOpenCode2Sdk("session.wait", () =>
+              client.v2.session.wait({ sessionID: session.id }),
+            );
+            const compactionId = `msg_t3_live_compaction_${yield* Clock.currentTimeMillis}`;
+            yield* runOpenCode2Sdk("session.compact", () =>
+              client.v2.session.compact({
+                sessionID: session.id,
+                id: compactionId,
+              }),
+            );
+            yield* runOpenCode2Sdk("session.wait", () =>
+              client.v2.session.wait({ sessionID: session.id }),
+            );
+
+            const events = Array.from(
+              yield* Fiber.join(eventFiber).pipe(Effect.timeout("60 seconds")),
+            );
+            assert.deepEqual(
+              events
+                .filter((event) => event.type !== "session.compaction.delta")
+                .map((event) => event.type),
+              [
+                "session.compaction.admitted",
+                "session.compaction.started",
+                "session.compaction.ended",
+              ],
+            );
+            const ended = events.find((event) => event.type === "session.compaction.ended");
+            assert.isDefined(ended);
+            assert.isAbove(ended.data.text.length, 0);
+          }),
+        ).pipe(Effect.provide(layer)),
+      { timeout: 120_000 },
     );
   },
 );

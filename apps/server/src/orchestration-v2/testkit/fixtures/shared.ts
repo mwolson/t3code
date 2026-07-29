@@ -52,6 +52,10 @@ export const OPENCODE_SUBAGENT_PROMPT =
   "Use the task tool exactly once. Delegate to the general subagent with this prompt: Respond exactly CHILD_OK. After the task completes, respond exactly PARENT_OK.";
 export const OPENCODE_ERROR_CLEANUP_DRAIN_PROMPT =
   "Run a local command that prints the authoritative cleanup result.";
+export const OPENCODE2_COMPACTION_PROMPT =
+  "Compact the current context, then respond exactly: compaction fixture complete";
+export const OPENCODE2_COMPACTION_INTERRUPT_PROMPT =
+  "Begin compacting the current context and wait for it to finish.";
 export const OPENCODE2_SHELL_PROJECTION_PROMPT =
   "Run a shell command that prints the paged shell fixture output, move it to background observation, then respond exactly: shell projection fixture complete";
 export const OPENCODE2_SHELL_FAILURE_PROMPT =
