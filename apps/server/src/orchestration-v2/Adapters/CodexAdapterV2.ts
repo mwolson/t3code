@@ -107,6 +107,7 @@ export const CODEX_DRIVER_KIND = CODEX_PROVIDER;
 export const CODEX_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(CODEX_DRIVER_KIND);
 const DEFAULT_CODEX_SETTINGS = Schema.decodeSync(CodexSettings)({});
 const CODEX_ASSISTANT_DELTA_FLUSH_INTERVAL_MS = 50;
+const CODEX_MANUAL_COMPACTION_TIMEOUT = "10 minutes";
 const CodexBackgroundTerminalTerminateResponse = Schema.Struct({
   terminated: Schema.Boolean,
 });
@@ -4417,7 +4418,15 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               yield* Effect.gen(function* () {
                 yield* ensureInitialized;
                 yield* client.request("thread/compact/start", { threadId });
-                yield* Deferred.await(completion);
+                yield* Deferred.await(completion).pipe(
+                  Effect.timeoutOrElse({
+                    duration: CODEX_MANUAL_COMPACTION_TIMEOUT,
+                    orElse: () =>
+                      toProtocolError(
+                        `Timed out waiting ${CODEX_MANUAL_COMPACTION_TIMEOUT} for Codex thread ${threadId} to compact`,
+                      ),
+                  }),
+                );
               }).pipe(
                 Effect.ensuring(
                   Ref.update(compactionWaiters, (current) => {

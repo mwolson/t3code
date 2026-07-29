@@ -241,6 +241,8 @@ function makeProviderAdapter(
     }) => Effect.Effect<void>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hangSessionScopeClose?: boolean;
+    readonly failDeleteThread?: boolean;
+    readonly failDetachedDeleteThread?: boolean;
   } = {},
 ): ProviderAdapterV2Shape {
   return {
@@ -250,7 +252,13 @@ function makeProviderAdapter(
       Ref.update(state, (current) => ({
         ...current,
         detachedDeleteCount: current.detachedDeleteCount + 1,
-      })),
+      })).pipe(
+        Effect.andThen(
+          options.failDetachedDeleteThread === true
+            ? unimplemented("detached native deletion failed")
+            : Effect.void,
+        ),
+      ),
     getCapabilities: () => Effect.succeed(options.capabilities ?? CodexCapabilities),
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
     openSession: (input) =>
@@ -320,7 +328,13 @@ function makeProviderAdapter(
             Ref.update(state, (current) => ({
               ...current,
               deleteCount: current.deleteCount + 1,
-            })),
+            })).pipe(
+              Effect.andThen(
+                options.failDeleteThread === true
+                  ? unimplemented("native deletion failed")
+                  : Effect.void,
+              ),
+            ),
           startTurn: () => Effect.void,
           steerTurn: () => Effect.void,
           interruptTurn: () =>
@@ -352,6 +366,8 @@ function makeTestLayer(input: {
   readonly failReleaseEventWrites?: boolean;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hangSessionScopeClose?: boolean;
+  readonly failDeleteThread?: boolean;
+  readonly failDetachedDeleteThread?: boolean;
 }) {
   const configuredEventSinkLayer = input.failReleaseEventWrites
     ? FailingReleaseEventSinkLayer
@@ -368,6 +384,10 @@ function makeTestLayer(input: {
       ...(input.hangSessionScopeClose === undefined
         ? {}
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
+      ...(input.failDeleteThread === undefined ? {} : { failDeleteThread: input.failDeleteThread }),
+      ...(input.failDetachedDeleteThread === undefined
+        ? {}
+        : { failDetachedDeleteThread: input.failDetachedDeleteThread }),
     }),
   );
   return Layer.mergeAll(
@@ -1310,6 +1330,82 @@ it.effect("ProviderSessionManagerV2 deletes native threads only on permanent det
   }),
 );
 
+it.effect(
+  "ProviderSessionManagerV2 cleans up the session and MCP credential when native deletion fails",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const mcpConfigs = yield* Ref.make<
+        ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+      >([]);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSinkV2;
+        const idAllocator = yield* IdAllocatorV2;
+        const manager = yield* ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-delete-failure");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+        });
+
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId, now }),
+            {
+              id: yield* idAllocator.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              driver: CODEX_DRIVER,
+              occurredAt: now,
+              payload: providerThread,
+            },
+          ],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const token = (yield* Ref.get(mcpConfigs))
+          .at(-1)
+          ?.authorizationHeader.replace(/^Bearer\s+/, "");
+        assert.isDefined(yield* registry.resolve(token!));
+
+        yield* manager
+          .detach({
+            providerSessionId,
+            threadId,
+            detail: "Thread deleted.",
+            deleteProviderThread: true,
+            revokeMcpCredential: true,
+          })
+          .pipe(Effect.flip);
+
+        const runtimeState = yield* Ref.get(state);
+        assert.equal(runtimeState.deleteCount, 1);
+        assert.equal(runtimeState.closeCount, 1);
+        assert.isUndefined(yield* registry.resolve(token!));
+        assert.isUndefined(McpProviderSession.readMcpProviderSession(threadId));
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          makeTestLayer({
+            state,
+            idleTimeoutMs: 1_000,
+            capabilities: ExclusiveCapabilities,
+            mcpConfigs,
+            failDeleteThread: true,
+          }),
+        ),
+      );
+    }),
+);
+
 it.effect("ProviderSessionManagerV2 deletes detached historical native threads", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
@@ -1355,6 +1451,54 @@ it.effect("ProviderSessionManagerV2 deletes detached historical native threads",
           state,
           idleTimeoutMs: 1_000,
           capabilities: ExclusiveCapabilities,
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 reports detached native deletion after cleanup", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const idAllocator = yield* IdAllocatorV2;
+      const manager = yield* ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "provider-session-manager-historical-native-delete-failure",
+        projectId: yield* idAllocator.allocate.project({
+          fixtureName: "provider-session-manager-historical-native-delete-failure",
+        }),
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+
+      yield* manager
+        .detach({
+          providerSessionId,
+          threadId,
+          detail: "Thread deleted.",
+          deleteProviderThread: true,
+          revokeMcpCredential: true,
+          providerInstanceId: modelSelection.instanceId,
+          providerSession: makeProviderSession({ providerSessionId, now }),
+          providerThreads: [makeProviderThread({ idAllocator, threadId, providerSessionId, now })],
+        })
+        .pipe(Effect.flip);
+
+      assert.equal((yield* Ref.get(state)).detachedDeleteCount, 1);
+      assert.isUndefined(McpProviderSession.readMcpProviderSession(threadId));
+    });
+
+    yield* effect.pipe(
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 1_000,
+          capabilities: ExclusiveCapabilities,
+          failDetachedDeleteThread: true,
         }),
       ),
     );

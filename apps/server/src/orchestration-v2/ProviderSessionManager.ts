@@ -1571,6 +1571,7 @@ export const layerWithOptions = (
                         .map((thread) => [thread.id, thread] as const),
                     )
                   : new Map();
+            let deletionFailure: Exit.Exit<void, ProviderAdapterV2Error> | null = null;
             if (
               input.deleteProviderThread === true &&
               currentEntry === undefined &&
@@ -1581,20 +1582,17 @@ export const layerWithOptions = (
               const deleteDetachedThread = adapter.deleteDetachedThread;
               if (deleteDetachedThread !== undefined) {
                 const providerSession = input.providerSession;
-                yield* Effect.scoped(
-                  Effect.forEach(
-                    providerThreads.values(),
-                    (providerThread) =>
+                const exits = yield* Effect.scoped(
+                  Effect.forEach(providerThreads.values(), (providerThread) =>
+                    Effect.exit(
                       deleteDetachedThread({
                         providerSession,
                         providerThread,
                       }),
-                    {
-                      concurrency: 1,
-                      discard: true,
-                    },
+                    ),
                   ),
                 );
+                deletionFailure = exits.find(Exit.isFailure) ?? null;
               }
             }
             if (
@@ -1633,11 +1631,13 @@ export const layerWithOptions = (
               input.deleteProviderThread === true &&
               currentEntry?.exposedRuntime.deleteThread !== undefined
             ) {
-              yield* Effect.forEach(
+              const exits = yield* Effect.forEach(
                 providerThreads.values(),
-                currentEntry.exposedRuntime.deleteThread,
-                { concurrency: 1, discard: true },
+                (providerThread) =>
+                  Effect.exit(currentEntry.exposedRuntime.deleteThread!(providerThread)),
+                { concurrency: 1 },
               );
+              deletionFailure = exits.find(Exit.isFailure) ?? deletionFailure;
             }
             const detached = yield* Ref.modify(sessions, (current) => {
               const entry = current.get(key);
@@ -1686,21 +1686,23 @@ export const layerWithOptions = (
             if (input.revokeMcpCredential === true) {
               yield* clearMcpSession(input.threadId);
             }
-            if (Option.isNone(detached)) {
-              return;
+            if (Option.isSome(detached)) {
+              if (
+                detached.value.attachedThreadIds.size === 0 &&
+                !detached.value.supportsMultipleProviderThreads
+              ) {
+                yield* releaseEntry({
+                  providerSessionId: input.providerSessionId,
+                  reason: "manual_shutdown",
+                  ...(input.detail === undefined ? {} : { detail: input.detail }),
+                });
+              } else {
+                yield* scheduleIdleRelease(input.providerSessionId);
+              }
             }
-            if (
-              detached.value.attachedThreadIds.size === 0 &&
-              !detached.value.supportsMultipleProviderThreads
-            ) {
-              yield* releaseEntry({
-                providerSessionId: input.providerSessionId,
-                reason: "manual_shutdown",
-                ...(input.detail === undefined ? {} : { detail: input.detail }),
-              });
-              return;
+            if (deletionFailure !== null && Exit.isFailure(deletionFailure)) {
+              return yield* Effect.failCause(deletionFailure.cause);
             }
-            yield* scheduleIdleRelease(input.providerSessionId);
           }).pipe(
             Effect.catchCause((cause) =>
               Effect.fail(

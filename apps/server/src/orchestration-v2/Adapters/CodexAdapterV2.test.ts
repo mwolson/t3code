@@ -1267,6 +1267,51 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("fails context compaction when Codex never reports completion", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-manual-compaction-timeout";
+        const nativeThreadId = `native-${scenario}-thread`;
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...codexReplaySessionPreamble(nativeThreadId),
+            {
+              type: "expect_outbound",
+              label: "thread/compact/start",
+              frame: {
+                id: 3,
+                method: "thread/compact/start",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "thread/compact/start",
+              frame: { id: 3, result: {} },
+            },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        if (harness.runtime.compactThread === undefined) {
+          return yield* Effect.die("Codex adapter runtime must expose compactThread.");
+        }
+
+        const compactFiber = yield* harness.runtime
+          .compactThread(harness.providerThread)
+          .pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("10 minutes");
+        const failure = yield* Fiber.join(compactFiber).pipe(Effect.flip);
+
+        assert.match(
+          String((failure.cause as { readonly detail?: unknown } | undefined)?.detail),
+          /Timed out waiting 10 minutes/,
+        );
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
   const finalAnswerTranscript = (
     scenario: string,
     answers: ReadonlyArray<{

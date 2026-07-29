@@ -10,6 +10,7 @@ import {
   openCode2EnvironmentWithT3Mcp,
   openCode2InterruptedThreadDisposition,
   openCode2PendingWorkForSession,
+  openCode2PermissionAutoReply,
   openCode2QuestionId,
   openCode2SessionErrorMessage,
   openCode2SessionErrorStatus,
@@ -223,6 +224,28 @@ describe("openCode2AutoPermissionReply", () => {
       "once",
     );
     assert.strictEqual(reply(overrides, "external_directory", ["/outside/file.txt"]), "reject");
+  });
+
+  it("does not let a remembered session grant override a later policy denial", () => {
+    assert.strictEqual(
+      openCode2PermissionAutoReply(
+        policy({ runtimeMode: "auto", approvalPolicy: "never" }),
+        [{ action: "bash", resources: ["*"] }],
+        { action: "bash", resources: ["*"] },
+      ),
+      "reject",
+    );
+  });
+
+  it("uses a remembered session grant when policy still requires approval", () => {
+    assert.strictEqual(
+      openCode2PermissionAutoReply(
+        policy({ runtimeMode: "default" }),
+        [{ action: "bash", resources: ["/workspace/*"] }],
+        { action: "bash", resources: ["/workspace/file.txt"] },
+      ),
+      "once",
+    );
   });
 });
 

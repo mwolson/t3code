@@ -1,10 +1,16 @@
 import { assert, describe, it } from "@effect/vitest";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   escalateOpenCode2ServerTermination,
+  OpenCode2Runtime,
+  OpenCode2RuntimeLive,
   openCode2AuthorizationHeader,
   parseOpenCode2Startup,
 } from "./opencode2Runtime.ts";
@@ -92,6 +98,62 @@ describe("escalateOpenCode2ServerTermination", () => {
 
       yield* TestClock.adjust("1 millis");
       yield* Fiber.join(termination);
+      assert.deepStrictEqual(signals, ["SIGTERM", "SIGKILL"]);
+    }),
+  );
+});
+
+describe("OpenCode2Runtime startup cleanup", () => {
+  it.effect("reaps a spawned server whose startup banner times out", () =>
+    Effect.gen(function* () {
+      const signals: Array<NodeJS.Signals> = [];
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.succeed(
+          ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(42),
+            exitCode: Effect.never,
+            isRunning: Effect.succeed(true),
+            kill: (options) =>
+              Effect.sync(() => {
+                if (options?.killSignal !== undefined) {
+                  signals.push(options.killSignal);
+                }
+              }),
+            unref: Effect.succeed(Effect.void),
+            stdin: Sink.drain,
+            stdout: Stream.never,
+            stderr: Stream.never,
+            all: Stream.never,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.never,
+          }),
+        ),
+      );
+      const startup = Effect.scoped(
+        Effect.gen(function* () {
+          const runtime = yield* OpenCode2Runtime;
+          return yield* runtime
+            .startOpenCode2ServerProcess({
+              binaryPath: "opencode2",
+              port: 4_711,
+              timeoutMs: 100,
+            })
+            .pipe(Effect.flip);
+        }),
+      ).pipe(
+        Effect.provide(OpenCode2RuntimeLive),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(HostProcessPlatform, "win32"),
+      );
+      const startupFiber = yield* startup.pipe(Effect.forkChild);
+
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("100 millis");
+      yield* Effect.yieldNow;
+      assert.deepStrictEqual(signals, ["SIGTERM"]);
+
+      yield* TestClock.adjust("1 second");
+      yield* Fiber.join(startupFiber);
       assert.deepStrictEqual(signals, ["SIGTERM", "SIGKILL"]);
     }),
   );

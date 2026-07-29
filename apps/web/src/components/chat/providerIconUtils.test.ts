@@ -6,7 +6,11 @@ import {
   DRIVER_OPTION_BY_VALUE,
   PROVIDER_CLIENT_DEFINITIONS,
 } from "../settings/providerDriverMeta";
-import { getProviderIconBadgeLabel, PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
+import {
+  getProviderIconBadgeLabel,
+  PROVIDER_ICON_BY_PROVIDER,
+  resolveProviderModelPickerAriaLabel,
+} from "./providerIconUtils";
 
 describe("OpenCode provider icons", () => {
   it("uses a distinct icon component for OpenCode 2 in chat and settings surfaces", () => {
@@ -26,5 +30,22 @@ describe("OpenCode provider icons", () => {
     expect(getProviderIconBadgeLabel(ProviderDriverKind.make("opencode"))).toBeUndefined();
     expect(getProviderIconBadgeLabel(ProviderDriverKind.make("codex"))).toBeUndefined();
     expect(getProviderIconBadgeLabel(ProviderDriverKind.make("acpRegistry"))).toBeUndefined();
+  });
+});
+
+describe("provider model picker accessibility", () => {
+  it("preserves a caller-specific trigger label", () => {
+    expect(
+      resolveProviderModelPickerAriaLabel(
+        "Source control writer model",
+        "OpenCode 2.0 (Beta), Big Pickle",
+      ),
+    ).toBe("Source control writer model");
+  });
+
+  it("uses the generated provider and model label by default", () => {
+    expect(resolveProviderModelPickerAriaLabel(undefined, "OpenCode 2.0 (Beta), Big Pickle")).toBe(
+      "OpenCode 2.0 (Beta), Big Pickle",
+    );
   });
 });

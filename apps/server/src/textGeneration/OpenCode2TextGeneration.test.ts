@@ -25,6 +25,11 @@ const runtimeMock = {
   state: {
     startCalls: [] as string[],
     closeCalls: [] as string[],
+    connectCalls: [] as Array<{
+      binaryPath: string;
+      serverUrl?: string | null;
+      serverPassword?: string | null;
+    }>,
     clientConnections: [] as Array<{
       baseUrl: string;
       directory: string;
@@ -50,6 +55,7 @@ const runtimeMock = {
   reset() {
     this.state.startCalls.length = 0;
     this.state.closeCalls.length = 0;
+    this.state.connectCalls.length = 0;
     this.state.clientConnections.length = 0;
     this.state.generateRequests.length = 0;
     this.state.sessionCreateRequests.length = 0;
@@ -86,12 +92,25 @@ const OpenCode2RuntimeTestDouble: OpenCode2Runtime.OpenCode2RuntimeShape = {
         exitCode: Effect.never,
       };
     }),
-  connectToOpenCode2Server: ({ serverUrl, serverPassword }) =>
-    Effect.succeed({
-      url: serverUrl ?? "http://127.0.0.1:4500",
-      password: serverPassword ?? "password-1",
-      exitCode: null,
-      external: Boolean(serverUrl),
+  connectToOpenCode2Server: ({ binaryPath, serverUrl, serverPassword }) =>
+    Effect.gen(function* () {
+      runtimeMock.state.connectCalls.push({
+        binaryPath,
+        ...(serverUrl === undefined ? {} : { serverUrl }),
+        ...(serverPassword === undefined ? {} : { serverPassword }),
+      });
+      if (serverUrl && !serverPassword?.trim()) {
+        return yield* new OpenCode2Runtime.OpenCode2RuntimeError({
+          operation: "connectToOpenCode2Server",
+          detail: "An external OpenCode 2 server requires a server password.",
+        });
+      }
+      return {
+        url: serverUrl ?? "http://127.0.0.1:4500",
+        password: serverPassword ?? "password-1",
+        exitCode: null,
+        external: Boolean(serverUrl),
+      };
     }),
   createOpenCode2SdkClient: ({ baseUrl, directory, serverPassword }) => {
     runtimeMock.state.clientConnections.push({ baseUrl, directory, serverPassword });
@@ -145,6 +164,10 @@ const EXTERNAL_SETTINGS = Schema.decodeSync(OpenCode2Settings)({
   binaryPath: "fake-opencode2",
   serverUrl: "http://127.0.0.1:9998",
   serverPassword: "external-secret",
+});
+const EXTERNAL_SETTINGS_WITHOUT_PASSWORD = Schema.decodeSync(OpenCode2Settings)({
+  binaryPath: "fake-opencode2",
+  serverUrl: "http://127.0.0.1:9998",
 });
 const IMAGE_ATTACHMENT = Schema.decodeSync(ChatAttachment)({
   type: "image",
@@ -221,6 +244,13 @@ it.layer(OpenCode2TextGenerationTestLayer)("OpenCode2TextGeneration", (it) => {
         yield* textGeneration.generateCommitMessage(DEFAULT_COMMIT_INPUT);
 
         expect(runtimeMock.state.startCalls).toEqual([]);
+        expect(runtimeMock.state.connectCalls).toEqual([
+          {
+            binaryPath: "fake-opencode2",
+            serverUrl: "http://127.0.0.1:9998",
+            serverPassword: "external-secret",
+          },
+        ]);
         expect(runtimeMock.state.clientConnections).toEqual([
           {
             baseUrl: "http://127.0.0.1:9998",
@@ -228,6 +258,20 @@ it.layer(OpenCode2TextGenerationTestLayer)("OpenCode2TextGeneration", (it) => {
             serverPassword: "external-secret",
           },
         ]);
+      }),
+    ),
+  );
+
+  it.effect("rejects an external server without its required password", () =>
+    withOpenCode2TextGeneration(EXTERNAL_SETTINGS_WITHOUT_PASSWORD, (textGeneration) =>
+      Effect.gen(function* () {
+        const error = yield* textGeneration
+          .generateCommitMessage(DEFAULT_COMMIT_INPUT)
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(TextGenerationError);
+        expect(error.message).toContain("requires a server password");
+        expect(runtimeMock.state.clientConnections).toEqual([]);
       }),
     ),
   );

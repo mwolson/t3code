@@ -77,3 +77,10 @@ export function getTriggerDisplayModelName(model: ModelEsque): string {
 export function getTriggerDisplayModelLabel(model: ModelEsque): string {
   return getTriggerDisplayModelName(model);
 }
+
+export function resolveProviderModelPickerAriaLabel(
+  explicitLabel: string | undefined,
+  generatedLabel: string | undefined,
+): string | undefined {
+  return explicitLabel ?? generatedLabel;
+}

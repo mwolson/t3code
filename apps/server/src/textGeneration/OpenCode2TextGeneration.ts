@@ -371,10 +371,25 @@ export const makeOpenCode2TextGeneration = Effect.fn("makeOpenCode2TextGeneratio
 
     const rawOutput =
       settings.serverUrl.length > 0
-        ? yield* runAgainstServer({
-            url: settings.serverUrl,
-            password: settings.serverPassword,
-          })
+        ? yield* runtime
+            .connectToOpenCode2Server({
+              binaryPath: settings.binaryPath,
+              serverUrl: settings.serverUrl,
+              serverPassword: settings.serverPassword,
+              environment: resolvedEnvironment,
+            })
+            .pipe(
+              Effect.provideService(Scope.Scope, idleFiberScope),
+              Effect.mapError(
+                (cause) =>
+                  new TextGenerationError({
+                    operation: input.operation,
+                    detail: `OpenCode 2 server connection failed: ${cause.detail}`,
+                    cause,
+                  }),
+              ),
+              Effect.flatMap(runAgainstServer),
+            )
         : yield* Effect.acquireUseRelease(
             acquireSharedServer(input.operation),
             runAgainstServer,

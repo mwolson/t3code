@@ -16,6 +16,7 @@ import {
   getProviderIconBadgeLabel,
   getTriggerDisplayModelLabel,
   getTriggerDisplayModelName,
+  resolveProviderModelPickerAriaLabel,
 } from "./providerIconUtils";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import { ComposerControl, ComposerControlChevron } from "./ComposerControl";
@@ -78,11 +79,13 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const kindBadgeLabel = activeEntry
     ? getProviderIconBadgeLabel(activeEntry.driverKind)
     : undefined;
-  const triggerAriaLabel =
-    props.triggerAriaLabel ??
-    (activeEntry
-      ? `${activeEntry.displayName}${kindBadgeLabel ? ` (${kindBadgeLabel})` : ""}, ${triggerLabel}`
-      : undefined);
+  const triggerAriaLabel = activeEntry
+    ? `${activeEntry.displayName}${kindBadgeLabel ? ` (${kindBadgeLabel})` : ""}, ${triggerLabel}`
+    : undefined;
+  const resolvedTriggerAriaLabel = resolveProviderModelPickerAriaLabel(
+    props.triggerAriaLabel,
+    triggerAriaLabel,
+  );
 
   const setIsMenuOpen = (open: boolean) => {
     props.onOpenChange?.(open);
@@ -159,7 +162,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       <PopoverTrigger
         render={
           <ComposerControl
-            aria-label={triggerAriaLabel}
+            aria-label={resolvedTriggerAriaLabel}
             variant={props.triggerVariant ?? "ghost"}
             data-chat-provider-model-picker="true"
             className={cn(

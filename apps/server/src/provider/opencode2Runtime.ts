@@ -261,6 +261,14 @@ const makeOpenCode2Runtime = Effect.gen(function* () {
         Effect.forkIn(runtimeScope),
       );
 
+      // Register this after the exit observer so LIFO scope teardown terminates
+      // the server before waiting for that observer to finish. Register before
+      // awaiting readiness so startup failures receive the same cleanup.
+      yield* Scope.addFinalizer(
+        runtimeScope,
+        escalateOpenCode2ServerTermination(killOpenCode2ProcessGroup),
+      );
+
       const readyExit = yield* Effect.exit(
         Deferred.await(readyDeferred).pipe(Effect.timeoutOption(timeoutMs)),
       );
@@ -294,13 +302,6 @@ const makeOpenCode2Runtime = Effect.gen(function* () {
             .join("\n\n"),
         });
       }
-
-      // Register this after the exit observer so LIFO scope teardown terminates
-      // the server before waiting for that observer to finish.
-      yield* Scope.addFinalizer(
-        runtimeScope,
-        escalateOpenCode2ServerTermination(killOpenCode2ProcessGroup),
-      );
 
       return {
         url: ready.value.url,

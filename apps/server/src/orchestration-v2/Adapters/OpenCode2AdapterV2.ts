@@ -697,6 +697,23 @@ export function openCode2AutoPermissionReply(
   return needsApproval ? null : "once";
 }
 
+export function openCode2PermissionAutoReply(
+  runtimePolicy: ProviderAdapterV2TurnInput["runtimePolicy"],
+  sessionPermissions: ReadonlyArray<OpenCode2SessionPermission>,
+  request: {
+    readonly action: string;
+    readonly resources: ReadonlyArray<string>;
+  },
+): "once" | "reject" | null {
+  const policyReply = openCode2AutoPermissionReply(runtimePolicy, request);
+  if (policyReply !== null) return policyReply;
+  return sessionPermissions.some((permission) =>
+    openCode2SessionPermissionMatches(permission, request),
+  )
+    ? "once"
+    : null;
+}
+
 function openCode2WildcardMatch(pattern: string, value: string): boolean {
   if (pattern === "*") return true;
   const expression = pattern
@@ -2185,11 +2202,11 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 action: event.data.action,
                 resources: event.data.resources,
               };
-              const autoReply = sessionPermissions.some((remembered) =>
-                openCode2SessionPermissionMatches(remembered, permission),
-              )
-                ? "once"
-                : openCode2AutoPermissionReply(input.runtimePolicy, permission);
+              const autoReply = openCode2PermissionAutoReply(
+                input.runtimePolicy,
+                sessionPermissions,
+                permission,
+              );
               if (autoReply !== null) {
                 yield* autoReplyPermission(event.data.sessionID, event.data.id, autoReply);
                 return;
@@ -2234,7 +2251,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               if (active === null) return;
               if (
                 !openCode2ShouldSettleTurn(
-                  "execution-interrupted",
+                  "execution-terminal",
                   active.turn.executionStarted,
                   active.turn.interrupted,
                 )
@@ -2251,7 +2268,13 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             case "session.execution.interrupted": {
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
-              if (!openCode2ShouldSettleTurn("execution-terminal", active.turn.executionStarted)) {
+              if (
+                !openCode2ShouldSettleTurn(
+                  "execution-interrupted",
+                  active.turn.executionStarted,
+                  active.turn.interrupted,
+                )
+              ) {
                 return;
               }
               active.turn.interrupted = true;
@@ -2718,7 +2741,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           deleteThread: (providerThread) =>
             Effect.gen(function* () {
               const sessionID = nativeThreadId(providerThread);
-              if (!threads.has(sessionID)) return;
               yield* removeOpenCode2Session(
                 sessionID,
                 sdkCall("session.remove", { sessionID }, () =>
