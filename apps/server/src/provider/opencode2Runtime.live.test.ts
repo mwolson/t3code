@@ -1,11 +1,17 @@
 import { assert, it } from "@effect/vitest";
+import { OpenCode2Settings as OpenCode2SettingsSchema } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe } from "vite-plus/test";
 
+import { checkOpenCode2ProviderStatus } from "./Layers/OpenCode2Provider.ts";
 import { OpenCode2Runtime, OpenCode2RuntimeLive, runOpenCode2Sdk } from "./opencode2Runtime.ts";
+import { OpenCodeRuntimeLive } from "./opencodeRuntime.ts";
+
+const decodeOpenCode2Settings = Schema.decodeEffect(OpenCode2SettingsSchema);
 
 /**
  * Spawns a real `opencode2` binary, so it is gated the same way the other live
@@ -23,10 +29,12 @@ import { OpenCode2Runtime, OpenCode2RuntimeLive, runOpenCode2Sdk } from "./openc
 // is what apps/server/src/bin.ts composes for the production runtime.
 // `HostProcessPlatform` is a Context.Reference with a default, so it needs no
 // layer of its own.
-const layer = OpenCode2RuntimeLive.pipe(Layer.provide(NodeServices.layer));
+const layer = Layer.merge(OpenCode2RuntimeLive, OpenCodeRuntimeLive).pipe(
+  Layer.provide(NodeServices.layer),
+);
 
 describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")("OpenCode 2 runtime (live)", () => {
-  it.effect(
+  it.live(
     "spawns a server, reads both startup facts, and builds a client that authenticates",
     () =>
       Effect.gen(function* () {
@@ -56,6 +64,20 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")("OpenCode 2 runtime (live)
         assert.isString(sessionId, "session.create returned no id");
 
         yield* Scope.close(scope, Effect.void as never).pipe(Effect.ignore);
+      }).pipe(Effect.provide(layer)),
+    { timeout: 60_000 },
+  );
+
+  it.live(
+    "waits for startup inventory before publishing the provider snapshot",
+    () =>
+      Effect.gen(function* () {
+        const settings = yield* decodeOpenCode2Settings({});
+        const provider = yield* checkOpenCode2ProviderStatus(settings, process.cwd());
+
+        assert.strictEqual(provider.status, "ready");
+        assert.isAbove(provider.models.length, 0);
+        assert.isTrue(provider.models.some((model) => model.slug === "opencode/glm-5.2"));
       }).pipe(Effect.provide(layer)),
     { timeout: 60_000 },
   );

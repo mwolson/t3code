@@ -189,6 +189,38 @@ export interface OpenCode2Inventory {
   readonly agents: ReadonlyArray<AgentInfoV2>;
 }
 
+interface OpenCode2InventoryRetryOptions {
+  readonly maxAttempts?: number;
+  readonly retryDelayMs?: number;
+}
+
+/**
+ * A newly spawned 2.x server prints its ready banner before model and agent
+ * bootstrap has finished. Retry only the empty startup result so a genuinely
+ * populated response returns immediately while an installation with no models
+ * remains bounded.
+ *
+ * @internal exported for tests
+ */
+export const retryEmptyOpenCode2Inventory = Effect.fn("retryEmptyOpenCode2Inventory")(function* <
+  E,
+  R,
+>(
+  readInventory: Effect.Effect<OpenCode2Inventory, E, R>,
+  options?: OpenCode2InventoryRetryOptions,
+): Effect.fn.Return<OpenCode2Inventory, E, R> {
+  const maxAttempts = Math.max(1, options?.maxAttempts ?? 5);
+  const retryDelayMs = Math.max(0, options?.retryDelayMs ?? 500);
+  let inventory = yield* readInventory;
+
+  for (let attempt = 1; inventory.models.length === 0 && attempt < maxAttempts; attempt += 1) {
+    yield* Effect.sleep(retryDelayMs);
+    inventory = yield* readInventory;
+  }
+
+  return inventory;
+});
+
 function openCode2CapabilitiesForModel(input: {
   readonly model: ModelInfo;
   readonly agents: ReadonlyArray<AgentInfoV2>;
@@ -269,16 +301,20 @@ const loadOpenCode2Inventory = (input: {
         serverPassword: server.password,
       });
       const location = { directory: input.cwd };
-      const modelResponse = yield* runOpenCode2Sdk("model.list", () =>
-        client.v2.model.list({ location }),
+      return yield* retryEmptyOpenCode2Inventory(
+        Effect.gen(function* () {
+          const modelResponse = yield* runOpenCode2Sdk("model.list", () =>
+            client.v2.model.list({ location }),
+          );
+          const agentResponse = yield* runOpenCode2Sdk("agent.list", () =>
+            client.v2.agent.list({ location }),
+          );
+          return {
+            models: modelResponse.data?.data ?? [],
+            agents: agentResponse.data?.data ?? [],
+          } satisfies OpenCode2Inventory;
+        }),
       );
-      const agentResponse = yield* runOpenCode2Sdk("agent.list", () =>
-        client.v2.agent.list({ location }),
-      );
-      return {
-        models: modelResponse.data?.data ?? [],
-        agents: agentResponse.data?.data ?? [],
-      } satisfies OpenCode2Inventory;
     }),
   );
 

@@ -354,6 +354,16 @@ describe("getDefaultProviderInstanceModel", () => {
     expect(resolved?.length).toBeGreaterThan(0);
   });
 
+  it("uses the OpenCode 2 driver default while its model inventory is pending", () => {
+    const providers = [
+      provider({ provider: ProviderDriverKind.make("opencode2"), instanceId: "opencode2" }),
+    ];
+
+    expect(getDefaultProviderInstanceModel(providers, ProviderInstanceId.make("opencode2"))).toBe(
+      "opencode/glm-5.2",
+    );
+  });
+
   it("honors the instance's declared default before model-list order", () => {
     const providers = [
       provider({

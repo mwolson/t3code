@@ -685,6 +685,44 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         ]);
       });
 
+      it("retains stale OpenCode 2 models while the initial probe is pending", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("opencode2"),
+          driver: ProviderDriverKind.make("opencode2"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-07-28T00:00:00.000Z",
+          version: "0.0.0-next-16383",
+          models: [
+            {
+              slug: "opencode/big-pickle",
+              name: "Big Pickle",
+              subProvider: "OpenCode",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const pendingProvider = {
+          ...previousProvider,
+          status: "warning",
+          installed: false,
+          auth: { status: "unknown" },
+          checkedAt: "2026-07-28T00:01:00.000Z",
+          version: null,
+          models: [],
+          message: "OpenCode 2.0 provider status has not been checked in this session yet.",
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, pendingProvider).models, [
+          ...previousProvider.models,
+        ]);
+      });
+
       it("classifies pending, logout, uninstall, and reconnect OpenCode inventories", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("opencode"),
