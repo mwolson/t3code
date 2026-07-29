@@ -173,6 +173,9 @@ function formatOpenCode2ProbeError(input: {
 }
 
 function titleCaseSlug(value: string): string {
+  if (value === "opencode") return "OpenCode";
+  if (value === "openai") return "OpenAI";
+  if (value === "xai") return "xAI";
   const segments: Array<string> = [];
   for (const segment of value.split(/[-_/]+/)) {
     if (segment.length > 0) segments.push(segment.charAt(0).toUpperCase() + segment.slice(1));
@@ -259,16 +262,18 @@ function openCode2CapabilitiesForModel(input: {
   });
 }
 
-function flattenOpenCode2Models(inventory: OpenCode2Inventory): ReadonlyArray<ServerProviderModel> {
+export function flattenOpenCode2Models(
+  inventory: OpenCode2Inventory,
+): ReadonlyArray<ServerProviderModel> {
   const models: Array<ServerProviderModel> = [];
   for (const model of inventory.models) {
     if (!model.enabled) continue;
     const name = nonEmptyTrimmed(model.name);
     if (!name) continue;
     models.push({
-      slug: `${model.providerID}/${model.modelID}`,
+      slug: `${model.providerID}/${model.id}`,
       name,
-      subProvider: model.providerID,
+      subProvider: titleCaseSlug(model.providerID),
       isCustom: false,
       capabilities: openCode2CapabilitiesForModel({ model, agents: inventory.agents }),
     });

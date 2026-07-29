@@ -16,6 +16,7 @@ import {
   GrokIcon,
   type Icon,
   OpenAI,
+  OpenCode2Icon,
   OpenCodeIcon,
 } from "../Icons";
 
@@ -106,7 +107,7 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
   {
     value: ProviderDriverKind.make("opencode2"),
     label: "OpenCode 2.0",
-    icon: OpenCodeIcon,
+    icon: OpenCode2Icon,
     badgeLabel: "Beta",
     settingsSchema: OpenCode2Settings,
     hasDefaultInstance: false,

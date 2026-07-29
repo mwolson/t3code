@@ -5,6 +5,7 @@ import { describe } from "vite-plus/test";
 
 import { parseGenericCliVersion } from "../providerSnapshot.ts";
 import {
+  flattenOpenCode2Models,
   openCode2NextBuild,
   parseOpenCode2Version,
   retryEmptyOpenCode2Inventory,
@@ -32,6 +33,11 @@ const BIG_PICKLE_MODEL = {
     context: 128_000,
     output: 16_384,
   },
+} satisfies ModelInfo;
+const BIG_PICKLE_FAST_MODEL = {
+  ...BIG_PICKLE_MODEL,
+  id: "big-pickle-fast",
+  name: "Big Pickle Fast",
 } satisfies ModelInfo;
 
 describe("parseOpenCode2Version", () => {
@@ -102,4 +108,30 @@ describe("retryEmptyOpenCode2Inventory", () => {
       assert.deepStrictEqual(inventory, { models: [], agents: [] });
     }),
   );
+});
+
+describe("flattenOpenCode2Models", () => {
+  it("uses a readable upstream provider label", () => {
+    assert.deepStrictEqual(flattenOpenCode2Models({ models: [BIG_PICKLE_MODEL], agents: [] }), [
+      {
+        slug: "opencode/big-pickle",
+        name: "Big Pickle",
+        subProvider: "OpenCode",
+        isCustom: false,
+        capabilities: {
+          optionDescriptors: [],
+        },
+      },
+    ]);
+  });
+
+  it("uses the selectable model ref id when models share an underlying model id", () => {
+    assert.deepStrictEqual(
+      flattenOpenCode2Models({
+        models: [BIG_PICKLE_MODEL, BIG_PICKLE_FAST_MODEL],
+        agents: [],
+      }).map((model) => model.slug),
+      ["opencode/big-pickle", "opencode/big-pickle-fast"],
+    );
+  });
 });

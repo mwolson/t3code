@@ -226,4 +226,5 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
   [GROK_DRIVER_KIND]: "Grok",
   [ACP_REGISTRY_DRIVER_KIND]: "ACP Registry",
   [OPENCODE_DRIVER_KIND]: "OpenCode",
+  [OPENCODE2_DRIVER_KIND]: "OpenCode 2.0",
 };
