@@ -369,6 +369,9 @@ importers:
       expo-asset:
         specifier: ~56.0.17
         version: 56.0.23(expo@56.0.20(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.20)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))
+      expo-audio:
+        specifier: ~56.0.12
+        version: 56.0.13(expo@56.0.20(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.20)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(expo-asset@56.0.23(expo@56.0.20(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.20)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3)))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))
       expo-auth-session:
         specifier: ~56.0.14
         version: 56.0.17(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))
@@ -6555,6 +6558,14 @@ packages:
     resolution: {integrity: sha512-QN0rEr7I6mAx4Hk2wWBdSzeTtt+6hqg2ImMBcL3SoCqHjxBUVJ05+wyb1jAlZOm/R0HkpMZbkGqBnyqUNSJB1w==}
     peerDependencies:
       expo: '*'
+      react: '*'
+      react-native: '*'
+
+  expo-audio@56.0.13:
+    resolution: {integrity: sha512-pfBmT/8OYbhrb37ECk+fC1EstLBFxMTioF4uZrAEeOj3uCgjproj1qYmkpsQLJIoEOMPSIw1iSfBEMl10v1DDA==}
+    peerDependencies:
+      expo: '*'
+      expo-asset: '*'
       react: '*'
       react-native: '*'
 
@@ -16311,6 +16322,13 @@ snapshots:
       react-native: 0.85.3(@types/react@19.2.18)(react@19.2.3)
     transitivePeerDependencies:
       - supports-color
+
+  expo-audio@56.0.13(expo@56.0.20(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.20)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(expo-asset@56.0.23(expo@56.0.20(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.20)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3)))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3)):
+    dependencies:
+      expo: 56.0.20(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.20)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3)))
+      expo-asset: 56.0.23(expo@56.0.20(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.20)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))
+      react: 19.2.3
+      react-native: 0.85.3(@types/react@19.2.18)(react@19.2.3)
 
   expo-auth-session@56.0.17(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3)):
     dependencies:
