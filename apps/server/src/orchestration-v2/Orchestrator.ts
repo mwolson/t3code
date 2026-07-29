@@ -300,6 +300,10 @@ function isTerminalDelegatedTaskStatus(status: OrchestrationV2Subagent["status"]
  * callers of isBlockingRun intentionally leave queue slots free so the next
  * queued run can start.
  */
+function isSettleBlockingRun(run: OrchestrationV2Run): boolean {
+  return isBlockingRun(run) || run.status === "queued";
+}
+
 function delegatedTaskTerminalStatus(
   status: OrchestrationV2Run["status"],
 ): OrchestrationV2Subagent["status"] | null {
