@@ -11,19 +11,9 @@
  * built-in instance and no `providers.opencode2`-backed default: an instance
  * exists only when the user adds one.
  *
- * Text generation is deliberately unsupported. Commit messages and PR text run
- * through whichever instance the user picks in settings, and routing them
- * through a beta-gated preview binary is not something to opt users into
- * implicitly.
- *
  * @module provider/Drivers/OpenCode2Driver
  */
-import {
-  OpenCode2Settings,
-  ProviderDriverKind,
-  TextGenerationError,
-  type ServerProvider,
-} from "@t3tools/contracts";
+import { OpenCode2Settings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -33,8 +23,8 @@ import {
   OpenCode2AdapterV2Driver,
   type OpenCode2AdapterV2DriverEnv,
 } from "../../orchestration-v2/Adapters/OpenCode2AdapterV2.ts";
-import type { TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { makeOpenCode2TextGeneration } from "../../textGeneration/OpenCode2TextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import {
   checkOpenCode2ProviderStatus,
@@ -61,22 +51,6 @@ const decodeOpenCode2Settings = Schema.decodeSync(OpenCode2Settings);
 
 const DRIVER_KIND = ProviderDriverKind.make("opencode2");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
-
-const makeUnsupportedTextGeneration = (): TextGenerationShape => {
-  const unsupported = (operation: string) =>
-    Effect.fail(
-      new TextGenerationError({
-        operation,
-        detail: "OpenCode 2.0 instances do not provide application text generation.",
-      }),
-    );
-  return {
-    generateCommitMessage: () => unsupported("generateCommitMessage"),
-    generatePrContent: () => unsupported("generatePrContent"),
-    generateBranchName: () => unsupported("generateBranchName"),
-    generateThreadTitle: () => unsupported("generateThreadTitle"),
-  };
-};
 
 const withInstanceIdentity =
   (input: {
@@ -146,6 +120,7 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
             }),
         ),
       );
+      const textGeneration = yield* makeOpenCode2TextGeneration(effectiveConfig, processEnv);
 
       const checkProvider = checkOpenCode2ProviderStatus(
         effectiveConfig,
@@ -196,7 +171,7 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
         enabled,
         snapshot,
         orchestrationAdapter,
-        textGeneration: makeUnsupportedTextGeneration(),
+        textGeneration,
       } satisfies ProviderInstance;
     }),
 };
