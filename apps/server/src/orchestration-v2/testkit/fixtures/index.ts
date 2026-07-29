@@ -36,6 +36,8 @@ import { openCode2ShellProjectionInput } from "./opencode2_shell_projection/inpu
 import { assertOpenCode2ShellProjectionOutput } from "./opencode2_shell_projection/output.ts";
 import { openCode2ShellTerminalsInput } from "./opencode2_shell_terminals/input.ts";
 import { assertOpenCode2ShellTerminalsOutput } from "./opencode2_shell_terminals/output.ts";
+import { openCode2ThreadDeleteInput } from "./opencode2_thread_delete/input.ts";
+import { assertOpenCode2ThreadDeleteOutput } from "./opencode2_thread_delete/output.ts";
 import { openCodeSubagentInput } from "./opencode_subagent/input.ts";
 import { assertOpenCodeSubagentOutput } from "./opencode_subagent/output.ts";
 import { assertPlanQuestionsOutput } from "./plan_questions/codex_output.ts";
@@ -629,6 +631,21 @@ export const ORCHESTRATOR_REPLAY_FIXTURES = [
         ),
         modelSelection: OPENCODE2_MODEL_SELECTION,
         assertOutput: assertOpenCode2ShellTerminalsOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_thread_delete",
+    buildInput: openCode2ThreadDeleteInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_thread_delete/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertOpenCode2ThreadDeleteOutput,
       },
     ],
   },

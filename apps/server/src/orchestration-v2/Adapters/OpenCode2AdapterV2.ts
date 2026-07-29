@@ -2553,6 +2553,19 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   }),
               ),
             ),
+          deleteThread: (providerThread) =>
+            Effect.gen(function* () {
+              const sessionID = nativeThreadId(providerThread);
+              if (!threads.has(sessionID)) return;
+              yield* sdkCall("session.remove", { sessionID }, () =>
+                client.v2.session.remove({ sessionID }),
+              );
+              threads.delete(sessionID);
+            }).pipe(
+              Effect.mapError((cause) =>
+                protocolError(`Failed to delete OpenCode 2 session ${providerThread.id}`, cause),
+              ),
+            ),
           startTurn: (turnInput) =>
             Effect.gen(function* () {
               const sessionID = nativeThreadId(turnInput.providerThread);

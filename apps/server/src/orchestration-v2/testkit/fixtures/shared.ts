@@ -58,6 +58,7 @@ export const OPENCODE2_COMPACTION_INTERRUPT_PROMPT =
   "Begin compacting the current context and wait for it to finish.";
 export const OPENCODE2_RETRY_PROMPT =
   "Recover from the transient provider error, then respond exactly: retry fixture complete";
+export const OPENCODE2_THREAD_DELETE_PROMPT = "Respond exactly: native deletion fixture complete";
 export const OPENCODE2_SHELL_PROJECTION_PROMPT =
   "Run a shell command that prints the paged shell fixture output, move it to background observation, then respond exactly: shell projection fixture complete";
 export const OPENCODE2_SHELL_FAILURE_PROMPT =
@@ -203,6 +204,9 @@ export type OrchestratorFixtureInputStep =
       readonly type: "interrupt";
       readonly targetRunIndex: number;
       readonly waitForTurnItemType?: OrchestrationV2TurnItem["type"];
+    }
+  | {
+      readonly type: "delete";
     }
   | {
       readonly type: "approve_next_runtime_request";
@@ -681,6 +685,16 @@ export function materializeFixtureInput(input: {
           }
           steps.push({ type: "advance_clock", duration: "1 millis" });
           steps.push({ type: "await_thread_idle", threadId: ids.threadId });
+          break;
+        case "delete":
+          pushDispatch({
+            type: "thread.delete",
+            commandId: yield* idAllocator.allocate.command({
+              fixtureName: input.scenario,
+              commandName: "thread-delete",
+            }),
+            threadId: ids.threadId,
+          });
           break;
         case "advance_clock":
           steps.push({ type: "advance_clock", duration: step.duration });

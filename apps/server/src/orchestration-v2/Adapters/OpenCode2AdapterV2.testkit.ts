@@ -287,6 +287,7 @@ function makeReplayClient(controller: OpenCode2ReplayController): OpencodeClient
           reply: (input: unknown) => request("session.permission.reply", input),
         },
         prompt: (input: unknown) => request("session.prompt", input),
+        remove: (input: unknown) => request("session.remove", input),
         question: {
           reply: (input: unknown) => request("session.question.reply", input),
         },
