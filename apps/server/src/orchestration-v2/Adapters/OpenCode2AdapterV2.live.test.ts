@@ -88,6 +88,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             });
             const sessionID = providerThread.nativeThreadRef?.nativeId;
             assert.isString(sessionID);
+            assert.isDefined(session.hasPendingBackgroundWork);
             assert.isDefined(session.hasPendingBackgroundWorkForThread);
 
             const created = yield* runOpenCode2Sdk("shell.create", () =>
@@ -100,6 +101,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             );
             const shell = unwrapOpenCode2Data<{ readonly id: string }>("shell.create", created);
 
+            assert.isTrue(yield* session.hasPendingBackgroundWork!);
             assert.isTrue(yield* session.hasPendingBackgroundWorkForThread!(providerThread));
             const createdWake = yield* session.events.pipe(
               Stream.filter((event) => event.type === "provider_thread.updated"),
@@ -120,6 +122,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
               Effect.timeoutOption("5 seconds"),
             );
             assert.isTrue(Option.isSome(exitedWake));
+            assert.isFalse(yield* session.hasPendingBackgroundWork!);
             assert.isFalse(yield* session.hasPendingBackgroundWorkForThread!(providerThread));
           }),
         ).pipe(Effect.provide(layer)),

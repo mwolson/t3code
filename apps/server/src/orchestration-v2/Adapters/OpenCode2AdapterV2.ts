@@ -1796,12 +1796,61 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           };
         });
 
+        const inspectPendingBackgroundWork = Effect.fnUntraced(function* (
+          state: OpenCode2ThreadState,
+        ) {
+          const sessionID = state.nativeSessionId;
+          return yield* openCode2PendingWorkForSession({
+            sessionID,
+            pending: sdkCall("session.pending.list", { sessionID }, () =>
+              client.v2.session.pending.list({ sessionID }),
+            ).pipe(
+              Effect.map((response) =>
+                unwrapOpenCode2Data<Array<SessionPendingInfo>>("session.pending.list", response),
+              ),
+            ),
+            shells: sdkCall("shell.list", { location: state.location }, () =>
+              client.v2.shell.list({ location: state.location }),
+            ).pipe(
+              Effect.map((response) =>
+                unwrapOpenCode2Data<Array<ShellInfoV2>>("shell.list", response),
+              ),
+              Effect.tap((shells) =>
+                Effect.sync(() => {
+                  for (const shell of shells) {
+                    if (shell.metadata.sessionID === sessionID) {
+                      shellSessionIds.set(shell.id, sessionID);
+                    }
+                  }
+                }),
+              ),
+            ),
+          });
+        });
+
+        const hasPendingBackgroundWorkForState = (state: OpenCode2ThreadState) =>
+          inspectPendingBackgroundWork(state).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Failed to inspect OpenCode 2 pending background work.", {
+                errorTag: causeErrorTag(cause),
+                provider: OPENCODE2_PROVIDER,
+                providerThreadId: state.providerThread.id,
+              }).pipe(Effect.as(false)),
+            ),
+          );
+
         const runtimeSession: ProviderAdapterV2SessionRuntime = {
           instanceId: options.instanceId,
           driver: OPENCODE2_PROVIDER,
           providerSessionId: input.providerSessionId,
           providerSession: sessionEntity,
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          hasPendingBackgroundWork: Effect.gen(function* () {
+            for (const state of threads.values()) {
+              if (yield* hasPendingBackgroundWorkForState(state)) return true;
+            }
+            return false;
+          }),
           hasPendingBackgroundWorkForThread: (providerThread) =>
             Effect.gen(function* () {
               const sessionID = nativeThreadId(providerThread);
@@ -1811,35 +1860,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   `OpenCode 2 session ${sessionID} is not registered for pending-work inspection`,
                 );
               }
-              return yield* openCode2PendingWorkForSession({
-                sessionID,
-                pending: sdkCall("session.pending.list", { sessionID }, () =>
-                  client.v2.session.pending.list({ sessionID }),
-                ).pipe(
-                  Effect.map((response) =>
-                    unwrapOpenCode2Data<Array<SessionPendingInfo>>(
-                      "session.pending.list",
-                      response,
-                    ),
-                  ),
-                ),
-                shells: sdkCall("shell.list", { location: state.location }, () =>
-                  client.v2.shell.list({ location: state.location }),
-                ).pipe(
-                  Effect.map((response) =>
-                    unwrapOpenCode2Data<Array<ShellInfoV2>>("shell.list", response),
-                  ),
-                  Effect.tap((shells) =>
-                    Effect.sync(() => {
-                      for (const shell of shells) {
-                        if (shell.metadata.sessionID === sessionID) {
-                          shellSessionIds.set(shell.id, sessionID);
-                        }
-                      }
-                    }),
-                  ),
-                ),
-              });
+              return yield* inspectPendingBackgroundWork(state);
             }).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("Failed to inspect OpenCode 2 pending background work.", {
