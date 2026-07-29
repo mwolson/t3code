@@ -5,8 +5,12 @@ import { describe } from "vite-plus/test";
 
 import {
   openCode2AutoPermissionReply,
+  openCode2InterruptedThreadDisposition,
   openCode2PendingWorkForSession,
   openCode2QuestionId,
+  openCode2SessionErrorMessage,
+  openCode2SessionErrorStatus,
+  openCode2SessionErrorTargetSessionIds,
   openCode2ToolNeedsTerminalOverride,
   unwrapOpenCode2Data,
 } from "./OpenCode2AdapterV2.ts";
@@ -197,5 +201,54 @@ describe("openCode2ToolNeedsTerminalOverride", () => {
 
   it("preserves completed tools", () => {
     assert.isFalse(openCode2ToolNeedsTerminalOverride(part("completed"), "interrupted"));
+  });
+});
+
+describe("OpenCode 2 session errors", () => {
+  it("fans an unscoped error out to every active native session", () => {
+    assert.deepStrictEqual(
+      openCode2SessionErrorTargetSessionIds(undefined, ["ses_first", "ses_second"]),
+      ["ses_first", "ses_second"],
+    );
+    assert.deepStrictEqual(
+      openCode2SessionErrorTargetSessionIds("ses_second", ["ses_first", "ses_second"]),
+      ["ses_second"],
+    );
+    assert.deepStrictEqual(
+      openCode2SessionErrorTargetSessionIds("ses_missing", ["ses_first", "ses_second"]),
+      [],
+    );
+  });
+
+  it("normalizes provider abort errors without poisoning the provider session", () => {
+    const error = {
+      sessionID: "ses_target",
+      error: {
+        name: "MessageAbortedError",
+        data: { message: "The user aborted the request." },
+      },
+    } as const;
+
+    assert.strictEqual(openCode2SessionErrorMessage(error), "The user aborted the request.");
+    assert.strictEqual(openCode2SessionErrorStatus(error, false), "interrupted");
+  });
+
+  it("preserves ordinary provider failures", () => {
+    const error = {
+      error: {
+        name: "UnknownError",
+        data: { message: "Provider exploded." },
+      },
+    } as const;
+
+    assert.strictEqual(openCode2SessionErrorMessage(error), "Provider exploded.");
+    assert.strictEqual(openCode2SessionErrorStatus(error, false), "failed");
+    assert.strictEqual(openCode2SessionErrorStatus(error, true), "interrupted");
+  });
+
+  it("breaks a native thread only when the provider shuts down", () => {
+    assert.strictEqual(openCode2InterruptedThreadDisposition("user"), "reusable");
+    assert.strictEqual(openCode2InterruptedThreadDisposition("superseded"), "reusable");
+    assert.strictEqual(openCode2InterruptedThreadDisposition("shutdown"), "broken");
   });
 });

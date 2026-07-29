@@ -344,6 +344,35 @@ export function openCode2ToolNeedsTerminalOverride(
   );
 }
 
+type OpenCode2SessionErrorData = Extract<V2Event, { type: "session.error" }>["data"];
+
+export function openCode2SessionErrorMessage(data: OpenCode2SessionErrorData): string {
+  const error = data.error;
+  if (error === undefined) return "OpenCode 2 reported a session error.";
+  return recordString(error.data, "message") ?? error.name;
+}
+
+export function openCode2SessionErrorStatus(
+  data: OpenCode2SessionErrorData,
+  interrupted: boolean,
+): TerminalTurnStatus {
+  return interrupted || data.error?.name === "MessageAbortedError" ? "interrupted" : "failed";
+}
+
+export function openCode2SessionErrorTargetSessionIds(
+  sessionID: string | undefined,
+  activeSessionIDs: ReadonlyArray<string>,
+): ReadonlyArray<string> {
+  if (sessionID === undefined) return activeSessionIDs;
+  return activeSessionIDs.includes(sessionID) ? [sessionID] : [];
+}
+
+export function openCode2InterruptedThreadDisposition(
+  reason: Extract<V2Event, { type: "session.execution.interrupted" }>["data"]["reason"],
+): "reusable" | "broken" {
+  return reason === "shutdown" ? "broken" : "reusable";
+}
+
 export interface OpenCode2ProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";
   readonly messageKind: "request" | "response" | "notification" | "error";
@@ -1594,7 +1623,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
               active.turn.interrupted = true;
-              yield* finalizeTurn(active.state, active.turn, "interrupted");
+              yield* finalizeTurn(active.state, active.turn, "interrupted", {
+                threadDisposition: openCode2InterruptedThreadDisposition(event.data.reason),
+              });
               return;
             }
             case "session.execution.failed": {
@@ -1624,21 +1655,39 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               return;
             }
             case "session.error": {
-              const active = activeFor(event.data.sessionID);
-              const message = event.data.error?.name ?? "OpenCode 2 reported a session error.";
-              if (active === null) {
-                yield* updateProviderSession("error", message);
-                return;
-              }
-              yield* updateProviderSession("error", message);
-              yield* finalizeTurn(
-                active.state,
-                active.turn,
-                active.turn.interrupted ? "interrupted" : "failed",
-                {
-                  failure: makeProviderFailure({ message, class: "provider_error" }),
-                },
+              const activeSessionIDs = Array.from(threads.values())
+                .filter((state) => state.activeTurn !== null && !state.activeTurn.finalized)
+                .map((state) => state.nativeSessionId);
+              const targetSessionIDs = openCode2SessionErrorTargetSessionIds(
+                event.data.sessionID,
+                activeSessionIDs,
               );
+              const message = openCode2SessionErrorMessage(event.data);
+              const isAbort = event.data.error?.name === "MessageAbortedError";
+              if (!isAbort) yield* updateProviderSession("error", message);
+              for (const sessionID of targetSessionIDs) {
+                const active = activeFor(sessionID);
+                if (active === null) continue;
+                yield* finalizeTurn(
+                  active.state,
+                  active.turn,
+                  openCode2SessionErrorStatus(event.data, active.turn.interrupted),
+                  {
+                    failure: makeProviderFailure({
+                      message,
+                      code: event.data.error?.name ?? null,
+                      class: "provider_error",
+                    }),
+                    threadDisposition: event.data.sessionID === undefined ? "broken" : "reusable",
+                  },
+                );
+              }
+              // Finalizing one of several active turns temporarily marks the
+              // shared provider session as running. Restore the unscoped
+              // provider failure after every affected turn has closed.
+              if (!isAbort && targetSessionIDs.length > 1) {
+                yield* updateProviderSession("error", message);
+              }
               return;
             }
             default:
