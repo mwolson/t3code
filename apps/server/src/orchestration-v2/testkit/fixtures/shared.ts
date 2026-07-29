@@ -274,6 +274,11 @@ export const OPENCODE_MODEL_SELECTION = {
   options: [{ id: "agent", value: "build" }],
 } satisfies ModelSelection;
 
+export const OPENCODE2_MODEL_SELECTION = {
+  instanceId: ProviderInstanceId.make("opencode2"),
+  model: "opencode/big-pickle",
+} satisfies ModelSelection;
+
 export const ACP_REGISTRY_MODEL_SELECTION = {
   instanceId: ProviderInstanceId.make("acpRegistry"),
   model: "default",
