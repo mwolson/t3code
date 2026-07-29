@@ -1,6 +1,7 @@
 import {
   ModelSelection,
   OrchestrationV2DomainEvent,
+  type OrchestrationV2ProviderThread,
   OrchestrationV2ProviderSession,
   OrchestrationV2RuntimeRequest,
   ProviderInstanceId,
@@ -160,6 +161,11 @@ export interface ProviderSessionManagerV2Shape {
      * potential re-attach.
      */
     readonly revokeMcpCredential?: boolean;
+    /**
+     * True only when the application thread is permanently deleted. Adapters
+     * with native thread deletion remove it before the runtime is detached.
+     */
+    readonly deleteProviderThread?: boolean;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
 }
 
@@ -1539,43 +1545,63 @@ export const layerWithOptions = (
           Effect.gen(function* () {
             const key = sessionKey(input.providerSessionId);
             const currentEntry = (yield* Ref.get(sessions)).get(key);
-            if (currentEntry?.supportsMultipleProviderThreads === true) {
-              const projection = yield* Effect.option(
-                projectionStore.getThreadProjection(input.threadId),
-              );
-              if (Option.isSome(projection)) {
-                const providerThreads = new Map(
+            const shouldLoadProviderThreads =
+              currentEntry !== undefined &&
+              (currentEntry.supportsMultipleProviderThreads || input.deleteProviderThread === true);
+            const projection = shouldLoadProviderThreads
+              ? yield* Effect.option(projectionStore.getThreadProjection(input.threadId))
+              : Option.none();
+            const providerThreads: ReadonlyMap<
+              OrchestrationV2ProviderThread["id"],
+              OrchestrationV2ProviderThread
+            > = Option.isSome(projection)
+              ? new Map(
                   projection.value.providerThreads
                     .filter((thread) => thread.providerSessionId === input.providerSessionId)
                     .map((thread) => [thread.id, thread] as const),
-                );
-                const activeTurns = projection.value.providerTurns.filter(
-                  (turn) => turn.status === "running" && providerThreads.has(turn.providerThreadId),
-                );
-                yield* Effect.forEach(
-                  activeTurns,
-                  (turn) =>
-                    currentEntry.exposedRuntime
-                      .interruptTurn({
-                        providerThread: providerThreads.get(turn.providerThreadId)!,
-                        providerTurnId: turn.id,
-                      })
-                      .pipe(
-                        Effect.catchCause((cause) =>
-                          Effect.logWarning(
-                            "orchestration-v2.driver-session.detach-interrupt-failed",
-                            {
-                              providerSessionId: input.providerSessionId,
-                              threadId: input.threadId,
-                              providerTurnId: turn.id,
-                              cause,
-                            },
-                          ),
+                )
+              : new Map();
+            if (
+              currentEntry !== undefined &&
+              Option.isSome(projection) &&
+              (currentEntry.supportsMultipleProviderThreads || input.deleteProviderThread === true)
+            ) {
+              const activeTurns = projection.value.providerTurns.filter(
+                (turn) => turn.status === "running" && providerThreads.has(turn.providerThreadId),
+              );
+              yield* Effect.forEach(
+                activeTurns,
+                (turn) =>
+                  currentEntry.exposedRuntime
+                    .interruptTurn({
+                      providerThread: providerThreads.get(turn.providerThreadId)!,
+                      providerTurnId: turn.id,
+                    })
+                    .pipe(
+                      Effect.catchCause((cause) =>
+                        Effect.logWarning(
+                          "orchestration-v2.driver-session.detach-interrupt-failed",
+                          {
+                            providerSessionId: input.providerSessionId,
+                            threadId: input.threadId,
+                            providerTurnId: turn.id,
+                            cause,
+                          },
                         ),
                       ),
-                  { concurrency: 1, discard: true },
-                );
-              }
+                    ),
+                { concurrency: 1, discard: true },
+              );
+            }
+            if (
+              input.deleteProviderThread === true &&
+              currentEntry?.exposedRuntime.deleteThread !== undefined
+            ) {
+              yield* Effect.forEach(
+                providerThreads.values(),
+                currentEntry.exposedRuntime.deleteThread,
+                { concurrency: 1, discard: true },
+              );
             }
             const detached = yield* Ref.modify(sessions, (current) => {
               const entry = current.get(key);

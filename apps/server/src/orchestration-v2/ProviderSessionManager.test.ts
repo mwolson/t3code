@@ -89,6 +89,7 @@ const ExclusiveCapabilities: OrchestrationV2ProviderCapabilities = {
 interface TestProviderRuntimeState {
   readonly openCount: number;
   readonly closeCount: number;
+  readonly deleteCount: number;
   readonly interruptCount: number;
   readonly resumeCount: number;
   readonly eventQueues: ReadonlyMap<string, Queue.Queue<ProviderAdapterV2Event>>;
@@ -97,6 +98,7 @@ interface TestProviderRuntimeState {
 const emptyState: TestProviderRuntimeState = {
   openCount: 0,
   closeCount: 0,
+  deleteCount: 0,
   interruptCount: 0,
   resumeCount: 0,
   eventQueues: new Map(),
@@ -307,6 +309,11 @@ function makeProviderAdapter(
               ...current,
               resumeCount: current.resumeCount + 1,
             })).pipe(Effect.as(threadInput.providerThread)),
+          deleteThread: () =>
+            Ref.update(state, (current) => ({
+              ...current,
+              deleteCount: current.deleteCount + 1,
+            })),
           startTurn: () => Effect.void,
           steerTurn: () => Effect.void,
           interruptTurn: () =>
@@ -1230,6 +1237,69 @@ it.effect("ProviderSessionManagerV2 terminal detach revokes the thread's MCP cre
     });
 
     yield* effect.pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 1_000, mcpConfigs })));
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 deletes native threads only on permanent detach", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSinkV2;
+      const idAllocator = yield* IdAllocatorV2;
+      const manager = yield* ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const projectId = yield* idAllocator.allocate.project({
+        fixtureName: "provider-session-manager-native-delete",
+      });
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "provider-session-manager-native-delete",
+        projectId,
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator,
+        threadId,
+        providerSessionId,
+        now,
+      });
+
+      yield* eventSink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator, threadId, now }),
+          {
+            id: yield* idAllocator.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            threadId,
+            driver: CODEX_DRIVER,
+            occurredAt: now,
+            payload: providerThread,
+          },
+        ],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+
+      yield* manager.detach({
+        providerSessionId,
+        threadId,
+        detail: "Thread deleted.",
+        deleteProviderThread: true,
+      });
+
+      assert.equal((yield* Ref.get(state)).deleteCount, 1);
+    });
+
+    yield* effect.pipe(
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 1_000,
+          capabilities: ExclusiveCapabilities,
+        }),
+      ),
+    );
   }),
 );
 

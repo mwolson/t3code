@@ -1421,6 +1421,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                         : command.type === "thread.runtime-mode.set"
                           ? "Runtime mode changed."
                           : "Provider or model selection changed.",
+                ...(command.type === "thread.archive" || command.type === "thread.delete"
+                  ? { revokeMcpCredential: true }
+                  : {}),
+                ...(command.type === "thread.delete" ? { deleteProviderThread: true } : {}),
               },
             } satisfies PendingOrchestrationEffectV2;
             yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);

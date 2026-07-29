@@ -103,6 +103,9 @@ export const executorLayer: Layer.Layer<
                 ...(effect.request.revokeMcpCredential === undefined
                   ? {}
                   : { revokeMcpCredential: effect.request.revokeMcpCredential }),
+                ...(effect.request.deleteProviderThread === undefined
+                  ? {}
+                  : { deleteProviderThread: effect.request.deleteProviderThread }),
               })
               .pipe(
                 Effect.mapError(

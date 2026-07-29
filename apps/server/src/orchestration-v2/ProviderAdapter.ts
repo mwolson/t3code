@@ -503,6 +503,13 @@ export interface ProviderAdapterV2SessionRuntime {
     readonly modelSelection?: ModelSelection;
     readonly runtimePolicy?: ProviderAdapterV2RuntimePolicy;
   }) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;
+  /**
+   * Remove the provider-native thread when the owning application thread is
+   * permanently deleted. Archive and ordinary detach flows never call this.
+   */
+  readonly deleteThread?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly startTurn: (
     input: ProviderAdapterV2TurnInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
