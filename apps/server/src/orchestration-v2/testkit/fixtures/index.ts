@@ -24,6 +24,10 @@ import { assertOpenCodeErrorCleanupMultipleMessagesOutput } from "./opencode_err
 import { assertOpenCodeErrorUnscopedOutput } from "./opencode_error_unscoped/output.ts";
 import { assertOpenCodeInterruptErrorCleanupOutput } from "./opencode_interrupt_error_cleanup/output.ts";
 import { assertOpenCodeInterruptErrorCleanupAbortedToolOutput } from "./opencode_interrupt_error_cleanup_aborted_tool/output.ts";
+import { openCode2ShellProjectionInput } from "./opencode2_shell_projection/input.ts";
+import { assertOpenCode2ShellProjectionOutput } from "./opencode2_shell_projection/output.ts";
+import { openCode2ShellTerminalsInput } from "./opencode2_shell_terminals/input.ts";
+import { assertOpenCode2ShellTerminalsOutput } from "./opencode2_shell_terminals/output.ts";
 import { openCodeSubagentInput } from "./opencode_subagent/input.ts";
 import { assertOpenCodeSubagentOutput } from "./opencode_subagent/output.ts";
 import { assertPlanQuestionsOutput } from "./plan_questions/codex_output.ts";
@@ -529,6 +533,36 @@ export const ORCHESTRATOR_REPLAY_FIXTURES = [
         transcriptFile: new URL("./opencode_subagent/opencode_transcript.ndjson", import.meta.url),
         modelSelection: OPENCODE_MODEL_SELECTION,
         assertOutput: assertOpenCodeSubagentOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_shell_projection",
+    buildInput: openCode2ShellProjectionInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_shell_projection/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertOpenCode2ShellProjectionOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_shell_terminals",
+    buildInput: openCode2ShellTerminalsInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_shell_terminals/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertOpenCode2ShellTerminalsOutput,
       },
     ],
   },

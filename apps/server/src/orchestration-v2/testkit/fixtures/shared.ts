@@ -52,6 +52,12 @@ export const OPENCODE_SUBAGENT_PROMPT =
   "Use the task tool exactly once. Delegate to the general subagent with this prompt: Respond exactly CHILD_OK. After the task completes, respond exactly PARENT_OK.";
 export const OPENCODE_ERROR_CLEANUP_DRAIN_PROMPT =
   "Run a local command that prints the authoritative cleanup result.";
+export const OPENCODE2_SHELL_PROJECTION_PROMPT =
+  "Run a shell command that prints the paged shell fixture output, move it to background observation, then respond exactly: shell projection fixture complete";
+export const OPENCODE2_SHELL_FAILURE_PROMPT =
+  "Run a shell command that exits with status 7, move it to background observation, then respond exactly: shell failure fixture complete";
+export const OPENCODE2_SHELL_DELETION_PROMPT =
+  "Run a long shell command, move it to background observation, then respond exactly: shell deletion fixture complete";
 export const SUBAGENT_CONTINUE_PROMPT =
   "Spawn one subagent and have it reply exactly: initial subagent response";
 export const SUBAGENT_CONTINUE_PARENT_PROMPT =

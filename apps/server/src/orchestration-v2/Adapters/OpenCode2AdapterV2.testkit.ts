@@ -299,6 +299,7 @@ function makeReplayClient(controller: OpenCode2ReplayController): OpencodeClient
       },
       shell: {
         list: (input: unknown) => request("shell.list", input),
+        output: (input: unknown) => request("shell.output", input),
       },
     },
   } as unknown as OpencodeClient;

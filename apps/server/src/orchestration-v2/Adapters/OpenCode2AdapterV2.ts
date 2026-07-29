@@ -260,6 +260,15 @@ interface OpenCode2ToolPart {
   completedAt: DateTime.Utc | null;
 }
 
+interface OpenCode2ShellProjection {
+  readonly shellId: string;
+  readonly state: OpenCode2ThreadState;
+  readonly turn: ActiveOpenCode2Turn;
+  readonly part: OpenCode2ToolPart;
+  readonly location: SessionInfoV2["location"];
+  status: ShellInfoV2["status"];
+}
+
 type OpenCode2Part = OpenCode2TextPart | OpenCode2ToolPart;
 
 interface ActiveOpenCode2Turn {
@@ -714,6 +723,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         };
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         const threads = new Map<string, OpenCode2ThreadState>();
+        const shellProjections = new Map<string, OpenCode2ShellProjection>();
         const shellSessionIds = new Map<string, string>();
         const pendingRequests = new Map<string, PendingOpenCode2Request>();
         const pendingRequestsByNativeId = new Map<string, PendingOpenCode2Request>();
@@ -1066,6 +1076,14 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           });
         });
 
+        const runningShellForPart = (
+          turn: ActiveOpenCode2Turn,
+          part: OpenCode2ToolPart,
+        ): OpenCode2ShellProjection | undefined =>
+          Array.from(shellProjections.values()).find(
+            (shell) => shell.turn === turn && shell.part === part && shell.status === "running",
+          );
+
         const runtimeRequestTurnItem = (
           pending: PendingOpenCode2Request,
           status: OrchestrationV2TurnItem["status"],
@@ -1283,6 +1301,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           const completedAt = yield* DateTime.now;
           for (const part of turn.parts.values()) {
             if (part.kind === "tool") {
+              if (status === "completed" && runningShellForPart(turn, part) !== undefined) {
+                continue;
+              }
               if (openCode2ToolNeedsTerminalOverride(part, status)) {
                 yield* emitToolPart(state, turn, part, status);
               }
@@ -1424,12 +1445,176 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           if (update.output !== undefined) part.output = update.output;
           if (update.structured !== undefined) part.structured = update.structured;
           if (update.errorMessage !== undefined) part.errorMessage = update.errorMessage;
-          if (update.status !== undefined) {
+          const preserveRunningShell =
+            update.status !== undefined &&
+            (update.status === "completed" || update.status === "error") &&
+            runningShellForPart(turn, part) !== undefined;
+          if (update.status !== undefined && !preserveRunningShell) {
             part.status = update.status;
             if (update.status === "completed" || update.status === "error") part.completedAt = now;
           }
           turn.parts.set(id, part);
           yield* emitToolPart(state, turn, part);
+        });
+
+        const shellToolStatus = (shell: ShellInfoV2): OpenCode2ToolStatus => {
+          if (shell.status === "running") return "running";
+          if (shell.status === "exited" && shell.exit === 0) return "completed";
+          return "error";
+        };
+
+        const registerShellProjection = Effect.fnUntraced(function* (
+          state: OpenCode2ThreadState,
+          shell: ShellInfoV2,
+        ) {
+          const existing = shellProjections.get(shell.id);
+          if (existing !== undefined) {
+            existing.status = shell.status;
+            existing.part.status = shellToolStatus(shell);
+            existing.part.structured = {
+              ...existing.part.structured,
+              ...(shell.exit === undefined ? {} : { exit: shell.exit }),
+            };
+            if (existing.part.status !== "running") {
+              existing.part.completedAt = yield* DateTime.now;
+            }
+            yield* emitToolPart(existing.state, existing.turn, existing.part);
+            return existing;
+          }
+
+          const turn = state.activeTurn;
+          if (turn === null) return null;
+          const associated = Array.from(turn.parts.values()).find(
+            (part): part is OpenCode2ToolPart =>
+              part.kind === "tool" &&
+              openCodeToolProjectionKind(part.name) === "command_execution" &&
+              recordString(part.input, "command", "cmd") === shell.command &&
+              Array.from(shellProjections.values()).every((projection) => projection.part !== part),
+          );
+          const now = yield* DateTime.now;
+          const part: OpenCode2ToolPart =
+            associated ??
+            ({
+              kind: "tool",
+              id: `shell:${shell.id}`,
+              callId: shell.id,
+              startedAt: dateTimeFromEpoch(shell.time.started, now),
+              name: "bash",
+              input: { command: shell.command },
+              inputText: "",
+              output: undefined,
+              structured: shell.exit === undefined ? undefined : { exit: shell.exit },
+              status: shellToolStatus(shell),
+              errorMessage: undefined,
+              completedAt:
+                shell.status === "running" ? null : dateTimeFromEpoch(shell.time.completed, now),
+            } satisfies OpenCode2ToolPart);
+          part.status = shellToolStatus(shell);
+          if (shell.exit !== undefined) {
+            part.structured = { ...part.structured, exit: shell.exit };
+          }
+          if (part.status !== "running") {
+            part.completedAt = dateTimeFromEpoch(shell.time.completed, now);
+          }
+          turn.parts.set(part.id, part);
+          const projection: OpenCode2ShellProjection = {
+            shellId: shell.id,
+            state,
+            turn,
+            part,
+            location: state.location,
+            status: shell.status,
+          };
+          shellProjections.set(shell.id, projection);
+          shellSessionIds.set(shell.id, state.nativeSessionId);
+          yield* emitToolPart(state, turn, part);
+          return projection;
+        });
+
+        const readShellOutput = Effect.fnUntraced(function* (
+          shellId: string,
+          location: SessionInfoV2["location"],
+          initial?: {
+            readonly output: string;
+            readonly cursor: number;
+            readonly truncated: boolean;
+          },
+        ) {
+          let output = initial?.output ?? "";
+          let cursor = initial?.cursor ?? 0;
+          let truncated = initial?.truncated ?? true;
+          while (truncated) {
+            const parameters = {
+              id: shellId,
+              location,
+              cursor: String(cursor),
+              limit: String(64 * 1024),
+            };
+            const response = yield* sdkCall("shell.output", parameters, () =>
+              client.v2.shell.output(parameters),
+            );
+            const page = unwrapOpenCode2Data<{
+              readonly output: string;
+              readonly cursor: number;
+              readonly size: number;
+              readonly truncated: boolean;
+            }>("shell.output", response);
+            output += page.output;
+            if (!page.truncated) return output;
+            if (page.cursor <= cursor) {
+              return yield* protocolError(
+                `OpenCode 2 shell ${shellId} output cursor did not advance`,
+              );
+            }
+            cursor = page.cursor;
+            truncated = page.truncated;
+          }
+          return output;
+        });
+
+        const completeShellProjection = Effect.fnUntraced(function* (
+          shellId: string,
+          patch: {
+            readonly exit?: number;
+            readonly status: ShellInfoV2["status"];
+            readonly output?: {
+              readonly output: string;
+              readonly cursor: number;
+              readonly truncated: boolean;
+            };
+          },
+        ) {
+          const projection = shellProjections.get(shellId);
+          if (projection === undefined) return;
+          projection.status = patch.status;
+          if (
+            projection.turn.providerTurn.status !== "running" &&
+            projection.turn.providerTurn.status !== "completed"
+          ) {
+            return;
+          }
+          const output =
+            patch.status === "killed" && patch.output === undefined
+              ? projection.part.output
+              : yield* readShellOutput(shellId, projection.location, patch.output).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("Failed to read OpenCode 2 shell output.", {
+                      errorTag: causeErrorTag(cause),
+                      provider: OPENCODE2_PROVIDER,
+                      shellId,
+                    }).pipe(Effect.as(projection.part.output)),
+                  ),
+                );
+          const completedAt = yield* DateTime.now;
+          projection.part.status =
+            patch.status === "exited" && patch.exit === 0 ? "completed" : "error";
+          projection.part.completedAt = completedAt;
+          if (output !== undefined) projection.part.output = output;
+          projection.part.structured = {
+            ...projection.part.structured,
+            ...(patch.exit === undefined ? {} : { exit: patch.exit }),
+          };
+          yield* emitToolPart(projection.state, projection.turn, projection.part);
         });
 
         const autoReplyPermission = Effect.fnUntraced(function* (
@@ -1479,19 +1664,58 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               }
               return;
             }
+            case "session.shell.started": {
+              const state = threads.get(event.data.sessionID);
+              if (state === undefined) return;
+              yield* registerShellProjection(state, event.data.shell);
+              yield* updateProviderThread(state, {});
+              return;
+            }
+            case "session.shell.ended": {
+              yield* completeShellProjection(event.data.shell.id, {
+                status: event.data.shell.status,
+                ...(event.data.shell.exit === undefined ? {} : { exit: event.data.shell.exit }),
+                output: event.data.output,
+              });
+              shellProjections.delete(event.data.shell.id);
+              shellSessionIds.delete(event.data.shell.id);
+              const state = threads.get(event.data.sessionID);
+              if (state !== undefined) yield* updateProviderThread(state, {});
+              return;
+            }
             case "shell.created": {
               const sessionID = recordString(event.data.info.metadata, "sessionID");
               if (sessionID === undefined) return;
               shellSessionIds.set(event.data.info.id, sessionID);
               const state = threads.get(sessionID);
+              if (state !== undefined) {
+                yield* registerShellProjection(state, event.data.info);
+                yield* updateProviderThread(state, {});
+              }
+              return;
+            }
+            case "shell.exited": {
+              yield* completeShellProjection(event.data.id, {
+                status: event.data.status,
+                ...(event.data.exit === undefined ? {} : { exit: event.data.exit }),
+              });
+              const sessionID = shellSessionIds.get(event.data.id);
+              shellProjections.delete(event.data.id);
+              shellSessionIds.delete(event.data.id);
+              if (sessionID === undefined) return;
+              const state = threads.get(sessionID);
               if (state !== undefined) yield* updateProviderThread(state, {});
               return;
             }
-            case "shell.exited":
             case "shell.deleted": {
               const sessionID = shellSessionIds.get(event.data.id);
               if (sessionID === undefined) return;
-              if (event.type === "shell.deleted") shellSessionIds.delete(event.data.id);
+              const projection = shellProjections.get(event.data.id);
+              if (projection !== undefined && projection.turn.finalized) {
+                yield* completeShellProjection(event.data.id, { status: "killed" });
+              }
+              shellProjections.delete(event.data.id);
+              shellSessionIds.delete(event.data.id);
               const state = threads.get(sessionID);
               if (state !== undefined) yield* updateProviderThread(state, {});
               return;
