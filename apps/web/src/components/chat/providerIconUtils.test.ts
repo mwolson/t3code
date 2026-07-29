@@ -6,10 +6,10 @@ import {
   DRIVER_OPTION_BY_VALUE,
   PROVIDER_CLIENT_DEFINITIONS,
 } from "../settings/providerDriverMeta";
-import { PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
+import { getProviderIconBadgeLabel, PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
 
 describe("OpenCode provider icons", () => {
-  it("uses the versioned icon for OpenCode 2 in chat and settings surfaces", () => {
+  it("uses a distinct icon component for OpenCode 2 in chat and settings surfaces", () => {
     expect(PROVIDER_ICON_BY_PROVIDER[ProviderDriverKind.make("opencode")]).toBe(OpenCodeIcon);
     expect(PROVIDER_ICON_BY_PROVIDER[ProviderDriverKind.make("opencode2")]).toBe(OpenCode2Icon);
     expect(DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode2")]?.icon).toBe(OpenCode2Icon);
@@ -19,5 +19,12 @@ describe("OpenCode provider icons", () => {
     for (const definition of PROVIDER_CLIENT_DEFINITIONS) {
       expect(PROVIDER_ICON_BY_PROVIDER[definition.value]).toBe(definition.icon);
     }
+  });
+
+  it("marks OpenCode 2 as Beta and leaves other drivers unmarked", () => {
+    expect(getProviderIconBadgeLabel(ProviderDriverKind.make("opencode2"))).toBe("Beta");
+    expect(getProviderIconBadgeLabel(ProviderDriverKind.make("opencode"))).toBeUndefined();
+    expect(getProviderIconBadgeLabel(ProviderDriverKind.make("codex"))).toBeUndefined();
+    expect(getProviderIconBadgeLabel(ProviderDriverKind.make("acpRegistry"))).toBeUndefined();
   });
 });

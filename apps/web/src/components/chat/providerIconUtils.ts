@@ -9,6 +9,7 @@ import {
   OpenCode2Icon,
   OpenCodeIcon,
 } from "../Icons";
+import { PROVIDER_CLIENT_DEFINITION_BY_VALUE } from "../settings/providerDriverMeta";
 import { PROVIDER_OPTIONS } from "../../session-logic";
 
 export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
@@ -20,6 +21,14 @@ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>
   [ProviderDriverKind.make("cursor")]: CursorIcon,
   [ProviderDriverKind.make("grok")]: GrokIcon,
 };
+
+/**
+ * Corner marker for a driver's glyph, e.g. "Beta" for OpenCode 2. Reads the
+ * same client definitions the settings surfaces use so the two cannot drift.
+ */
+export function getProviderIconBadgeLabel(driverKind: ProviderDriverKind): string | undefined {
+  return PROVIDER_CLIENT_DEFINITION_BY_VALUE[driverKind]?.iconBadgeLabel;
+}
 
 function isAvailableProviderOption(option: (typeof PROVIDER_OPTIONS)[number]): option is {
   value: ProviderDriverKind;

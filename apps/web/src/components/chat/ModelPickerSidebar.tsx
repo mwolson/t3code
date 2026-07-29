@@ -2,22 +2,30 @@ import { type ProviderInstanceId } from "@t3tools/contracts";
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { SparklesIcon, StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import { getProviderIconBadgeLabel } from "./providerIconUtils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
-import { isProviderInstancePickerReady, type ProviderInstanceEntry } from "../../providerInstances";
+import {
+  isProviderInstanceInitialProbePending,
+  isProviderInstancePickerReady,
+  type ProviderInstanceEntry,
+} from "../../providerInstances";
 
 /**
- * Build the hover tooltip for an instance button. Mirrors the old
- * kind-based copy but uses the entry's configured `displayName` so custom
- * instances get their user-authored name (e.g. "Codex Personal — Unavailable.").
+ * Build the hover tooltip for an instance button. `label` is the caller's
+ * resolved display name — the entry's configured `displayName`, so custom
+ * instances get their user-authored name (e.g. "Codex Personal —
+ * Unavailable."), plus any driver marker such as "(Beta)".
  */
-function describeUnavailableInstance(entry: ProviderInstanceEntry): string {
-  const label = entry.displayName;
+function describeUnavailableInstance(entry: ProviderInstanceEntry, label: string): string {
   if (!entry.enabled || entry.status === "disabled") {
     return `${label} — Disabled in settings.`;
   }
   if (entry.status === "ready" && entry.isAvailable) {
     return label;
+  }
+  if (isProviderInstanceInitialProbePending(entry)) {
+    return `${label} — Checking availability…`;
   }
   const kind =
     entry.status === "error" ? "Unavailable" : entry.status === "warning" ? "Limited" : "Not ready";
@@ -137,28 +145,43 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
 
           {/* Instance buttons (one per configured instance — built-in + custom) */}
           {props.instanceEntries.map((entry) => {
+            // A first probe that has not landed yet still cannot serve
+            // models, so the entry stays unselectable. It just stops being
+            // dimmed: at half opacity the OpenCode 2 rail glyph read as
+            // though the provider were not offered at all.
+            const isProbePending = isProviderInstanceInitialProbePending(entry);
             const isUnavailable = !isProviderInstancePickerReady(entry);
             const isContextDisabled = props.disabledInstanceIds?.has(entry.instanceId) ?? false;
             const isDisabled = isUnavailable || isContextDisabled;
             const isSelected = props.selectedInstanceId === entry.instanceId;
             const isHovered = hoveredInstanceId === entry.instanceId;
-            const showNewBadge = props.newBadgeInstanceIds?.has(entry.instanceId) ?? false;
             const showInstanceBadge =
               Boolean(entry.accentColor) || (duplicateDriverCounts.get(entry.driverKind) ?? 0) > 1;
 
+            // The corner marker is decorative, so this control has to spell
+            // it out in its own label and tooltip.
+            const kindBadgeLabel = getProviderIconBadgeLabel(entry.driverKind);
+            // Both want the glyph's top-right corner; the driver marker is
+            // the more durable fact, so it wins.
+            const showNewBadge =
+              (props.newBadgeInstanceIds?.has(entry.instanceId) ?? false) && !kindBadgeLabel;
+            const displayName = kindBadgeLabel
+              ? `${entry.displayName} (${kindBadgeLabel})`
+              : entry.displayName;
             const tooltip = isUnavailable
-              ? describeUnavailableInstance(entry)
+              ? describeUnavailableInstance(entry, displayName)
               : isContextDisabled
-                ? (props.getDisabledInstanceTooltip?.(entry) ?? entry.displayName)
+                ? (props.getDisabledInstanceTooltip?.(entry) ?? displayName)
                 : showNewBadge
-                  ? `${entry.displayName} — New`
-                  : entry.displayName;
+                  ? `${displayName} — New`
+                  : displayName;
 
             const button = (
               <button
                 className={cn(
                   "relative isolate flex w-full cursor-pointer aspect-square items-center justify-center rounded-md transition-colors hover:bg-[color-mix(in_srgb,var(--popover)_90%,var(--foreground))] focus-visible:bg-[color-mix(in_srgb,var(--popover)_90%,var(--foreground))] focus-visible:outline-none",
-                  isDisabled && "opacity-50 cursor-not-allowed hover:bg-transparent",
+                  isDisabled && "cursor-not-allowed hover:bg-transparent",
+                  isDisabled && !isProbePending && "opacity-50",
                 )}
                 data-provider-accent-color={entry.accentColor}
                 onClick={() => !isDisabled && handleSelect(entry.instanceId)}
@@ -173,11 +196,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                 disabled={isDisabled}
                 type="button"
                 aria-label={
-                  isDisabled
-                    ? tooltip
-                    : showNewBadge
-                      ? `${entry.displayName}, new`
-                      : entry.displayName
+                  isDisabled ? tooltip : showNewBadge ? `${displayName}, new` : displayName
                 }
               >
                 <ProviderInstanceIcon
@@ -185,6 +204,8 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
                   displayName={entry.displayName}
                   accentColor={entry.accentColor}
                   showBadge={showInstanceBadge}
+                  showKindBadge
+                  kindBadgeVariant="full"
                   className="size-6"
                   iconClassName="size-5"
                   indicatorBackground={

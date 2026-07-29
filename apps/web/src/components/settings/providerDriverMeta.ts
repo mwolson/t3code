@@ -46,6 +46,15 @@ export interface ProviderClientDefinition {
    * built-in default or custom — advertises the same marker.
    */
   readonly badgeLabel?: string;
+  /**
+   * Very short marker rendered in the corner of the provider glyph on
+   * identity surfaces (model picker rail, composer trigger). Separate from
+   * `badgeLabel` because that one sits beside a full-width title and can
+   * afford longer copy; this one has to stay legible at 16-24px. Only set
+   * it where the driver's mark is otherwise indistinguishable from another
+   * driver's — OpenCode 2 shares the OpenCode brand mark.
+   */
+  readonly iconBadgeLabel?: string;
 }
 
 export interface ProviderEnvironmentFieldDefinition {
@@ -109,6 +118,7 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "OpenCode 2.0",
     icon: OpenCode2Icon,
     badgeLabel: "Beta",
+    iconBadgeLabel: "Beta",
     settingsSchema: OpenCode2Settings,
     hasDefaultInstance: false,
   },

@@ -13,6 +13,7 @@ import { ModelPickerContent } from "./ModelPickerContent";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import {
   ModelEsque,
+  getProviderIconBadgeLabel,
   getTriggerDisplayModelLabel,
   getTriggerDisplayModelName,
 } from "./providerIconUtils";
@@ -71,6 +72,17 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     (entry) => activeEntry !== null && entry.driverKind === activeEntry.driverKind,
   ).length;
   const showInstanceBadge = Boolean(activeEntry?.accentColor) || duplicateDriverCount > 1;
+  // The trigger's glyph carries a decorative marker at this size (a "B" for
+  // OpenCode 2's Beta), so the button has to name provider, marker and model
+  // itself rather than leaving a screen reader to infer them from a letter.
+  const kindBadgeLabel = activeEntry
+    ? getProviderIconBadgeLabel(activeEntry.driverKind)
+    : undefined;
+  const triggerAriaLabel =
+    props.triggerAriaLabel ??
+    (activeEntry
+      ? `${activeEntry.displayName}${kindBadgeLabel ? ` (${kindBadgeLabel})` : ""}, ${triggerLabel}`
+      : undefined);
 
   const setIsMenuOpen = (open: boolean) => {
     props.onOpenChange?.(open);
@@ -147,7 +159,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       <PopoverTrigger
         render={
           <ComposerControl
-            aria-label={props.triggerAriaLabel}
+            aria-label={triggerAriaLabel}
             variant={props.triggerVariant ?? "ghost"}
             data-chat-provider-model-picker="true"
             className={cn(
@@ -166,7 +178,9 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
               displayName={activeEntry.displayName}
               accentColor={activeEntry.accentColor}
               showBadge={showInstanceBadge}
-              className="size-4"
+              showKindBadge
+              kindBadgeVariant="compact"
+              className={showInstanceBadge ? "size-5" : "size-4"}
               iconClassName={cn("size-4", props.activeProviderIconClassName)}
               indicatorBackground="var(--input)"
               badgeClassName={cn(

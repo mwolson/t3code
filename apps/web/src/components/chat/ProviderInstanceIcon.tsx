@@ -1,8 +1,27 @@
 import { type CSSProperties, memo } from "react";
 import { type ProviderDriverKind } from "@t3tools/contracts";
 
-import { PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
+import { getProviderIconBadgeLabel, PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
 import { cn } from "~/lib/utils";
+
+/**
+ * Corner marker used where two drivers share one brand mark (OpenCode and
+ * OpenCode 2). Absolutely positioned so it never changes the control's
+ * layout size. It sits at the *top* right because the bottom right is
+ * already the instance badge's corner (accent / initials for custom
+ * instances) — both have to stay readable on the same glyph.
+ */
+const KIND_BADGE_BASE_CLASS =
+  "pointer-events-none absolute -top-1 z-20 rounded-[3px] border border-amber-500/40 bg-amber-100 font-bold uppercase leading-[1.5] tracking-tight text-amber-800 shadow-sm dark:border-amber-400/35 dark:bg-amber-950 dark:text-amber-200";
+/** Roomy surfaces (picker rail) can carry the whole word. */
+const KIND_BADGE_FULL_CLASS = `${KIND_BADGE_BASE_CLASS} -right-1.5 px-[2px] text-[6px]`;
+/**
+ * The composer trigger renders at 16px next to the model label, where a
+ * four-letter pill is both unreadable and liable to run into the text, so it
+ * degrades to the version number. The owning control names the Beta status in
+ * full.
+ */
+const KIND_BADGE_COMPACT_CLASS = `${KIND_BADGE_BASE_CLASS} -right-1 px-[1.5px] text-[7px]`;
 
 export function providerInstanceInitials(label: string): string {
   const words = label.replace(/[_-]+/g, " ").split(/\s+/u).filter(Boolean);
@@ -20,6 +39,15 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
   accentColor?: string | undefined;
   showBadge?: boolean;
   badgeContent?: "initials" | "none";
+  /**
+   * Render the driver's corner marker (e.g. OpenCode 2's "Beta"). Opt-in so
+   * dense surfaces like sidebar thread rows stay uncluttered; identity and
+   * selection surfaces turn it on. The marker is decorative — the calling
+   * control owns the accessible name and must spell the marker out there.
+   */
+  showKindBadge?: boolean;
+  /** "full" spells the marker out; "compact" shows the version number. */
+  kindBadgeVariant?: "full" | "compact";
   className?: string;
   iconClassName?: string;
   badgeClassName?: string;
@@ -32,6 +60,10 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
     ? ({ "--provider-accent": props.accentColor } as CSSProperties)
     : undefined;
   const badgeContent = props.badgeContent ?? "initials";
+  const kindBadgeLabel = props.showKindBadge
+    ? getProviderIconBadgeLabel(props.driverKind)
+    : undefined;
+  const isCompactKindBadge = props.kindBadgeVariant === "compact";
 
   return (
     <span
@@ -72,6 +104,15 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
           aria-hidden
         >
           {badgeContent === "initials" ? providerInstanceInitials(props.displayName) : null}
+        </span>
+      ) : null}
+      {kindBadgeLabel ? (
+        <span
+          className={isCompactKindBadge ? KIND_BADGE_COMPACT_CLASS : KIND_BADGE_FULL_CLASS}
+          data-provider-kind-badge={kindBadgeLabel}
+          aria-hidden
+        >
+          {isCompactKindBadge ? "2" : kindBadgeLabel}
         </span>
       ) : null}
     </span>

@@ -1,7 +1,7 @@
-import { useColorScheme } from "react-native";
+import { Text, useColorScheme, View } from "react-native";
 import { Path, Svg } from "react-native-svg";
 
-import { providerIconKind } from "./providerIconKind";
+import { providerIconBetaMarker, providerIconKind } from "./providerIconKind";
 
 type ProviderIconProps = {
   readonly provider: string | null | undefined;
@@ -25,20 +25,58 @@ export function ProviderIcon(props: ProviderIconProps) {
   }
 
   if (iconKind === "opencode" || iconKind === "opencode2") {
+    // Both generations carry the upstream OpenCode mark; OpenCode 2 is
+    // distinguished by the corner marker below, never by a version glyph.
     const detailFill = isDarkMode ? "#4B4646" : "#CFCECD";
     const frameFill = isDarkMode ? "#F1ECEC" : "#211E1E";
-    return (
+    const betaMarker = providerIconBetaMarker(iconKind);
+    const mark = (
       <Svg width={size} height={size} viewBox="0 0 32 40" fill="none">
-        <Path
-          fill={detailFill}
-          d={
-            iconKind === "opencode2"
-              ? "M8 8H24V12H8V8ZM20 12H24V20H20V12ZM8 16H20V20H8V16ZM8 20H12V28H8V20ZM8 28H24V32H8V28Z"
-              : "M24 32H8V16H24V32Z"
-          }
-        />
+        <Path fill={detailFill} d="M24 32H8V16H24V32Z" />
         <Path fill={frameFill} d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" />
       </Svg>
+    );
+    if (!betaMarker) {
+      return mark;
+    }
+    // Sized from the icon and kept inside its own bounds, so no row's layout
+    // width or hit target changes. The whole thing is decorative: the rows
+    // and controls that render this already name their provider.
+    const markerSize = Math.max(7, Math.round(size * 0.5));
+    return (
+      <View
+        importantForAccessibility="no-hide-descendants"
+        accessibilityElementsHidden
+        style={{ width: size, height: size, position: "relative" }}
+      >
+        {mark}
+        <View
+          style={{
+            position: "absolute",
+            right: 0,
+            top: 0,
+            width: markerSize,
+            height: markerSize,
+            borderRadius: 2,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: isDarkMode ? "#451A03" : "#FEF3C7",
+            borderWidth: 1,
+            borderColor: isDarkMode ? "#FCD34D" : "#B45309",
+          }}
+        >
+          <Text
+            style={{
+              color: isDarkMode ? "#FDE68A" : "#92400E",
+              fontSize: Math.max(5, markerSize - 3),
+              fontWeight: "700",
+              lineHeight: Math.max(6, markerSize - 2),
+            }}
+          >
+            {betaMarker}
+          </Text>
+        </View>
+      </View>
     );
   }
 

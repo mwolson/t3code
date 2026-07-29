@@ -647,6 +647,18 @@ export const AntigravityIcon: Icon = (props) => (
   </svg>
 );
 
+// Both OpenCode generations share the upstream brand mark. Generations are
+// distinguished by the surrounding surface (a "Beta" marker on OpenCode 2),
+// never by drawing a version number into the glyph.
+const OpenCodeMarkPaths = () => (
+  <>
+    <path className="dark:hidden" d="M24 32H8V16H24V32Z" fill="#CFCECD" />
+    <path className="dark:hidden" d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#211E1E" />
+    <path className="hidden dark:block" d="M24 32H8V16H24V32Z" fill="#4B4646" />
+    <path className="hidden dark:block" d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#F1ECEC" />
+  </>
+);
+
 export const OpenCodeIcon: Icon = (props) => (
   <svg
     {...props}
@@ -655,10 +667,7 @@ export const OpenCodeIcon: Icon = (props) => (
     xmlns="http://www.w3.org/2000/svg"
     data-provider-icon="opencode"
   >
-    <path className="dark:hidden" d="M24 32H8V16H24V32Z" fill="#CFCECD" />
-    <path className="dark:hidden" d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#211E1E" />
-    <path className="hidden dark:block" d="M24 32H8V16H24V32Z" fill="#4B4646" />
-    <path className="hidden dark:block" d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#F1ECEC" />
+    <OpenCodeMarkPaths />
   </svg>
 );
 
@@ -670,18 +679,7 @@ export const OpenCode2Icon: Icon = (props) => (
     xmlns="http://www.w3.org/2000/svg"
     data-provider-icon="opencode2"
   >
-    <path
-      className="dark:hidden"
-      d="M8 8H24V12H8V8ZM20 12H24V20H20V12ZM8 16H20V20H8V16ZM8 20H12V28H8V20ZM8 28H24V32H8V28Z"
-      fill="#CFCECD"
-    />
-    <path className="dark:hidden" d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#211E1E" />
-    <path
-      className="hidden dark:block"
-      d="M8 8H24V12H8V8ZM20 12H24V20H20V12ZM8 16H20V20H8V16ZM8 20H12V28H8V20ZM8 28H24V32H8V28Z"
-      fill="#4B4646"
-    />
-    <path className="hidden dark:block" d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#F1ECEC" />
+    <OpenCodeMarkPaths />
   </svg>
 );
 
