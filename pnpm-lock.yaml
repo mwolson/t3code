@@ -352,6 +352,9 @@ importers:
       expo-asset:
         specifier: ~56.0.17
         version: 56.0.22(expo@56.0.19(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.19)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))
+      expo-audio:
+        specifier: ~56.0.12
+        version: 56.0.13(expo@56.0.19(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.19)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(expo-asset@56.0.22(expo@56.0.19(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.19)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3)))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))
       expo-auth-session:
         specifier: ~56.0.14
         version: 56.0.16(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))
@@ -656,7 +659,7 @@ importers:
         version: 0.9.0
       '@legendapp/list':
         specifier: 'catalog:'
-        version: 3.3.5(patch_hash=6befc76c7f590a0b0915b531386ce7e3bbb364612868e1f04e4ac84f60a39ab5)(react@19.2.6)(react-dom@19.2.6(react@19.2.6))
+        version: 3.3.5(patch_hash=6befc76c7f590a0b0915b531386ce7e3bbb364612868e1f04e4ac84f60a39ab5)(react@19.2.6)(react-dom@19.2.6(react@19.2.6))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.6))
       '@lexical/react':
         specifier: ^0.41.0
         version: 0.41.0(react@19.2.6)(react-dom@19.2.6(react@19.2.6))
@@ -6508,6 +6511,14 @@ packages:
     resolution: {integrity: sha512-KIlIskLTD1a/rtoEIiJv0IeRAnnxRavD2oLyHI0aCEs4zl0yNHM2xLZHh05PWvAHJbBlbopfOWW1g8IbJp6ttg==}
     peerDependencies:
       expo: '*'
+      react: '*'
+      react-native: '*'
+
+  expo-audio@56.0.13:
+    resolution: {integrity: sha512-pfBmT/8OYbhrb37ECk+fC1EstLBFxMTioF4uZrAEeOj3uCgjproj1qYmkpsQLJIoEOMPSIw1iSfBEMl10v1DDA==}
+    peerDependencies:
+      expo: '*'
+      expo-asset: '*'
       react: '*'
       react-native: '*'
 
@@ -12810,10 +12821,11 @@ snapshots:
       react-native: 0.85.3(@types/react@19.2.18)(react@19.2.3)
       use-sync-external-store: 1.6.0(react@19.2.3)
 
-  '@legendapp/list@3.3.5(patch_hash=6befc76c7f590a0b0915b531386ce7e3bbb364612868e1f04e4ac84f60a39ab5)(react@19.2.6)(react-dom@19.2.6(react@19.2.6))':
+  '@legendapp/list@3.3.5(patch_hash=6befc76c7f590a0b0915b531386ce7e3bbb364612868e1f04e4ac84f60a39ab5)(react@19.2.6)(react-dom@19.2.6(react@19.2.6))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.6))':
     dependencies:
       react: 19.2.6
       react-dom: 19.2.6(react@19.2.6)
+      react-native: 0.85.3(@types/react@19.2.18)(react@19.2.6)
       use-sync-external-store: 1.6.0(react@19.2.6)
 
   '@lexical/clipboard@0.41.0':
@@ -13744,6 +13756,14 @@ snapshots:
       nullthrows: 1.1.1
       react: 19.2.3
       react-native: 0.85.3(@types/react@19.2.18)(react@19.2.3)
+
+  '@react-native/virtualized-lists@0.85.3(@types/react@19.2.18)(react@19.2.6)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.6))':
+    dependencies:
+      '@types/react': 19.2.18
+      invariant: 2.2.4
+      nullthrows: 1.1.1
+      react: 19.2.6
+      react-native: 0.85.3(@types/react@19.2.18)(react@19.2.6)
 
   '@react-navigation/core@7.21.12(react@19.2.3)':
     dependencies:
@@ -16159,6 +16179,13 @@ snapshots:
       react-native: 0.85.3(@types/react@19.2.18)(react@19.2.3)
     transitivePeerDependencies:
       - supports-color
+
+  expo-audio@56.0.13(expo@56.0.19(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.19)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(expo-asset@56.0.22(expo@56.0.19(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.19)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3)))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3)):
+    dependencies:
+      expo: 56.0.19(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.19)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3)))
+      expo-asset: 56.0.22(expo@56.0.19(@expo/dom-webview@56.0.6)(@expo/metro-runtime@56.0.19)(react@19.2.3)(react-dom@19.2.3(react@19.2.3))(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))(react-native-webview@13.17.0(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))))(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3))
+      react: 19.2.3
+      react-native: 0.85.3(@types/react@19.2.18)(react@19.2.3)
 
   expo-auth-session@56.0.16(react@19.2.3)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.3)):
     dependencies:
@@ -19204,6 +19231,49 @@ snapshots:
       pretty-format: 29.7.0
       promise: 8.3.0
       react: 19.2.3
+      react-devtools-core: 6.1.5
+      react-refresh: 0.14.2
+      regenerator-runtime: 0.13.11
+      scheduler: 0.27.0
+      semver: 7.7.4
+      stacktrace-parser: 0.1.11
+      tinyglobby: 0.2.17
+      whatwg-fetch: 3.6.20
+      ws: 7.5.13
+      yargs: 17.7.3
+    transitivePeerDependencies:
+      - '@react-native-community/cli'
+      - '@react-native/metro-config'
+      - bufferutil
+      - supports-color
+      - utf-8-validate
+
+  react-native@0.85.3(@types/react@19.2.18)(react@19.2.6):
+    dependencies:
+      '@react-native/assets-registry': 0.85.3
+      '@react-native/codegen': 0.85.3(@babel/core@7.29.7)
+      '@react-native/community-cli-plugin': 0.85.3
+      '@react-native/gradle-plugin': 0.85.3(patch_hash=c1b594a16e682d621b6a960926f8ce13fc92edfb397884cfe7fcb0518996a784)
+      '@react-native/js-polyfills': 0.85.3
+      '@react-native/normalize-colors': 0.85.3
+      '@react-native/virtualized-lists': 0.85.3(@types/react@19.2.18)(react@19.2.6)(react-native@0.85.3(@types/react@19.2.18)(react@19.2.6))
+      '@types/react': 19.2.18
+      abort-controller: 3.0.0
+      anser: 1.4.10
+      ansi-regex: 5.0.1
+      babel-plugin-syntax-hermes-parser: 0.33.3
+      base64-js: 1.5.1
+      commander: 12.1.0
+      flow-enums-runtime: 0.0.6
+      hermes-compiler: 250829098.0.10
+      invariant: 2.2.4
+      memoize-one: 5.2.1
+      metro-runtime: 0.84.4
+      metro-source-map: 0.84.4
+      nullthrows: 1.1.1
+      pretty-format: 29.7.0
+      promise: 8.3.0
+      react: 19.2.6
       react-devtools-core: 6.1.5
       react-refresh: 0.14.2
       regenerator-runtime: 0.13.11
