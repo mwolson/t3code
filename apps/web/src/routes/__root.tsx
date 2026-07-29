@@ -56,6 +56,7 @@ import {
 } from "../state/entities";
 import {
   captureThreadSoundState,
+  captureThreadSoundStatePreservingUnobserved,
   captureThreadSoundStateWhileSettingsHydrating,
   deriveInteractionSoundCues,
   selectLiveThreadShells,
@@ -217,8 +218,11 @@ function InteractionSoundCoordinator() {
         play(cue);
       }
     }
-    previousStateRef.current = captureThreadSoundState(liveThreads);
-  }, [completionSoundEnabled, liveThreads, settingsHydrated]);
+    previousStateRef.current =
+      previous === null
+        ? captureThreadSoundState(liveThreads)
+        : captureThreadSoundStatePreservingUnobserved(previous, liveThreads, threads);
+  }, [completionSoundEnabled, liveThreads, settingsHydrated, threads]);
 
   return null;
 }
