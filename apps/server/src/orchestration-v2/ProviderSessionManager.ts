@@ -166,6 +166,13 @@ export interface ProviderSessionManagerV2Shape {
      * with native thread deletion remove it before the runtime is detached.
      */
     readonly deleteProviderThread?: boolean;
+    /**
+     * Persisted deletion targets used when the managed runtime has already
+     * stopped by the time the replay-safe detach effect executes.
+     */
+    readonly providerInstanceId?: ProviderInstanceId;
+    readonly providerSession?: OrchestrationV2ProviderSession;
+    readonly providerThreads?: ReadonlyArray<OrchestrationV2ProviderThread>;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
 }
 
@@ -1554,13 +1561,42 @@ export const layerWithOptions = (
             const providerThreads: ReadonlyMap<
               OrchestrationV2ProviderThread["id"],
               OrchestrationV2ProviderThread
-            > = Option.isSome(projection)
-              ? new Map(
-                  projection.value.providerThreads
-                    .filter((thread) => thread.providerSessionId === input.providerSessionId)
-                    .map((thread) => [thread.id, thread] as const),
-                )
-              : new Map();
+            > =
+              input.providerThreads !== undefined
+                ? new Map(input.providerThreads.map((thread) => [thread.id, thread] as const))
+                : Option.isSome(projection)
+                  ? new Map(
+                      projection.value.providerThreads
+                        .filter((thread) => thread.providerSessionId === input.providerSessionId)
+                        .map((thread) => [thread.id, thread] as const),
+                    )
+                  : new Map();
+            if (
+              input.deleteProviderThread === true &&
+              currentEntry === undefined &&
+              input.providerInstanceId !== undefined &&
+              input.providerSession !== undefined
+            ) {
+              const adapter = yield* registry.get(input.providerInstanceId);
+              const deleteDetachedThread = adapter.deleteDetachedThread;
+              if (deleteDetachedThread !== undefined) {
+                const providerSession = input.providerSession;
+                yield* Effect.scoped(
+                  Effect.forEach(
+                    providerThreads.values(),
+                    (providerThread) =>
+                      deleteDetachedThread({
+                        providerSession,
+                        providerThread,
+                      }),
+                    {
+                      concurrency: 1,
+                      discard: true,
+                    },
+                  ),
+                );
+              }
+            }
             if (
               currentEntry !== undefined &&
               Option.isSome(projection) &&

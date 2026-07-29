@@ -1370,16 +1370,32 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             : (providerSwitchPlan?.releaseProviderSessionIds ?? []),
     );
     if (detachSessionIds.size > 0) {
-      const liveSessions = projection.providerSessions.filter(
+      const sessionsToDetach = projection.providerSessions.filter(
         (session) =>
           detachSessionIds.has(session.id) &&
-          session.status !== "stopped" &&
-          session.status !== "error",
+          (command.type === "thread.delete" ||
+            (session.status !== "stopped" && session.status !== "error")),
       );
       yield* Effect.forEach(
-        liveSessions,
+        sessionsToDetach,
         (session) =>
           Effect.gen(function* () {
+            // Pending and materialized projection rows can share one native id.
+            const providerThreads = Array.from(
+              new Map(
+                projection.providerThreads.flatMap((thread) => {
+                  const nativeThreadRef = thread.nativeThreadRef;
+                  if (thread.providerSessionId !== session.id || nativeThreadRef === null)
+                    return [];
+                  return [
+                    [
+                      JSON.stringify([nativeThreadRef.driver, nativeThreadRef.nativeId]),
+                      thread,
+                    ] as const,
+                  ];
+                }),
+              ).values(),
+            );
             yield* emit(
               events,
               command,
@@ -1424,7 +1440,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 ...(command.type === "thread.archive" || command.type === "thread.delete"
                   ? { revokeMcpCredential: true }
                   : {}),
-                ...(command.type === "thread.delete" ? { deleteProviderThread: true } : {}),
+                ...(command.type === "thread.delete"
+                  ? {
+                      deleteProviderThread: true,
+                      providerInstanceId: session.providerInstanceId,
+                      providerSession: session,
+                      providerThreads,
+                    }
+                  : {}),
               },
             } satisfies PendingOrchestrationEffectV2;
             yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);

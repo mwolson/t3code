@@ -90,6 +90,7 @@ interface TestProviderRuntimeState {
   readonly openCount: number;
   readonly closeCount: number;
   readonly deleteCount: number;
+  readonly detachedDeleteCount: number;
   readonly interruptCount: number;
   readonly resumeCount: number;
   readonly eventQueues: ReadonlyMap<string, Queue.Queue<ProviderAdapterV2Event>>;
@@ -99,6 +100,7 @@ const emptyState: TestProviderRuntimeState = {
   openCount: 0,
   closeCount: 0,
   deleteCount: 0,
+  detachedDeleteCount: 0,
   interruptCount: 0,
   resumeCount: 0,
   eventQueues: new Map(),
@@ -244,6 +246,11 @@ function makeProviderAdapter(
   return {
     instanceId: ProviderInstanceId.make("codex"),
     driver: CODEX_DRIVER,
+    deleteDetachedThread: () =>
+      Ref.update(state, (current) => ({
+        ...current,
+        detachedDeleteCount: current.detachedDeleteCount + 1,
+      })),
     getCapabilities: () => Effect.succeed(options.capabilities ?? CodexCapabilities),
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
     openSession: (input) =>
@@ -1289,6 +1296,57 @@ it.effect("ProviderSessionManagerV2 deletes native threads only on permanent det
       });
 
       assert.equal((yield* Ref.get(state)).deleteCount, 1);
+    });
+
+    yield* effect.pipe(
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 1_000,
+          capabilities: ExclusiveCapabilities,
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 deletes detached historical native threads", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const idAllocator = yield* IdAllocatorV2;
+      const manager = yield* ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "provider-session-manager-historical-native-delete",
+        projectId: yield* idAllocator.allocate.project({
+          fixtureName: "provider-session-manager-historical-native-delete",
+        }),
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const providerSession = makeProviderSession({ providerSessionId, now });
+      const providerThread = makeProviderThread({
+        idAllocator,
+        threadId,
+        providerSessionId,
+        now,
+      });
+
+      yield* manager.detach({
+        providerSessionId,
+        threadId,
+        detail: "Thread deleted.",
+        deleteProviderThread: true,
+        providerInstanceId: modelSelection.instanceId,
+        providerSession,
+        providerThreads: [providerThread],
+      });
+
+      assert.equal((yield* Ref.get(state)).detachedDeleteCount, 1);
+      assert.equal((yield* Ref.get(state)).openCount, 0);
     });
 
     yield* effect.pipe(
