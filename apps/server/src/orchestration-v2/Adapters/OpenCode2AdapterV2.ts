@@ -256,6 +256,7 @@ interface OpenCode2ToolPart {
   output: string | undefined;
   structured: Record<string, unknown> | undefined;
   status: OpenCode2ToolStatus;
+  errorMessage: string | undefined;
   completedAt: DateTime.Utc | null;
 }
 
@@ -330,6 +331,18 @@ export const openCode2PendingWorkForSession = Effect.fnUntraced(function* (input
     (shell) => shell.status === "running" && shell.metadata.sessionID === input.sessionID,
   );
 });
+
+export function openCode2ToolNeedsTerminalOverride(
+  part: Pick<OpenCode2ToolPart, "status" | "errorMessage">,
+  terminal: TerminalTurnStatus,
+): boolean {
+  if (part.status === "pending" || part.status === "running") return true;
+  return (
+    terminal === "interrupted" &&
+    part.status === "error" &&
+    part.errorMessage === "Tool execution interrupted"
+  );
+}
 
 export interface OpenCode2ProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";
@@ -1205,7 +1218,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           const completedAt = yield* DateTime.now;
           for (const part of turn.parts.values()) {
             if (part.kind === "tool") {
-              if (part.status === "pending" || part.status === "running") {
+              if (openCode2ToolNeedsTerminalOverride(part, status)) {
                 yield* emitToolPart(state, turn, part, status);
               }
               continue;
@@ -1313,6 +1326,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             readonly output?: string;
             readonly structured?: Record<string, unknown>;
             readonly status?: OpenCode2ToolStatus;
+            readonly errorMessage?: string;
           },
         ) {
           const now = yield* DateTime.now;
@@ -1336,6 +1350,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   output: undefined,
                   structured: undefined,
                   status: "pending",
+                  errorMessage: undefined,
                   completedAt: null,
                 };
           if (update.name !== undefined) part.name = update.name;
@@ -1343,6 +1358,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           if (update.input !== undefined) part.input = update.input;
           if (update.output !== undefined) part.output = update.output;
           if (update.structured !== undefined) part.structured = update.structured;
+          if (update.errorMessage !== undefined) part.errorMessage = update.errorMessage;
           if (update.status !== undefined) {
             part.status = update.status;
             if (update.status === "completed" || update.status === "error") part.completedAt = now;
@@ -1501,6 +1517,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               if (active === null) return;
               yield* upsertToolPart(active.state, active.turn, event.data.callID, {
                 output: event.data.error.message,
+                errorMessage: event.data.error.message,
                 status: "error",
               });
               return;

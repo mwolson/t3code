@@ -7,6 +7,7 @@ import {
   openCode2AutoPermissionReply,
   openCode2PendingWorkForSession,
   openCode2QuestionId,
+  openCode2ToolNeedsTerminalOverride,
   unwrapOpenCode2Data,
 } from "./OpenCode2AdapterV2.ts";
 
@@ -166,4 +167,35 @@ describe("openCode2PendingWorkForSession", () => {
       );
     }),
   );
+});
+
+describe("openCode2ToolNeedsTerminalOverride", () => {
+  const part = (status: "pending" | "running" | "completed" | "error", errorMessage?: string) => ({
+    status,
+    errorMessage,
+  });
+
+  it("terminalizes tools that have no native terminal state", () => {
+    assert.isTrue(openCode2ToolNeedsTerminalOverride(part("pending"), "failed"));
+    assert.isTrue(openCode2ToolNeedsTerminalOverride(part("running"), "interrupted"));
+  });
+
+  it("restamps only the provider's interrupt-specific tool failure", () => {
+    assert.isTrue(
+      openCode2ToolNeedsTerminalOverride(
+        part("error", "Tool execution interrupted"),
+        "interrupted",
+      ),
+    );
+    assert.isFalse(
+      openCode2ToolNeedsTerminalOverride(part("error", "command failed"), "interrupted"),
+    );
+    assert.isFalse(
+      openCode2ToolNeedsTerminalOverride(part("error", "Tool execution interrupted"), "failed"),
+    );
+  });
+
+  it("preserves completed tools", () => {
+    assert.isFalse(openCode2ToolNeedsTerminalOverride(part("completed"), "interrupted"));
+  });
 });
