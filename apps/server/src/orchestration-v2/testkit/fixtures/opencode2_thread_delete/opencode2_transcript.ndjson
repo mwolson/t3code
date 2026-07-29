@@ -13,6 +13,10 @@
 {"type":"emit_inbound","label":"session.pending.list.response","frame":{"type":"sdk.response","operation":"session.pending.list","data":[]}}
 {"type":"expect_outbound","label":"shell.list","frame":{"type":"shell.list","input":{"location":{"directory":"/private/tmp/t3-opencode2-delete-replay"}}}}
 {"type":"emit_inbound","label":"shell.list.response","frame":{"type":"sdk.response","operation":"shell.list","data":[]}}
+{"type":"expect_outbound","label":"session.pending.list.idle-release","frame":{"type":"session.pending.list","input":{"sessionID":"ses_opencode2_thread_delete"}}}
+{"type":"emit_inbound","label":"session.pending.list.idle-release.response","frame":{"type":"sdk.response","operation":"session.pending.list","data":[]}}
+{"type":"expect_outbound","label":"shell.list.idle-release","frame":{"type":"shell.list","input":{"location":{"directory":"/private/tmp/t3-opencode2-delete-replay"}}}}
+{"type":"emit_inbound","label":"shell.list.idle-release.response","frame":{"type":"sdk.response","operation":"shell.list","data":[]}}
 {"type":"expect_outbound","label":"session.remove","frame":{"type":"session.remove","input":{"sessionID":"ses_opencode2_thread_delete"}}}
 {"type":"emit_inbound","label":"session.remove.response","frame":{"type":"sdk.response","operation":"session.remove","data":true}}
 {"type":"runtime_exit","status":"success"}

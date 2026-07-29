@@ -24,6 +24,12 @@ export function assertOpenCode2ThreadDeleteOutput(
   assert.isNotNull(projection.thread.deletedAt);
   assert.isTrue(
     result.domainEvents.some(
+      (event) => event.type === "provider-session.updated" && event.payload.status === "stopped",
+    ),
+    "the fixture must release the managed runtime before application deletion",
+  );
+  assert.isTrue(
+    result.domainEvents.some(
       (event) =>
         event.type === "provider-session.detached" && event.threadId === projection.thread.id,
     ),

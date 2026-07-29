@@ -13,6 +13,7 @@ import {
   openCode2SessionErrorTargetSessionIds,
   openCode2ShouldSettleTurn,
   openCode2ToolNeedsTerminalOverride,
+  removeOpenCode2Session,
   unwrapOpenCode2Data,
 } from "./OpenCode2AdapterV2.ts";
 
@@ -54,6 +55,35 @@ describe("unwrapOpenCode2Data", () => {
       /session.get returned no response payload/,
     );
   });
+});
+
+describe("removeOpenCode2Session", () => {
+  it.effect("treats an already-missing native session as deleted", () =>
+    removeOpenCode2Session(
+      "ses_missing",
+      Effect.succeed({
+        data: undefined,
+        error: { name: "SessionNotFoundError" },
+        response: { status: 404 },
+      }),
+    ),
+  );
+
+  it.effect("retains non-idempotent native deletion failures", () =>
+    Effect.gen(function* () {
+      const failure = yield* removeOpenCode2Session(
+        "ses_broken",
+        Effect.succeed({
+          data: undefined,
+          error: { name: "InternalServerError" },
+          response: { status: 500 },
+        }),
+      ).pipe(Effect.flip);
+
+      assert.strictEqual(failure.operation, "session.remove");
+      assert.match(failure.detail, /InternalServerError/);
+    }),
+  );
 });
 
 describe("openCode2QuestionId", () => {

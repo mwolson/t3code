@@ -587,6 +587,27 @@ export function unwrapOpenCode2Data<A>(
   return payload as NonNullable<A>;
 }
 
+/** @internal exported for tests */
+export function removeOpenCode2Session(
+  sessionID: string,
+  request: Effect.Effect<unknown, OpenCode2RuntimeError>,
+): Effect.Effect<void, OpenCode2RuntimeError> {
+  return request.pipe(
+    Effect.flatMap((response) => {
+      const error = recordValue(response, "error");
+      const status = recordNumber(recordValue(response, "response"), "status");
+      if (error === undefined || status === 404) return Effect.void;
+      return Effect.fail(
+        new OpenCode2RuntimeError({
+          operation: "session.remove",
+          detail: `Failed to remove OpenCode 2 session ${sessionID}: ${openCodeRuntimeErrorDetail(error)}`,
+          cause: error,
+        }),
+      );
+    }),
+  );
+}
+
 /**
  * Stable per-question id so an answer map keyed by header, question text, or
  * generated id all resolve. Mirrors `openCodeQuestionId` for the 2.x question
@@ -766,6 +787,34 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
   return ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver: OPENCODE2_PROVIDER,
+    deleteDetachedThread: (input) =>
+      Effect.gen(function* () {
+        const sessionID = nativeThreadId(input.providerThread);
+        const connection = yield* runtime.connectToOpenCode2Server({
+          binaryPath: options.settings.binaryPath,
+          serverUrl: options.settings.serverUrl,
+          serverPassword: options.settings.serverPassword,
+          environment: options.environment,
+        });
+        const client = runtime.createOpenCode2SdkClient({
+          baseUrl: connection.url,
+          directory: input.providerSession.cwd,
+          serverPassword: connection.password,
+        });
+        yield* removeOpenCode2Session(
+          sessionID,
+          runOpenCode2Sdk("session.remove", () =>
+            client.v2.session.remove({ sessionID }, { throwOnError: false }),
+          ),
+        );
+      }).pipe(
+        Effect.mapError((cause) =>
+          protocolError(
+            `Failed to delete detached OpenCode 2 session ${input.providerThread.id}`,
+            cause,
+          ),
+        ),
+      ),
     getCapabilities: () => Effect.succeed(OpenCode2ProviderCapabilitiesV2),
     planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
     openSession: Effect.fn("OpenCode2AdapterV2.openSession")(
@@ -2557,8 +2606,11 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             Effect.gen(function* () {
               const sessionID = nativeThreadId(providerThread);
               if (!threads.has(sessionID)) return;
-              yield* sdkCall("session.remove", { sessionID }, () =>
-                client.v2.session.remove({ sessionID }),
+              yield* removeOpenCode2Session(
+                sessionID,
+                sdkCall("session.remove", { sessionID }, () =>
+                  client.v2.session.remove({ sessionID }, { throwOnError: false }),
+                ),
               );
               threads.delete(sessionID);
             }).pipe(

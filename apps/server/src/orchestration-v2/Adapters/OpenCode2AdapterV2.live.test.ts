@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -25,7 +26,11 @@ import {
 } from "../../provider/opencode2Runtime.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../IdAllocator.ts";
 import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
-import { makeOpenCode2AdapterV2, unwrapOpenCode2Data } from "./OpenCode2AdapterV2.ts";
+import {
+  makeOpenCode2AdapterV2,
+  OpenCode2ProviderCapabilitiesV2,
+  unwrapOpenCode2Data,
+} from "./OpenCode2AdapterV2.ts";
 
 const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-opencode2-pending-work-",
@@ -247,6 +252,102 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
           }),
         ).pipe(Effect.provide(layer)),
       { timeout: 120_000 },
+    );
+
+    it.live(
+      "deletes a detached native session idempotently",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const serverConfig = yield* ServerConfig;
+            const idAllocator = yield* IdAllocatorV2;
+            const runtime = yield* OpenCode2Runtime;
+            const server = yield* runtime.startOpenCode2ServerProcess({
+              binaryPath: "opencode2",
+            });
+            const client = runtime.createOpenCode2SdkClient({
+              baseUrl: server.url,
+              directory: process.cwd(),
+              serverPassword: server.password,
+            });
+            const instanceId = ProviderInstanceId.make("opencode2-live-delete-test");
+            const providerSessionId = ProviderSessionId.make(
+              "provider-session-opencode2-live-delete-test",
+            );
+            const adapter = makeOpenCode2AdapterV2({
+              instanceId,
+              settings: yield* decodeOpenCode2Settings({
+                binaryPath: "opencode2",
+                serverUrl: server.url,
+                serverPassword: server.password,
+              }),
+              environment: process.env,
+              runtime,
+              idAllocator,
+              serverConfig,
+            });
+            const deleteDetachedThread = adapter.deleteDetachedThread;
+            assert.isDefined(deleteDetachedThread);
+
+            const created = yield* runOpenCode2Sdk("session.create", () =>
+              client.v2.session.create({
+                location: { directory: process.cwd() },
+                model: { providerID: "opencode", id: "glm-5.2" },
+              }),
+            );
+            const nativeSession = unwrapOpenCode2Data<{ readonly id: string }>(
+              "session.create",
+              created,
+            );
+            const now = yield* DateTime.now;
+            const providerSession = {
+              id: providerSessionId,
+              driver: adapter.driver,
+              providerInstanceId: instanceId,
+              status: "stopped" as const,
+              cwd: process.cwd(),
+              model: "opencode/glm-5.2",
+              capabilities: OpenCode2ProviderCapabilitiesV2,
+              createdAt: now,
+              updatedAt: now,
+              lastError: null,
+            };
+            const providerThread = {
+              id: idAllocator.derive.providerThread({
+                driver: adapter.driver,
+                nativeThreadId: nativeSession.id,
+              }),
+              driver: adapter.driver,
+              providerInstanceId: instanceId,
+              providerSessionId,
+              appThreadId: ThreadId.make("thread-opencode2-live-delete-test"),
+              ownerNodeId: null,
+              nativeThreadRef: {
+                driver: adapter.driver,
+                nativeId: nativeSession.id,
+                strength: "strong" as const,
+              },
+              nativeConversationHeadRef: null,
+              status: "idle" as const,
+              firstRunOrdinal: null,
+              lastRunOrdinal: null,
+              handoffIds: [],
+              forkedFrom: null,
+              pendingBackgroundTasks: [],
+              createdAt: now,
+              updatedAt: now,
+            };
+
+            yield* deleteDetachedThread({ providerSession, providerThread });
+            yield* deleteDetachedThread({ providerSession, providerThread });
+
+            const missing = yield* runOpenCode2Sdk("session.get", () =>
+              client.v2.session.get({ sessionID: nativeSession.id }, { throwOnError: false }),
+            );
+            assert.equal(missing.response.status, 404);
+          }),
+        ).pipe(Effect.provide(layer)),
+      { timeout: 60_000 },
     );
   },
 );
