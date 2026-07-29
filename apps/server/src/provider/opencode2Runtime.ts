@@ -205,11 +205,6 @@ const makeOpenCode2Runtime = Effect.gen(function* () {
                 // server. The group kill still owns any descendants it left.
               }
             });
-      yield* Scope.addFinalizer(
-        runtimeScope,
-        escalateOpenCode2ServerTermination(killOpenCode2ProcessGroup),
-      );
-
       const outputRef = yield* Ref.make("");
       const readyDeferred = yield* Deferred.make<
         OpenCode2ServerCredentials,
@@ -299,6 +294,13 @@ const makeOpenCode2Runtime = Effect.gen(function* () {
             .join("\n\n"),
         });
       }
+
+      // Register this after the exit observer so LIFO scope teardown terminates
+      // the server before waiting for that observer to finish.
+      yield* Scope.addFinalizer(
+        runtimeScope,
+        escalateOpenCode2ServerTermination(killOpenCode2ProcessGroup),
+      );
 
       return {
         url: ready.value.url,
