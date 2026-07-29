@@ -132,6 +132,15 @@ export interface OpenCode2RuntimeShape {
   }) => OpencodeClient;
 }
 
+export function escalateOpenCode2ServerTermination(
+  kill: (signal: NodeJS.Signals) => Effect.Effect<void>,
+): Effect.Effect<void, never> {
+  return kill("SIGTERM").pipe(
+    Effect.andThen(Effect.sleep("1 second")),
+    Effect.andThen(kill("SIGKILL")),
+  );
+}
+
 const makeOpenCode2Runtime = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const netService = yield* NetService.NetService;
@@ -182,6 +191,24 @@ const makeOpenCode2Runtime = Effect.gen(function* () {
               }),
           ),
         );
+
+      const killOpenCode2ProcessGroup = (signal: NodeJS.Signals) =>
+        hostPlatform === "win32"
+          ? child
+              .kill({ killSignal: signal, forceKillAfter: "1 second" })
+              .pipe(Effect.asVoid, Effect.ignore)
+          : Effect.sync(() => {
+              try {
+                process.kill(-Number(child.pid), signal);
+              } catch {
+                // The direct child may already have exited after starting the
+                // server. The group kill still owns any descendants it left.
+              }
+            });
+      yield* Scope.addFinalizer(
+        runtimeScope,
+        escalateOpenCode2ServerTermination(killOpenCode2ProcessGroup),
+      );
 
       const outputRef = yield* Ref.make("");
       const readyDeferred = yield* Deferred.make<

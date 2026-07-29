@@ -1,6 +1,13 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 
-import { openCode2AuthorizationHeader, parseOpenCode2Startup } from "./opencode2Runtime.ts";
+import {
+  escalateOpenCode2ServerTermination,
+  openCode2AuthorizationHeader,
+  parseOpenCode2Startup,
+} from "./opencode2Runtime.ts";
 
 describe("parseOpenCode2Startup", () => {
   // Exact banner emitted by @opencode-ai/cli 0.0.0-next-16339, captured by
@@ -65,4 +72,27 @@ describe("openCode2AuthorizationHeader", () => {
       `Basic ${Buffer.from("opencode:s3cr3t", "utf8").toString("base64")}`,
     );
   });
+});
+
+describe("escalateOpenCode2ServerTermination", () => {
+  it.effect("sends TERM, waits for the grace period, then sends KILL", () =>
+    Effect.gen(function* () {
+      const signals: Array<NodeJS.Signals> = [];
+      const termination = yield* escalateOpenCode2ServerTermination((signal) =>
+        Effect.sync(() => {
+          signals.push(signal);
+        }),
+      ).pipe(Effect.forkScoped);
+
+      yield* Effect.yieldNow;
+      assert.deepStrictEqual(signals, ["SIGTERM"]);
+
+      yield* TestClock.adjust("999 millis");
+      assert.deepStrictEqual(signals, ["SIGTERM"]);
+
+      yield* TestClock.adjust("1 millis");
+      yield* Fiber.join(termination);
+      assert.deepStrictEqual(signals, ["SIGTERM", "SIGKILL"]);
+    }),
+  );
 });
