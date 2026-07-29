@@ -216,19 +216,6 @@ export class ProviderAdapterEnsureThreadError extends Schema.TaggedErrorClass<Pr
   }
 }
 
-export class ProviderAdapterCompactThreadError extends Schema.TaggedErrorClass<ProviderAdapterCompactThreadError>()(
-  "ProviderAdapterCompactThreadError",
-  {
-    driver: ProviderDriverKind,
-    providerThreadId: ProviderThreadId,
-    cause: Schema.optional(Schema.Defect()),
-  },
-) {
-  override get message(): string {
-    return `Failed to compact ${this.driver} provider thread ${this.providerThreadId}.`;
-  }
-}
-
 export class ProviderAdapterReadThreadSnapshotError extends Schema.TaggedErrorClass<ProviderAdapterReadThreadSnapshotError>()(
   "ProviderAdapterReadThreadSnapshotError",
   {
@@ -369,7 +356,6 @@ export const ProviderAdapterV2Error = Schema.Union([
   ProviderAdapterCloseSessionError,
   ProviderAdapterResumeThreadError,
   ProviderAdapterEnsureThreadError,
-  ProviderAdapterCompactThreadError,
   ProviderAdapterReadThreadSnapshotError,
   ProviderAdapterRollbackThreadError,
   ProviderAdapterForkThreadError,
@@ -522,9 +508,6 @@ export interface ProviderAdapterV2SessionRuntime {
    * permanently deleted. Archive and ordinary detach flows never call this.
    */
   readonly deleteThread?: (
-    providerThread: OrchestrationV2ProviderThread,
-  ) => Effect.Effect<void, ProviderAdapterV2Error>;
-  readonly compactThread?: (
     providerThread: OrchestrationV2ProviderThread,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly startTurn: (

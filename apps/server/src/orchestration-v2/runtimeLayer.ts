@@ -30,7 +30,6 @@ import { workerLive as providerContinuationWorkerLive } from "./ProviderContinua
 import { workerLive as threadTitleRegenerationWorkerLive } from "./ThreadTitleRegenerationService.ts";
 import { layer as providerEventIngestorLayer } from "./ProviderEventIngestor.ts";
 import { layer as providerSessionManagerLayer } from "./ProviderSessionManager.ts";
-import { layer as providerThreadCompactionServiceLayer } from "./ProviderThreadCompactionService.ts";
 import { layer as providerRuntimeRecoveryLayer } from "./ProviderRuntimeRecoveryService.ts";
 import { layer as providerSwitchServiceLayer } from "./ProviderSwitchService.ts";
 import { layer as providerTurnControlServiceLayer } from "./ProviderTurnControlService.ts";
@@ -144,17 +143,6 @@ const checkpointRollbackServiceProvided = checkpointRollbackServiceLayer.pipe(
     ),
   ),
 );
-const providerThreadCompactionServiceProvided = providerThreadCompactionServiceLayer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      eventSinkProvided,
-      idAllocatorLayer,
-      projectionStoreLayer,
-      providerSessionManagerProvided,
-      runtimePolicyProvided,
-    ),
-  ),
-);
 const checkpointCaptureServiceProvided = checkpointCaptureServiceLayer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -175,7 +163,6 @@ const effectExecutorProvided = effectExecutorLayer.pipe(
       runFinalizationServiceProvided,
       checkpointRollbackServiceProvided,
       providerSessionManagerProvided,
-      providerThreadCompactionServiceProvided,
       providerTurnControlServiceProvided,
       providerTurnStartServiceProvided,
       runtimeRequestServiceProvided,

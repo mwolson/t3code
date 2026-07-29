@@ -103,7 +103,6 @@ export const CursorProviderCapabilitiesV2 = {
     pendingRequestsSurviveRestart: false,
   },
   threads: {
-    canCompactThread: false,
     canCreateEmptyThread: true,
     canReadThreadSnapshot: true,
     canRollbackThread: false,

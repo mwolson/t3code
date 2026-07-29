@@ -50,6 +50,8 @@ export const SUBAGENT_PROMPT =
 export const SUBAGENT_V2_PROMPT = "just say hello";
 export const OPENCODE_SUBAGENT_PROMPT =
   "Use the task tool exactly once. Delegate to the general subagent with this prompt: Respond exactly CHILD_OK. After the task completes, respond exactly PARENT_OK.";
+export const OPENCODE_ERROR_CLEANUP_DRAIN_PROMPT =
+  "Run a local command that prints the authoritative cleanup result.";
 export const OPENCODE2_COMPACTION_PROMPT =
   "Compact the current context, then respond exactly: compaction fixture complete";
 export const OPENCODE2_COMPACTION_INTERRUPT_PROMPT =
@@ -205,13 +207,6 @@ export type OrchestratorFixtureInputStep =
     }
   | {
       readonly type: "delete";
-    }
-  | {
-      readonly type: "compact";
-    }
-  | {
-      readonly type: "await_provider_session_status";
-      readonly status: OrchestrationV2ThreadProjection["providerSessions"][number]["status"];
     }
   | {
       readonly type: "approve_next_runtime_request";
@@ -698,32 +693,6 @@ export function materializeFixtureInput(input: {
               fixtureName: input.scenario,
               commandName: "thread-delete",
             }),
-            threadId: ids.threadId,
-          });
-          break;
-        case "compact":
-          {
-            const commandId = yield* idAllocator.allocate.command({
-              fixtureName: input.scenario,
-              commandName: "thread-compact",
-            });
-            pushDispatch({
-              type: "thread.compact",
-              commandId,
-              threadId: ids.threadId,
-            });
-            steps.push({
-              type: "await_stored_event",
-              commandId,
-              eventType: "provider-thread.compacted",
-              threadId: ids.threadId,
-            });
-          }
-          break;
-        case "await_provider_session_status":
-          steps.push({
-            type: "await_provider_session_status",
-            status: step.status,
             threadId: ids.threadId,
           });
           break;

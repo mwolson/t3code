@@ -45,17 +45,6 @@ export type OrchestratorV2ScenarioStep =
       readonly threadId: ThreadId;
     }
   | {
-      readonly type: "await_stored_event";
-      readonly commandId: CommandId;
-      readonly eventType: OrchestrationV2DomainEvent["type"];
-      readonly threadId: ThreadId;
-    }
-  | {
-      readonly type: "await_provider_session_status";
-      readonly status: OrchestrationV2ThreadProjection["providerSessions"][number]["status"];
-      readonly threadId: ThreadId;
-    }
-  | {
       readonly type: "await_run_steerable";
       readonly threadId: ThreadId;
       readonly runId: OrchestrationV2Run["id"];
@@ -110,7 +99,6 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
   switch (command.type) {
     case "thread.create":
     case "thread.archive":
-    case "thread.compact":
     case "thread.unarchive":
     case "thread.delete":
     case "thread.settle":
@@ -293,61 +281,6 @@ export function runOrchestratorV2Scenario(
           return yield* waitForThreadIdle(threadId, attemptsRemaining - 1);
         });
 
-      const waitForStoredEvent = (
-        input: {
-          readonly commandId: CommandId;
-          readonly eventType: OrchestrationV2DomainEvent["type"];
-          readonly threadId: ThreadId;
-        },
-        attemptsRemaining = SCENARIO_WAIT_ATTEMPTS,
-      ): Effect.Effect<void, OrchestratorV2ScenarioStepError, never> =>
-        Effect.gen(function* () {
-          const events = yield* Ref.get(observedStoredEvents);
-          if (
-            events.some(
-              (stored) =>
-                stored.commandId === input.commandId &&
-                stored.event.threadId === input.threadId &&
-                stored.event.type === input.eventType,
-            )
-          ) {
-            return;
-          }
-          if (attemptsRemaining <= 0) {
-            return yield* new OrchestratorV2ScenarioStepError({
-              scenario: scenario.name,
-              step: `await_stored_event:${input.commandId}:${input.eventType}:${input.threadId}`,
-            });
-          }
-          yield* yieldToRuntime;
-          return yield* waitForStoredEvent(input, attemptsRemaining - 1);
-        });
-
-      const waitForProviderSessionStatus = (
-        input: {
-          readonly status: OrchestrationV2ThreadProjection["providerSessions"][number]["status"];
-          readonly threadId: ThreadId;
-        },
-        attemptsRemaining = SCENARIO_WAIT_ATTEMPTS,
-      ): Effect.Effect<void, OrchestratorV2Error | OrchestratorV2ScenarioStepError, never> =>
-        Effect.gen(function* () {
-          const projection = yield* orchestrator.getThreadProjection(input.threadId);
-          if (projection.providerSessions.some((session) => session.status === input.status)) {
-            return;
-          }
-          if (attemptsRemaining <= 0) {
-            const statuses = projection.providerSessions
-              .map((session) => `${session.id}:${session.status}`)
-              .join(",");
-            return yield* new OrchestratorV2ScenarioStepError({
-              scenario: scenario.name,
-              step: `await_provider_session_status:${input.threadId}:${input.status}:actual=${statuses}`,
-            });
-          }
-          yield* yieldToRuntime;
-          return yield* waitForProviderSessionStatus(input, attemptsRemaining - 1);
-        });
-
       const waitForRunSteerable = (
         threadId: ThreadId,
         runId: OrchestrationV2Run["id"],
@@ -454,12 +387,6 @@ export function runOrchestratorV2Scenario(
             break;
           case "await_thread_idle":
             yield* waitForThreadIdle(step.threadId);
-            break;
-          case "await_stored_event":
-            yield* waitForStoredEvent(step);
-            break;
-          case "await_provider_session_status":
-            yield* waitForProviderSessionStatus(step);
             break;
           case "await_run_steerable":
             yield* waitForRunSteerable(step.threadId, step.runId);

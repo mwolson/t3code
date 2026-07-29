@@ -19,7 +19,7 @@ describe("ProviderInstanceIcon kind badge", () => {
     const markup = renderToStaticMarkup(
       <ProviderInstanceIcon
         driverKind={OPENCODE2}
-        displayName="OpenCode 2.0"
+        displayName="OpenCode 2"
         showKindBadge
         kindBadgeVariant="full"
       />,
@@ -34,7 +34,7 @@ describe("ProviderInstanceIcon kind badge", () => {
     const markup = renderToStaticMarkup(
       <ProviderInstanceIcon
         driverKind={OPENCODE2}
-        displayName="OpenCode 2.0"
+        displayName="OpenCode 2"
         showKindBadge
         kindBadgeVariant="compact"
       />,
@@ -47,7 +47,7 @@ describe("ProviderInstanceIcon kind badge", () => {
 
   it("stays decorative: the owning control names the marker", () => {
     const markup = renderToStaticMarkup(
-      <ProviderInstanceIcon driverKind={OPENCODE2} displayName="OpenCode 2.0" showKindBadge />,
+      <ProviderInstanceIcon driverKind={OPENCODE2} displayName="OpenCode 2" showKindBadge />,
     );
 
     expect(kindBadge(markup)?.className).toBeDefined();
@@ -89,7 +89,7 @@ describe("ProviderInstanceIcon kind badge", () => {
 
   it("stays opt-in so dense surfaces are unaffected", () => {
     const markup = renderToStaticMarkup(
-      <ProviderInstanceIcon driverKind={OPENCODE2} displayName="OpenCode 2.0" />,
+      <ProviderInstanceIcon driverKind={OPENCODE2} displayName="OpenCode 2" />,
     );
 
     expect(markup).not.toContain("data-provider-kind-badge");
@@ -97,7 +97,7 @@ describe("ProviderInstanceIcon kind badge", () => {
 
   it("renders the brand mark rather than an initials fallback", () => {
     const markup = renderToStaticMarkup(
-      <ProviderInstanceIcon driverKind={OPENCODE2} displayName="OpenCode 2.0" showKindBadge />,
+      <ProviderInstanceIcon driverKind={OPENCODE2} displayName="OpenCode 2" showKindBadge />,
     );
 
     expect(markup).toContain('data-provider-icon="opencode2"');

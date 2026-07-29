@@ -434,7 +434,7 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
 export type OpenCodeSettings = typeof OpenCodeSettings.Type;
 
 /**
- * OpenCode 2.x ("OpenCode 2.0"). A separate driver rather than a mode of
+ * OpenCode 2.x ("OpenCode 2"). A separate driver rather than a mode of
  * `opencode`: 2.x serves a different route surface, requires auth, and emits a
  * different event vocabulary, so nothing but the vendor name is shared.
  *
@@ -460,7 +460,7 @@ export const OpenCode2Settings = makeProviderSettingsSchema(
     binaryPath: makeBinaryPathSetting("opencode2").pipe(
       Schema.annotateKey({
         title: "Binary path",
-        description: "Path to the OpenCode 2.0 binary.",
+        description: "Path to the OpenCode 2 binary.",
         providerSettingsForm: {
           placeholder: "opencode2",
           clearWhenEmpty: "omit",
@@ -483,7 +483,7 @@ export const OpenCode2Settings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Server password",
         description:
-          "Required only with a server URL, since OpenCode 2.0 rejects unauthenticated requests. Stored in plain text on disk.",
+          "Required only with a server URL, since OpenCode 2 rejects unauthenticated requests. Stored in plain text on disk.",
         providerSettingsForm: {
           control: "password",
           placeholder: "Required with a server URL",

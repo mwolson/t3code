@@ -230,7 +230,7 @@ describe("deriveProviderInstanceEntries", () => {
     expect(entry?.isDefault).toBe(false);
   });
 
-  it("uses the canonical OpenCode 2.0 display name for its default instance", () => {
+  it("uses the canonical OpenCode 2 display name for its default instance", () => {
     const [entry] = deriveProviderInstanceEntries([
       provider({
         provider: ProviderDriverKind.make("opencode2"),
@@ -238,7 +238,7 @@ describe("deriveProviderInstanceEntries", () => {
       }),
     ]);
 
-    expect(entry?.displayName).toBe("OpenCode 2.0");
+    expect(entry?.displayName).toBe("OpenCode 2");
   });
 
   it("distinguishes a non-default OpenCode 2 instance by its instance id", () => {
@@ -246,7 +246,7 @@ describe("deriveProviderInstanceEntries", () => {
       provider({
         provider: ProviderDriverKind.make("opencode2"),
         instanceId: "opencode2_zen",
-        displayName: "OpenCode 2.0",
+        displayName: "OpenCode 2",
       }),
     ]);
 

@@ -715,7 +715,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           checkedAt: "2026-07-28T00:01:00.000Z",
           version: null,
           models: [],
-          message: "OpenCode 2.0 provider status has not been checked in this session yet.",
+          message: "OpenCode 2 provider status has not been checked in this session yet.",
         } satisfies ServerProvider;
 
         assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, pendingProvider).models, [

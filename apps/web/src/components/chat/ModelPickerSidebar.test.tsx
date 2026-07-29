@@ -71,7 +71,7 @@ describe("ModelPickerSidebar first open", () => {
   it("names both the driver marker and the pending state in the accessible label", () => {
     const button = railButton(render([pendingOpenCode2]), "opencode2");
 
-    expect(button).toContain("OpenCode 2.0 (Beta)");
+    expect(button).toContain("OpenCode 2 (Beta)");
   });
 
   it("gives another driver with the same snapshot shape the normal unavailable treatment", () => {

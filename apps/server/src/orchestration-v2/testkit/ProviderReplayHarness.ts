@@ -37,7 +37,6 @@ import { OrchestratorV2, type OrchestratorV2Error } from "../Orchestrator.ts";
 import { ProviderAdapterRegistryV2 } from "../ProviderAdapterRegistry.ts";
 import { layer as providerEventIngestorLayer } from "../ProviderEventIngestor.ts";
 import { layerWithOptions as providerSessionManagerLayerWithOptions } from "../ProviderSessionManager.ts";
-import { layer as providerThreadCompactionServiceLayer } from "../ProviderThreadCompactionService.ts";
 import { layer as providerSwitchServiceLayer } from "../ProviderSwitchService.ts";
 import { layer as providerTurnControlServiceLayer } from "../ProviderTurnControlService.ts";
 import { layer as providerTurnStartServiceLayer } from "../ProviderTurnStartService.ts";
@@ -327,17 +326,6 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
       ),
     ),
   );
-  const providerThreadCompactionServiceProvided = providerThreadCompactionServiceLayer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        eventSinkProvided,
-        idAllocatorLayer,
-        storesLayer,
-        providerSessionManagerProvided,
-        runtimeLayer,
-      ),
-    ),
-  );
   const checkpointCaptureServiceProvided = checkpointCaptureServiceLayer.pipe(
     Layer.provide(
       Layer.mergeAll(checkpointServiceProvided, eventSinkProvided, idAllocatorLayer, storesLayer),
@@ -352,7 +340,6 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
         runFinalizationServiceProvided,
         checkpointRollbackServiceProvided,
         providerSessionManagerProvided,
-        providerThreadCompactionServiceProvided,
         providerTurnControlServiceProvided,
         providerTurnStartServiceProvided,
         runtimeRequestServiceProvided,

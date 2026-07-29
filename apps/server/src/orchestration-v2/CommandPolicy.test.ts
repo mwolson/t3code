@@ -259,30 +259,6 @@ layer("CommandPolicyV2", (it) => {
     }),
   );
 
-  it.effect("guards manual compaction behind provider thread support", () =>
-    Effect.gen(function* () {
-      const policy = yield* CommandPolicyV2;
-
-      const error = yield* policy
-        .ensureManualCompaction({
-          commandId,
-          threadId,
-          providerInstanceId: ProviderInstanceId.make("codex"),
-          capabilities: capabilities((current) => ({
-            ...current,
-            threads: {
-              ...current.threads,
-              canCompactThread: false,
-            },
-          })),
-        })
-        .pipe(Effect.flip);
-
-      assert.instanceOf(error, CommandPolicyCapabilityUnsupportedError);
-      assert.equal(error.capability, "manual_compaction");
-    }),
-  );
-
   it.effect("guards fork-delta handoff behind context handoff capabilities", () =>
     Effect.gen(function* () {
       const policy = yield* CommandPolicyV2;

@@ -1677,18 +1677,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
         const commandId = CommandId.make("command:foundation-reclaim-running");
         yield* outbox.enqueue([
           {
-            id: "effect:a-foundation-cancel-provider-compaction",
-            commandId,
-            threadId: ThreadId.make("thread:foundation-reclaim-compaction"),
-            request: {
-              type: "provider-thread.compact",
-              providerThreadId: ProviderThreadId.make(
-                "provider-thread:foundation-reclaim-compaction",
-              ),
-            },
-          },
-          {
-            id: "effect:b-foundation-cancel-provider-turn",
+            id: "effect:a-foundation-cancel-provider-turn",
             commandId,
             threadId: ThreadId.make("thread:foundation-reclaim-running"),
             request: {
@@ -1697,7 +1686,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
             },
           },
           {
-            id: "effect:c-foundation-requeue-cleanup",
+            id: "effect:b-foundation-requeue-cleanup",
             commandId,
             threadId: ThreadId.make("thread:foundation-reclaim-cleanup"),
             request: { type: "terminal.cleanup" },
@@ -1713,23 +1702,13 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
             yield* outbox.claimNext({ workerId: "crashed-worker", leaseDurationMs: 30_000 }),
           ),
         );
-        assert.isTrue(
-          Option.isSome(
-            yield* outbox.claimNext({ workerId: "crashed-worker", leaseDurationMs: 30_000 }),
-          ),
-        );
         assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, {
-          cancelled: 2,
+          cancelled: 1,
           requeued: 1,
         });
-        for (const effectId of [
-          "effect:a-foundation-cancel-provider-compaction",
-          "effect:b-foundation-cancel-provider-turn",
-        ]) {
-          const cancelled = yield* outbox.get(effectId);
-          assert.isTrue(Option.isSome(cancelled));
-          if (Option.isSome(cancelled)) assert.equal(cancelled.value.status, "cancelled");
-        }
+        const cancelled = yield* outbox.get("effect:a-foundation-cancel-provider-turn");
+        assert.isTrue(Option.isSome(cancelled));
+        if (Option.isSome(cancelled)) assert.equal(cancelled.value.status, "cancelled");
 
         const reclaimed = yield* outbox.claimNext({
           workerId: "recovery-worker",

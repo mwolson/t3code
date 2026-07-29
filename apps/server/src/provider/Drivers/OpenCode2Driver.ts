@@ -78,7 +78,7 @@ export type OpenCode2DriverEnv =
 export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
-    displayName: "OpenCode 2.0",
+    displayName: "OpenCode 2",
     supportsMultipleInstances: true,
   },
   configSchema: OpenCode2Settings,
@@ -115,7 +115,7 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
             new ProviderDriverError({
               driver: DRIVER_KIND,
               instanceId,
-              detail: "Failed to build OpenCode 2.0 orchestration adapter.",
+              detail: "Failed to build OpenCode 2 orchestration adapter.",
               cause,
             }),
         ),
@@ -156,7 +156,7 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
             new ProviderDriverError({
               driver: DRIVER_KIND,
               instanceId,
-              detail: `Failed to build OpenCode 2.0 snapshot: ${cause.message ?? String(cause)}`,
+              detail: `Failed to build OpenCode 2 snapshot: ${cause.message ?? String(cause)}`,
               cause,
             }),
         ),

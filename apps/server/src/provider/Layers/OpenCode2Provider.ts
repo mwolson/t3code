@@ -43,7 +43,7 @@ import {
 } from "../providerSnapshot.ts";
 
 const OPENCODE2_PRESENTATION = {
-  displayName: "OpenCode 2.0",
+  displayName: "OpenCode 2",
   showInteractionModeToggle: false,
 } as const;
 
@@ -121,7 +121,7 @@ function formatOpenCode2ProbeError(input: {
       return {
         installed: true,
         message:
-          "OpenCode 2.0 server rejected authentication. Check the server URL and password — 2.x has no unauthenticated mode.",
+          "OpenCode 2 server rejected authentication. Check the server URL and password. OpenCode 2 has no unauthenticated mode.",
       };
     }
     if (
@@ -135,19 +135,19 @@ function formatOpenCode2ProbeError(input: {
     ) {
       return {
         installed: true,
-        message: `Couldn't reach the configured OpenCode 2.0 server at ${input.serverUrl}. Check that the server is running and the URL is correct.`,
+        message: `Couldn't reach the configured OpenCode 2 server at ${input.serverUrl}. Check that the server is running and the URL is correct.`,
       };
     }
     return {
       installed: true,
-      message: detail ?? "Failed to connect to the configured OpenCode 2.0 server.",
+      message: detail ?? "Failed to connect to the configured OpenCode 2 server.",
     };
   }
 
   if (lower.includes("enoent") || lower.includes("notfound")) {
     return {
       installed: false,
-      message: "OpenCode 2.0 CLI (`opencode2`) is not installed or not on PATH.",
+      message: "OpenCode 2 CLI (`opencode2`) is not installed or not on PATH.",
     };
   }
   if (lower.includes("postinstall")) {
@@ -161,14 +161,14 @@ function formatOpenCode2ProbeError(input: {
     return {
       installed: true,
       message:
-        "macOS is blocking the OpenCode 2.0 binary (quarantine). Run `xattr -d com.apple.quarantine $(which opencode2)` to fix this.",
+        "macOS is blocking the OpenCode 2 binary (quarantine). Run `xattr -d com.apple.quarantine $(which opencode2)` to fix this.",
     };
   }
   return {
     installed: true,
     message: detail
-      ? `Failed to execute OpenCode 2.0 CLI health check: ${detail}`
-      : "Failed to execute OpenCode 2.0 CLI health check.",
+      ? `Failed to execute OpenCode 2 CLI health check: ${detail}`
+      : "Failed to execute OpenCode 2 CLI health check.",
   };
 }
 
@@ -344,8 +344,8 @@ export const makePendingOpenCode2Provider = (
         status: "warning",
         auth: { status: "unknown" },
         message: settings.enabled
-          ? "OpenCode 2.0 provider status has not been checked in this session yet."
-          : "OpenCode 2.0 is disabled in T3 Code settings.",
+          ? "OpenCode 2 provider status has not been checked in this session yet."
+          : "OpenCode 2 is disabled in T3 Code settings.",
       },
     });
   });
@@ -412,8 +412,8 @@ export const checkOpenCode2ProviderStatus = Effect.fn("checkOpenCode2ProviderSta
       version: null,
       status: "warning",
       message: isExternalServer
-        ? "OpenCode 2.0 is disabled in T3 Code settings. A server URL is configured."
-        : "OpenCode 2.0 is disabled in T3 Code settings.",
+        ? "OpenCode 2 is disabled in T3 Code settings. A server URL is configured."
+        : "OpenCode 2 is disabled in T3 Code settings.",
     });
   }
 
@@ -437,7 +437,7 @@ export const checkOpenCode2ProviderStatus = Effect.fn("checkOpenCode2ProviderSta
     version = parseOpenCode2Version(versionExit.value.stdout);
     if (version === null) {
       return fallback(
-        new Error("Unable to determine OpenCode 2.0 version from `opencode2 --version` output."),
+        new Error("Unable to determine OpenCode 2 version from `opencode2 --version` output."),
         null,
       );
     }
@@ -447,7 +447,7 @@ export const checkOpenCode2ProviderStatus = Effect.fn("checkOpenCode2ProviderSta
         installed: true,
         version,
         status: "error",
-        message: `OpenCode 2.0 ${version} is older than the verified build next-${MINIMUM_OPENCODE2_NEXT_BUILD}. Upgrade with \`npm install -g @opencode-ai/cli@next\`.`,
+        message: `OpenCode 2 ${version} is older than the verified build next-${MINIMUM_OPENCODE2_NEXT_BUILD}. Upgrade with \`npm install -g @opencode-ai/cli@next\`.`,
       });
     }
   }
@@ -477,7 +477,7 @@ export const checkOpenCode2ProviderStatus = Effect.fn("checkOpenCode2ProviderSta
     models,
     message:
       models.length > 0
-        ? `${models.length} model${models.length === 1 ? "" : "s"} available through ${isExternalServer ? "the configured OpenCode 2.0 server" : "OpenCode 2.0"}.`
-        : "Connected to OpenCode 2.0, but it did not report any enabled models.",
+        ? `${models.length} model${models.length === 1 ? "" : "s"} available through ${isExternalServer ? "the configured OpenCode 2 server" : "OpenCode 2"}.`
+        : "Connected to OpenCode 2, but it did not report any enabled models.",
   });
 });

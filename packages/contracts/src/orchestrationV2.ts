@@ -172,7 +172,6 @@ export const OrchestrationV2SessionCapabilities = Schema.Struct({
 export type OrchestrationV2SessionCapabilities = typeof OrchestrationV2SessionCapabilities.Type;
 
 export const OrchestrationV2ThreadCapabilities = Schema.Struct({
-  canCompactThread: Schema.Boolean,
   canCreateEmptyThread: Schema.Boolean,
   canReadThreadSnapshot: Schema.Boolean,
   canRollbackThread: Schema.Boolean,
@@ -1108,11 +1107,6 @@ export const OrchestrationV2DomainEvent = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
-    type: Schema.Literals(["provider-thread.compaction-requested", "provider-thread.compacted"]),
-    payload: OrchestrationV2ProviderThread,
-  }),
-  Schema.Struct({
-    ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("provider-turn.updated"),
     payload: OrchestrationV2ProviderTurn,
   }),
@@ -1825,11 +1819,6 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
-    type: Schema.Literals(["provider-thread.compaction-requested", "provider-thread.compacted"]),
-    payload: OrchestrationV2ProviderThreadJson,
-  }),
-  Schema.Struct({
-    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("provider-turn.updated"),
     payload: OrchestrationV2ProviderTurnJson,
   }),
@@ -1919,11 +1908,6 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.delete"),
-    commandId: CommandId,
-    threadId: ThreadId,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("thread.compact"),
     commandId: CommandId,
     threadId: ThreadId,
   }),

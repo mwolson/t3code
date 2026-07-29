@@ -115,7 +115,7 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
   },
   {
     value: ProviderDriverKind.make("opencode2"),
-    label: "OpenCode 2.0",
+    label: "OpenCode 2",
     icon: OpenCode2Icon,
     badgeLabel: "Beta",
     iconBadgeLabel: "Beta",

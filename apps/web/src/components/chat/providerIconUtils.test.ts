@@ -38,14 +38,14 @@ describe("provider model picker accessibility", () => {
     expect(
       resolveProviderModelPickerAriaLabel(
         "Source control writer model",
-        "OpenCode 2.0 (Beta), Big Pickle",
+        "OpenCode 2 (Beta), Big Pickle",
       ),
     ).toBe("Source control writer model");
   });
 
   it("uses the generated provider and model label by default", () => {
-    expect(resolveProviderModelPickerAriaLabel(undefined, "OpenCode 2.0 (Beta), Big Pickle")).toBe(
-      "OpenCode 2.0 (Beta), Big Pickle",
+    expect(resolveProviderModelPickerAriaLabel(undefined, "OpenCode 2 (Beta), Big Pickle")).toBe(
+      "OpenCode 2 (Beta), Big Pickle",
     );
   });
 });

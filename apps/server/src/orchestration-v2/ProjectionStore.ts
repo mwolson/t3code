@@ -267,7 +267,6 @@ export function applyToProjection(
         ),
       };
     case "provider-thread.updated":
-    case "provider-thread.compacted":
       return {
         ...base,
         thread:
@@ -279,8 +278,6 @@ export function applyToProjection(
             : base.thread,
         providerThreads: upsertById(base.providerThreads, event.payload),
       };
-    case "provider-thread.compaction-requested":
-      return base;
     case "provider-turn.updated":
       return {
         ...base,
@@ -1468,8 +1465,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             `;
             break;
           }
-          case "provider-thread.updated":
-          case "provider-thread.compacted": {
+          case "provider-thread.updated": {
             const payloadJson = yield* encodeProviderThreadPayload(event.payload);
             const payload = parseEncodedPayload(payloadJson);
             yield* sql`
@@ -1543,8 +1539,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }
             break;
           }
-          case "provider-thread.compaction-requested":
-            break;
           case "provider-turn.updated": {
             const payloadJson = yield* encodeProviderTurnPayload(event.payload);
             const payload = parseEncodedPayload(payloadJson);

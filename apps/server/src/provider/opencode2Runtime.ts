@@ -1,5 +1,5 @@
 /**
- * Runtime for OpenCode 2.x ("OpenCode 2.0"), which is a different server than
+ * Runtime for OpenCode 2.x ("OpenCode 2"), which is a different server than
  * the 1.x one `opencodeRuntime.ts` drives, not a newer build of it.
  *
  * Three differences make a separate runtime necessary rather than a flag:
