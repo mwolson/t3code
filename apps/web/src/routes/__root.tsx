@@ -61,7 +61,7 @@ import {
   selectLiveThreadShells,
   shouldPlayInteractionSound,
   type ThreadSoundStateByKey,
-} from "../interactionSounds";
+} from "@t3tools/client-runtime/interaction-sounds";
 import {
   createKeybindingsUpdateToastController,
   type KeybindingsUpdateToastController,
