@@ -16,6 +16,7 @@ import {
   threadRuntimeIsActive,
   type ThreadRuntimeSummary,
 } from "@t3tools/client-runtime/state/models";
+import { threadRuntimeHasInterruptibleRun } from "@t3tools/client-runtime/state/thread-execution";
 
 import {
   buildThreadFeed,
@@ -598,7 +599,13 @@ describe("deriveThreadWorkingStartedAt", () => {
   // without honouring that park the feed shows Working for the whole capture
   // window, hiding Waiting exactly when it should first appear.
   it("stays quiet once the roster has parked the runtime at idle", () => {
-    expect(deriveThreadWorkingStartedAt(waitingRun, runtime("idle"), null)).toBeNull();
+    const parkedRuntime = {
+      ...runtime("idle"),
+      activeRunId: RunId.make("run-stale"),
+    };
+
+    expect(deriveThreadWorkingStartedAt(waitingRun, parkedRuntime, null)).toBeNull();
+    expect(threadRuntimeHasInterruptibleRun(parkedRuntime)).toBe(false);
   });
 
   it("still reports working for a waiting run with no roster behind it", () => {

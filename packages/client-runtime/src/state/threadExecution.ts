@@ -2,7 +2,11 @@ import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 
-import type { ThreadRunSummary, ThreadRuntimeSummary } from "./models.ts";
+import {
+  threadRuntimeIsActive,
+  type ThreadRunSummary,
+  type ThreadRuntimeSummary,
+} from "./models.ts";
 
 const ACTIVITY_RUN_STATUSES = new Set(["preparing", "starting", "running", "waiting"]);
 const INTERRUPTIBLE_RUN_STATUSES = new Set(["preparing", "starting", "running"]);
@@ -92,5 +96,9 @@ export function deriveThreadRuntime(
 export function threadRuntimeHasInterruptibleRun(
   runtime: ThreadRuntimeSummary | null | undefined,
 ): boolean {
-  return runtime?.activeRunId !== null && runtime?.activeRunId !== undefined;
+  return (
+    threadRuntimeIsActive(runtime) &&
+    runtime?.activeRunId !== null &&
+    runtime?.activeRunId !== undefined
+  );
 }
