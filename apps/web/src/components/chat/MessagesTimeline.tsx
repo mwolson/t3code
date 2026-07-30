@@ -32,8 +32,8 @@ import {
   type TimelineEntry,
   providerErrorPresentation,
   workEntryDisplayIndicatesToolFailure,
-  workEntryIndicatesToolNeutralStatus,
   workEntryIndicatesToolSuccess,
+  workEntryIsExecuting,
   workEntrySignalsSevereFailure,
   workLogEntryIsToolLike,
 } from "../../session-logic";
@@ -109,6 +109,7 @@ import {
   extractTrailingPreviewAnnotation,
   type ParsedPreviewAnnotation,
 } from "~/lib/previewAnnotation";
+import { Spinner } from "~/components/ui/spinner";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
@@ -172,7 +173,6 @@ interface TimelineRowSharedState {
 interface TimelineRowActivityState {
   isWorking: boolean;
   isRevertingCheckpoint: boolean;
-  activeTurnInProgress: boolean;
   latestRunId: RunId | null;
   workingStepLabel: string | null;
 }
@@ -207,7 +207,6 @@ export interface MessagesTimelineHistoryControls {
 
 interface MessagesTimelineProps {
   isWorking: boolean;
-  activeTurnInProgress: boolean;
   activeTurnStartedAt: string | null;
   workingStepLabel?: string | null;
   pendingBackgroundTasks?: ReadonlyArray<{
@@ -269,7 +268,6 @@ interface MessagesTimelineProps {
 
 export const MessagesTimeline = memo(function MessagesTimeline({
   isWorking,
-  activeTurnInProgress,
   activeTurnStartedAt,
   workingStepLabel = null,
   pendingBackgroundTasks = null,
@@ -613,7 +611,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     () => ({
       isWorking,
       isRevertingCheckpoint,
-      activeTurnInProgress,
       latestRunId: latestRun?.runId ?? null,
       workingStepLabel,
     }),
@@ -3124,7 +3121,6 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   isExpandedToolGroupEntry?: boolean;
 }) {
   const { workEntry, workspaceRoot, isExpandedToolGroupEntry = false } = props;
-  const activity = use(TimelineRowActivityCtx);
   const ctx = use(TimelineRowCtx);
   const [expanded, setExpanded] = useState(false);
   const iconConfig = workToneIcon(workEntry.tone);
@@ -3169,16 +3165,43 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       : workLogEntryIsToolLike(workEntry)
         ? "text-secondary-label"
         : "font-medium text-foreground/82";
-  const turnSettled = !activity.activeTurnInProgress;
-  const showNeutralIndicator = !turnSettled && workEntryIndicatesToolNeutralStatus(workEntry);
-  const showSuccessIndicator =
-    workEntryIndicatesToolSuccess(workEntry) ||
-    (turnSettled && workEntryIndicatesToolNeutralStatus(workEntry));
+  // Only two kinds of row reach here: terminal ones, and neutral ones with a
+  // reported non-terminal or stopped lifecycle.
+  // `workEntryShouldRenderInWorkLog` drops the rest, so there is no
+  // neutral-without-lifecycle row left to show a dash for.
+  //
+  // The indicators read the item's own status, never the thread-wide turn state:
+  // a background command legitimately keeps running after the root run
+  // terminalizes and reports completion later, so inferring "stopped" from a
+  // settled turn would label live work as stopped and then jump it to
+  // completed. A genuine interrupt terminalizes the item at the projection
+  // layer instead.
+  const showRunningIndicator = workEntryIsExecuting(workEntry);
+  // `inProgress` also covers pending and waiting items. Those rows deliberately
+  // claim nothing: a spinner would falsely say they are executing, while the
+  // old `MinusIcon` with an "Empty" tooltip describes neither queued work nor
+  // a tool blocked on approval. A distinct indicator needs a design decision.
+  // A stopped row gets no indicator of its own. This component already assigns
+  // `XIcon` to Failed, and the red square the "Interrupt requested" lifecycle
+  // row uses would read as an error here, so it falls through to the null
+  // branch the row already supports. Note this covers `cancelled` too, which
+  // does not always have a lifecycle row beneath it.
+  const isStopped = workEntry.toolLifecycleStatus === "stopped";
+  const showSuccessIndicator = workEntryIndicatesToolSuccess(workEntry);
+  const lifecycleSuffix = showRunningIndicator
+    ? ", running"
+    : isStopped
+      ? ", stopped"
+      : showFailedIndicator
+        ? ", failed"
+        : "";
+  const lifecycleAccessibleName = `${displayText}${lifecycleSuffix}`;
+
   const rowToggleProps = canExpand
     ? {
         role: "button" as const,
         tabIndex: 0 as const,
-        "aria-label": displayText,
+        "aria-label": lifecycleAccessibleName,
         onClick: () => setExpanded((v) => !v),
         onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -3267,6 +3290,20 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                   </TooltipTrigger>
                   <TooltipPopup>Failed</TooltipPopup>
                 </Tooltip>
+              ) : showRunningIndicator ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={<span className="flex size-4 items-center justify-center" />}
+                  >
+                    <Spinner
+                      aria-hidden
+                      aria-label={undefined}
+                      role={undefined}
+                      className="block size-3 shrink-0 opacity-70"
+                    />
+                  </TooltipTrigger>
+                  <TooltipPopup>Running</TooltipPopup>
+                </Tooltip>
               ) : showSuccessIndicator ? (
                 <Tooltip>
                   <TooltipTrigger
@@ -3281,15 +3318,6 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                     </span>
                   </TooltipTrigger>
                   <TooltipPopup>Completed</TooltipPopup>
-                </Tooltip>
-              ) : showNeutralIndicator ? (
-                <Tooltip>
-                  <TooltipTrigger
-                    render={<span className="flex size-4 items-center justify-center" />}
-                  >
-                    <MinusIcon className="block size-3 shrink-0 opacity-70" aria-hidden />
-                  </TooltipTrigger>
-                  <TooltipPopup>Empty</TooltipPopup>
                 </Tooltip>
               ) : null}
             </span>
