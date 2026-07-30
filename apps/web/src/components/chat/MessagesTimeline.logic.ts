@@ -4,7 +4,7 @@ import {
   formatDuration,
   timelineEntryIsPersistentResourceCard,
   workEntryDisplayIndicatesToolFailure,
-  workEntryIndicatesToolNeutralStatus,
+  workEntryShouldRenderInWorkLog,
   workLogEntryIsToolLike,
   type TimelineEntry,
   type TurnPlanEntry,
@@ -53,7 +53,7 @@ export function workEntryIsVisibleInGroup(
 ): boolean {
   return (
     (expandedToolGroupEntry && entry.toolLifecycleStatus === "inProgress") ||
-    !workEntryIndicatesToolNeutralStatus(entry)
+    workEntryShouldRenderInWorkLog(entry)
   );
 }
 export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
