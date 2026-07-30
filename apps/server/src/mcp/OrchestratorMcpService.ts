@@ -65,6 +65,7 @@ import { isBuiltInProviderAdapterDriverV2 } from "../orchestration-v2/builtInPro
 import { subagentResultForRun } from "../orchestration-v2/SubagentProjection.ts";
 import {
   isActiveRun,
+  isTerminalRunStatus,
   latestActiveRun,
   latestRun,
   ThreadManagementError,
@@ -324,6 +325,26 @@ function isTerminalTaskStatus(
     status === "failed" ||
     status === "cancelled" ||
     status === "interrupted"
+  );
+}
+
+function latestTerminalResultRun(
+  projection: OrchestrationV2ThreadProjection,
+  delegatedRun: OrchestrationV2Run | undefined,
+): OrchestrationV2Run | undefined {
+  return projection.runs
+    .filter(
+      (run) =>
+        isTerminalRunStatus(run.status) &&
+        run.status !== "rolled_back" &&
+        (run.id === delegatedRun?.id || run.startedAt !== null),
+    )
+    .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+}
+
+function canExposeTaskRunResult(run: OrchestrationV2Run | undefined): run is OrchestrationV2Run {
+  return (
+    run !== undefined && run.status !== "rolled_back" && isTerminalTaskStatus(taskStatusForRun(run))
   );
 }
 
@@ -809,6 +830,7 @@ const make = Effect.gen(function* () {
       }
       const childProjection = yield* loadProjection(task.childThreadId);
       const childRun = delegatedTaskRun(childProjection, task);
+      const terminalRun = latestTerminalResultRun(childProjection, childRun);
       const status = taskStatusForRun(childRun);
       const derivedResult =
         task.result !== null
@@ -816,23 +838,42 @@ const make = Effect.gen(function* () {
           : childRun !== undefined && isTerminalTaskStatus(status)
             ? subagentResultForRun(childProjection, childRun).text
             : null;
-      const resultTransfer =
-        parentProjection.contextTransfers.find(
-          (transfer) =>
-            transfer.type === "subagent_result" &&
-            transfer.sourceThreadId === task.childThreadId &&
-            transfer.targetThreadId === scope.threadId,
-        ) ?? null;
+      const resultTransfers = parentProjection.contextTransfers.filter(
+        (transfer) =>
+          transfer.type === "subagent_result" &&
+          transfer.sourceThreadId === task.childThreadId &&
+          transfer.targetThreadId === scope.threadId,
+      );
+      const resultTransferForRun = (run: OrchestrationV2Run | undefined) =>
+        !canExposeTaskRunResult(run)
+          ? null
+          : (resultTransfers.find((transfer) => transfer.sourcePoint.runId === run.id) ??
+            (run.id === childRun?.id
+              ? resultTransfers.find((transfer) => transfer.sourcePoint.runId === undefined)
+              : undefined) ??
+            null);
+      const resultTransfer = resultTransferForRun(childRun);
+      const terminalStatus = terminalRun === undefined ? null : taskStatusForRun(terminalRun);
       return {
         taskId: task.id,
         childThreadId: task.childThreadId,
         childRunId: childRun?.id ?? null,
         childNodeId: task.id,
         status,
+        hasPendingChildRuns: childProjection.runs.some((run) => !isTerminalRunStatus(run.status)),
         providerInstanceId: ProviderInstanceId.make(task.driver),
         model: task.model,
         summary: derivedResult,
         resultContextTransferId: resultTransfer?.id ?? null,
+        latestTerminalRunId: terminalRun?.id ?? null,
+        latestTerminalStatus:
+          terminalStatus !== null && isTerminalTaskStatus(terminalStatus) ? terminalStatus : null,
+        latestTerminalSummary: canExposeTaskRunResult(terminalRun)
+          ? terminalRun.id === childRun?.id
+            ? derivedResult
+            : subagentResultForRun(childProjection, terminalRun).text
+          : null,
+        latestTerminalResultContextTransferId: resultTransferForRun(terminalRun)?.id ?? null,
         waitTimedOut,
       };
     });
