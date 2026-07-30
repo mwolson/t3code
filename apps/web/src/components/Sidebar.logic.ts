@@ -471,6 +471,12 @@ export function resolveThreadRowClassName(input: {
 // thread needs attention, not what the thread is currently doing.
 export type SidebarV2Status = "approval" | "input" | "working" | "failed" | "ready";
 
+export interface SidebarV2TopStatus {
+  readonly label: "Working" | "Approval" | "Input" | "Waiting" | "Failed" | "Woke" | "Done";
+  readonly icon: "working" | "done" | "woke" | null;
+  readonly className: string;
+}
+
 type SidebarV2StatusInput = Pick<
   SidebarThreadSummary,
   "hasPendingApprovals" | "hasPendingUserInput" | "runtime"
@@ -493,6 +499,70 @@ export function resolveSidebarV2Status(thread: SidebarV2StatusInput): SidebarV2S
     return "failed";
   }
   return "ready";
+}
+
+export function sidebarV2StatusIsInFlight(status: SidebarV2Status): boolean {
+  return (
+    status === "working" || status === "waiting" || status === "approval" || status === "input"
+  );
+}
+
+export function resolveSidebarV2TopStatus(input: {
+  readonly status: SidebarV2Status;
+  readonly isUnread: boolean;
+  readonly isWoke: boolean;
+}): SidebarV2TopStatus | null {
+  if (input.status === "working") {
+    return {
+      label: "Working",
+      icon: "working",
+      className:
+        "animate-sidebar-working-text text-sky-600 motion-reduce:animate-none dark:text-sky-400",
+    };
+  }
+  if (input.status === "approval") {
+    return {
+      label: "Approval",
+      icon: null,
+      className: "text-amber-700 dark:text-amber-300",
+    };
+  }
+  if (input.status === "input") {
+    return {
+      label: "Input",
+      icon: null,
+      className: "text-indigo-600 dark:text-indigo-300",
+    };
+  }
+  if (input.status === "failed") {
+    return {
+      label: "Failed",
+      icon: null,
+      className: "text-red-700 dark:text-red-300",
+    };
+  }
+  if (input.isWoke) {
+    return {
+      label: "Woke",
+      icon: "woke",
+      className: "text-amber-700 dark:text-amber-300",
+    };
+  }
+  if (input.status === "waiting") {
+    return {
+      label: "Waiting",
+      icon: null,
+      className: "text-sidebar-muted-foreground",
+    };
+  }
+  if (input.isUnread) {
+    return {
+      label: "Done",
+      icon: "done",
+      className: "text-emerald-700 dark:text-emerald-300",
+    };
+  }
+  return null;
 }
 
 /** NaN-safe Date.parse for sort comparators: a malformed timestamp must not

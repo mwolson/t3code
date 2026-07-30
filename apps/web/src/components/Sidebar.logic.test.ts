@@ -21,8 +21,10 @@ import {
   resolveSidebarStageBadgeLabel,
   resolveThreadRowClassName,
   resolveSidebarV2Status,
+  resolveSidebarV2TopStatus,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
+  sidebarV2StatusIsInFlight,
   formatWorkingDurationLabel,
   shouldNavigateAfterProjectRemoval,
   shouldClearThreadSelectionOnMouseDown,
@@ -774,6 +776,37 @@ describe("resolveSidebarV2Status", () => {
 
   it("defaults to ready with no runtime", () => {
     expect(resolveSidebarV2Status(idle)).toBe("ready");
+  });
+});
+
+describe("resolveSidebarV2TopStatus", () => {
+  it("presents unread waiting work as Waiting instead of Done", () => {
+    expect(sidebarV2StatusIsInFlight("waiting")).toBe(true);
+    expect(
+      resolveSidebarV2TopStatus({
+        status: "waiting",
+        isUnread: true,
+        isWoke: false,
+      }),
+    ).toMatchObject({
+      label: "Waiting",
+      icon: null,
+      className: "text-sidebar-muted-foreground",
+    });
+  });
+
+  it("keeps a snooze wake visible while background work remains", () => {
+    expect(
+      resolveSidebarV2TopStatus({
+        status: "waiting",
+        isUnread: true,
+        isWoke: true,
+      }),
+    ).toMatchObject({
+      label: "Woke",
+      icon: "woke",
+      className: "text-amber-700 dark:text-amber-300",
+    });
   });
 });
 

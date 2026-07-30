@@ -95,12 +95,12 @@ function providerThreadHasPendingBackgroundTasks(
  * Resolve providerInstanceId for a stale background-capable turn item whose
  * run is missing/null (or not found). Prefer an existing run, then a subagent
  * item's own instance id, then the item's provider thread, then a last-resort
- * first provider thread.
+ * first provider thread, then the thread's selected provider.
  */
 function resolveStaleBackgroundItemProviderInstanceId(
   item: OrchestrationV2ThreadProjection["turnItems"][number],
   projection: OrchestrationV2ThreadProjection,
-): OrchestrationV2ThreadProjection["providerThreads"][number]["providerInstanceId"] | undefined {
+): OrchestrationV2ThreadProjection["thread"]["providerInstanceId"] {
   if (item.runId !== null) {
     const run = projection.runs.find((candidate) => candidate.id === item.runId);
     if (run !== undefined) {
@@ -118,7 +118,7 @@ function resolveStaleBackgroundItemProviderInstanceId(
       return providerThread.providerInstanceId;
     }
   }
-  return projection.providerThreads[0]?.providerInstanceId;
+  return projection.providerThreads[0]?.providerInstanceId ?? projection.thread.providerInstanceId;
 }
 
 export const make = Effect.gen(function* () {
@@ -321,9 +321,6 @@ export const make = Effect.gen(function* () {
           continue;
         }
         const providerInstanceId = resolveStaleBackgroundItemProviderInstanceId(item, projection);
-        if (providerInstanceId === undefined) {
-          continue;
-        }
         events.push({
           id: yield* allocateEventId(),
           type: "turn-item.updated",

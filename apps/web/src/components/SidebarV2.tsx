@@ -116,8 +116,10 @@ import {
   resolveAdjacentThreadId,
   resolveSettledTimestamp,
   resolveSidebarV2Status,
+  resolveSidebarV2TopStatus,
   resolveThreadLastVisitedAt,
   resolveWorkingStartedAt,
+  sidebarV2StatusIsInFlight,
   shouldNavigateAfterProjectRemoval,
   sortSidebarV2ProjectGroups,
   sortSettledThreadsForSidebarV2,
@@ -479,51 +481,13 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   // findable. In-flight rows recede the same as read-ready ones (inbox-zero:
   // working threads aren't your problem yet) — only the colored status label
   // stands out.
-  const isInFlight = status === "working" || status === "approval" || status === "input";
+  const isInFlight = sidebarV2StatusIsInFlight(status);
   const shouldRecede =
     (status === "ready" || isInFlight) && !isUnread && !isWoke && !props.isActive && !isSelected;
   // Status hues follow the system-wide convention set by sidebar v1 and the
   // mobile Live Activity/widgets (amber approval, indigo input, sky working)
   // so a thread reads the same color everywhere it surfaces.
-  const topStatus =
-    status === "working"
-      ? {
-          label: "Working",
-          icon: "working" as const,
-          className:
-            "animate-sidebar-working-text text-sky-600 motion-reduce:animate-none dark:text-sky-400",
-        }
-      : status === "approval"
-        ? {
-            label: "Approval",
-            icon: null,
-            className: "text-amber-700 dark:text-amber-300",
-          }
-        : status === "input"
-          ? {
-              label: "Input",
-              icon: null,
-              className: "text-indigo-600 dark:text-indigo-300",
-            }
-          : status === "failed"
-            ? {
-                label: "Failed",
-                icon: null,
-                className: "text-red-700 dark:text-red-300",
-              }
-            : isWoke
-              ? {
-                  label: "Woke",
-                  icon: "woke" as const,
-                  className: "text-amber-700 dark:text-amber-300",
-                }
-              : isUnread
-                ? {
-                    label: "Done",
-                    icon: "done" as const,
-                    className: "text-emerald-700 dark:text-emerald-300",
-                  }
-                : null;
+  const topStatus = resolveSidebarV2TopStatus({ status, isUnread, isWoke });
 
   const gitCwd = thread.worktreePath ?? props.projectCwd;
   const gitStatus = useEnvironmentQuery(

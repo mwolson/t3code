@@ -152,6 +152,60 @@ describe("derivePendingBackgroundWork", () => {
     ]);
   });
 
+  it("trims normalized background-work descriptions", () => {
+    const base = {
+      latestRun: { id: "run-1" as never, ordinal: 1, status: "completed" as const },
+      providerThreads: [
+        {
+          id: "pt-1" as never,
+          pendingBackgroundTasks: [
+            {
+              taskId: "native-task",
+              description: "  native background work  ",
+            },
+          ],
+        },
+      ],
+    };
+    expect(
+      derivePendingBackgroundWork({
+        ...base,
+        turnItems: [
+          {
+            id: "item-command" as never,
+            type: "command_execution",
+            status: "running",
+            title: "  npm test  ",
+            nativeItemRef: null,
+          },
+          {
+            id: "item-tool" as never,
+            type: "dynamic_tool",
+            status: "running",
+            title: null,
+            nativeItemRef: null,
+            toolName: "  browser.search  ",
+          } as never,
+        ],
+      }),
+    ).toEqual([
+      {
+        taskId: "native-task",
+        description: "native background work",
+      },
+      {
+        taskId: "item-command",
+        description: "npm test",
+        taskType: "command_execution",
+      },
+      {
+        taskId: "item-tool",
+        description: "browser.search",
+        taskType: "dynamic_tool",
+      },
+    ]);
+  });
+
   it("dedupes roster entries against turn items by native task id", () => {
     const tasks = derivePendingBackgroundWork({
       latestRun: { id: "run-1" as never, ordinal: 1, status: "completed" },

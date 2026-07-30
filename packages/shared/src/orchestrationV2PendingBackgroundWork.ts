@@ -96,7 +96,7 @@ function isPersistentDynamicToolInput(input: unknown): boolean {
 
 function descriptionFromTurnItem(item: PendingBackgroundWorkTurnItem): string | undefined {
   if (typeof item.title === "string" && item.title.trim().length > 0) {
-    return item.title;
+    return item.title.trim();
   }
   if (item.type === "command_execution" && typeof item.input === "string") {
     const command = item.input.trim();
@@ -105,7 +105,7 @@ function descriptionFromTurnItem(item: PendingBackgroundWorkTurnItem): string | 
   if (item.type === "dynamic_tool") {
     const toolName = Reflect.get(item, "toolName");
     if (typeof toolName === "string" && toolName.trim().length > 0) {
-      return toolName;
+      return toolName.trim();
     }
   }
   if (item.type === "subagent" && typeof item.prompt === "string") {
@@ -167,9 +167,10 @@ export function derivePendingBackgroundWork(input: {
       if (task.taskId.length === 0 || byTaskId.has(task.taskId)) {
         continue;
       }
+      const description = task.description?.trim();
       byTaskId.set(task.taskId, {
         taskId: task.taskId,
-        ...(task.description === undefined ? {} : { description: task.description }),
+        ...(description === undefined || description.length === 0 ? {} : { description }),
         ...(task.taskType === undefined ? {} : { taskType: task.taskType }),
       });
     }

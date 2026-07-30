@@ -12,13 +12,17 @@ import { formatPendingBackgroundWorkLabel } from "@t3tools/shared/orchestrationV
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { ThreadRuntimeSummary } from "@t3tools/client-runtime/state/models";
+import {
+  threadRuntimeIsActive,
+  type ThreadRuntimeSummary,
+} from "@t3tools/client-runtime/state/models";
 
 import {
   buildThreadFeed,
   deriveThreadFeedPresentation,
   deriveThreadPendingBackgroundWork,
   deriveThreadWorkingStartedAt,
+  resolvePresentedThreadExecution,
   threadFeedRunIsUnsettled,
   type ThreadFeedActivity,
   type ThreadFeedEntry,
@@ -551,13 +555,20 @@ describe("deriveThreadPendingBackgroundWork", () => {
     expect(tasks).toEqual([]);
   });
 
-  it("refuses to claim background work from a cached projection", () => {
+  it("uses the shell roster instead of a cached projection", () => {
     const cached = projection({
       runs: [{ id: backgroundRunId, ordinal: 1, status: "completed" }],
       turnItems: [subagentItem("item-background", backgroundRunId)],
     });
+    const shellTasks = [
+      {
+        taskId: "shell-task",
+        description: "Fresh shell work",
+        taskType: "command_execution",
+      },
+    ] as const;
 
-    expect(deriveThreadPendingBackgroundWork(cached, "cached")).toEqual([]);
+    expect(deriveThreadPendingBackgroundWork(cached, "cached", shellTasks)).toEqual(shellTasks);
     expect(deriveThreadPendingBackgroundWork(undefined, "live")).toEqual([]);
   });
 });
@@ -578,9 +589,7 @@ describe("deriveThreadWorkingStartedAt", () => {
   }
 
   it("reports working while a turn is actually running", () => {
-    expect(
-      deriveThreadWorkingStartedAt(waitingRun, runtime("running"), runtime("idle"), "live", null),
-    ).toBe(startedAt);
+    expect(deriveThreadWorkingStartedAt(waitingRun, runtime("running"), null)).toBe(startedAt);
   });
 
   // The regression this pins: a successful run persists as `waiting` with a
@@ -589,33 +598,73 @@ describe("deriveThreadWorkingStartedAt", () => {
   // without honouring that park the feed shows Working for the whole capture
   // window, hiding Waiting exactly when it should first appear.
   it("stays quiet once the roster has parked the runtime at idle", () => {
-    expect(
-      deriveThreadWorkingStartedAt(waitingRun, runtime("idle"), runtime("waiting"), "live", null),
-    ).toBeNull();
+    expect(deriveThreadWorkingStartedAt(waitingRun, runtime("idle"), null)).toBeNull();
   });
 
   it("still reports working for a waiting run with no roster behind it", () => {
-    expect(
-      deriveThreadWorkingStartedAt(waitingRun, runtime("waiting"), runtime("idle"), "live", null),
-    ).toBe(startedAt);
+    expect(deriveThreadWorkingStartedAt(waitingRun, runtime("waiting"), null)).toBe(startedAt);
   });
 
-  it("uses active shell work while the parked detail projection is stale", () => {
-    expect(
-      deriveThreadWorkingStartedAt(waitingRun, runtime("idle"), runtime("running"), "cached", null),
-    ).toBe(startedAt);
-    expect(
-      deriveThreadWorkingStartedAt(
-        waitingRun,
-        runtime("idle"),
-        runtime("running"),
-        "synchronizing",
-        null,
-      ),
-    ).toBe(startedAt);
+  it("uses one fresh shell execution when the terminal detail is stale", () => {
+    const detailRun = {
+      runId: RunId.make("run-stale-detail"),
+      status: "completed" as const,
+      requestedAt: "2026-04-01T00:00:00.000Z",
+      startedAt: "2026-04-01T00:00:01.000Z",
+      completedAt: "2026-04-01T00:00:02.000Z",
+      assistantMessageId: null,
+    };
+    const shellRun = {
+      runId: RunId.make("run-fresh-shell"),
+      status: "running" as const,
+      requestedAt: "2026-04-01T00:01:00.000Z",
+      startedAt: "2026-04-01T00:01:01.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    };
+    const shellRuntime = {
+      ...runtime("running"),
+      activeRunId: shellRun.runId,
+      updatedAt: "2026-04-01T00:01:01.000Z",
+    };
+    const presented = resolvePresentedThreadExecution({
+      detailRun,
+      detailRuntime: runtime("idle"),
+      detailStatus: "cached",
+      shellRun,
+      shellRuntime,
+    });
+
+    expect(presented).toEqual({ run: shellRun, runtime: shellRuntime });
+    expect(deriveThreadWorkingStartedAt(presented.run, presented.runtime, null)).toBe(
+      shellRun.startedAt,
+    );
+    expect(threadRuntimeIsActive(presented.runtime)).toBe(true);
+    expect(presented.runtime?.activeRunId).toBe(shellRun.runId);
+  });
+
+  it("keeps one live detail execution pair", () => {
+    const detailRuntime = runtime("running");
+    const detailRun = {
+      runId: RunId.make("run-live-detail"),
+      status: "running" as const,
+      requestedAt: "2026-04-01T00:02:00.000Z",
+      startedAt: "2026-04-01T00:02:01.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    };
+    const presented = resolvePresentedThreadExecution({
+      detailRun,
+      detailRuntime,
+      detailStatus: "live",
+      shellRun: null,
+      shellRuntime: runtime("idle"),
+    });
+
+    expect(presented).toEqual({ run: detailRun, runtime: detailRuntime });
   });
 
   it("has no working row without a runtime", () => {
-    expect(deriveThreadWorkingStartedAt(waitingRun, null, null, "live", null)).toBeNull();
+    expect(deriveThreadWorkingStartedAt(waitingRun, null, null)).toBeNull();
   });
 });

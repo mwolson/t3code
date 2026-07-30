@@ -1,5 +1,6 @@
 import {
   threadRuntimeIsActive,
+  type ThreadRunSummary,
   type ThreadRuntimeSummary,
 } from "@t3tools/client-runtime/state/models";
 import type { EnvironmentThreadStatus } from "@t3tools/client-runtime/state/threads";
@@ -599,21 +600,14 @@ type PendingBackgroundWorkProjection = {
  * turn still holding a post-settlement roster parks at `idle`. Web gates the
  * same way, on the parked phase rather than on the timestamp.
  *
- * A cached or synchronizing detail can still contain that parked runtime after
- * the shell has moved to a new active turn, so only a live detail owns the
- * working gate. Until then the shell runtime is the fresher activity signal.
- *
  * A `waiting` run with an empty roster still reports Working, which is correct:
  * that is checkpoint capture with no background work behind it.
  */
 export function deriveThreadWorkingStartedAt(
   latestRun: Parameters<typeof deriveActiveWorkStartedAt>[0],
-  detailRuntime: ThreadRuntimeSummary | null,
-  shellRuntime: ThreadRuntimeSummary | null,
-  detailStatus: EnvironmentThreadStatus,
+  runtime: ThreadRuntimeSummary | null,
   sendStartedAt: string | null,
 ): string | null {
-  const runtime = detailStatus === "live" ? detailRuntime : shellRuntime;
   if (!threadRuntimeIsActive(runtime)) {
     return null;
   }
@@ -627,6 +621,26 @@ export function deriveThreadWorkingStartedAt(
         },
     sendStartedAt,
   );
+}
+
+/**
+ * The detail run and runtime are one presentation snapshot. Cached or
+ * synchronizing detail can lag a newly active shell, so switch both values
+ * together rather than combining a stale run with fresh runtime controls.
+ */
+export function resolvePresentedThreadExecution(input: {
+  readonly detailRun: ThreadRunSummary | null;
+  readonly detailRuntime: ThreadRuntimeSummary | null;
+  readonly detailStatus: EnvironmentThreadStatus;
+  readonly shellRun: ThreadRunSummary | null;
+  readonly shellRuntime: ThreadRuntimeSummary | null;
+}): {
+  readonly run: ThreadRunSummary | null;
+  readonly runtime: ThreadRuntimeSummary | null;
+} {
+  return input.detailStatus === "live"
+    ? { run: input.detailRun, runtime: input.detailRuntime }
+    : { run: input.shellRun, runtime: input.shellRuntime };
 }
 
 /**
@@ -646,8 +660,12 @@ export function deriveThreadWorkingStartedAt(
 export function deriveThreadPendingBackgroundWork(
   projection: PendingBackgroundWorkProjection | null | undefined,
   detailStatus: EnvironmentThreadStatus,
+  shellTasks: ReadonlyArray<PendingBackgroundWorkTask> = [],
 ): ReadonlyArray<PendingBackgroundWorkTask> {
-  if (!projection || detailStatus !== "live") {
+  if (detailStatus !== "live") {
+    return shellTasks;
+  }
+  if (!projection) {
     return [];
   }
   const latestRun =

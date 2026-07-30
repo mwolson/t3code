@@ -128,6 +128,19 @@ export const layer: Layer.Layer<
           cause: `Run ${runId} is missing its execution projection state.`,
         });
       }
+      const selectInheritedBackgroundItems = (
+        current: typeof projection,
+      ): ReturnType<typeof selectInheritedBackgroundTurnItems> =>
+        selectInheritedBackgroundTurnItems({
+          threadId: current.thread.id,
+          currentProviderThreadId: providerThread.id,
+          currentRunOrdinal: run.ordinal,
+          runs: current.runs,
+          turnItems: current.turnItems,
+        });
+      const inheritedBackgroundTurnItems = yield* projectionStore
+        .getThreadProjection(projection.thread.id)
+        .pipe(Effect.map(selectInheritedBackgroundItems));
       const providerSessionId = providerThread.providerSessionId;
       const isCurrentAttemptInStatus = (
         expectedStatus: OrchestrationV2Run["status"],
@@ -423,15 +436,8 @@ export const layer: Layer.Layer<
         attemptId: attempt.id,
         loadInheritedBackgroundTurnItems: () =>
           projectionStore.getThreadProjection(projection.thread.id).pipe(
-            Effect.map((current) =>
-              selectInheritedBackgroundTurnItems({
-                threadId: current.thread.id,
-                currentProviderThreadId: runningProviderThread.id,
-                currentRunOrdinal: run.ordinal,
-                runs: current.runs,
-                turnItems: current.turnItems,
-              }),
-            ),
+            Effect.map(selectInheritedBackgroundItems),
+            Effect.catchCause(() => Effect.succeed(inheritedBackgroundTurnItems)),
           ),
         relatedThreadIds: routableSubagents.flatMap((subagent) =>
           subagent.childThreadId === null ? [] : [subagent.childThreadId],

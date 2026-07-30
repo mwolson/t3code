@@ -29,6 +29,7 @@ import {
   buildThreadFeed,
   deriveThreadPendingBackgroundWork,
   deriveThreadWorkingStartedAt,
+  resolvePresentedThreadExecution,
 } from "../lib/threadActivity";
 import { appAtomRegistry } from "../state/atom-registry";
 import {
@@ -117,47 +118,58 @@ export function useThreadComposerState() {
   const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
   const interactionMode = selectedDraft?.interactionMode ?? selectedThread?.interactionMode ?? null;
-  const selectedThreadRuntime = useMemo(
+  const selectedThreadDetailRuntime = useMemo(
     () =>
-      selectedThreadProjection
-        ? deriveThreadRuntime(selectedThreadProjection.projection)
-        : (selectedThreadShell?.runtime ?? null),
-    [selectedThreadProjection, selectedThreadShell?.runtime],
+      selectedThreadProjection ? deriveThreadRuntime(selectedThreadProjection.projection) : null,
+    [selectedThreadProjection],
   );
-  const selectedThreadActivityRun = useMemo(
+  const selectedThreadDetailActivityRun = useMemo(
     () =>
       selectedThreadProjection
         ? deriveThreadActivityRun(selectedThreadProjection.projection)
-        : (selectedThreadShell?.latestRun ?? null),
-    [selectedThreadProjection, selectedThreadShell?.latestRun],
+        : null,
+    [selectedThreadProjection],
   );
+  const selectedThreadExecution = useMemo(
+    () =>
+      resolvePresentedThreadExecution({
+        detailRun: selectedThreadDetailActivityRun,
+        detailRuntime: selectedThreadDetailRuntime,
+        detailStatus: selectedThreadDetailStatus,
+        shellRun: selectedThreadShell?.latestRun ?? null,
+        shellRuntime: selectedThreadShell?.runtime ?? null,
+      }),
+    [
+      selectedThreadDetailActivityRun,
+      selectedThreadDetailRuntime,
+      selectedThreadDetailStatus,
+      selectedThreadShell?.latestRun,
+      selectedThreadShell?.runtime,
+    ],
+  );
+  const selectedThreadActivityRun = selectedThreadExecution.run;
+  const selectedThreadRuntime = selectedThreadExecution.runtime;
 
   const activeWorkStartedAt = useMemo(() => {
     if (!selectedThreadShell) {
       return null;
     }
-    return deriveThreadWorkingStartedAt(
-      selectedThreadActivityRun,
-      selectedThreadRuntime,
-      selectedThreadShell.runtime,
-      selectedThreadDetailStatus,
-      null,
-    );
-  }, [
-    selectedThreadDetailStatus,
-    selectedThreadActivityRun,
-    selectedThreadRuntime,
-    selectedThreadShell,
-  ]);
+    return deriveThreadWorkingStartedAt(selectedThreadActivityRun, selectedThreadRuntime, null);
+  }, [selectedThreadActivityRun, selectedThreadRuntime, selectedThreadShell]);
 
   const pendingBackgroundTasks = useMemo(
     () => [
       ...deriveThreadPendingBackgroundWork(
         selectedThreadProjection?.projection,
         selectedThreadDetailStatus,
+        selectedThreadShell?.pendingBackgroundTasks,
       ),
     ],
-    [selectedThreadDetailStatus, selectedThreadProjection?.projection],
+    [
+      selectedThreadDetailStatus,
+      selectedThreadProjection?.projection,
+      selectedThreadShell?.pendingBackgroundTasks,
+    ],
   );
 
   const activeThreadBusy = threadRuntimeIsActive(selectedThreadRuntime);
