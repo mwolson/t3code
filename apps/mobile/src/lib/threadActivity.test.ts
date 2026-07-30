@@ -671,6 +671,37 @@ describe("deriveThreadWorkingStartedAt", () => {
     expect(presented).toEqual({ run: detailRun, runtime: detailRuntime });
   });
 
+  it("keeps fresher detail controls while synchronization is finishing", () => {
+    const detailRun = {
+      runId: RunId.make("run-fresh-detail"),
+      status: "running" as const,
+      requestedAt: "2026-04-01T00:02:00.000Z",
+      startedAt: "2026-04-01T00:02:01.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    };
+    const detailRuntime = {
+      ...runtime("running"),
+      activeRunId: detailRun.runId,
+      updatedAt: "2026-04-01T00:02:01.000Z",
+    };
+    const shellRuntime = {
+      ...runtime("idle"),
+      updatedAt: "2026-04-01T00:01:01.000Z",
+    };
+    const presented = resolvePresentedThreadExecution({
+      detailRun,
+      detailRuntime,
+      detailStatus: "synchronizing",
+      shellRun: null,
+      shellRuntime,
+    });
+
+    expect(presented).toEqual({ run: detailRun, runtime: detailRuntime });
+    expect(threadRuntimeIsActive(presented.runtime)).toBe(true);
+    expect(presented.runtime?.activeRunId).toBe(detailRun.runId);
+  });
+
   it("has no working row without a runtime", () => {
     expect(deriveThreadWorkingStartedAt(waitingRun, null, null)).toBeNull();
   });

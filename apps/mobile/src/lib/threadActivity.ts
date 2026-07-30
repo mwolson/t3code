@@ -624,9 +624,9 @@ export function deriveThreadWorkingStartedAt(
 }
 
 /**
- * The detail run and runtime are one presentation snapshot. Cached or
- * synchronizing detail can lag a newly active shell, so switch both values
- * together rather than combining a stale run with fresh runtime controls.
+ * The detail run and runtime are one presentation snapshot. Until detail is
+ * live, use the newer pair so cached detail cannot hide fresh shell work and a
+ * fresh detail snapshot cannot lose controls behind a stale shell.
  */
 export function resolvePresentedThreadExecution(input: {
   readonly detailRun: ThreadRunSummary | null;
@@ -638,7 +638,15 @@ export function resolvePresentedThreadExecution(input: {
   readonly run: ThreadRunSummary | null;
   readonly runtime: ThreadRuntimeSummary | null;
 } {
-  return input.detailStatus === "live"
+  if (input.detailStatus === "live") {
+    return { run: input.detailRun, runtime: input.detailRuntime };
+  }
+  const detailUpdatedAt =
+    input.detailRuntime === null ? Number.NaN : Date.parse(input.detailRuntime.updatedAt);
+  const shellUpdatedAt =
+    input.shellRuntime === null ? Number.NaN : Date.parse(input.shellRuntime.updatedAt);
+  return Number.isFinite(detailUpdatedAt) &&
+    (!Number.isFinite(shellUpdatedAt) || detailUpdatedAt > shellUpdatedAt)
     ? { run: input.detailRun, runtime: input.detailRuntime }
     : { run: input.shellRun, runtime: input.shellRuntime };
 }
