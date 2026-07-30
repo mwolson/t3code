@@ -936,7 +936,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                           wrapper around the ticking duration would make
                           screen readers announce every second. */}
                       <span role="status">{topStatus.label}</span>
-                      {status === "working" ? (
+                      {status === "working" || status === "waiting" ? (
                         <span aria-hidden>
                           <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
                         </span>
