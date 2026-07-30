@@ -771,7 +771,7 @@ describe("resolveSidebarV2Status", () => {
         ...idle,
         runtime: { ...runtime, status: "idle" as const, lastError: "persisted" },
       }),
-    ).toBe("ready");
+    ).toBe("waiting");
   });
 
   it("defaults to ready with no runtime", () => {

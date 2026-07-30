@@ -59,8 +59,6 @@ import Animated, {
   cancelAnimation,
   FadeIn,
   FadeInUp,
-  useSharedValue,
-  withTiming,
   type LayoutAnimationsValues,
   type SharedValue,
   useAnimatedStyle,
