@@ -96,7 +96,6 @@ export function resolveThreadListV2SnoozeGateExpiryMs(
   if (Number.isNaN(messageAtMs)) return null;
   return messageAtMs + QUEUED_TURN_START_GRACE_MS;
 }
-
 // Settled-tail paging: recent history is the common lookup; the deep tail
 // stays behind an explicit Show more. Shared by the compact Home list and
 // the iPad sidebar so both page identically.
