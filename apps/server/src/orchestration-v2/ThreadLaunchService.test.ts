@@ -379,6 +379,7 @@ it.effect(
         });
         assert.equal(followUp.delivery, "queued");
         assert.equal(followUp.run.status, "queued");
+        assert.isNull(followUp.turnItem);
         assert.equal(
           followUp.projection.nodes.find(
             (node) => node.runId === followUp.run.id && node.kind === "root_turn",

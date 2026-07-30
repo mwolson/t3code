@@ -35,7 +35,7 @@ export function assertQueuedTurnOutput(
   assertConversationMessageRoles(projection, ["user", "assistant", "user", "assistant"]);
   assertTurnItemTypes(projection, ["user_message", "assistant_message"]);
   assertUserMessagesInclude(projection, [MULTI_TURN_FIRST_PROMPT, MULTI_TURN_SECOND_PROMPT]);
-  assertUserMessageInputIntents(projection, ["turn_start", "queued_turn"]);
+  assertUserMessageInputIntents(projection, ["turn_start", "turn_start"]);
   assert.equal(projection.turnItems.filter((item) => item.type === "user_message").length, 2);
   assertAssistantTextIncludes(projection, "first fixture turn complete");
   assertAssistantTextIncludes(projection, "second fixture turn complete");
