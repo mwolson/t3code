@@ -45,10 +45,10 @@ function render(providers: ReadonlyArray<ServerProvider>): string {
 }
 
 function railButton(markup: string, instanceId: string): string {
-  const match = markup.match(
-    new RegExp(`<button data-model-picker-provider="${instanceId}"[^>]*>`),
+  const provider = markup.match(
+    new RegExp(`<div[^>]*data-model-picker-provider="${instanceId}"[^>]*>[\\s\\S]*?<button[^>]*>`),
   );
-  return match?.[0] ?? "";
+  return provider?.[0].match(/<button[^>]*>/)?.[0] ?? "";
 }
 
 describe("ModelPickerSidebar first open", () => {

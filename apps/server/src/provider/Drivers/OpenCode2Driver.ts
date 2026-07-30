@@ -18,6 +18,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   OpenCode2AdapterV2Driver,
@@ -71,6 +72,7 @@ const withInstanceIdentity =
 
 export type OpenCode2DriverEnv =
   | OpenCode2AdapterV2DriverEnv
+  | BackgroundPolicy.BackgroundPolicy
   | OpenCode2Runtime
   | OpenCodeRuntime
   | ServerConfig

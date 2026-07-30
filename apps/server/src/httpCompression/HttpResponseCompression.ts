@@ -30,7 +30,7 @@ export const layerNode = Layer.effect(
 export const layerBun = Layer.succeed(HttpResponseCompression, {
   gzip: (body, options) =>
     HttpServerResponse.raw(
-      new Response(body).body!.pipeThrough(new CompressionStream("gzip")),
+      new Response(Uint8Array.from(body).buffer).body!.pipeThrough(new CompressionStream("gzip")),
       options,
     ),
 });
