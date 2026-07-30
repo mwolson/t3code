@@ -1,4 +1,8 @@
 export type TimelineScrollMode = "following-end" | "anchoring-new-turn" | "free-scrolling";
+export type TimelineManualScrollDirection = "toward-end" | "toward-start";
+
+export const TIMELINE_AUTO_FOLLOW_SETTLED_DELAY_MS = 1_000;
+export const TIMELINE_MANUAL_SCROLL_COOLDOWN_MS = 30_000;
 
 export interface TimelineListMeasurementState {
   readonly data: readonly unknown[];
@@ -17,6 +21,15 @@ export interface AnchoredTurnMetrics {
   readonly overflowsUsableViewport: boolean;
   readonly targetScrollToRevealEnd: number;
   readonly scrollDeltaToRevealEnd: number;
+}
+
+export interface TimelineAutoFollowGate {
+  readonly endSpaceVisible: boolean | null;
+  readonly followLatched: boolean;
+  readonly mainThreadHasActiveStatus: boolean;
+  readonly mainThreadSettled: boolean;
+  readonly manualScrollCooldownActive: boolean;
+  readonly userSendFollowActive: boolean;
 }
 
 export function getRowBottom(state: TimelineListMeasurementState, index: number): number | null {
@@ -75,4 +88,52 @@ export function getAnchoredTurnMetrics({
     targetScrollToRevealEnd,
     scrollDeltaToRevealEnd,
   };
+}
+
+export function getTimelineEndSpaceVisibility({
+  state,
+  composerOverlayHeight,
+  anchorOffset,
+}: {
+  readonly state: TimelineListMeasurementState;
+  readonly composerOverlayHeight: number;
+  readonly anchorOffset: number;
+}): boolean | null {
+  if (state.data.length === 0) {
+    return null;
+  }
+
+  const lastBottom = getRowBottom(state, state.data.length - 1);
+  if (lastBottom === null) {
+    return null;
+  }
+
+  const usableViewportHeight = Math.max(
+    0,
+    state.scrollLength - composerOverlayHeight - anchorOffset,
+  );
+  return state.scroll + usableViewportHeight > lastBottom + 1;
+}
+
+export function shouldAutoFollowTimeline({
+  endSpaceVisible,
+  followLatched,
+  mainThreadHasActiveStatus,
+  mainThreadSettled,
+  manualScrollCooldownActive,
+  userSendFollowActive,
+}: TimelineAutoFollowGate): boolean {
+  if (!followLatched || manualScrollCooldownActive) {
+    return false;
+  }
+
+  if (userSendFollowActive) {
+    return true;
+  }
+
+  if (mainThreadHasActiveStatus || !mainThreadSettled || endSpaceVisible !== false) {
+    return false;
+  }
+
+  return true;
 }
