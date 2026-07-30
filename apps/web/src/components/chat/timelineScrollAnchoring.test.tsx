@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
-import { getAnchoredTurnMetrics, getRowBottom } from "./timelineScrollAnchoring";
+import {
+  getAnchoredTurnMetrics,
+  getRowBottom,
+  getTimelineEndSpaceVisibility,
+  shouldAutoFollowTimeline,
+} from "./timelineScrollAnchoring";
 
 function buildState({
   positions,
@@ -134,5 +139,111 @@ describe("timeline scroll anchoring", () => {
 
     expect(withoutComposer?.overflowsUsableViewport).toBe(false);
     expect(withComposer?.overflowsUsableViewport).toBe(true);
+  });
+
+  it("detects blank end space within the usable viewport", () => {
+    const state = buildState({
+      positions: [0, 520],
+      sizes: [480, 80],
+      scroll: 120,
+      scrollLength: 700,
+    });
+
+    expect(
+      getTimelineEndSpaceVisibility({
+        state,
+        composerOverlayHeight: 120,
+        anchorOffset: 16,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not report end space when the last row reaches below the viewport", () => {
+    const state = buildState({
+      positions: [0, 520],
+      sizes: [480, 240],
+      scroll: 120,
+      scrollLength: 700,
+    });
+
+    expect(
+      getTimelineEndSpaceVisibility({
+        state,
+        composerOverlayHeight: 120,
+        anchorOffset: 16,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("timeline auto-follow gate", () => {
+  const readyGate = {
+    endSpaceVisible: false,
+    followLatched: true,
+    mainThreadHasActiveStatus: false,
+    mainThreadSettled: true,
+    manualScrollCooldownActive: false,
+    userSendFollowActive: false,
+  } as const;
+
+  it("allows follow after the thread settles with hidden end space and no recent input", () => {
+    expect(shouldAutoFollowTimeline(readyGate)).toBe(true);
+  });
+
+  it("blocks follow while Working or Waiting and during the settled delay", () => {
+    expect(
+      shouldAutoFollowTimeline({
+        ...readyGate,
+        mainThreadHasActiveStatus: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoFollowTimeline({
+        ...readyGate,
+        mainThreadSettled: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("allows a user send to follow while active even when end space is visible", () => {
+    expect(
+      shouldAutoFollowTimeline({
+        ...readyGate,
+        endSpaceVisible: true,
+        mainThreadHasActiveStatus: true,
+        mainThreadSettled: false,
+        userSendFollowActive: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("blocks follow when blank end space is visible or cannot be measured", () => {
+    expect(
+      shouldAutoFollowTimeline({
+        ...readyGate,
+        endSpaceVisible: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoFollowTimeline({
+        ...readyGate,
+        endSpaceVisible: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("requires both an armed latch and an expired manual-scroll cooldown", () => {
+    expect(
+      shouldAutoFollowTimeline({
+        ...readyGate,
+        manualScrollCooldownActive: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutoFollowTimeline({
+        ...readyGate,
+        followLatched: false,
+      }),
+    ).toBe(false);
   });
 });

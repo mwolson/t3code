@@ -98,7 +98,15 @@ import {
   isLatestRunSettled,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
-import { getAnchoredTurnMetrics, type TimelineScrollMode } from "./chat/timelineScrollAnchoring";
+import {
+  getAnchoredTurnMetrics,
+  getTimelineEndSpaceVisibility,
+  shouldAutoFollowTimeline,
+  TIMELINE_AUTO_FOLLOW_SETTLED_DELAY_MS,
+  TIMELINE_MANUAL_SCROLL_COOLDOWN_MS,
+  type TimelineManualScrollDirection,
+  type TimelineScrollMode,
+} from "./chat/timelineScrollAnchoring";
 import {
   buildPendingUserInputAnswers,
   derivePendingUserInputProgress,
@@ -1323,6 +1331,11 @@ function ChatViewContent(props: ChatViewProps) {
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [timelineFollowLatched, setTimelineFollowLatched] = useState(true);
+  const [timelineMainThreadSettled, setTimelineMainThreadSettled] = useState(false);
+  const [timelineManualScrollCooldownActive, setTimelineManualScrollCooldownActive] =
+    useState(false);
+  const [timelineUserSendFollowActive, setTimelineUserSendFollowActive] = useState(false);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
   const optimisticUserMessagesRef = useRef(optimisticUserMessages);
@@ -2346,6 +2359,8 @@ function ChatViewContent(props: ChatViewProps) {
       }),
     ];
   }, [serverProjection]);
+  const mainThreadHasWorkingOrWaitingStatus =
+    isWorking || activeRuntime?.status === "idle" || pendingBackgroundTasks.length > 0;
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeActivityRun,
     activeRuntime,
@@ -3721,6 +3736,7 @@ function ChatViewContent(props: ChatViewProps) {
     readonly userScrollGeneration: number;
   } | null>(null);
   const anchorScrollRestoreFrameRef = useRef<number | null>(null);
+  const timelineManualScrollCooldownTimerRef = useRef<number | null>(null);
   const cancelTimelineLiveFollowForUserNavigation = useCallback(() => {
     anchorUserScrollGenerationRef.current += 1;
     const wasProgrammaticScrollMode = timelineScrollModeRef.current !== "free-scrolling";
@@ -3767,6 +3783,57 @@ function ChatViewContent(props: ChatViewProps) {
     cancelTimelineLiveFollowForUserNavigationRef.current =
       cancelTimelineLiveFollowForUserNavigation;
   }, [cancelTimelineLiveFollowForUserNavigation]);
+  useEffect(() => {
+    setTimelineMainThreadSettled(false);
+    if (activeThreadKey === null || mainThreadHasWorkingOrWaitingStatus) {
+      return;
+    }
+
+    const timer = window.setTimeout(
+      () => setTimelineMainThreadSettled(true),
+      TIMELINE_AUTO_FOLLOW_SETTLED_DELAY_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [activeThreadKey, mainThreadHasWorkingOrWaitingStatus]);
+  useEffect(
+    () => () => {
+      if (timelineManualScrollCooldownTimerRef.current !== null) {
+        window.clearTimeout(timelineManualScrollCooldownTimerRef.current);
+      }
+    },
+    [],
+  );
+  const recordTimelineManualScroll = useCallback((direction: TimelineManualScrollDirection) => {
+    setTimelineManualScrollCooldownActive(true);
+    if (timelineManualScrollCooldownTimerRef.current !== null) {
+      window.clearTimeout(timelineManualScrollCooldownTimerRef.current);
+    }
+    timelineManualScrollCooldownTimerRef.current = window.setTimeout(() => {
+      timelineManualScrollCooldownTimerRef.current = null;
+      setTimelineManualScrollCooldownActive(false);
+    }, TIMELINE_MANUAL_SCROLL_COOLDOWN_MS);
+
+    if (direction === "toward-start") {
+      setTimelineFollowLatched(false);
+      setTimelineUserSendFollowActive(false);
+      cancelTimelineLiveFollowForUserNavigationRef.current();
+    }
+  }, []);
+  const clearTimelineManualScrollCooldown = useCallback(() => {
+    setTimelineManualScrollCooldownActive(false);
+    if (timelineManualScrollCooldownTimerRef.current !== null) {
+      window.clearTimeout(timelineManualScrollCooldownTimerRef.current);
+      timelineManualScrollCooldownTimerRef.current = null;
+    }
+  }, []);
+  const onTimelineManualNavigation = useCallback(() => {
+    recordTimelineManualScroll("toward-start");
+  }, [recordTimelineManualScroll]);
+  const armTimelineFollowForUserSend = useCallback(() => {
+    setTimelineFollowLatched(true);
+    setTimelineUserSendFollowActive(true);
+    clearTimelineManualScrollCooldown();
+  }, [clearTimelineManualScrollCooldown]);
   useEffect(() => {
     const observed = observedTimelineActivityRef.current;
     if (observed.threadKey !== activeThreadKey) {
@@ -3828,48 +3895,67 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [composerOverlayHeight],
   );
-  const timelineRealContentOverflowsViewport = useCallback(
+  const getTimelineEndSpaceVisible = useCallback(
     (list?: LegendListRef | null) => {
       const resolvedList = list ?? legendListRef.current;
       const state = resolvedList?.getState();
-      if (!resolvedList || !state || state.data.length === 0) {
-        return false;
+      if (!resolvedList || !state) {
+        return null;
       }
 
-      const lastRowIndex = state.data.length - 1;
-      const lastRowTop = state.positionAtIndex(lastRowIndex);
-      const lastRowHeight = state.sizeAtIndex(lastRowIndex);
-      if (
-        typeof lastRowTop !== "number" ||
-        typeof lastRowHeight !== "number" ||
-        !Number.isFinite(lastRowTop) ||
-        !Number.isFinite(lastRowHeight)
-      ) {
-        return false;
-      }
-
-      const realContentBottom = lastRowTop + Math.max(1, lastRowHeight);
-      const visibleScrollLength = Math.max(
-        0,
-        (state.scrollLength ?? 0) - composerOverlayHeight - CHAT_LIST_ANCHOR_OFFSET,
-      );
-      return realContentBottom > visibleScrollLength;
+      return getTimelineEndSpaceVisibility({
+        state,
+        composerOverlayHeight,
+        anchorOffset: CHAT_LIST_ANCHOR_OFFSET,
+      });
     },
     [composerOverlayHeight],
   );
+  const canAutomaticallyScrollTimeline = useCallback(
+    (list?: LegendListRef | null) =>
+      shouldAutoFollowTimeline({
+        endSpaceVisible: getTimelineEndSpaceVisible(list),
+        followLatched: timelineFollowLatched,
+        mainThreadHasActiveStatus: mainThreadHasWorkingOrWaitingStatus,
+        mainThreadSettled: timelineMainThreadSettled,
+        manualScrollCooldownActive: timelineManualScrollCooldownActive,
+        userSendFollowActive: timelineUserSendFollowActive,
+      }),
+    [
+      getTimelineEndSpaceVisible,
+      mainThreadHasWorkingOrWaitingStatus,
+      timelineFollowLatched,
+      timelineMainThreadSettled,
+      timelineManualScrollCooldownActive,
+      timelineUserSendFollowActive,
+    ],
+  );
+  const armTimelineFollowLatchAtEnd = useCallback(() => {
+    if (getTimelineEndSpaceVisible() !== true) {
+      return;
+    }
 
-  // Live-follow stays active after send/thread-open until an actual list scroll
-  // gesture opts out.
-  const scrollToEnd = useCallback((animated = false) => {
-    isAtEndRef.current = true;
+    setTimelineFollowLatched(true);
+    clearTimelineManualScrollCooldown();
     timelineScrollModeRef.current = "following-end";
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
-    pendingTimelineAnchorRef.current = null;
-    activeTimelineAnchorIndexRef.current = null;
-    showScrollDebouncer.current.cancel();
-    setShowScrollToBottom(false);
-    void legendListRef.current?.scrollToEnd?.({ animated });
-  }, []);
+  }, [clearTimelineManualScrollCooldown, getTimelineEndSpaceVisible]);
+
+  const scrollToEnd = useCallback(
+    (animated = false) => {
+      isAtEndRef.current = true;
+      timelineScrollModeRef.current = "following-end";
+      liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
+      setTimelineFollowLatched(true);
+      clearTimelineManualScrollCooldown();
+      pendingTimelineAnchorRef.current = null;
+      activeTimelineAnchorIndexRef.current = null;
+      showScrollDebouncer.current.cancel();
+      setShowScrollToBottom(false);
+      void legendListRef.current?.scrollToEnd?.({ animated });
+    },
+    [clearTimelineManualScrollCooldown],
+  );
   useEffect(() => {
     let removeListeners: (() => void) | null = null;
     const frame = requestAnimationFrame(() => {
@@ -3877,22 +3963,133 @@ function ChatViewContent(props: ChatViewProps) {
       if (!scrollNode) {
         return;
       }
-      const handleManualNavigation = () => {
-        cancelTimelineLiveFollowForUserNavigationRef.current();
+      let lastTouchY: number | null = null;
+      let manualScrollDirection: TimelineManualScrollDirection | null = null;
+      let manualScrollDirectionTimer: number | null = null;
+      let pointerScrollActive = false;
+      let pointerScrollTop = legendListRef.current?.getState().scroll ?? 0;
+      const recordDirection = (direction: TimelineManualScrollDirection) => {
+        manualScrollDirection = direction;
+        recordTimelineManualScroll(direction);
+        if (direction === "toward-end") {
+          requestAnimationFrame(armTimelineFollowLatchAtEnd);
+        }
       };
-      scrollNode.addEventListener("wheel", handleManualNavigation, {
+      const handleWheel = (event: WheelEvent) => {
+        if (Math.abs(event.deltaY) <= Math.abs(event.deltaX) || event.deltaY === 0) {
+          return;
+        }
+        recordDirection(event.deltaY > 0 ? "toward-end" : "toward-start");
+      };
+      const handleTouchStart = (event: TouchEvent) => {
+        lastTouchY = event.touches[0]?.clientY ?? null;
+      };
+      const handleTouchMove = (event: TouchEvent) => {
+        const nextTouchY = event.touches[0]?.clientY ?? null;
+        if (lastTouchY === null || nextTouchY === null) {
+          lastTouchY = nextTouchY;
+          return;
+        }
+        const delta = lastTouchY - nextTouchY;
+        lastTouchY = nextTouchY;
+        if (Math.abs(delta) <= 1) {
+          return;
+        }
+        recordDirection(delta > 0 ? "toward-end" : "toward-start");
+      };
+      const handleTouchEnd = () => {
+        lastTouchY = null;
+      };
+      const handlePointerDown = (event: PointerEvent) => {
+        if (event.pointerType !== "mouse") {
+          return;
+        }
+        pointerScrollActive = true;
+        pointerScrollTop = legendListRef.current?.getState().scroll ?? pointerScrollTop;
+      };
+      const handlePointerEnd = () => {
+        pointerScrollActive = false;
+      };
+      const handleManualScroll = () => {
+        if (pointerScrollActive) {
+          const nextScrollTop = legendListRef.current?.getState().scroll;
+          if (typeof nextScrollTop === "number") {
+            const delta = nextScrollTop - pointerScrollTop;
+            pointerScrollTop = nextScrollTop;
+            if (Math.abs(delta) > 1) {
+              recordDirection(delta > 0 ? "toward-end" : "toward-start");
+            }
+          }
+        }
+        if (manualScrollDirection === "toward-end") {
+          armTimelineFollowLatchAtEnd();
+        }
+        if (manualScrollDirectionTimer !== null) {
+          window.clearTimeout(manualScrollDirectionTimer);
+        }
+        manualScrollDirectionTimer = window.setTimeout(() => {
+          manualScrollDirection = null;
+          manualScrollDirectionTimer = null;
+        }, 200);
+      };
+      const handleKeyDown = (event: KeyboardEvent) => {
+        if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) {
+          return;
+        }
+        const target = event.target;
+        if (
+          target instanceof HTMLInputElement ||
+          target instanceof HTMLTextAreaElement ||
+          (target instanceof HTMLElement && target.isContentEditable)
+        ) {
+          return;
+        }
+        if (
+          event.key === "ArrowUp" ||
+          event.key === "PageUp" ||
+          event.key === "Home" ||
+          (event.key === " " && event.shiftKey)
+        ) {
+          recordDirection("toward-start");
+        } else if (
+          event.key === "ArrowDown" ||
+          event.key === "PageDown" ||
+          event.key === "End" ||
+          event.key === " "
+        ) {
+          recordDirection("toward-end");
+        }
+      };
+      scrollNode.addEventListener("wheel", handleWheel, {
         passive: true,
       });
-      scrollNode.addEventListener("touchmove", handleManualNavigation, {
+      scrollNode.addEventListener("touchstart", handleTouchStart, {
         passive: true,
       });
-      scrollNode.addEventListener("pointerdown", handleManualNavigation, {
+      scrollNode.addEventListener("touchmove", handleTouchMove, {
         passive: true,
       });
+      scrollNode.addEventListener("touchend", handleTouchEnd, { passive: true });
+      scrollNode.addEventListener("touchcancel", handleTouchEnd, { passive: true });
+      scrollNode.addEventListener("pointerdown", handlePointerDown, { passive: true });
+      scrollNode.addEventListener("scroll", handleManualScroll, { passive: true });
+      scrollNode.addEventListener("keydown", handleKeyDown);
+      window.addEventListener("pointerup", handlePointerEnd, { passive: true });
+      window.addEventListener("pointercancel", handlePointerEnd, { passive: true });
       removeListeners = () => {
-        scrollNode.removeEventListener("wheel", handleManualNavigation);
-        scrollNode.removeEventListener("touchmove", handleManualNavigation);
-        scrollNode.removeEventListener("pointerdown", handleManualNavigation);
+        scrollNode.removeEventListener("wheel", handleWheel);
+        scrollNode.removeEventListener("touchstart", handleTouchStart);
+        scrollNode.removeEventListener("touchmove", handleTouchMove);
+        scrollNode.removeEventListener("touchend", handleTouchEnd);
+        scrollNode.removeEventListener("touchcancel", handleTouchEnd);
+        scrollNode.removeEventListener("pointerdown", handlePointerDown);
+        scrollNode.removeEventListener("scroll", handleManualScroll);
+        scrollNode.removeEventListener("keydown", handleKeyDown);
+        window.removeEventListener("pointerup", handlePointerEnd);
+        window.removeEventListener("pointercancel", handlePointerEnd);
+        if (manualScrollDirectionTimer !== null) {
+          window.clearTimeout(manualScrollDirectionTimer);
+        }
       };
     });
 
@@ -3900,13 +4097,9 @@ function ChatViewContent(props: ChatViewProps) {
       cancelAnimationFrame(frame);
       removeListeners?.();
     };
-  }, [activeThread?.id]);
+  }, [activeThread?.id, armTimelineFollowLatchAtEnd, recordTimelineManualScroll]);
 
-  const onTimelineAnchorReady = useCallback((messageId: MessageId, anchorIndex: number) => {
-    if (pendingTimelineAnchorRef.current === messageId) {
-      pendingTimelineAnchorRef.current = null;
-    }
-    activeTimelineAnchorIndexRef.current = anchorIndex;
+  const positionTimelineAnchor = useCallback((messageId: MessageId, anchorIndex: number) => {
     if (positionedTimelineAnchorRef.current === messageId) {
       return;
     }
@@ -3951,6 +4144,14 @@ function ChatViewContent(props: ChatViewProps) {
       });
     };
     requestAnimationFrame(() => positionAnchor(12));
+  }, []);
+  const onTimelineAnchorReady = useCallback((messageId: MessageId, anchorIndex: number) => {
+    if (pendingTimelineAnchorRef.current === messageId) {
+      pendingTimelineAnchorRef.current = null;
+    }
+    activeTimelineAnchorIndexRef.current = anchorIndex;
+    positionedTimelineAnchorRef.current = null;
+    settledTimelineAnchorRef.current = null;
   }, []);
   const onTimelineAnchorSizeChanged = useCallback((messageId: MessageId) => {
     if (settledTimelineAnchorRef.current !== messageId) {
@@ -4006,8 +4207,6 @@ function ChatViewContent(props: ChatViewProps) {
     if (isAtEndRef.current === isAtEnd) return;
     isAtEndRef.current = isAtEnd;
     if (isAtEnd) {
-      timelineScrollModeRef.current = "following-end";
-      liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
       showScrollDebouncer.current.cancel();
       setShowScrollToBottom(false);
     } else {
@@ -4021,31 +4220,38 @@ function ChatViewContent(props: ChatViewProps) {
     if (!activeThread?.id) {
       return;
     }
-    if (liveFollowUserScrollGenerationRef.current !== anchorUserScrollGenerationRef.current) {
-      return;
-    }
 
     let secondFrame: number | null = null;
     const frame = requestAnimationFrame(() => {
       secondFrame = requestAnimationFrame(() => {
-        if (liveFollowUserScrollGenerationRef.current !== anchorUserScrollGenerationRef.current) {
-          return;
-        }
         if (pendingTimelineAnchorRef.current !== null) {
           return;
         }
-        if (
-          positionedTimelineAnchorRef.current !== null &&
-          settledTimelineAnchorRef.current !== positionedTimelineAnchorRef.current
-        ) {
+        const list = legendListRef.current;
+        if (!list || !canAutomaticallyScrollTimeline(list)) {
           return;
         }
-        const list = legendListRef.current;
-        if (!list) {
-          return;
+        if (liveFollowUserScrollGenerationRef.current !== anchorUserScrollGenerationRef.current) {
+          timelineScrollModeRef.current = "following-end";
+          liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
         }
 
         if (timelineScrollModeRef.current === "anchoring-new-turn") {
+          const anchorIndex = activeTimelineAnchorIndexRef.current;
+          if (
+            timelineAnchorMessageId !== null &&
+            anchorIndex !== null &&
+            positionedTimelineAnchorRef.current !== timelineAnchorMessageId
+          ) {
+            positionTimelineAnchor(timelineAnchorMessageId, anchorIndex);
+            return;
+          }
+          if (
+            positionedTimelineAnchorRef.current !== null &&
+            settledTimelineAnchorRef.current !== positionedTimelineAnchorRef.current
+          ) {
+            return;
+          }
           const metrics = getActiveTimelineTurnMetrics(list);
           if (!metrics) {
             return;
@@ -4062,9 +4268,6 @@ function ChatViewContent(props: ChatViewProps) {
         if (timelineScrollModeRef.current !== "following-end") {
           return;
         }
-        if (!timelineRealContentOverflowsViewport(list)) {
-          return;
-        }
 
         void list.scrollToEnd?.({ animated: false });
       });
@@ -4078,9 +4281,11 @@ function ChatViewContent(props: ChatViewProps) {
     };
   }, [
     activeThread?.id,
+    canAutomaticallyScrollTimeline,
     timelineEntries,
     getActiveTimelineTurnMetrics,
-    timelineRealContentOverflowsViewport,
+    positionTimelineAnchor,
+    timelineAnchorMessageId,
   ]);
 
   useEffect(() => {
@@ -4088,6 +4293,13 @@ function ChatViewContent(props: ChatViewProps) {
     isAtEndRef.current = true;
     timelineScrollModeRef.current = "following-end";
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
+    setTimelineFollowLatched(true);
+    setTimelineUserSendFollowActive(false);
+    setTimelineManualScrollCooldownActive(false);
+    if (timelineManualScrollCooldownTimerRef.current !== null) {
+      window.clearTimeout(timelineManualScrollCooldownTimerRef.current);
+      timelineManualScrollCooldownTimerRef.current = null;
+    }
     pendingTimelineAnchorRef.current = null;
     positionedTimelineAnchorRef.current = null;
     settledTimelineAnchorRef.current = null;
@@ -5182,6 +5394,7 @@ function ChatViewContent(props: ChatViewProps) {
       // A sent turn returns to the live edge and anchors its new transcript
       // row. Queued input stays in the composer queue and must not move the
       // timeline away from the provider work already in flight.
+      armTimelineFollowForUserSend();
       isAtEndRef.current = true;
       timelineScrollModeRef.current = "anchoring-new-turn";
       liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
@@ -5619,6 +5832,7 @@ function ChatViewContent(props: ChatViewProps) {
     setThreadError(threadIdForSend, null);
 
     // Position this sent row once LegendList has measured the anchored tail.
+    armTimelineFollowForUserSend();
     isAtEndRef.current = true;
     timelineScrollModeRef.current = "anchoring-new-turn";
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
@@ -6345,7 +6559,7 @@ function ChatViewContent(props: ChatViewProps) {
                 onAnchorSizeChanged={onTimelineAnchorSizeChanged}
                 contentInsetEndAdjustment={composerOverlayHeight}
                 onIsAtEndChange={onIsAtEndChange}
-                onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
+                onManualNavigation={onTimelineManualNavigation}
                 hideEmptyPlaceholder={isDraftHeroState}
                 topFadeEnabled={!hasTimelineTopBanner}
               />
