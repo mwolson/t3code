@@ -410,6 +410,31 @@ function protocolError(detail: string, payload?: unknown): ProviderAdapterProtoc
   });
 }
 
+/**
+ * Builds the native selection fragment shared by session creation and
+ * subsequent model or agent switches.
+ *
+ * @internal exported for tests
+ */
+export function openCode2SessionSelectionParameters(modelSelection: ModelSelection) {
+  const parsed = parseOpenCodeModelSlug(modelSelection.model);
+  if (parsed === null) {
+    throw protocolError(
+      `OpenCode 2 model '${modelSelection.model}' must use provider/model format`,
+    );
+  }
+  const variant = getModelSelectionStringOptionValue(modelSelection, "variant");
+  const agent = getModelSelectionStringOptionValue(modelSelection, "agent");
+  return {
+    model: {
+      id: parsed.modelID,
+      providerID: parsed.providerID,
+      ...(variant === undefined ? {} : { variant }),
+    },
+    ...(agent === undefined ? {} : { agent }),
+  };
+}
+
 function nativeThreadId(providerThread: OrchestrationV2ProviderThread): string {
   const nativeId = providerThread.nativeThreadRef?.nativeId;
   if (nativeId === null || nativeId === undefined) {
@@ -1693,21 +1718,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           return state;
         };
 
-        const modelRefFor = (modelSelection: ModelSelection) => {
-          const parsed = parseOpenCodeModelSlug(modelSelection.model);
-          if (parsed === null) {
-            throw protocolError(
-              `OpenCode 2 model '${modelSelection.model}' must use provider/model format`,
-            );
-          }
-          const variant = getModelSelectionStringOptionValue(modelSelection, "variant");
-          return {
-            id: parsed.modelID,
-            providerID: parsed.providerID,
-            ...(variant === undefined ? {} : { variant }),
-          };
-        };
-
         /**
          * 2.x binds the model and agent to the session, not to the prompt, so a
          * selection change between turns has to be pushed before the prompt.
@@ -1717,14 +1727,15 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           modelSelection: ModelSelection,
         ) {
           const sessionID = state.nativeSessionId;
+          const selection = openCode2SessionSelectionParameters(modelSelection);
           if (state.boundModel !== modelSelection.model) {
-            const model = modelRefFor(modelSelection);
+            const model = selection.model;
             yield* sdkCall("session.switchModel", { sessionID, model }, () =>
               client.v2.session.switchModel({ sessionID, model }),
             );
             state.boundModel = modelSelection.model;
           }
-          const agent = getModelSelectionStringOptionValue(modelSelection, "agent");
+          const agent = selection.agent;
           if (agent !== undefined && state.boundAgent !== agent) {
             yield* sdkCall("session.switchAgent", { sessionID, agent }, () =>
               client.v2.session.switchAgent({ sessionID, agent }),
@@ -1894,12 +1905,11 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   providerThread: threadInput.existingProviderThread,
                 });
               }
-              const model = modelRefFor(threadInput.modelSelection);
-              const agent = getModelSelectionStringOptionValue(threadInput.modelSelection, "agent");
+              const selection = openCode2SessionSelectionParameters(threadInput.modelSelection);
+              const agent = selection.agent;
               const parameters = {
-                model,
+                ...selection,
                 location: { directory: threadInput.runtimePolicy.cwd ?? cwd },
-                ...(agent === undefined ? {} : { agent }),
               };
               const response = yield* sdkCall("session.create", parameters, () =>
                 client.v2.session.create(parameters),

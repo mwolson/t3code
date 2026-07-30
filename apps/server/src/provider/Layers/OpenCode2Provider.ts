@@ -236,11 +236,11 @@ function openCode2CapabilitiesForModel(input: {
     (agent) => !agent.hidden && (agent.mode === "primary" || agent.mode === "all"),
   );
   const defaultAgent =
-    primaryAgents.find((agent) => agent.name === "build")?.name ?? primaryAgents[0]?.name;
+    primaryAgents.find((agent) => agent.id === "build")?.id ?? primaryAgents[0]?.id;
   const agentOptions = primaryAgents.map((agent) =>
-    defaultAgent === agent.name
-      ? { id: agent.name, label: titleCaseSlug(agent.name), isDefault: true as const }
-      : { id: agent.name, label: titleCaseSlug(agent.name) },
+    defaultAgent === agent.id
+      ? { id: agent.id, label: titleCaseSlug(agent.name), isDefault: true as const }
+      : { id: agent.id, label: titleCaseSlug(agent.name) },
   );
   return createModelCapabilities({
     optionDescriptors: [
