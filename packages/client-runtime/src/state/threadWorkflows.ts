@@ -10,6 +10,12 @@ type Run = Projection["runs"][number];
 type ProviderSession = Projection["providerSessions"][number];
 
 const ACTIVE_RUN_STATUSES = new Set<Run["status"]>(["preparing", "starting", "running", "waiting"]);
+const MERGE_BACK_RUN_STATUSES = new Set<Run["status"]>(["waiting", "completed"]);
+const MERGE_BACK_BLOCKING_RUN_STATUSES = new Set<Run["status"]>([
+  "preparing",
+  "starting",
+  "running",
+]);
 
 export interface QueuedThreadRun {
   readonly run: Run;
@@ -25,6 +31,29 @@ export interface ThreadQueueWorkflowState {
 
 export function resolveActiveThreadRun(projection: Projection): Run | null {
   return projection.runs.findLast((run) => ACTIVE_RUN_STATUSES.has(run.status)) ?? null;
+}
+
+/**
+ * A successfully finished provider turn remains in `waiting` while its
+ * checkpoint is captured. Keep that newest turn available for merge-back
+ * instead of falling through to an older fully checkpointed run.
+ */
+export function resolveLatestMergeBackRun(projection: Projection): Run | null {
+  const latestProviderFinishedRun = projection.runs.reduce<Run | null>(
+    (latest, run) =>
+      MERGE_BACK_RUN_STATUSES.has(run.status) && (latest === null || run.ordinal > latest.ordinal)
+        ? run
+        : latest,
+    null,
+  );
+  if (latestProviderFinishedRun === null) return null;
+
+  const hasNewerActiveRun = projection.runs.some(
+    (run) =>
+      run.ordinal > latestProviderFinishedRun.ordinal &&
+      MERGE_BACK_BLOCKING_RUN_STATUSES.has(run.status),
+  );
+  return hasNewerActiveRun ? null : latestProviderFinishedRun;
 }
 
 export function resolveThreadProviderSession(projection: Projection): ProviderSession | null {
@@ -55,6 +84,12 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
   const activeRun = resolveActiveThreadRun(projection);
   const session = resolveThreadProviderSession(projection);
   const capabilities = session?.capabilities.turns;
+  const hasSteerableProviderTurn =
+    activeRun?.status === "running" &&
+    activeRun.activeAttemptId !== null &&
+    projection.providerTurns.some(
+      (turn) => turn.runAttemptId === activeRun.activeAttemptId && turn.status === "running",
+    );
   const queuedRuns = copySorted(
     projection.runs.filter((run) => run.status === "queued"),
     (left, right) =>
@@ -72,7 +107,7 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
     queuedRuns,
     canReorder: capabilities?.supportsQueuedMessages === true,
     canPromoteToSteer:
-      activeRun !== null &&
+      hasSteerableProviderTurn &&
       (capabilities?.supportsActiveSteering === true ||
         capabilities?.supportsSteeringByInterruptRestart === true),
   };

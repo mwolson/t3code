@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+
 import {
   type ChatAttachment,
   type ModelSelection,
@@ -473,7 +477,6 @@ function negotiatedCapabilities(
   const setup = started.sessionSetupResult;
   const hasModelConfig =
     setup.configOptions?.some((option) => option.category === "model") === true;
-  const hasModeConfig = setup.configOptions?.some((option) => option.category === "mode") === true;
   const supportsMcp = agent.mcpCapabilities?.http === true || agent.mcpCapabilities?.sse === true;
   const canLoad = agent.loadSession === true;
   const canFork = session?.fork != null;
@@ -482,7 +485,6 @@ function negotiatedCapabilities(
     sessions: {
       ...base.sessions,
       supportsModelSwitchInSession: setup.models != null || hasModelConfig,
-      supportsRuntimeModeSwitchInSession: setup.modes != null || hasModeConfig,
     },
     threads: {
       ...base.threads,
@@ -522,15 +524,20 @@ function acpMcpServers(threadId: ThreadId | null): ReadonlyArray<EffectAcpSchema
   ];
 }
 
-function nativeThreadId(driver: ProviderDriverKind, thread: OrchestrationV2ProviderThread): string {
+function nativeThreadId(
+  driver: ProviderDriverKind,
+  thread: OrchestrationV2ProviderThread,
+): Effect.Effect<string, ProviderAdapterProtocolError> {
   const id = thread.nativeThreadRef?.nativeId;
   if (id === null || id === undefined || id.trim().length === 0) {
-    throw new ProviderAdapterProtocolError({
-      driver,
-      detail: `Provider thread ${thread.id} is missing its ACP session id`,
-    });
+    return Effect.fail(
+      new ProviderAdapterProtocolError({
+        driver,
+        detail: `Provider thread ${thread.id} is missing its ACP session id`,
+      }),
+    );
   }
-  return id;
+  return Effect.succeed(id);
 }
 
 function makeProviderThread(input: {
@@ -837,6 +844,112 @@ function selectAutoApprovedPermissionOption(
 
 export type AcpPermissionDisposition = "allow" | "ask" | "deny";
 
+function resolveAcpPermissionPath(path: string, cwd: string | null): string | undefined {
+  const trimmed = path.trim();
+  if (trimmed.length === 0) return undefined;
+  if (NodePath.isAbsolute(trimmed)) return trimmed;
+  if (cwd === null || cwd.trim().length === 0) return undefined;
+  return `${cwd}${cwd.endsWith(NodePath.sep) ? "" : NodePath.sep}${trimmed}`;
+}
+
+function acpPathIsWithinRoot(path: string, root: string): boolean {
+  const relative = NodePath.relative(root, path);
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${NodePath.sep}`) &&
+      !NodePath.isAbsolute(relative))
+  );
+}
+
+/**
+ * Canonicalize a path for an authorization containment check.
+ *
+ * `realpath` cannot resolve a file that has not been created yet, so walk up
+ * to the deepest existing ancestor and append the missing suffix to that
+ * ancestor's canonical path. This follows symlinked directories while still
+ * allowing normal writes to new files. If an existing entry cannot be
+ * canonicalized (for example, a broken symlink), fail closed.
+ */
+function acpCanonicalPathForContainment(path: string): string | undefined {
+  // Do not lexically normalize before realpath. For a path such as
+  // `workspace/link/../file`, the kernel resolves `link` before `..`; an
+  // eager NodePath.resolve would erase that symlink traversal and could turn
+  // an outside target into an apparently in-workspace path.
+  let candidate = path;
+  const missingSuffix: Array<string> = [];
+
+  while (true) {
+    try {
+      return NodePath.resolve(NodeFS.realpathSync.native(candidate), ...missingSuffix);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
+        return undefined;
+      }
+    }
+
+    try {
+      NodeFS.lstatSync(candidate);
+      // The entry exists but realpath could not resolve it, as with a broken
+      // symlink. Treat it as untrusted rather than authorizing its lexical path.
+      return undefined;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
+        return undefined;
+      }
+    }
+
+    const parent = NodePath.dirname(candidate);
+    if (parent === candidate) return undefined;
+    missingSuffix.unshift(NodePath.basename(candidate));
+    candidate = parent;
+  }
+}
+
+function acpWorkspaceWriteAllowsMutation(
+  runtimePolicy: ProviderAdapterV2RuntimePolicy,
+  sandboxPolicy: Record<string, unknown>,
+  request: EffectAcpSchema.RequestPermissionRequest,
+): boolean {
+  const cwd =
+    typeof runtimePolicy.cwd === "string" && runtimePolicy.cwd.trim().length > 0
+      ? (resolveAcpPermissionPath(runtimePolicy.cwd, process.cwd()) ?? null)
+      : null;
+  const roots: Array<string> = [];
+  if (cwd !== null) {
+    const canonicalCwd = acpCanonicalPathForContainment(cwd);
+    if (canonicalCwd !== undefined) roots.push(canonicalCwd);
+  }
+  const writableRoots = sandboxPolicy.writableRoots;
+  if (Array.isArray(writableRoots)) {
+    for (const writableRoot of writableRoots) {
+      if (typeof writableRoot !== "string") continue;
+      const resolved = resolveAcpPermissionPath(writableRoot, cwd);
+      if (resolved === undefined) continue;
+      const canonicalRoot = acpCanonicalPathForContainment(resolved);
+      if (canonicalRoot !== undefined) roots.push(canonicalRoot);
+    }
+  }
+  if (roots.length === 0) return false;
+
+  const locations = request.toolCall.locations;
+  if (locations === undefined || locations === null || locations.length === 0) {
+    return false;
+  }
+  for (const location of locations) {
+    const resolved = resolveAcpPermissionPath(location.path, cwd);
+    const canonicalPath =
+      resolved === undefined ? undefined : acpCanonicalPathForContainment(resolved);
+    if (
+      canonicalPath === undefined ||
+      !roots.some((root) => acpPathIsWithinRoot(canonicalPath, root))
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function acpPermissionDisposition(
   runtimePolicy: ProviderAdapterV2RuntimePolicy,
   request: EffectAcpSchema.RequestPermissionRequest,
@@ -859,14 +972,15 @@ export function acpPermissionDisposition(
         ? "allow"
         : "deny";
     case "workspaceWrite":
-      return toolKind === "read" ||
-        toolKind === "search" ||
-        toolKind === "think" ||
-        toolKind === "edit" ||
-        toolKind === "delete" ||
-        toolKind === "move"
-        ? "allow"
-        : "deny";
+      if (toolKind === "read" || toolKind === "search" || toolKind === "think") {
+        return "allow";
+      }
+      if (toolKind === "edit" || toolKind === "delete" || toolKind === "move") {
+        return acpWorkspaceWriteAllowsMutation(runtimePolicy, sandboxPolicy ?? {}, request)
+          ? "allow"
+          : "deny";
+      }
+      return "deny";
     case "dangerFullAccess":
     case "externalSandbox":
       return "allow";
@@ -907,6 +1021,7 @@ interface ActiveTextStream {
 interface ActiveAcpTurn {
   readonly input: ProviderAdapterV2TurnInput;
   readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
+  readonly nativeThreadId: string;
   readonly nativeTurnId: string;
   readonly startedAt: DateTime.Utc;
   readonly completed: Deferred.Deferred<void, never>;
@@ -937,6 +1052,12 @@ interface ActiveAcpTurn {
    * the safety timeout elapses.
    */
   readonly pendingInjectedReport: Set<string>;
+  /**
+   * An injected assistant report can race ahead of its monitor end notice.
+   * Remember that unmatched report so the later notice consumes, rather than
+   * re-arming, the task's pre-settle completion marker.
+   */
+  earlyInjectedReportObserved: boolean;
   plan: {
     readonly id: OrchestrationV2PlanArtifact["id"];
     readonly startedAt: DateTime.Utc;
@@ -1017,6 +1138,7 @@ export function acpPostSettleWakeEvidence(
   ) {
     const text = update.content.text;
     if ((flavor.extractBackgroundToolMutation?.(text) ?? []).length > 0) return false;
+    if (update.sessionUpdate === "agent_message_chunk" && text.trim().length === 0) return false;
     if (/<monitor-event\b/i.test(text) || /Monitor\s+["']?[0-9a-f-]{8,}["']?\s+ended/i.test(text)) {
       return false;
     }
@@ -1042,7 +1164,7 @@ export function acpPostSettleContinuationOfferEvidence(
   // Assistant text only. Thought/reasoning bursts alone must not open synthetic
   // "Background task completed." runs (duplicate-run spam after monitors).
   if (update.sessionUpdate === "agent_message_chunk") {
-    return update.content.type === "text" && update.content.text.length > 0;
+    return update.content.type === "text" && update.content.text.trim().length > 0;
   }
   if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
     return parseSessionUpdateEvent(notification).events.some((event) => {
@@ -1065,6 +1187,20 @@ export function acpPostSettleWakeShouldBuffer(
   return (
     update.sessionUpdate !== "agent_message_chunk" && update.sessionUpdate !== "agent_thought_chunk"
   );
+}
+
+/**
+ * An app-owned wake (a delegated child finishing) is injected by the
+ * orchestrator, not typed by the user. It reports on a sibling child and says
+ * nothing about this session's own pending wake frames, so it must not discard
+ * them the way a real user turn does. ClaudeAdapterV2 already leaves its buffer
+ * alone on non-continuation turns; this keeps ACP consistent.
+ */
+export function acpIsAppOwnedWakeTurn(message: {
+  readonly createdBy: string;
+  readonly creationSource: string;
+}): boolean {
+  return message.createdBy === "agent" && message.creationSource === "server";
 }
 
 export function acpPostSettleMonitorPromptShouldSuppress(
@@ -1456,6 +1592,13 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
         const handledBackgroundTaskIdsInActiveTurn = yield* Ref.make<ReadonlySet<string>>(
           new Set(),
         );
+        // Background tasks that reached a genuine terminal mutation while a root
+        // turn was still streaming and were not yet marked handled in-turn. The
+        // mid-turn offer is suppressed (active turn owns the work); on finalize
+        // these ids re-arm a single continuation when the agent never hydrated
+        // or reported them before settle (regression: mid-turn complete + no
+        // get_command must still wake after finalize).
+        const midTurnUnreportedCompletedTaskIds = yield* Ref.make<ReadonlySet<string>>(new Set());
         // A monitor-event can arrive after its task and the user-facing provider
         // turn already completed. Grok starts another internal prompt for that
         // stale notification; suppress its agent output until a genuine terminal
@@ -1909,7 +2052,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             existing?.childThreadId ??
             idAllocator.derive.threadFromProviderThread({
               driver,
-              nativeThreadId: `${nativeThreadId(driver, context.input.providerThread)}:task:${nativeTaskId}`,
+              nativeThreadId: `${context.nativeThreadId}:task:${nativeTaskId}`,
             });
           const childRootNodeId =
             existing?.childRootNodeId ??
@@ -2251,6 +2394,17 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             }).pipe(Effect.forkIn(sessionScope), Effect.asVoid);
           });
 
+        const clearMidTurnUnreportedTaskIds = (taskIds: ReadonlyArray<string>) =>
+          Ref.update(midTurnUnreportedCompletedTaskIds, (current) => {
+            let next: Set<string> | null = null;
+            for (const taskId of taskIds) {
+              if (!current.has(taskId)) continue;
+              if (next === null) next = new Set(current);
+              next.delete(taskId);
+            }
+            return next ?? current;
+          });
+
         emitTool = Effect.fnUntraced(function* (
           context: ActiveAcpTurn,
           incoming: AcpToolCallState,
@@ -2283,6 +2437,15 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             // continuation (live: grok-post-settle-continuation-poll).
             // Terminal statuses only after normalizeToolCall (start ACKs stay
             // inProgress/running).
+            //
+            // Tradeoff: a pre-settle false "completed" normalization (Bash-
+            // shaped re-report with exit_code 0, or the hydration safety
+            // force-complete firing pre-settle) would permanently mark the task
+            // handled and suppress its injected report chatter. The deleted
+            // handled-id removal on late monitor-event mutations used to rescue
+            // that case; likelihood is low because mid-turn monitor ends
+            // normally arrive as reminder mutations that force inProgress, and
+            // re-reports are documented post-settle traffic.
             if (
               !context.promptSettled &&
               backgroundStatus !== "pending" &&
@@ -2291,6 +2454,12 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               yield* Ref.update(handledBackgroundTaskIdsInActiveTurn, (current) =>
                 new Set(current).add(backgroundTaskId),
               );
+              yield* Ref.update(midTurnUnreportedCompletedTaskIds, (current) => {
+                if (!current.has(backgroundTaskId)) return current;
+                const next = new Set(current);
+                next.delete(backgroundTaskId);
+                return next;
+              });
             }
           }
 
@@ -2309,6 +2478,12 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               yield* Ref.update(handledBackgroundTaskIdsInActiveTurn, (current) =>
                 new Set(current).add(backgroundCompletion.taskId),
               );
+              yield* Ref.update(midTurnUnreportedCompletedTaskIds, (current) => {
+                if (!current.has(backgroundCompletion.taskId)) return current;
+                const next = new Set(current);
+                next.delete(backgroundCompletion.taskId);
+                return next;
+              });
             }
             // A still-running fetch must keep the hydration hold (and its
             // safety timer) alive until output actually lands.
@@ -2365,7 +2540,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
           }
           const status = projectedStatus ?? toolStatus(toolCall.status);
           const now = yield* DateTime.now;
-          const nativeItemId = `${nativeThreadId(driver, context.input.providerThread)}:tool:${toolCall.toolCallId}`;
+          const nativeItemId = `${context.nativeThreadId}:tool:${toolCall.toolCallId}`;
           const ordinal = yield* resolveItemOrdinal(context, nativeItemId);
           const nodeId = idAllocator.derive.nodeFromProviderItem({ driver, nativeItemId });
           const turnItemId = idAllocator.derive.turnItemFromProviderItem({
@@ -2760,25 +2935,62 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
         ) {
           const taskAlreadyEnded = (yield* Ref.get(endedBackgroundTaskIds)).has(mutation.taskId);
           yield* applyBackgroundTaskMutationRunning(mutation);
-          if (taskAlreadyEnded && acpPostSettleMonitorPromptShouldSuppress(mutation)) {
-            yield* Ref.set(suppressPostSettleMonitorPrompt, true);
-          }
-          if (mutation.status !== "running") {
-            yield* Ref.set(suppressPostSettleMonitorPrompt, false);
-            yield* Ref.update(handledBackgroundTaskIdsInActiveTurn, (current) => {
-              if (!current.has(mutation.taskId)) return current;
-              const next = new Set(current);
-              next.delete(mutation.taskId);
-              return next;
-            });
-            if (
-              postSettleContinuationEnabled &&
-              (yield* Ref.get(activeSessionId)) === sessionId &&
-              (yield* Ref.get(runningBackgroundTaskIds)).size === 0 &&
-              (yield* Ref.get(wakeBuffer)).length > 0
-            ) {
-              yield* offerContinuationRun(sessionId);
+          if (mutation.status === "running") {
+            // Straggler running notice after a genuine end: suppress residual
+            // monitor-prompt agent chatter so it cannot open a synthetic wake.
+            if (taskAlreadyEnded && acpPostSettleMonitorPromptShouldSuppress(mutation)) {
+              yield* Ref.set(suppressPostSettleMonitorPrompt, true);
             }
+            return;
+          }
+          // First genuine terminal: allow subsequent agent output. Re-delivery
+          // of an already-ended terminal must not un-suppress residual ack
+          // chatter from the injected monitor-event turn.
+          if (!taskAlreadyEnded) {
+            yield* Ref.set(suppressPostSettleMonitorPrompt, false);
+          }
+          // Keep handledBackgroundTaskIdsInActiveTurn intact. Erasing the mark
+          // on a late monitor-event mutation defeated the in-turn chatter guard
+          // and let injected-turn acks arm wakeBuffer for a later spurious
+          // "Background task completed." run (multiturn live repro). Monitors
+          // the agent settled without reporting never enter that set, so their
+          // injected report still streams via pendingInjectedReport / hold.
+          const activeContext = yield* Ref.get(activeTurn);
+          // Completions that land while a root turn is still streaming are
+          // owned by in-turn machinery (emitTool handled marks, deferred
+          // finalize, injected-report hold). Do not open a synthetic wake mid-
+          // turn; finalizeTurn re-checks wakeBuffer / midTurnUnreported once
+          // the turn leaves the active slot so legitimate unhandled evidence
+          // still offers after finalize.
+          if (activeContext !== null && !activeContext.finalized) {
+            const handled = yield* Ref.get(handledBackgroundTaskIdsInActiveTurn);
+            // Only arm deferred wake when this turn registered the task (monitor
+            // tool started in-turn) and the root prompt is still open. Completions
+            // that land in the settled-held window (promptSettled, deferred
+            // finalize holding for injected report) fall back to the pre-existing
+            // post-finalize injected-turn path; arming here would spuriously
+            // offer "Background task completed." after the report streams into
+            // the held turn. Residual cancel-backgrounded completions from a
+            // prior interrupt must not open a synthetic continuation.
+            if (
+              !activeContext.promptSettled &&
+              !handled.has(mutation.taskId) &&
+              activeContext.toolCallIdsByBackgroundTaskId.has(mutation.taskId)
+            ) {
+              yield* Ref.update(midTurnUnreportedCompletedTaskIds, (current) =>
+                new Set(current).add(mutation.taskId),
+              );
+            }
+            return;
+          }
+          if (
+            postSettleContinuationEnabled &&
+            (yield* Ref.get(activeSessionId)) === sessionId &&
+            (yield* Ref.get(runningBackgroundTaskIds)).size === 0 &&
+            ((yield* Ref.get(wakeBuffer)).length > 0 ||
+              (yield* Ref.get(midTurnUnreportedCompletedTaskIds)).size > 0)
+          ) {
+            yield* offerContinuationRun(sessionId);
           }
         });
 
@@ -2833,6 +3045,18 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             }
           }
           const backgroundWorkRunning = (yield* Ref.get(runningBackgroundTaskIds)).size > 0;
+          // Residual Grok agent/thought chatter after in-turn-handled background
+          // work must not be retained as wake evidence. Tool-path alreadyHandled
+          // covers re-reports with a task id; this covers agent_message_chunk /
+          // agent_thought_chunk frames that carry no task id (live:
+          // grok-in-turn-monitor-no-wake, multiturn stale-buffer arm). Check
+          // before buffering so the frames cannot dirty wakeBuffer and later
+          // arm a mid-turn offer when a second monitor completes.
+          const handledInTurnCount = (yield* Ref.get(handledBackgroundTaskIdsInActiveTurn)).size;
+          const isInTurnHandledAgentChatter =
+            handledInTurnCount > 0 &&
+            (update.sessionUpdate === "agent_message_chunk" ||
+              update.sessionUpdate === "agent_thought_chunk");
           // Grok prompts itself for every monitor event after the root turn
           // settles. Its assistant/reasoning replies are progress chatter, not
           // separate wake results. Retaining them would replay the entire burst
@@ -2850,6 +3074,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
           // completed." spam).
           if (
             !alreadyHandledToolUpdate &&
+            !isInTurnHandledAgentChatter &&
             acpPostSettleWakeShouldBuffer(notification, backgroundWorkRunning)
           ) {
             yield* Ref.update(wakeBuffer, (current) => [...current, notification]);
@@ -2880,19 +3105,10 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             }
             return true;
           }
-          // Residual Grok agent/thought chatter after in-turn-handled background
-          // work must not open synthetic continuation runs. Tool-path
-          // alreadyHandled covers re-reports with a task id; this covers
-          // agent_message_chunk frames that carry no task id (live:
-          // grok-in-turn-monitor-no-wake). Running work already returned above.
+          // Same in-turn-handled agent chatter: do not open a synthetic wake.
           // Do not clear wakeBuffer here: frames for other still-tracked tasks
           // must remain drainable when a real (tool) completion later offers.
-          const handledInTurnCount = (yield* Ref.get(handledBackgroundTaskIdsInActiveTurn)).size;
-          if (
-            handledInTurnCount > 0 &&
-            (update.sessionUpdate === "agent_message_chunk" ||
-              update.sessionUpdate === "agent_thought_chunk")
-          ) {
+          if (isInTurnHandledAgentChatter) {
             return true;
           }
           yield* offerContinuationRun(notification.sessionId);
@@ -2963,7 +3179,11 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               const lateMonitorChatter =
                 /<monitor-event\b/i.test(text) ||
                 /Monitor\s+["']?[0-9a-f-]{8,}["']?\s+ended/i.test(text);
-              if (lateBackgroundMutations.length === 0 && !lateMonitorChatter) {
+              if (
+                text.trim().length > 0 &&
+                lateBackgroundMutations.length === 0 &&
+                !lateMonitorChatter
+              ) {
                 yield* appendLoadedHistory(
                   notification,
                   update.sessionUpdate === "user_message_chunk" ? "user" : "assistant",
@@ -3003,10 +3223,25 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
           switch (update.sessionUpdate) {
             case "agent_message_chunk":
               if (update.content.type === "text") {
+                const startsNewAssistantSegment = context.assistant.current === null;
                 // The injected-turn report is streaming; the normal debounce
-                // after the last chunk takes over from here.
+                // after the last chunk takes over from here. Drop matching
+                // mid-turn armed ids so finalize does not open a duplicate
+                // wake after the report already projected into this turn.
                 if (context.pendingInjectedReport.size > 0) {
+                  const reportedTaskIds = [...context.pendingInjectedReport];
                   context.pendingInjectedReport.clear();
+                  yield* clearMidTurnUnreportedTaskIds(reportedTaskIds);
+                } else if (
+                  startsNewAssistantSegment &&
+                  context.promptSettled &&
+                  (yield* Ref.get(midTurnUnreportedCompletedTaskIds)).size > 0
+                ) {
+                  // Some ACP implementations deliver the injected assistant
+                  // report before the synthetic monitor end notice. Correlation
+                  // arrives with that notice, so remember the unmatched report
+                  // and consume its task id when the notice follows.
+                  context.earlyInjectedReportObserved = true;
                 }
                 yield* appendText(context, "assistant", update.content.text);
               }
@@ -3018,7 +3253,17 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               break;
             case "user_message_chunk":
               if (update.content.type === "text" && flavor.extractBackgroundToolMutation) {
-                for (const mutation of flavor.extractBackgroundToolMutation(update.content.text)) {
+                const mutations = flavor.extractBackgroundToolMutation(update.content.text);
+                const terminalTaskIds = mutations
+                  .filter((mutation) => mutation.status !== "running")
+                  .map((mutation) => mutation.taskId);
+                const reportArrivedBeforeNotice =
+                  context.earlyInjectedReportObserved && terminalTaskIds.length > 0;
+                if (reportArrivedBeforeNotice) {
+                  context.earlyInjectedReportObserved = false;
+                  yield* clearMidTurnUnreportedTaskIds(terminalTaskIds);
+                }
+                for (const mutation of mutations) {
                   const toolCallId = context.toolCallIdsByBackgroundTaskId.get(mutation.taskId);
                   const previous =
                     toolCallId !== undefined ? context.tools.get(toolCallId) : undefined;
@@ -3049,7 +3294,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
                   // the mutation's semantic status. Also tracks monitors that
                   // never surfaced a tool_call row at all.
                   yield* applyBackgroundTaskMutationRunning(mutation);
-                  if (mutation.status !== "running") {
+                  if (mutation.status !== "running" && !reportArrivedBeforeNotice) {
                     yield* markPendingInjectedReport(context, mutation.taskId);
                   }
                 }
@@ -4058,6 +4303,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               yield* Ref.set(wakeBuffer, []);
               yield* Ref.set(continuationRequested, false);
               yield* Ref.set(runningBackgroundTaskIds, new Set());
+              yield* Ref.set(midTurnUnreportedCompletedTaskIds, new Set());
               yield* Ref.set(carryoverSubagents, null);
               yield* Ref.set(lastTurnRoute, null);
             }),
@@ -4151,6 +4397,37 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             }
           }
           yield* Ref.set(activeTurn, null);
+          // A mid-turn background completion may have deferred its offer while
+          // this root turn was still streaming. Once the turn leaves the active
+          // slot, re-check: empty running set + residual wake evidence (or a
+          // mid-turn unreported completion) means a legitimate unhandled
+          // completion can open exactly one continuation. Sticky
+          // continuationRequested prevents double-offer if a later frame also
+          // races into offerContinuationRun.
+          if (
+            postSettleContinuationEnabled &&
+            settledStatus === "completed" &&
+            !directStopQuarantine &&
+            (yield* Ref.get(runningBackgroundTaskIds)).size === 0 &&
+            ((yield* Ref.get(wakeBuffer)).length > 0 ||
+              (yield* Ref.get(midTurnUnreportedCompletedTaskIds)).size > 0)
+          ) {
+            const sessionId = yield* Ref.get(activeSessionId);
+            if (sessionId !== null) {
+              yield* offerContinuationRun(sessionId);
+            }
+          }
+          // Clear mid-turn unreported marks unless a completed turn still has
+          // running background work: keep them so the post-finalize gate can
+          // offer once when the last task ends. Interrupted/failed turns must
+          // not leave marks that open a wake after interrupt (quarantine owns
+          // that path). Non-continuation turn start also clears (~user turn).
+          if (
+            settledStatus !== "completed" ||
+            (yield* Ref.get(runningBackgroundTaskIds)).size === 0
+          ) {
+            yield* Ref.set(midTurnUnreportedCompletedTaskIds, new Set());
+          }
           yield* Deferred.succeed(context.completed, undefined).pipe(Effect.ignore);
         });
 
@@ -4320,7 +4597,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
                 detail: `ACP provider turn ${existing.providerTurnId} is still active`,
               });
             }
-            const requestedSessionId = nativeThreadId(driver, turnInput.providerThread);
+            const requestedSessionId = yield* nativeThreadId(driver, turnInput.providerThread);
             const restartAfterInterrupt = yield* restartRuntimeAfterTeardownIfRequired();
             const needsSessionActivation =
               (yield* Ref.get(activeSessionId)) !== requestedSessionId || restartAfterInterrupt;
@@ -4363,6 +4640,27 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               postSettleContinuationEnabled &&
               turnInput.message.createdBy === "agent" &&
               turnInput.message.creationSource === "provider";
+            const isAppOwnedWakeTurn = acpIsAppOwnedWakeTurn(turnInput.message);
+            // An app-owned wake reports on a sibling delegated child and owns
+            // none of this session's background work, so it must not discard
+            // pending wake evidence: neither the mid-turn completion marks kept
+            // across a settle with work still running, nor the wake buffer
+            // below. Dropping the marks here would lose the offer for a task
+            // that completed unreported before the settle.
+            if (!isAppOwnedWakeTurn) {
+              yield* Ref.set(midTurnUnreportedCompletedTaskIds, new Set());
+            }
+            // User turns must not inherit prior-turn wake residue. Stale injected-
+            // turn ack chatter buffered for in-turn-handled work can otherwise
+            // arm a mid-turn offer when a later monitor completes (multiturn
+            // live repro). Continuation turns keep the buffer so attach mode can
+            // drain it. Still-running tasks remain in runningBackgroundTaskIds
+            // and re-buffer evidence when they complete; a user message means
+            // this turn owns the conversation, so prior wake frames cannot be
+            // legitimate for a synthetic continuation of the previous turn.
+            if (!isContinuationTurn && !isAppOwnedWakeTurn) {
+              yield* Ref.set(wakeBuffer, []);
+            }
             // Drop a sticky continuation offer when any new turn starts so idle
             // pin and further offers cannot wed on a completed or failed dispatch.
             yield* continuationPermit.withPermit(
@@ -4380,6 +4678,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             const context: ActiveAcpTurn = {
               input: turnInput,
               providerTurnId,
+              nativeThreadId: requestedSessionId,
               nativeTurnId,
               startedAt,
               completed,
@@ -4394,6 +4693,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               persistentBackgroundTaskIds: new Set(),
               awaitingBackgroundHydration: new Set(),
               pendingInjectedReport: new Set(),
+              earlyInjectedReportObserved: false,
               plan: null,
               interrupted: false,
               finalized: false,
@@ -4466,9 +4766,21 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               context.promptSettled = true;
               context.promptSettledStatus = "completed";
               if (drained.length === 0) {
-                yield* finalizeTurn(context, "completed", undefined, {
-                  drainTrailingChunks: true,
-                });
+                // Empty wakeBuffer (midTurn-only offer): wait the quiet window
+                // so late CLI frames can attach. scheduleDeferredFinalize
+                // no-ops without deferFinalizeForBackgroundWork; fall back to
+                // immediate finalize so the turn cannot wedge.
+                if (flavor.deferFinalizeForBackgroundWork === true) {
+                  if (hasDeferredBackgroundWork(context)) {
+                    yield* rearmDeferredFinalize(context);
+                  } else {
+                    yield* scheduleDeferredFinalize(context);
+                  }
+                } else {
+                  yield* finalizeTurn(context, "completed", undefined, {
+                    drainTrailingChunks: true,
+                  });
+                }
                 return;
               }
               for (const notification of drained) {
@@ -4686,7 +4998,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
                 Effect.gen(function* () {
                   yield* awaitRuntimeTeardown();
                   const restartAfterInterrupt = yield* restartRuntimeAfterTeardownIfRequired();
-                  const sessionId = nativeThreadId(driver, threadInput.providerThread);
+                  const sessionId = yield* nativeThreadId(driver, threadInput.providerThread);
                   if ((yield* Ref.get(activeSessionId)) !== sessionId || restartAfterInterrupt) {
                     yield* Ref.set(snapshot, {
                       order: [],
@@ -5097,7 +5409,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
                 Effect.gen(function* () {
                   yield* awaitRuntimeTeardown();
                   yield* restartRuntimeAfterTeardownIfRequired();
-                  const sessionId = nativeThreadId(driver, snapshotInput.providerThread);
+                  const sessionId = yield* nativeThreadId(driver, snapshotInput.providerThread);
                   if ((yield* Ref.get(activeSessionId)) !== sessionId) {
                     if (!capabilities.threads.canReadThreadSnapshot) {
                       return yield* new ProviderAdapterProtocolError({
@@ -5177,7 +5489,10 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
                       detail: "ACP session/fork can only fork the current session head",
                     });
                   }
-                  const sourceSessionId = nativeThreadId(driver, forkInput.sourceProviderThread);
+                  const sourceSessionId = yield* nativeThreadId(
+                    driver,
+                    forkInput.sourceProviderThread,
+                  );
                   const forked = yield* runtime.forkSession(sourceSessionId, {
                     mcpServers: acpMcpServers(forkInput.targetThreadId),
                   });

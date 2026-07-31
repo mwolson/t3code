@@ -23,7 +23,11 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
-import { ProjectionStoreV2, layer as projectionStoreLayer } from "./ProjectionStore.ts";
+import {
+  isTurnItemAtOrBeforeRun,
+  ProjectionStoreV2,
+  layer as projectionStoreLayer,
+} from "./ProjectionStore.ts";
 
 const TestLayer = Layer.mergeAll(
   projectionStoreLayer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
@@ -37,7 +41,222 @@ const driver = ProviderDriverKind.make("codex");
 const providerInstanceId = modelSelection.instanceId;
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
+it("includes imported runless history when selecting fork context through a run", () => {
+  const firstRunId = RunId.make("run:projection-imported-fork:1");
+  const secondRunId = RunId.make("run:projection-imported-fork:2");
+  const runOrdinalById = new Map([
+    [firstRunId, 1],
+    [secondRunId, 2],
+  ]);
+
+  assert.isTrue(
+    isTurnItemAtOrBeforeRun({
+      historyOrigin: "v1_import",
+      itemRunId: null,
+      runOrdinalById,
+      sourceRunOrdinal: 1,
+    }),
+  );
+  assert.isFalse(
+    isTurnItemAtOrBeforeRun({
+      historyOrigin: undefined,
+      itemRunId: null,
+      runOrdinalById,
+      sourceRunOrdinal: 1,
+    }),
+  );
+  assert.isTrue(
+    isTurnItemAtOrBeforeRun({
+      historyOrigin: "v1_import",
+      itemRunId: firstRunId,
+      runOrdinalById,
+      sourceRunOrdinal: 1,
+    }),
+  );
+  assert.isFalse(
+    isTurnItemAtOrBeforeRun({
+      historyOrigin: "v1_import",
+      itemRunId: secondRunId,
+      runOrdinalById,
+      sourceRunOrdinal: 1,
+    }),
+  );
+});
+
 it.layer(TestLayer)("ProjectionStoreV2", (it) => {
+  it.effect("does not treat visited or marked-unread state as thread activity", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStoreV2;
+      const createdAt = yield* DateTime.now;
+      const visitedOccurredAt = DateTime.add(createdAt, { seconds: 1 });
+      const markedUnreadOccurredAt = DateTime.add(createdAt, { seconds: 2 });
+      const threadId = ThreadId.make("thread:projection-read-state");
+      const projectId = ProjectId.make("project:projection-read-state");
+      const thread = {
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        id: threadId,
+        projectId,
+        title: "Projection read state",
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: {
+          parentThreadId: null,
+          relationshipToParent: null,
+          rootThreadId: threadId,
+        },
+        forkedFrom: null,
+        createdAt,
+        updatedAt: createdAt,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      };
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-read-state:created"),
+        type: "thread.created",
+        threadId,
+        occurredAt: createdAt,
+        payload: thread,
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-read-state:visited"),
+        type: "thread.visited",
+        threadId,
+        occurredAt: visitedOccurredAt,
+        payload: { ...thread, lastVisitedAt: createdAt },
+      });
+
+      const visited = yield* projectionStore.getThreadProjection(threadId);
+      assert.deepEqual(visited.thread.lastVisitedAt, createdAt);
+      assert.deepEqual(visited.thread.updatedAt, createdAt);
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-read-state:marked-unread"),
+        type: "thread.marked-unread",
+        threadId,
+        occurredAt: markedUnreadOccurredAt,
+        payload: thread,
+      });
+
+      const markedUnread = yield* projectionStore.getThreadProjection(threadId);
+      assert.isNull(markedUnread.thread.lastVisitedAt);
+      assert.deepEqual(markedUnread.thread.updatedAt, createdAt);
+    }),
+  );
+
+  it.effect("only exposes interruptible runs through the shell activeRunId", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:projection-shell-interruptible");
+      const projectId = ProjectId.make("project:projection-shell-interruptible");
+      const runId = RunId.make("run:projection-shell-interruptible");
+      const rootNodeId = NodeId.make("node:projection-shell-interruptible");
+      const run = {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId: null,
+        userMessageId: MessageId.make("message:projection-shell-interruptible"),
+        rootNodeId,
+        activeAttemptId: null,
+        status: "running" as const,
+        requestedAt: now,
+        startedAt: now,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-shell-interruptible:thread"),
+        type: "thread.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId,
+          title: "Interruptible shell run",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: {
+            parentThreadId: null,
+            relationshipToParent: null,
+            rootThreadId: threadId,
+          },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-shell-interruptible:running"),
+        type: "run.created",
+        threadId,
+        runId,
+        nodeId: rootNodeId,
+        driver,
+        occurredAt: now,
+        payload: run,
+      });
+
+      let shell = (yield* projectionStore.getShellSnapshot()).threads.find(
+        (thread) => thread.id === threadId,
+      );
+      assert.equal(shell?.status, "running");
+      assert.equal(shell?.activeRunId, runId);
+      assert.equal(
+        shell?.latestRunRequestedAt && DateTime.toEpochMillis(shell.latestRunRequestedAt),
+        DateTime.toEpochMillis(now),
+      );
+      assert.equal(
+        shell?.latestRunStartedAt && DateTime.toEpochMillis(shell.latestRunStartedAt),
+        DateTime.toEpochMillis(now),
+      );
+      assert.isNull(shell?.latestRunCompletedAt);
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-shell-interruptible:waiting"),
+        type: "run.updated",
+        threadId,
+        runId,
+        nodeId: rootNodeId,
+        driver,
+        occurredAt: now,
+        payload: { ...run, status: "waiting" },
+      });
+
+      shell = (yield* projectionStore.getShellSnapshot()).threads.find(
+        (thread) => thread.id === threadId,
+      );
+      assert.equal(shell?.status, "waiting");
+      assert.isNull(shell?.activeRunId);
+    }),
+  );
+
   it.effect("projects one shared provider session into multiple thread bindings", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStoreV2;
@@ -72,19 +291,20 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
         archivedAt: null,
         settledOverride: null,
         settledAt: null,
+        lastVisitedAt: null,
         deletedAt: null,
       });
       const session = {
         id: providerSessionId,
         driver,
         providerInstanceId,
-        status: "ready" as const,
+        status: "error" as const,
         cwd: "/workspace",
         model: modelSelection.model,
         capabilities: CodexProviderCapabilitiesV2,
         createdAt: now,
         updatedAt: now,
-        lastError: null,
+        lastError: "provider process exited",
       };
 
       yield* projectionStore.apply({
@@ -127,6 +347,18 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
           (value) => value.id,
         ),
         [providerSessionId],
+      );
+      assert.deepEqual(
+        (yield* projectionStore.getShellSnapshot()).threads
+          .filter((thread) => thread.id === firstThreadId || thread.id === secondThreadId)
+          .map((thread) => ({
+            id: thread.id,
+            lastError: thread.lastError,
+          })),
+        [
+          { id: firstThreadId, lastError: "provider process exited" },
+          { id: secondThreadId, lastError: "provider process exited" },
+        ],
       );
 
       yield* projectionStore.apply({
@@ -188,6 +420,7 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
           archivedAt: null,
           settledOverride: null,
           settledAt: null,
+          lastVisitedAt: null,
           deletedAt: null,
         },
       });
@@ -267,6 +500,158 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect("counts imported runless history inherited by fork shells", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const projectId = ProjectId.make("project:projection-imported-fork-shell");
+      const sourceThreadId = ThreadId.make("thread:projection-imported-fork-shell:source");
+      const targetThreadId = ThreadId.make("thread:projection-imported-fork-shell:target");
+      const sourceRunId = RunId.make("run:projection-imported-fork-shell:source");
+      const rootNodeId = NodeId.make("node:projection-imported-fork-shell:source");
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-imported-fork-shell:source-thread"),
+        type: "thread.created",
+        threadId: sourceThreadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "system",
+          creationSource: "server",
+          id: sourceThreadId,
+          projectId,
+          title: "Imported fork source",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          historyOrigin: "v1_import",
+          lineage: {
+            parentThreadId: null,
+            relationshipToParent: null,
+            rootThreadId: sourceThreadId,
+          },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-imported-fork-shell:target-thread"),
+        type: "thread.created",
+        threadId: targetThreadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: targetThreadId,
+          projectId,
+          title: "Imported fork target",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: {
+            parentThreadId: sourceThreadId,
+            relationshipToParent: "fork",
+            rootThreadId: sourceThreadId,
+          },
+          forkedFrom: {
+            type: "run",
+            threadId: sourceThreadId,
+            runId: sourceRunId,
+          },
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-imported-fork-shell:source-run"),
+        type: "run.created",
+        threadId: sourceThreadId,
+        runId: sourceRunId,
+        nodeId: rootNodeId,
+        driver,
+        occurredAt: now,
+        payload: {
+          id: sourceRunId,
+          threadId: sourceThreadId,
+          ordinal: 1,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId: null,
+          userMessageId: MessageId.make("message:projection-imported-fork-shell:run"),
+          rootNodeId,
+          activeAttemptId: null,
+          status: "completed",
+          requestedAt: now,
+          startedAt: now,
+          completedAt: now,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      });
+
+      const applyAssistantItem = (suffix: string, runId: RunId | null, ordinal: number) =>
+        projectionStore.apply({
+          id: EventId.make(`event:projection-imported-fork-shell:item:${suffix}`),
+          type: "turn-item.updated",
+          threadId: sourceThreadId,
+          ...(runId === null ? {} : { runId }),
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`turn-item:projection-imported-fork-shell:${suffix}`),
+            threadId: sourceThreadId,
+            runId,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "assistant_message",
+            messageId: MessageId.make(`message:projection-imported-fork-shell:${suffix}`),
+            text: suffix,
+            streaming: false,
+          },
+        });
+
+      yield* applyAssistantItem("imported-one", null, 1);
+      yield* applyAssistantItem("imported-two", null, 2);
+      yield* applyAssistantItem("native-run", sourceRunId, 3);
+
+      const shell = yield* projectionStore.getShellSnapshot();
+      const targetShell = shell.threads.find((thread) => thread.id === targetThreadId);
+      const targetProjection = yield* projectionStore.getThreadProjection(targetThreadId);
+
+      assert.isDefined(targetShell);
+      assert.equal(targetShell.itemCount, 0);
+      assert.equal(targetShell.visibleItemCount, 4);
+      assert.equal(targetProjection.visibleTurnItems.length, 4);
+    }),
+  );
+
   it.effect("removes rolled back runs from the active visible projection", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStoreV2;
@@ -313,6 +698,7 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
           archivedAt: null,
           settledOverride: null,
           settledAt: null,
+          lastVisitedAt: null,
           deletedAt: null,
         },
       });
@@ -687,6 +1073,7 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
           archivedAt: null,
           settledOverride: null,
           settledAt: null,
+          lastVisitedAt: null,
           deletedAt: null,
         },
       });
@@ -723,6 +1110,7 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
           archivedAt: null,
           settledOverride: null,
           settledAt: null,
+          lastVisitedAt: null,
           deletedAt: null,
         },
       });

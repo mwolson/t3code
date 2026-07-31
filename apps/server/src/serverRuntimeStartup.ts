@@ -26,6 +26,7 @@ import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as EffectWorker from "./orchestration-v2/EffectWorker.ts";
+import * as LegacyV1ThreadImporter from "./orchestration-v2/LegacyV1ThreadImporter.ts";
 import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
 import * as ProviderRuntimeRecovery from "./orchestration-v2/ProviderRuntimeRecoveryService.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
@@ -285,22 +286,51 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
     Effect.withSpan(`server.startup.${phase}`),
   );
 
+export const startEffectWorkerWithRelay = Effect.fn(
+  "ServerRuntimeStartup.startEffectWorkerWithRelay",
+)(function* <WorkerContext, RelayContext>(input: {
+  readonly runWorker: Effect.Effect<void, never, WorkerContext>;
+  readonly startRelay: Effect.Effect<void, never, RelayContext>;
+  readonly workerFiberRef: Ref.Ref<Fiber.Fiber<void, never> | null>;
+}) {
+  const workerFiber = yield* input.runWorker.pipe(Effect.forkScoped);
+  yield* Ref.set(input.workerFiberRef, workerFiber);
+  yield* input.startRelay.pipe(
+    Effect.onExit((exit) => {
+      if (Exit.isSuccess(exit)) {
+        return Effect.void;
+      }
+      return Ref.getAndSet(input.workerFiberRef, null).pipe(
+        Effect.flatMap((ownedWorkerFiber) =>
+          ownedWorkerFiber === null
+            ? Effect.void
+            : Fiber.interrupt(ownedWorkerFiber).pipe(Effect.asVoid),
+        ),
+      );
+    }),
+  );
+});
+
 export function runOrderedV2StartupPhases<
+  Import,
   Verification extends { readonly valid: boolean },
   RebuildVerification extends { readonly valid: boolean },
   Recovery,
   Bootstrap,
+  ImportError,
   VerifyError,
   RebuildError,
   RecoveryError,
   WorkerError,
   BootstrapError,
+  ImportContext,
   VerifyContext,
   RebuildContext,
   RecoveryContext,
   WorkerContext,
   BootstrapContext,
 >(input: {
+  readonly importLegacyShells: Effect.Effect<Import, ImportError, ImportContext>;
   readonly verify: Effect.Effect<Verification, VerifyError, VerifyContext>;
   readonly rebuild: Effect.Effect<RebuildVerification, RebuildError, RebuildContext>;
   readonly recover: Effect.Effect<Recovery, RecoveryError, RecoveryContext>;
@@ -308,6 +338,7 @@ export function runOrderedV2StartupPhases<
   readonly autoBootstrap: Effect.Effect<Bootstrap, BootstrapError, BootstrapContext>;
 }) {
   return Effect.gen(function* () {
+    yield* input.importLegacyShells;
     const verification = yield* input.verify;
     if (!verification.valid) {
       const rebuilt = yield* input.rebuild;
@@ -328,6 +359,7 @@ export const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const keybindings = yield* Keybindings.Keybindings;
   const projectionMaintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+  const legacyV1ThreadImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const providerRuntimeRecovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
@@ -401,7 +433,28 @@ export const make = Effect.gen(function* () {
 
     const welcomeBase = yield* resolveWelcomeBase;
     const environment = yield* serverEnvironment.getDescriptor;
+    const legacyMigrationThreadCount = yield* legacyV1ThreadImporter.pendingThreadCount;
+    if (legacyMigrationThreadCount > 0) {
+      yield* lifecycleEvents.publish({
+        version: 1,
+        type: "legacyThreadMigration",
+        payload: {
+          status: "running",
+          totalThreadCount: legacyMigrationThreadCount,
+        },
+      });
+    }
     const { recovery, bootstrap: bootstrapTargets } = yield* runOrderedV2StartupPhases({
+      importLegacyShells: runStartupPhase(
+        "orchestration-v2.legacy-v1.import-shells",
+        legacyV1ThreadImporter.reconcileShells.pipe(
+          Effect.tap((summary) =>
+            summary.importedThreadCount === 0
+              ? Effect.void
+              : Effect.logInfo("Imported legacy v1 thread shells", summary),
+          ),
+        ),
+      ),
       verify: runStartupPhase(
         "orchestration-v2.projections.verify",
         projectionMaintenance.verify.pipe(
@@ -429,10 +482,10 @@ export const make = Effect.gen(function* () {
       recover: runStartupPhase("orchestration-v2.recovery", providerRuntimeRecovery.recover),
       startEffectWorker: runStartupPhase(
         "orchestration-v2.effect-worker.start",
-        Effect.gen(function* () {
-          const workerFiber = yield* EffectWorker.runDaemon.pipe(Effect.forkScoped);
-          yield* Ref.set(effectWorkerFiber, workerFiber);
-          yield* agentAwarenessRelay.start();
+        startEffectWorkerWithRelay({
+          runWorker: EffectWorker.runDaemon,
+          startRelay: agentAwarenessRelay.start(),
+          workerFiberRef: effectWorkerFiber,
         }),
       ),
       autoBootstrap: (serverConfig.autoBootstrapProjectFromCwd
@@ -447,6 +500,53 @@ export const make = Effect.gen(function* () {
 
     yield* Effect.logDebug("Accepting commands");
     yield* commandGate.signalCommandReady;
+    const importPendingTranscripts = legacyV1ThreadImporter.importPendingTranscripts.pipe(
+      Effect.tap((summary) =>
+        summary.importedThreadCount === 0
+          ? Effect.void
+          : Effect.logInfo("Hydrated legacy v1 thread transcripts", summary),
+      ),
+    );
+    yield* (
+      legacyMigrationThreadCount > 0
+        ? importPendingTranscripts.pipe(
+            Effect.tap(() =>
+              lifecycleEvents.publish({
+                version: 1,
+                type: "legacyThreadMigration",
+                payload: {
+                  status: "complete",
+                  totalThreadCount: legacyMigrationThreadCount,
+                },
+              }),
+            ),
+          )
+        : importPendingTranscripts
+    ).pipe(Effect.forkScoped);
+
+    // Off the startup path: the first run after an upgrade deletes the whole
+    // superseded-event and legacy-v1 backlog (potentially millions of rows,
+    // paced in small batches), and nothing at boot depends on it.
+    yield* projectionMaintenance.compactEventStore.pipe(
+      Effect.tap((summary) =>
+        summary.deletedEventCount === 0 && summary.deletedReceiptCount === 0
+          ? Effect.void
+          : Effect.logInfo("Compacted orchestration event store", summary),
+      ),
+      Effect.tap((summary) =>
+        // Freed pages are reused, so the file stops growing regardless; only
+        // an offline VACUUM shrinks it, which is not safe to run on the
+        // synchronous sqlite connection while serving.
+        summary.reclaimableBytes >= 512 * 1024 * 1024
+          ? Effect.logInfo(
+              "state.sqlite has substantial reclaimable free space; an offline VACUUM would shrink the file",
+              { reclaimableBytes: summary.reclaimableBytes },
+            )
+          : Effect.void,
+      ),
+      Effect.catch((cause) => Effect.logWarning("Unable to compact the event store", { cause })),
+      Effect.forkScoped,
+    );
 
     yield* Effect.logDebug("startup phase: publishing welcome event", {
       environmentId: environment.environmentId,

@@ -7,11 +7,14 @@ import { LayoutAnimation, Pressable, useColorScheme, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { T3_CODE_BRAND_MARK_SOURCE } from "../../components/brandAssets";
+import { scaledTypographyLineHeight } from "../../lib/appearancePreferences";
 import { cn } from "../../lib/cn";
 import type { ThreadFeedActivity } from "../../lib/threadActivity";
+import { MOBILE_TYPOGRAPHY } from "../../lib/typography";
 import Animated, { FadeIn } from "react-native-reanimated";
 import { useV2ItemSupport } from "../../state/v2-item-support";
 import { ThreadActivityInspector } from "./ThreadActivityInspector";
+import { threadWorkLogOverflowNoun } from "./thread-work-log-labels";
 
 const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
 const WORK_LOG_LAYOUT_ANIMATION = {
@@ -165,6 +168,46 @@ function isFreshRow(createdAt: string): boolean {
   return Number.isFinite(timestamp) && Date.now() - timestamp < FRESH_ROW_WINDOW_MS;
 }
 
+// Tool-like activities with a neutral status carry no signal worth a row.
+export function visibleWorkLogActivities(
+  activities: ReadonlyArray<ThreadFeedActivity>,
+): ReadonlyArray<ThreadFeedActivity> {
+  return activities.filter((activity) => !(activity.toolLike && activity.status === "neutral"));
+}
+
+// Pre-measurement heights for the feed's getFixedItemSize. Collapsed work-log
+// rows are single-line (numberOfLines={1}) inside a min-height that stays
+// taller than the text at every supported base font size (text-xs reaches
+// 23px at the 22pt maximum, under the 32px min-h-8), so row height is
+// deterministic. The "work log" label has no such clamp — its height follows
+// the scaled text-2xs line height. Values mirror the classNames below — keep
+// them in sync; a mismatch only costs a one-time correction on measure.
+const WORK_ROW_HEIGHT = 32; // min-h-8
+const WORK_ROW_GAP = 1; // gap-px
+const WORK_LOG_HEADER_PADDING = 2; // pb-0.5 under the "work log" label
+const WORK_LOG_BOTTOM_MARGIN = 4; // mb-1
+
+export const WORK_GROUP_TOGGLE_HEIGHT = 36; // min-h-8 (32) + mb-1 (4)
+
+export function collapsedWorkLogHeight(
+  activities: ReadonlyArray<ThreadFeedActivity>,
+  baseFontSize: number,
+): number {
+  const rows = visibleWorkLogActivities(activities);
+  if (rows.length === 0) {
+    return 0;
+  }
+  const onlyToolRows = rows.every((row) => row.toolLike);
+  const headerHeight =
+    scaledTypographyLineHeight(MOBILE_TYPOGRAPHY.caption, baseFontSize) + WORK_LOG_HEADER_PADDING;
+  return (
+    WORK_LOG_BOTTOM_MARGIN +
+    (onlyToolRows ? 0 : headerHeight) +
+    rows.length * WORK_ROW_HEIGHT +
+    (rows.length - 1) * WORK_ROW_GAP
+  );
+}
+
 export function ThreadWorkLog(props: {
   readonly activities: ReadonlyArray<ThreadFeedActivity>;
   readonly copiedRowId: string | null;
@@ -180,7 +223,10 @@ export function ThreadWorkLog(props: {
 }) {
   const colorScheme = useColorScheme();
   const pressedBackground = colorScheme === "dark" ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.035)";
-  const rows = props.activities;
+  const rows = visibleWorkLogActivities(props.activities).map((activity) => ({
+    ...activity,
+    detail: compactActivityDetail(activity.detail),
+  }));
 
   if (rows.length === 0) {
     return null;
@@ -191,6 +237,7 @@ export function ThreadWorkLog(props: {
     hasOverflow && !props.expanded ? rows.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES) : rows;
   const hiddenCount = rows.length - visibleRows.length;
   const onlyToolRows = rows.every((row) => row.toolLike);
+  const overflowNoun = threadWorkLogOverflowNoun(onlyToolRows, hiddenCount);
 
   return (
     <View className="-mx-1 mb-3 px-1 py-0.5">
@@ -203,7 +250,7 @@ export function ThreadWorkLog(props: {
       <View className="gap-px">
         {visibleRows.map((row) => {
           const expanded = props.expandedRows[row.id] ?? false;
-          const canExpand = row.fullDetail !== null;
+          const canExpand = row.canExpand;
           const detail = compactActivityDetail(row.detail);
           const displayText = detail ? `${row.summary} ${detail}` : row.summary;
           const textIsDestructive = row.icon === "alert" || row.icon === "warning";
@@ -233,7 +280,7 @@ export function ThreadWorkLog(props: {
                     props.onToggleRow(row.id);
                   }
                 }}
-                onLongPress={() => props.onCopyRow(row.id, row.copyText)}
+                onLongPress={() => props.onCopyRow(row.id, row.getCopyText())}
                 style={({ pressed }) => ({
                   backgroundColor: pressed ? pressedBackground : "transparent",
                 })}
@@ -298,7 +345,7 @@ export function ThreadWorkLog(props: {
                 </View>
               </Pressable>
 
-              {expanded && row.fullDetail ? (
+              {expanded && canExpand ? (
                 <View className="ml-7 border-l border-neutral-300/60 pb-1.5 pl-3 pt-0.5 dark:border-white/[0.12]">
                   <ThreadActivityInspector
                     activity={row}
@@ -327,8 +374,8 @@ export function ThreadWorkLog(props: {
           accessibilityState={{ expanded: props.expanded }}
           accessibilityLabel={
             props.expanded
-              ? "Show fewer tool calls"
-              : `Show ${hiddenCount} previous tool ${hiddenCount === 1 ? "call" : "calls"}`
+              ? `Show fewer ${overflowNoun}`
+              : `Show ${hiddenCount} previous ${overflowNoun}`
           }
           hitSlop={4}
           onPress={() => {
@@ -350,8 +397,8 @@ export function ThreadWorkLog(props: {
           </View>
           <Text className="font-t3-medium text-xs text-foreground opacity-80">
             {props.expanded
-              ? "Show fewer tool calls"
-              : `+${hiddenCount} previous tool ${hiddenCount === 1 ? "call" : "calls"}`}
+              ? `Show fewer ${overflowNoun}`
+              : `+${hiddenCount} previous ${overflowNoun}`}
           </Text>
         </Pressable>
       ) : null}
@@ -368,13 +415,7 @@ export function ThreadWorkGroupToggle(props: {
 }) {
   const colorScheme = useColorScheme();
   const pressedBackground = colorScheme === "dark" ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.035)";
-  const noun = props.onlyToolActivities
-    ? props.hiddenCount === 1
-      ? "tool call"
-      : "tool calls"
-    : props.hiddenCount === 1
-      ? "log entry"
-      : "log entries";
+  const noun = threadWorkLogOverflowNoun(props.onlyToolActivities, props.hiddenCount);
 
   return (
     <View className="-mx-1 mb-1 px-1">

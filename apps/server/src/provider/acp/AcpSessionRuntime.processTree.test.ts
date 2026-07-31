@@ -392,6 +392,29 @@ describe("terminatePosixOwnedProcessTree", () => {
     }),
   );
 
+  it.live("reports persistent retryable removal failures as removal failures", () =>
+    Effect.gen(function* () {
+      const removeError = Object.assign(new Error("cgroup remains busy"), {
+        code: "EBUSY",
+      });
+      const lease: AcpLinuxCgroupLease = {
+        contains: () => false,
+        exists: () => true,
+        path: "/test/t3-acp-busy",
+        relativePath: "/test/t3-acp-busy",
+        kill: () => undefined,
+        populated: () => false,
+        remove: () => {
+          throw removeError;
+        },
+      };
+
+      const error = yield* Effect.flip(terminateLinuxCgroupLease(lease));
+      expect(error.detail).toBe("Failed to remove ACP cgroup /test/t3-acp-busy");
+      expect(error.cause).toBe(removeError);
+    }),
+  );
+
   it("sends TERM only to the exact captured root while it remains in the child cgroup", () => {
     const fixture = makeController({
       processes: [server(), identity(100, process.pid, 100, 100, "owned")],
@@ -952,6 +975,43 @@ describe("terminatePosixOwnedProcessTree", () => {
       expect(forked).toBe(true);
       expect(fixture.processes.has(112)).toBe(false);
       expect(fixture.signals.some((entry) => entry.startsWith("process:112:"))).toBe(true);
+    }),
+  );
+
+  it.live("detects an owned child first observed in the final survivor snapshot", () =>
+    Effect.gen(function* () {
+      const lateChild = identity(111, 110, 111, 111);
+      const fixture = makeController({
+        processes: [server(), identity(100, process.pid, 100, 100), identity(110, 100, 110, 110)],
+        onProcess: (processes, pid) => {
+          // Leave the descendant parent alive through teardown so it can fork
+          // immediately after the last signal pass.
+          if (pid !== 110) processes.delete(pid);
+        },
+      });
+      let snapshotCalls = 0;
+      const controller: AcpPosixProcessTreeController = {
+        ...fixture.controller,
+        snapshot: () => {
+          snapshotCalls += 1;
+          // Two TERM discovery passes, the root TERM pass, and two KILL passes
+          // precede the final survivor snapshot.
+          if (snapshotCalls === 6) fixture.processes.set(lateChild.pid, lateChild);
+          return fixture.controller.snapshot();
+        },
+      };
+
+      const error = yield* Effect.flip(
+        terminatePosixOwnedProcessTree({
+          controller,
+          discoveryPasses: 2,
+          grace: 0,
+          rootPid: 100,
+        }),
+      );
+
+      expect(snapshotCalls).toBe(6);
+      expect(error.detail).toContain("110, 111");
     }),
   );
 

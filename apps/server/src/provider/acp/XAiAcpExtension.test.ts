@@ -241,6 +241,42 @@ describe("XAiAcpExtension", () => {
     });
   });
 
+  it("does not treat a subagent_id mentioned in result text as the completed identity", () => {
+    const requestedTaskId = "019f44a6-4820-7402-925d-bc862ee711dd";
+    const mentionedTaskId = "019f44b0-1b73-7f32-bb1b-1ff696f536e3";
+    const toolCall = {
+      toolCallId: "call-get-mentioned-id",
+      title: "get_command_or_subagent_output",
+      status: "completed" as const,
+      data: {
+        rawInput: {
+          variant: "TaskOutput",
+          task_ids: [requestedTaskId],
+        },
+        rawOutput: {
+          type: "TaskOutput",
+          Result: {
+            status: "completed",
+            exit_code: 0,
+            output: `Audited subagent_id: ${mentionedTaskId}; no issues found.`,
+          },
+        },
+      },
+    };
+
+    expect(extractXAiAcpSubagentUpdate(toolCall)).toMatchObject({
+      childSessionId: requestedTaskId,
+      status: "completed",
+    });
+    expect(extractXAiBackgroundTaskCompletion(toolCall)).toEqual([
+      {
+        taskId: requestedTaskId,
+        status: "completed",
+        appendOutput: `Audited subagent_id: ${mentionedTaskId}; no issues found.`,
+      },
+    ]);
+  });
+
   it("hydrates structured ACP TaskOutput tool envelopes", () => {
     expect(
       extractXAiAcpSubagentUpdate({
@@ -337,6 +373,29 @@ describe("XAiAcpExtension", () => {
     };
     expect(normalizeXAiAcpToolCallState(toolCall).status).toBe("inProgress");
     expect(extractXAiMonitorTaskId(toolCall)).toBe("019f44a5-87d1-7640-8e35-6a4667ffc873");
+  });
+
+  it("tracks text Monitor ACKs with generic titles and description-only input", () => {
+    const toolCall = {
+      toolCallId: "call-mon-generic-text",
+      title: "Tool",
+      status: "completed" as const,
+      data: {
+        rawInput: {
+          command: "echo mon_line_1",
+          description: "Demo monitor without variant",
+        },
+        rawOutput: {
+          type: "Text",
+          text: "Monitor started (task 019f44a5-87d1-7640-8e35-6a4667ffc873, timeout 36000000ms).\nYou will be notified on each event.",
+        },
+      },
+    };
+
+    const normalized = normalizeXAiAcpToolCallState(toolCall);
+    expect(isXAiMonitorTool(normalized)).toBe(true);
+    expect(normalized.status).toBe("inProgress");
+    expect(extractXAiMonitorTaskId(normalized)).toBe("019f44a5-87d1-7640-8e35-6a4667ffc873");
   });
 
   it("completes Monitor variant tools from structured Bash exit codes", () => {
@@ -605,6 +664,42 @@ describe("XAiAcpExtension", () => {
     ]);
   });
 
+  it("keeps every requested monitor running when a completed poll has no terminal task status", () => {
+    expect(
+      extractXAiBackgroundTaskCompletion({
+        toolCallId: "call-get-running-monitors",
+        title: "get_command_or_subagent_output",
+        status: "completed",
+        data: {
+          rawInput: {
+            variant: "TaskOutput",
+            task_ids: [
+              "019f44a6-4820-7402-925d-bc862ee711dd",
+              "019f44b0-1b73-7f32-bb1b-1ff696f536e3",
+            ],
+          },
+          rawOutput: {
+            type: "TaskOutput",
+            Result: {
+              output: "No task has reached a terminal state.",
+            },
+          },
+        },
+      }),
+    ).toEqual([
+      {
+        taskId: "019f44a6-4820-7402-925d-bc862ee711dd",
+        status: "running",
+        appendOutput: "No task has reached a terminal state.",
+      },
+      {
+        taskId: "019f44b0-1b73-7f32-bb1b-1ff696f536e3",
+        status: "running",
+        appendOutput: "No task has reached a terminal state.",
+      },
+    ]);
+  });
+
   it("treats Exit Code: -1 text envelopes as failed", () => {
     expect(
       extractXAiBackgroundTaskCompletion({
@@ -630,7 +725,7 @@ describe("XAiAcpExtension", () => {
     ]);
   });
 
-  it("tombstones tasks the model kills via kill_command_or_subagent", () => {
+  it("tombstones confirmed kills and ignores failed kill calls", () => {
     expect(
       extractXAiKilledBackgroundTasks({
         toolCallId: "call-kill-1",
@@ -655,7 +750,7 @@ describe("XAiAcpExtension", () => {
         status: "failed",
         data: { rawInput: { variant: "kill", task_id: "call-bg-3" } },
       }),
-    ).toEqual([{ taskId: "call-bg-3", status: "completed", appendOutput: "" }]);
+    ).toEqual([]);
     // In-flight kill calls and unrelated tools contribute nothing.
     expect(
       extractXAiKilledBackgroundTasks({
@@ -1515,6 +1610,46 @@ describe("XAiAcpExtension", () => {
         promptId: capturedMeta?.promptId,
         requestId: capturedMeta?.promptId,
       });
+    }),
+  );
+
+  it.effect("cancels pending completions without restarting a stalled runtime", () =>
+    Effect.gen(function* () {
+      const hungStart = yield* Deferred.make<never>();
+      const hungPrompt = yield* Deferred.make<never>();
+      let startCount = 0;
+      let cancelCalled = false;
+      const baseRuntime = {
+        start: () => {
+          startCount += 1;
+          return startCount === 1
+            ? Effect.succeed({
+                sessionId: "root-session",
+                initializeResult: {},
+                sessionSetupResult: {},
+                modelConfigId: undefined,
+              })
+            : Deferred.await(hungStart);
+        },
+        prompt: () => Deferred.await(hungPrompt),
+        cancel: Effect.sync(() => {
+          cancelCalled = true;
+        }),
+        handleExtNotification: () => Effect.void,
+        handleExtRequest: () => Effect.void,
+      } as unknown as AcpSessionRuntime.AcpSessionRuntime["Service"];
+
+      const runtime = yield* makeXAiPromptCompletionRuntime(baseRuntime);
+      const promptFiber = yield* runtime
+        .prompt({ prompt: [{ type: "text", text: "hi" }] })
+        .pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+
+      yield* runtime.cancel;
+
+      expect(cancelCalled).toBe(true);
+      expect(startCount).toBe(1);
+      expect((yield* Fiber.join(promptFiber)).stopReason).toBe("cancelled");
     }),
   );
 });

@@ -39,8 +39,9 @@ export interface ThreadFeedActivity {
   readonly runId: RunId | null;
   readonly summary: string;
   readonly detail: string | null;
-  readonly fullDetail: string | null;
-  readonly copyText: string;
+  readonly canExpand: boolean;
+  readonly getFullDetail: () => string | null;
+  readonly getCopyText: () => string;
   readonly icon:
     | "agent"
     | "alert"
@@ -150,6 +151,18 @@ function resolvePendingUserInputAnswer(
 function capitalizePhrase(value: string): string {
   const trimmed = value.trim();
   return trimmed.length === 0 ? value : `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
+}
+
+function memoizeValue<T>(build: () => T): () => T {
+  let value: T;
+  let initialized = false;
+  return () => {
+    if (!initialized) {
+      value = build();
+      initialized = true;
+    }
+    return value;
+  };
 }
 
 function itemIsToolLike(item: OrchestrationV2TurnItem): boolean {
@@ -324,15 +337,25 @@ function toFeedActivity(row: OrchestrationV2ProjectedTurnItem): ThreadFeedActivi
   const toolPresentation = itemToolPresentation(item);
   const summary = itemSummary(item, toolPresentation);
   const detail = itemPreview(item);
-  const fullDetail = JSON.stringify(
-    {
-      visibility: row.visibility,
-      sourceThreadId: row.sourceThreadId,
-      sourceItemId: row.sourceItemId,
-      item,
-    },
-    null,
-    2,
+  const getFullDetail = memoizeValue(() =>
+    JSON.stringify(
+      {
+        visibility: row.visibility,
+        sourceThreadId: row.sourceThreadId,
+        sourceItemId: row.sourceItemId,
+        item,
+      },
+      null,
+      2,
+    ),
+  );
+  const getCopyText = memoizeValue(() =>
+    [summary, detail, getFullDetail()]
+      .filter(
+        (value, index, values): value is string =>
+          Boolean(value) && values.indexOf(value) === index,
+      )
+      .join("\n"),
   );
   return {
     id: `${row.visibility}:${row.sourceThreadId}:${row.sourceItemId}`,
@@ -340,15 +363,11 @@ function toFeedActivity(row: OrchestrationV2ProjectedTurnItem): ThreadFeedActivi
     runId: item.runId,
     summary,
     detail,
-    fullDetail,
+    canExpand: true,
+    getFullDetail,
+    getCopyText,
     icon: itemIcon(item),
     logo: toolPresentation?.logo ?? null,
-    copyText: [summary, detail, fullDetail]
-      .filter(
-        (value, index, values): value is string =>
-          Boolean(value) && values.indexOf(value) === index,
-      )
-      .join("\n"),
     toolLike: itemIsToolLike(item),
     prominent: itemIsProminent(item),
     status: itemStatus(item),
@@ -366,31 +385,40 @@ function isEmptyMessage(entry: RawThreadFeedEntry): boolean {
 
 function groupAdjacentActivities(entries: ReadonlyArray<RawThreadFeedEntry>): ThreadFeedEntry[] {
   const grouped: ThreadFeedEntry[] = [];
+  // Mutable backing array for the trailing group so appending an activity is
+  // O(1) instead of re-copying the group (which made this loop quadratic on
+  // long tool runs). The array is only mutated while it is the trailing group.
+  let openGroupActivities: ThreadFeedActivity[] | null = null;
+  let openGroupRunId: string | null = null;
+  let openGroupHasProminent = false;
+
   for (const entry of entries) {
     if (isEmptyMessage(entry)) continue;
     if (entry.type !== "activity") {
       grouped.push(entry);
+      openGroupActivities = null;
       continue;
     }
-    const previous = grouped.at(-1);
+
     if (
-      previous?.type === "activity-group" &&
-      previous.runId === entry.runId &&
+      openGroupActivities !== null &&
+      openGroupRunId === entry.runId &&
       !entry.activity.prominent &&
-      !previous.activities.some((activity) => activity.prominent)
+      !openGroupHasProminent
     ) {
-      grouped[grouped.length - 1] = {
-        ...previous,
-        activities: [...previous.activities, entry.activity],
-      };
+      openGroupActivities.push(entry.activity);
       continue;
     }
+
+    openGroupActivities = [entry.activity];
+    openGroupRunId = entry.runId;
+    openGroupHasProminent = entry.activity.prominent === true;
     grouped.push({
       type: "activity-group",
       id: entry.id,
       createdAt: entry.createdAt,
       runId: entry.runId,
-      activities: [entry.activity],
+      activities: openGroupActivities,
     });
   }
   return grouped;
@@ -409,14 +437,19 @@ function maxIsoTimestamp(left: string | null, right: string | null): string | nu
 }
 
 function unsettledRunId(latestRun: ThreadFeedLatestRun | null): RunId | null {
-  if (!latestRun) return null;
-  return latestRun.completedAt === null ||
-    latestRun.status === "preparing" ||
-    latestRun.status === "starting" ||
-    latestRun.status === "running" ||
-    latestRun.status === "waiting"
-    ? latestRun.runId
-    : null;
+  return threadFeedRunIsUnsettled(latestRun) ? latestRun.runId : null;
+}
+
+export function threadFeedRunIsUnsettled(
+  run: ThreadFeedLatestRun | null,
+): run is ThreadFeedLatestRun {
+  return (
+    run !== null &&
+    (run.status === "preparing" ||
+      run.status === "starting" ||
+      run.status === "running" ||
+      run.status === "waiting")
+  );
 }
 
 interface ThreadFeedRunFold {
@@ -647,12 +680,13 @@ export function buildPendingUserInputAnswers(
 export function buildThreadFeed(
   visibleTurnItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
 ): ThreadFeedEntry[] {
-  const entries = visibleTurnItems.map((row): RawThreadFeedEntry => {
+  const entries: RawThreadFeedEntry[] = [];
+  for (const row of visibleTurnItems) {
     const item = row.item;
     const createdAt = DateTime.formatIso(item.startedAt ?? item.updatedAt);
     if (item.type === "user_message" || item.type === "assistant_message") {
       const updatedAt = DateTime.formatIso(item.updatedAt);
-      return {
+      entries.push({
         type: "message",
         id: item.messageId,
         createdAt,
@@ -676,16 +710,17 @@ export function buildThreadFeed(
           updatedAt,
           projectedItem: row,
         },
-      };
+      });
+      continue;
     }
     const activity = toFeedActivity(row);
-    return {
+    entries.push({
       type: "activity",
       id: activity.id,
       createdAt,
       runId: item.runId,
       activity,
-    };
-  });
+    });
+  }
   return groupAdjacentActivities(entries);
 }

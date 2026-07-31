@@ -190,6 +190,7 @@ export function isLatestRunSettled(
   if (latestRun === null) return false;
   if (
     latestRun.status === "preparing" ||
+    latestRun.status === "queued" ||
     latestRun.status === "starting" ||
     latestRun.status === "running" ||
     latestRun.status === "waiting"
@@ -380,6 +381,39 @@ function projectedWorkEntryTone(item: OrchestrationV2TurnItem): WorkLogEntry["to
   }
 }
 
+export function providerErrorPresentation(
+  item: Extract<OrchestrationV2TurnItem, { readonly type: "error" }>,
+): { readonly label: string; readonly detail: string } {
+  if (item.retry === undefined) {
+    return {
+      label: item.title?.trim() || "Provider error",
+      detail: item.failure.message,
+    };
+  }
+  const progress =
+    item.retry.maxAttempts === null
+      ? `${item.retry.attempt}`
+      : `${item.retry.attempt}/${item.retry.maxAttempts}`;
+  const label =
+    item.status === "running"
+      ? `Retrying provider (${progress})`
+      : item.status === "completed"
+        ? `Provider recovered (${progress} retries)`
+        : item.status === "failed"
+          ? `Provider error after ${progress} retries`
+          : `Provider retry stopped (${progress})`;
+  const retryDelay =
+    item.status === "running" && item.retry.retryDelayMs !== null && item.retry.retryDelayMs > 0
+      ? item.retry.retryDelayMs < 1_000
+        ? ` Retrying in ${item.retry.retryDelayMs}ms.`
+        : ` Retrying in ${(item.retry.retryDelayMs / 1_000).toFixed(1).replace(/\.0$/u, "")}s.`
+      : "";
+  return {
+    label,
+    detail: `${item.failure.message}${retryDelay}`,
+  };
+}
+
 function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry {
   const { item } = row;
   const title = item.title?.trim() || null;
@@ -411,15 +445,17 @@ function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry
         toolTitle: title ?? "Command",
         toolData: item,
       };
-    case "file_change":
+    case "file_change": {
+      const detail = item.diffStr ?? item.newStr;
       return {
         ...common,
         label: title ?? `Changed ${item.fileName}`,
         changedFiles: [item.fileName],
-        ...(item.diffStr ? { detail: item.diffStr } : {}),
+        ...(detail ? { detail } : {}),
         toolTitle: title ?? "File change",
         toolData: item,
       };
+    }
     case "file_search":
       return {
         ...common,
@@ -443,13 +479,14 @@ function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry
         changedFiles: item.files.map((file) => file.path),
         toolData: item,
       };
-    case "error":
+    case "error": {
+      const presentation = providerErrorPresentation(item);
       return {
         ...common,
-        label: title ?? "Provider error",
-        detail: item.failure.message,
+        ...presentation,
         toolData: item,
       };
+    }
     case "todo_list": {
       const completed = item.steps.filter((step) => step.status === "completed").length;
       return {
@@ -477,8 +514,9 @@ function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry
 
 /**
  * Builds the web timeline in the exact order committed by `visibleTurnItems`.
- * Committed rows are presented directly from their projected item. Optimistic
- * messages are the only client-owned entries appended to that sequence.
+ * Committed rows are presented directly from their projected item. Queued
+ * input is absent by construction until dispatch creates its user turn item.
+ * Optimistic messages are the only client-owned entries appended afterward.
  */
 export function deriveTimelineEntriesFromVisibleTurnItems(input: {
   readonly visibleTurnItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>;
@@ -486,6 +524,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(input: {
   readonly attachmentUrlById?: ReadonlyMap<string, string>;
   readonly attempts?: ReadonlyArray<OrchestrationV2RunAttempt>;
   readonly nodes?: ReadonlyArray<OrchestrationV2ExecutionNode>;
+  readonly plans?: ReadonlyArray<OrchestrationV2PlanArtifact>;
 }): TimelineEntry[] {
   const committedMessageIds = new Set<string>();
   const entries: TimelineEntry[] = [];
@@ -493,6 +532,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(input: {
     (input.attempts ?? []).map((attempt) => [attempt.rootNodeId, attempt] as const),
   );
   const nodeById = new Map((input.nodes ?? []).map((node) => [node.id, node] as const));
+  const planById = new Map((input.plans ?? []).map((plan) => [plan.id, plan] as const));
 
   const resolveAttempt = (item: OrchestrationV2TurnItem): TimelineAttempt | undefined => {
     if (item.nodeId === null || item.runId === null) return undefined;
@@ -551,11 +591,12 @@ export function deriveTimelineEntriesFromVisibleTurnItems(input: {
     }
 
     if (item.type === "proposed_plan") {
+      const plan = planById.get(item.planId);
       const proposedPlan = {
         id: item.planId,
         runId: item.runId,
         planMarkdown: item.markdown,
-        status: "active" as const,
+        status: plan?.kind === "proposed_plan" ? plan.status : ("active" as const),
         createdAt,
         updatedAt: DateTime.formatIso(item.updatedAt),
       };
@@ -590,7 +631,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(input: {
   }
 
   for (const message of input.optimisticMessages) {
-    if (!committedMessageIds.has(message.id)) {
+    if (message.inputIntent !== "queued_turn" && !committedMessageIds.has(message.id)) {
       entries.push({
         id: message.id,
         kind: "message",

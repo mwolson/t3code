@@ -5,6 +5,7 @@ import {
   type ModelSelection,
   NodeId,
   type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2TurnItem,
@@ -158,6 +159,24 @@ function failure(code: OrchestratorMcpFailure["code"], message: string): Orchest
   return new OrchestratorMcpFailure({ code, message });
 }
 
+function threadManagementFailure(error: ThreadManagementError): OrchestratorMcpFailure {
+  switch (error._tag) {
+    case "ThreadManagementThreadNotFoundError":
+      return failure("thread_not_found", error.message);
+    case "ThreadManagementRunNotFoundError":
+      return failure("run_not_found", error.message);
+    case "ThreadManagementThreadArchivedError":
+    case "ThreadManagementNoSteerableRunError":
+      return failure("thread_not_sendable", error.message);
+    case "ThreadManagementThreadNotInterruptibleError":
+      return failure("thread_not_interruptible", error.message);
+    case "ThreadManagementProjectionLoadError":
+    case "ThreadManagementProjectThreadsListError":
+    case "ThreadManagementDurableRunProjectionError":
+      return failure("orchestration_error", error.message);
+  }
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -277,6 +296,25 @@ function taskStatusForRun(
     case undefined:
       return "running";
   }
+}
+
+function delegatedTaskRun(
+  childProjection: OrchestrationV2ThreadProjection,
+  task: OrchestrationV2Subagent,
+): OrchestrationV2Run | undefined {
+  const spawnTransfer = childProjection.contextTransfers.find(
+    (transfer) =>
+      transfer.type === "subagent_spawn" &&
+      transfer.sourceThreadId === task.threadId &&
+      transfer.targetThreadId === task.childThreadId,
+  );
+  if (spawnTransfer === undefined) {
+    // Legacy delegated-task projections predate the durable spawn transfer.
+    return latestRun(childProjection);
+  }
+  return spawnTransfer.targetRunId === null
+    ? undefined
+    : childProjection.runs.find((run) => run.id === spawnTransfer.targetRunId);
 }
 
 function isTerminalTaskStatus(
@@ -621,11 +659,7 @@ const make = Effect.gen(function* () {
   ): Effect.Effect<OrchestrationV2ThreadProjection, OrchestratorMcpFailure> =>
     threadManagement
       .getProjectThread({ projectId, threadId })
-      .pipe(
-        Effect.mapError(() =>
-          failure("thread_not_found", `Thread ${threadId} was not found in the calling project.`),
-        ),
-      );
+      .pipe(Effect.mapError(threadManagementFailure));
 
   const loadScopedThread = (scope: McpInvocationScope, threadId: ThreadId) =>
     Effect.gen(function* () {
@@ -775,7 +809,7 @@ const make = Effect.gen(function* () {
         );
       }
       const childProjection = yield* loadProjection(task.childThreadId);
-      const childRun = childProjection.runs[0];
+      const childRun = delegatedTaskRun(childProjection, task);
       const status = taskStatusForRun(childRun);
       const derivedResult =
         task.result !== null
@@ -1053,6 +1087,10 @@ const make = Effect.gen(function* () {
             modelSelection: target.modelSelection,
             runtimeMode,
             interactionMode,
+            // Async delegations wake the parent on every child terminal; wait
+            // delegations deliver through the blocking tool call, so a wake is
+            // only needed if the parent settled first (timeout, disconnect).
+            completionWake: input.mode === "wait" ? "settled_only" : "always",
           })
           .pipe(
             Effect.mapError((error) =>
@@ -1072,18 +1110,59 @@ const make = Effect.gen(function* () {
             "Delegated task command did not produce a task projection.",
           );
         }
+        const taskId = taskEvent.event.payload.id;
 
         if (input.mode !== "wait") {
-          return yield* readTask(scope, taskEvent.event.payload.id);
+          return yield* readTask(scope, taskId);
         }
         const timeoutMs = Math.min(
           MAX_WAIT_TIMEOUT_MS,
           Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
         );
-        const waited = yield* waitForTask(scope, taskEvent.event.payload.id, timeoutMs);
-        return Option.isSome(waited)
-          ? waited.value
-          : yield* readTask(scope, taskEvent.event.payload.id, true);
+        const waited = yield* waitForTask(scope, taskId, timeoutMs);
+        if (Option.isSome(waited)) {
+          return waited.value;
+        }
+        // The blocking wait timed out, so it no longer owns delivery: upgrade
+        // the task so a later terminal wakes the parent even mid-turn. Best
+        // effort; on failure the settled_only policy still wakes a settled
+        // parent.
+        yield* threadManagement
+          .dispatch({
+            type: "delegated_task.wake-policy",
+            commandId: stableCommandId({
+              scope,
+              requestKey: key,
+              operation: "delegate-task-wake-policy",
+            }),
+            parentThreadId: scope.threadId,
+            taskId,
+            completionWake: "always",
+          })
+          .pipe(
+            // The tool result is the timed-out task either way, so failures
+            // stay warnings. Keep the two shapes apart: a rejected receipt
+            // means this exact command id already failed (a replay of a
+            // no-op upgrade), while anything else is a fresh dispatch fault.
+            Effect.catch((error) =>
+              Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
+                taskId,
+                outcome:
+                  error._tag === "OrchestratorCommandPreviouslyRejectedError"
+                    ? "previously_rejected"
+                    : "dispatch_failed",
+                error,
+              }),
+            ),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("orchestrator-mcp.delegate-task.wake-policy-failed", {
+                taskId,
+                outcome: "defect",
+                cause,
+              }),
+            ),
+          );
+        return yield* readTask(scope, taskId, true);
       }),
     taskStatus: (scope, taskId) => readTask(scope, taskId),
     cancelTask: (scope, input) =>
@@ -1096,7 +1175,9 @@ const make = Effect.gen(function* () {
           } satisfies OrchestratorMcpTaskCancelResult;
         }
         const child = yield* loadProjection(current.childThreadId);
-        const activeRun = child.runs.find(isActiveRun);
+        const activeRun = child.runs.find(
+          (run) => run.id === current.childRunId && isActiveRun(run),
+        );
         if (activeRun === undefined) {
           return yield* failure(
             "task_not_cancellable",
@@ -1390,10 +1471,12 @@ const make = Effect.gen(function* () {
           })
           .pipe(
             Effect.mapError((error) =>
-              failure(
-                "thread_not_sendable",
-                `Unable to send to thread ${input.threadId}: ${errorMessage(error)}`,
-              ),
+              isThreadManagementError(error)
+                ? threadManagementFailure(error)
+                : failure(
+                    "orchestration_error",
+                    `Unable to send to thread ${input.threadId}: ${errorMessage(error)}`,
+                  ),
             ),
           );
         return {
@@ -1417,14 +1500,7 @@ const make = Effect.gen(function* () {
               Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
             ),
           })
-          .pipe(
-            Effect.mapError((error) =>
-              failure(
-                error.code === "run_not_found" ? "run_not_found" : "orchestration_error",
-                error.message,
-              ),
-            ),
-          );
+          .pipe(Effect.mapError(threadManagementFailure));
         return {
           threadId: input.threadId,
           runId: result.run?.id ?? null,
@@ -1450,14 +1526,12 @@ const make = Effect.gen(function* () {
           })
           .pipe(
             Effect.mapError((error) =>
-              failure(
-                isThreadManagementError(error) && error.code === "run_not_found"
-                  ? "run_not_found"
-                  : "thread_not_interruptible",
-                isThreadManagementError(error)
-                  ? error.message
-                  : `Unable to interrupt thread ${input.threadId}: ${errorMessage(error)}`,
-              ),
+              isThreadManagementError(error)
+                ? threadManagementFailure(error)
+                : failure(
+                    "orchestration_error",
+                    `Unable to interrupt thread ${input.threadId}: ${errorMessage(error)}`,
+                  ),
             ),
           );
         if (result.type === "no_active_run") {

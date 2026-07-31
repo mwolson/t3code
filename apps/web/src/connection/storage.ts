@@ -88,6 +88,8 @@ function persistenceError(
     | "save-server-config"
     | "load-vcs-refs"
     | "save-vcs-refs"
+    | "remove-vcs-refs"
+    | "clear-vcs-refs"
     | "clear-environment",
   cause: unknown,
 ) {
@@ -604,6 +606,18 @@ export const connectionStorageLayer = Layer.effectContext(
               : persistenceError("save-vcs-refs", cause),
           ),
         ),
+      removeVcsRefs: (environmentId, cwd) =>
+        removeDatabaseValue(
+          database,
+          VCS_REFS_STORE_NAME,
+          vcsRefsCacheKey(environmentId, cwd),
+        ).pipe(Effect.mapError((cause) => persistenceError("remove-vcs-refs", cause))),
+      clearVcsRefs: (environmentId) =>
+        removeDatabaseValuesInRange(
+          database,
+          VCS_REFS_STORE_NAME,
+          IDBKeyRange.bound(`${environmentId}:`, `${environmentId}:\uffff`),
+        ).pipe(Effect.mapError((cause) => persistenceError("clear-vcs-refs", cause))),
       removeThread: (environmentId, threadId) =>
         removeDatabaseValue(
           database,

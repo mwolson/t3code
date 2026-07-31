@@ -12,6 +12,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildThreadFeed,
   deriveThreadFeedPresentation,
+  threadFeedRunIsUnsettled,
   type ThreadFeedActivity,
   type ThreadFeedEntry,
 } from "./threadActivity";
@@ -88,6 +89,48 @@ function assistantMessage(updatedAt = "2026-06-20T00:00:03.000Z") {
 }
 
 describe("buildThreadFeed", () => {
+  it("does not treat a queued-only run as live feed activity", () => {
+    expect(
+      threadFeedRunIsUnsettled({
+        runId,
+        status: "queued",
+        startedAt: null,
+        completedAt: null,
+      }),
+    ).toBe(false);
+    expect(
+      threadFeedRunIsUnsettled({
+        runId,
+        status: "running",
+        startedAt: "2026-06-20T00:00:01.000Z",
+        completedAt: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("adds queued input only after dispatch creates its turn item", () => {
+    const dispatchedRunId = RunId.make("run-dispatched-queued");
+    const dispatchedMessageId = MessageId.make("message-dispatched-queued");
+    expect(buildThreadFeed([])).toEqual([]);
+
+    const promotedEntries = buildThreadFeed([
+      projected(
+        {
+          ...userMessage(),
+          id: TurnItemId.make("item-dispatched-queued"),
+          runId: dispatchedRunId,
+          messageId: dispatchedMessageId,
+          inputIntent: "turn_start",
+        },
+        0,
+      ),
+    ]);
+    expect(promotedEntries.map((entry) => entry.id)).toEqual([dispatchedMessageId]);
+    expect(
+      promotedEntries[0]?.type === "message" ? promotedEntries[0].message.inputIntent : undefined,
+    ).toBe("turn_start");
+  });
+
   it("preserves authoritative V2 order instead of sorting reconstructed collections", () => {
     const rows = [
       projected(userMessage("2026-06-20T00:00:03.000Z"), 0),
@@ -104,7 +147,7 @@ describe("buildThreadFeed", () => {
     ]);
     const activity = feed.find((entry) => entry.type === "activity-group")?.activities[0];
     expect(activity?.projectedItem).toBe(rows[1]);
-    expect(activity?.fullDetail).toContain('"input": "vp check"');
+    expect(activity?.getFullDetail()).toContain('"input": "vp check"');
   });
 
   it("retains inherited and synthetic rows with their original projected identity", () => {
@@ -261,8 +304,9 @@ describe("buildThreadFeed", () => {
       runId: null,
       summary: `Tool ${id}`,
       detail: null,
-      fullDetail: null,
-      copyText: id,
+      canExpand: false,
+      getFullDetail: () => null,
+      getCopyText: () => id,
       icon: "command",
       logo: null,
       toolLike: true,
@@ -321,6 +365,6 @@ describe("buildThreadFeed", () => {
 
     expect(activity?.summary).toBe("Read a T3 thread");
     expect(activity?.logo).toBe("t3-code");
-    expect(activity?.copyText.split("\n")[0]).toBe("Read a T3 thread");
+    expect(activity?.getCopyText().split("\n")[0]).toBe("Read a T3 thread");
   });
 });

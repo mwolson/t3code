@@ -317,6 +317,20 @@ export function makeCursorAgentSdkReplayRunner(
           );
         }
         if (entry.type === "expect_outbound") {
+          const expectedCancel = {
+            type: "run.cancel",
+            runId,
+          };
+          if (!sameFrame(entry.frame, expectedCancel)) {
+            return yield* recordFailure(
+              new CursorReplayFrameMismatchError({
+                scenario: transcript.scenario,
+                cursor,
+                expected: expectedCancel,
+                actual: entry.frame,
+              }),
+            );
+          }
           const signal = cursorAdvanced;
           yield* Effect.promise(() => signal.promise);
           continue;
@@ -554,6 +568,7 @@ function makeReplayServerConfig(
       baseDir,
       staticDir: undefined,
       devUrl: undefined,
+      devAllowedOrigins: [],
       noBrowser: false,
       startupPresentation: "browser",
       tailscaleServeEnabled: false,
@@ -722,14 +737,24 @@ function recordingRuntimePolicy(input: {
 export async function recordCursorAgentSdkReplayTranscript(input: {
   readonly scenario: string;
   readonly prompts: ReadonlyArray<string>;
+  /** Stable transcript representation when runtime-only paths were substituted into prompts. */
+  readonly transcriptPrompts?: ReadonlyArray<string>;
   readonly modelSelection: ModelSelection;
   readonly cwd: string;
+  /** Stable fixture cwd used to sanitize runtime-only workspace paths in recorded updates. */
+  readonly transcriptCwd?: string;
   readonly interactionMode?: "default" | "plan";
   readonly apiKey?: string;
   readonly interruptAfterToolStart?: boolean;
   readonly interruptAfterRunStartPromptIndex?: number;
   readonly restartBeforePromptIndex?: number;
 }): Promise<CursorAgentSdkReplayTranscript> {
+  if (
+    input.transcriptPrompts !== undefined &&
+    input.transcriptPrompts.length !== input.prompts.length
+  ) {
+    throw new Error("Cursor transcript prompts must match the runtime prompt count.");
+  }
   if (input.interruptAfterToolStart === true && input.prompts.length !== 1) {
     throw new Error("Cursor interrupt recordings require exactly one prompt.");
   }
@@ -780,7 +805,7 @@ export async function recordCursorAgentSdkReplayTranscript(input: {
   });
 
   const replacements: ReadonlyArray<readonly [string, string]> = [
-    [input.cwd, `/tmp/cursor-replay-${input.scenario}`],
+    [input.cwd, input.transcriptCwd ?? `/tmp/cursor-replay-${input.scenario}`],
   ];
 
   try {
@@ -824,7 +849,7 @@ export async function recordCursorAgentSdkReplayTranscript(input: {
         label: `run.start:${index + 1}`,
         frame: {
           type: "run.start",
-          message: prompt,
+          message: input.transcriptPrompts?.[index] ?? prompt,
           options: loggedCursorSendOptions(sendOptions),
         },
       });

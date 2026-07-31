@@ -229,6 +229,37 @@ describe("CodexAdapterV2 assistant message streaming", () => {
       ]);
     }),
   );
+
+  it.effect("treats explicit empty final text as authoritative over buffered deltas", () =>
+    Effect.gen(function* () {
+      const updates = yield* Ref.make<ReadonlyArray<CodexAgentMessageDeltaUpdate>>([]);
+      const coalescer = yield* makeCodexAgentMessageDeltaCoalescer({
+        flushIntervalMs: 50,
+        emit: (update) => Ref.update(updates, (current) => [...current, update]),
+      });
+
+      yield* coalescer.append({
+        turnId: "turn-1",
+        itemId: "message-1",
+        delta: "stale buffered text",
+      });
+      const completedText = yield* coalescer.complete({
+        turnId: "turn-1",
+        itemId: "message-1",
+        finalText: "",
+      });
+
+      assert.equal(completedText, "");
+      assert.deepEqual(yield* Ref.get(updates), [
+        {
+          turnId: "turn-1",
+          itemId: "message-1",
+          text: "",
+          completed: true,
+        },
+      ]);
+    }),
+  );
 });
 
 describe("CodexAdapterV2 runtime policy", () => {
@@ -322,6 +353,78 @@ describe("CodexAdapterV2 runtime policy", () => {
         params.collaborationMode?.settings.developer_instructions ?? "",
         "structured object, never as JSON text",
       );
+    }),
+  );
+
+  it.effect("omits default-mode collaboration settings without the T3 MCP server", () =>
+    Effect.gen(function* () {
+      const params = yield* buildCodexTurnStartParams({
+        nativeThreadId: "native-default-without-t3-mcp",
+        codexInput: [{ type: "text", text: "implement this task" }],
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: null,
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4",
+        },
+        hasT3Mcp: false,
+      });
+
+      assert.isUndefined(params.collaborationMode);
+    }),
+  );
+
+  it.effect("adds T3 plan-mode developer instructions when the T3 MCP server is attached", () =>
+    Effect.gen(function* () {
+      const params = yield* buildCodexTurnStartParams({
+        nativeThreadId: "native-plan-with-t3-mcp",
+        codexInput: [{ type: "text", text: "plan this task" }],
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "plan",
+          cwd: null,
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4",
+        },
+        hasT3Mcp: true,
+      });
+
+      assert.equal(params.collaborationMode?.mode, "plan");
+      assert.include(
+        params.collaborationMode?.settings.developer_instructions ?? "",
+        "request_user_input",
+      );
+      assert.include(
+        params.collaborationMode?.settings.developer_instructions ?? "",
+        "preview_status",
+      );
+    }),
+  );
+
+  it.effect("keeps Codex in plan mode without referencing unavailable T3 MCP tools", () =>
+    Effect.gen(function* () {
+      const params = yield* buildCodexTurnStartParams({
+        nativeThreadId: "native-plan-without-t3-mcp",
+        codexInput: [{ type: "text", text: "plan this task" }],
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "plan",
+          cwd: null,
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.4",
+        },
+        hasT3Mcp: false,
+      });
+
+      assert.equal(params.collaborationMode?.mode, "plan");
+      assert.notProperty(params.collaborationMode?.settings, "developer_instructions");
     }),
   );
 
@@ -546,8 +649,14 @@ describe("CodexAdapterV2 native protocol logging", () => {
           },
         },
       });
+      yield* protocolLogger({
+        direction: "incoming",
+        stage: "raw",
+        payload:
+          '{"method":"thread/event","params":{"http_headers":{"Authorization":"Bearer secret-codex-token"}}}\n',
+      });
 
-      assert.equal(writes.length, 1);
+      assert.equal(writes.length, 2);
       assert.equal(writes[0]?.threadId, threadId);
       assert.deepEqual(writes[0]?.event, {
         provider: "codex",
@@ -565,6 +674,19 @@ describe("CodexAdapterV2 native protocol logging", () => {
               usage: { inputTokens: 12, outputTokens: 8, totalTokens: 20 },
             },
           },
+        },
+      });
+      assert.equal(writes[1]?.threadId, threadId);
+      assert.deepEqual(writes[1]?.event, {
+        provider: "codex",
+        protocol: "codex.app-server",
+        kind: "protocol",
+        providerSessionId,
+        event: {
+          direction: "incoming",
+          stage: "raw",
+          payload:
+            '{"method":"thread/event","params":{"http_headers":{"Authorization":"[REDACTED]"}}}',
         },
       });
     }),
@@ -724,6 +846,7 @@ function makeCodexTestAppThread(input: {
     archivedAt: null,
     settledOverride: null,
     settledAt: null,
+    lastVisitedAt: null,
     deletedAt: null,
   };
 }
@@ -1003,6 +1126,87 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       (event): event is Extract<ProviderAdapterV2Event, { type: "message.updated" }> =>
         event.type === "message.updated" && event.message.role === "assistant",
     );
+
+  it.effect("projects retryable app-server errors and resolves the same item after recovery", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-provider-api-retry";
+        const nativeThreadId = `native-${scenario}-thread`;
+        const nativeTurnId = `native-${scenario}-turn`;
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId,
+              nativeTurnId,
+              prompt: "Open github.com.",
+            }),
+            {
+              type: "emit_inbound",
+              label: "error/retry",
+              frame: {
+                method: "error",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  willRetry: true,
+                  error: {
+                    message: "Reconnecting... 2/5",
+                    additionalDetails: "The response stream disconnected.",
+                    codexErrorInfo: {
+                      responseStreamDisconnected: { httpStatusCode: 529 },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "turn/completed",
+              frame: {
+                method: "turn/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                },
+              },
+            },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        const now = yield* DateTime.now;
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-codex-provider-api-retry"),
+            text: "Open github.com.",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "Codex retry recovery");
+
+        const retryItems = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "error" &&
+          event.turnItem.retry !== undefined
+            ? [event.turnItem]
+            : [],
+        );
+        assert.lengthOf(retryItems, 2);
+        assert.equal(retryItems[0]?.status, "running");
+        assert.equal(retryItems[0]?.failure.code, "responseStreamDisconnected");
+        assert.deepEqual(retryItems[0]?.retry, {
+          attempt: 2,
+          maxAttempts: 5,
+          retryDelayMs: null,
+        });
+        assert.equal(retryItems[1]?.id, retryItems[0]?.id);
+        assert.equal(retryItems[1]?.status, "completed");
+        assert.equal(retryItems[1]?.title, "Provider recovered");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
 
   const finalAnswerTranscript = (
     scenario: string,

@@ -91,11 +91,27 @@ export const layer: Layer.Layer<
       }
 
       const capturedAt = yield* DateTime.now;
-      const baselineCheckpoint = projection.checkpoints.some(
-        (candidate) => candidate.scopeId === scope.id && candidate.ordinalWithinScope === 0,
-      )
+      const baselineOrdinalWithinScope = Math.max(0, run.ordinal - 1);
+      const hasReadyCheckpoint = (ordinalWithinScope: number) =>
+        projection.checkpoints.some(
+          (candidate) =>
+            candidate.scopeId === scope.id &&
+            candidate.ordinalWithinScope === ordinalWithinScope &&
+            candidate.status === "ready",
+        );
+      const threadStartCheckpoint =
+        baselineOrdinalWithinScope === 0 || hasReadyCheckpoint(0)
+          ? null
+          : yield* checkpoints.materializeBaselineCheckpoint({
+              scope,
+              ordinalWithinScope: 0,
+            });
+      const baselineCheckpoint = hasReadyCheckpoint(baselineOrdinalWithinScope)
         ? null
-        : yield* checkpoints.materializeBaselineCheckpoint({ scope });
+        : yield* checkpoints.materializeBaselineCheckpoint({
+            scope,
+            ordinalWithinScope: baselineOrdinalWithinScope,
+          });
       const checkpoint = yield* checkpoints.capture({
         scope,
         runId: run.id,
@@ -112,6 +128,20 @@ export const layer: Layer.Layer<
         acceptedAt: capturedAt,
         effects: [],
         events: [
+          ...(threadStartCheckpoint === null
+            ? []
+            : [
+                {
+                  id: yield* ids.allocate.event({ threadId: input.threadId, commandId }),
+                  type: "checkpoint.captured" as const,
+                  threadId: input.threadId,
+                  nodeId: threadStartCheckpoint.nodeId,
+                  driver: providerThread.driver,
+                  providerInstanceId: run.providerInstanceId,
+                  occurredAt: capturedAt,
+                  payload: threadStartCheckpoint,
+                },
+              ]),
           ...(baselineCheckpoint === null
             ? []
             : [

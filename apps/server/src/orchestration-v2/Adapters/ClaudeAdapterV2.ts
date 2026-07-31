@@ -10,6 +10,7 @@ import {
   type Query as ClaudeQuery,
   type Settings as ClaudeSdkSettings,
   type SDKAssistantMessage,
+  type SDKAPIRetryMessage,
   type SDKMessage,
   type SDKResultMessage,
   type SDKUserMessage,
@@ -27,6 +28,7 @@ import {
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
+  type OrchestrationV2ProviderRetry,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
@@ -62,15 +64,13 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { compileClaudeModelSelection } from "../../claudeModelOptions.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeClaudeEnvironment } from "../../provider/Drivers/ClaudeHome.ts";
-import {
-  type EventNdjsonLogger,
-  makeEventNdjsonLogger,
-} from "../../provider/Layers/EventNdjsonLogger.ts";
+import type { EventNdjsonLogger } from "../../provider/Layers/EventNdjsonLogger.ts";
+import { ProviderEventLoggers } from "../../provider/Layers/ProviderEventLoggers.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../../provider/T3OrchestrationInstructions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { IdAllocatorV2, type IdAllocatorV2Shape } from "../IdAllocator.ts";
-import { makeProviderFailure } from "../ProviderFailure.ts";
+import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailure.ts";
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
 import {
   ProviderAdapterEnsureThreadError,
@@ -475,15 +475,12 @@ export function makeClaudeAgentSdkProtocolLogger(input: {
 export const claudeAgentSdkQueryRunnerLiveLayer: Layer.Layer<
   ClaudeAgentSdkQueryRunner,
   never,
-  Crypto.Crypto | ServerConfig
+  Crypto.Crypto | ProviderEventLoggers
 > = Layer.effect(
   ClaudeAgentSdkQueryRunner,
   Effect.gen(function* () {
-    const { providerEventLogPath } = yield* ServerConfig;
     const crypto = yield* Crypto.Crypto;
-    const nativeEventLogger = yield* makeEventNdjsonLogger(providerEventLogPath, {
-      stream: "native",
-    });
+    const { native: nativeEventLogger } = yield* ProviderEventLoggers;
 
     return ClaudeAgentSdkQueryRunner.of({
       allocateSessionId: crypto.randomUUIDv4.pipe(
@@ -1465,24 +1462,26 @@ function claudeNativeToolOutputText(output: ClaudeNativeToolOutput): string {
 
 function claudeSubagentResultText(output: ClaudeNativeToolOutput): string {
   const value = claudeNativeToolOutputValue(output);
-  if (typeof value === "object" && value !== null && "content" in value) {
-    const content = value.content;
-    if (Array.isArray(content)) {
-      const text = content
-        .flatMap((part) =>
-          typeof part === "object" &&
-          part !== null &&
-          "type" in part &&
-          part.type === "text" &&
-          "text" in part &&
-          typeof part.text === "string"
-            ? [part.text]
-            : [],
-        )
-        .join("\n");
-      if (text.length > 0) {
-        return text;
-      }
+  const content = Array.isArray(value)
+    ? value
+    : typeof value === "object" && value !== null && "content" in value
+      ? value.content
+      : undefined;
+  if (Array.isArray(content)) {
+    const text = content
+      .flatMap((part) =>
+        typeof part === "object" &&
+        part !== null &&
+        "type" in part &&
+        part.type === "text" &&
+        "text" in part &&
+        typeof part.text === "string"
+          ? [part.text]
+          : [],
+      )
+      .join("\n");
+    if (text.length > 0) {
+      return text;
     }
   }
   return claudeNativeToolOutputText(output);
@@ -1802,6 +1801,19 @@ function providerFailureFromResult(
   });
 }
 
+function providerFailureFromApiRetry(message: SDKAPIRetryMessage): OrchestrationV2ProviderFailure {
+  const errorName = message.error.replaceAll("_", " ");
+  return makeProviderFailure({
+    message: `Claude API ${errorName}.`,
+    code:
+      message.error_status === null
+        ? message.error
+        : `api_error_${Math.trunc(message.error_status)}`,
+    class: message.error_status === null ? "transport_error" : "provider_error",
+    retryable: true,
+  });
+}
+
 function buildAssistantArtifacts(input: {
   readonly idAllocator: IdAllocatorV2Shape;
   readonly turnInput: ProviderAdapterV2TurnInput;
@@ -1908,6 +1920,13 @@ interface ActiveClaudeTurnContext {
   readonly subagentNodesByTaskId: Map<string, OrchestrationV2ExecutionNode["id"]>;
 }
 
+interface ActiveClaudeProviderRetry {
+  readonly retry: OrchestrationV2ProviderRetry;
+  readonly failure: OrchestrationV2ProviderFailure;
+  readonly startedAt: DateTime.Utc;
+  readonly itemOrdinal: number;
+}
+
 interface ActiveClaudeSubagent {
   task: OrchestrationV2Subagent;
   readonly childThreadId: ThreadId;
@@ -1993,6 +2012,9 @@ export function makeClaudeAdapterV2(
         const openedNativeThreads = yield* Ref.make(new Set<string>());
         const itemOrdinals = yield* Ref.make(new Map<string, number>());
         const nextItemOrdinalsByTurn = yield* Ref.make(new Map<string, number>());
+        const providerRetries = yield* Ref.make(
+          new Map<OrchestrationV2ProviderTurn["id"], ActiveClaudeProviderRetry>(),
+        );
         const pendingRuntimeRequests = yield* Ref.make(
           new Map<string, PendingClaudeRuntimeRequest>(),
         );
@@ -2840,6 +2862,37 @@ export function makeClaudeAdapterV2(
             );
           }
 
+          const providerRetry = yield* Ref.modify(providerRetries, (current) => {
+            const retry = current.get(input.context.providerTurnId);
+            if (retry === undefined) {
+              return [undefined, current] as const;
+            }
+            const updated = new Map(current);
+            updated.delete(input.context.providerTurnId);
+            return [retry, updated] as const;
+          });
+          if (providerRetry !== undefined && input.status !== "failed") {
+            yield* emitProviderEvent({
+              type: "turn_item.updated",
+              driver: CLAUDE_PROVIDER,
+              turnItem: makeProviderRetryTurnItem({
+                idAllocator,
+                driver: CLAUDE_PROVIDER,
+                threadId: input.context.input.threadId,
+                runId: input.context.input.runId,
+                nodeId: input.context.input.rootNodeId,
+                providerThreadId: input.context.input.providerThread.id,
+                providerTurnId: input.context.providerTurnId,
+                itemOrdinal: providerRetry.itemOrdinal,
+                failure: providerRetry.failure,
+                retry: providerRetry.retry,
+                status: input.status,
+                startedAt: providerRetry.startedAt,
+                updatedAt: input.completedAt,
+              }),
+            });
+          }
+
           const threadDisposition = input.threadDisposition ?? "reusable";
           const terminalEvent: ProviderAdapterV2Event =
             input.status === "failed"
@@ -2855,6 +2908,12 @@ export function makeClaudeAdapterV2(
                   ),
                   status: input.status,
                   failure: input.failure ?? makeProviderFailure({ class: "provider_error" }),
+                  ...(providerRetry === undefined
+                    ? {}
+                    : {
+                        retry: providerRetry.retry,
+                        retryStartedAt: providerRetry.startedAt,
+                      }),
                   threadDisposition,
                 }
               : {
@@ -3144,6 +3203,51 @@ export function makeClaudeAdapterV2(
             context.nativeMessageCursor = message.uuid;
           }
 
+          if (message.type === "system" && message.subtype === "api_retry") {
+            const updatedAt = yield* DateTime.now;
+            const previous = (yield* Ref.get(providerRetries)).get(context.providerTurnId);
+            const retry: OrchestrationV2ProviderRetry = {
+              attempt: Math.max(1, Math.trunc(message.attempt)),
+              maxAttempts: Math.max(1, Math.trunc(message.max_retries)),
+              retryDelayMs: Math.max(0, Math.trunc(message.retry_delay_ms)),
+            };
+            const failure = providerFailureFromApiRetry(message);
+            const itemOrdinal =
+              previous?.itemOrdinal ??
+              (yield* resolveItemOrdinal(context, `terminal-failure:${context.providerTurnId}`));
+            const state: ActiveClaudeProviderRetry = {
+              retry,
+              failure,
+              startedAt: previous?.startedAt ?? updatedAt,
+              itemOrdinal,
+            };
+            yield* Ref.update(providerRetries, (current) => {
+              const updated = new Map(current);
+              updated.set(context.providerTurnId, state);
+              return updated;
+            });
+            yield* emitProviderEvent({
+              type: "turn_item.updated",
+              driver: CLAUDE_PROVIDER,
+              turnItem: makeProviderRetryTurnItem({
+                idAllocator,
+                driver: CLAUDE_PROVIDER,
+                threadId: context.input.threadId,
+                runId: context.input.runId,
+                nodeId: context.input.rootNodeId,
+                providerThreadId: context.input.providerThread.id,
+                providerTurnId: context.providerTurnId,
+                itemOrdinal,
+                failure,
+                retry,
+                status: "running",
+                startedAt: state.startedAt,
+                updatedAt,
+              }),
+            });
+            return;
+          }
+
           if (message.type === "system" && message.subtype === "task_started") {
             if (isClaudeNonSubagentTask(message)) {
               context.ignoredTaskIds.add(message.task_id);
@@ -3281,16 +3385,57 @@ export function makeClaudeAdapterV2(
             return;
           }
 
-          // Task-notification-origin results can interleave during a normal
-          // user turn (for example a stale background stop after interrupt
-          // recovery). They must not finalize that turn or supply fallback
-          // assistant text. Provider continuation turns still consume them
-          // when draining buffered wake messages.
+          // A zero-turn task-notification-origin result is almost always
+          // lifecycle debris, so it must not finalize a normal turn or supply
+          // fallback assistant text. Provider continuation turns still consume
+          // it when draining buffered wake messages.
+          //
+          // "Almost always" is the honest word: num_turns is a workload count,
+          // not a causal link to the prompt this turn is waiting on. A genuine
+          // wake that fails before any model turn also reports zero, and is
+          // dropped here, so that turn hangs until query exit. Narrowing the
+          // drop to zero-turn results only shrinks a pre-existing drop; closing
+          // the residue needs a correlation id on the result, which the wire
+          // does not carry today.
+          if (
+            isClaudeTaskNotificationOriginResult(message) &&
+            !isClaudeProviderContinuationTurn(context.input) &&
+            message.num_turns === 0
+          ) {
+            // Routine lifecycle noise, so debug rather than warning: interrupt
+            // recovery produces this every time.
+            yield* Effect.logDebug("orchestration-v2.claude-task-notification-result-dropped", {
+              providerTurnId: context.providerTurnId,
+              num_turns: message.num_turns,
+              stop_reason: message.stop_reason,
+              terminal_reason: message.terminal_reason,
+              uuid: message.uuid,
+              session_id: message.session_id,
+              createdBy: context.input.message.createdBy,
+              creationSource: context.input.message.creationSource,
+            });
+            return;
+          }
+
+          // The converse of the drop above, and the case actually worth
+          // watching: a positive-turn task-notification result settling a turn
+          // T3 did not mark as a continuation. That is the hang fix working,
+          // but it is also the shape a stale result would take if one ever
+          // carried model turns, which nothing on the wire lets us rule out.
           if (
             isClaudeTaskNotificationOriginResult(message) &&
             !isClaudeProviderContinuationTurn(context.input)
           ) {
-            return;
+            yield* Effect.logInfo("orchestration-v2.claude-task-notification-result-accepted", {
+              providerTurnId: context.providerTurnId,
+              num_turns: message.num_turns,
+              stop_reason: message.stop_reason,
+              terminal_reason: message.terminal_reason,
+              uuid: message.uuid,
+              session_id: message.session_id,
+              createdBy: context.input.message.createdBy,
+              creationSource: context.input.message.creationSource,
+            });
           }
 
           // An is_error result's text is the error message; it belongs on the

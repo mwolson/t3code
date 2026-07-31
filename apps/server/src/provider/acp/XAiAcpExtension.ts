@@ -247,7 +247,12 @@ export function isXAiMonitorTool(toolCall: AcpToolCallState): boolean {
   // prevent monitor registration / inProgress forcing.
   const rawOutput = unknownRecord(toolCall.data.rawOutput);
   const outputType = nonEmptyString(rawOutput?.type)?.toLowerCase();
-  return outputType === "monitor";
+  if (outputType === "monitor") return true;
+  // Released clients can wrap the start ACK as plain Text and omit the Monitor
+  // variant. The ACK is still unambiguous and contains the task id required for
+  // background tracking, even after a generic title is rewritten from
+  // rawInput.description.
+  return isXAiMonitorStartAck(xAiToolOutputText(toolCall));
 }
 
 export function extractXAiMonitorTaskId(toolCall: AcpToolCallState): string | undefined {
@@ -329,8 +334,8 @@ export function extractXAiBackgroundTaskCompletion(toolCall: AcpToolCallState): 
 /**
  * A finished kill_command_or_subagent call is the genuine end signal for every
  * task id it names: the Grok CLI emits no `x.ai/task_completed` for a killed
- * task. A failed kill usually means the task was already gone, so it ends the
- * id too (failing open to a continuation beats pinning the running set).
+ * task. A failed kill is not proof the target stopped, so leave the existing
+ * task state unchanged until a genuine terminal signal arrives.
  */
 export function extractXAiKilledBackgroundTasks(toolCall: AcpToolCallState): ReadonlyArray<{
   readonly taskId: string;
@@ -341,7 +346,7 @@ export function extractXAiKilledBackgroundTasks(toolCall: AcpToolCallState): Rea
   const rawInput = unknownRecord(toolCall.data.rawInput);
   const variant = nonEmptyString(rawInput?.variant)?.toLowerCase();
   if (!title.includes("kill_command_or_subagent") && variant !== "kill") return [];
-  if (toolCall.status !== "completed" && toolCall.status !== "failed") return [];
+  if (toolCall.status !== "completed") return [];
   const taskIds: string[] = [];
   const push = (value: unknown) => {
     const id = nonEmptyString(value);
@@ -660,8 +665,7 @@ function resultTaskIdFromGetOutputTool(
     output,
     new RegExp(`===\\s*Task\\s+(${XAI_UUID_RE})\\s*===`, "i"),
   );
-  if (taskHeader !== undefined) return taskHeader;
-  return firstUuidMatch(output, new RegExp(`subagent_id:\\s*(${XAI_UUID_RE})\\b`, "i"));
+  return taskHeader;
 }
 
 function resultFromGetOutputTool(
@@ -714,7 +718,10 @@ function statusFromGetOutputTool(
       return "running";
     }
   }
-  return toolCall.status === "completed" ? "completed" : "running";
+  // A completed get_output tool call only means the poll RPC returned. Without
+  // a task-level terminal status or exit code, the requested task is still
+  // running and must remain registered for subsequent polling.
+  return "running";
 }
 
 /**
@@ -1038,14 +1045,16 @@ const unregisterXAiPromptCompletionFallback = (
 
 const abortPendingPromptCompletions = (
   pendingRef: Ref.Ref<ReadonlyArray<PendingXAiPromptCompletion>>,
-  sessionId: string,
+  sessionId?: string,
 ) =>
   Ref.modify(pendingRef, (pending) => {
     const [toAbort, remaining] = pending.reduce<
       [ReadonlyArray<PendingXAiPromptCompletion>, ReadonlyArray<PendingXAiPromptCompletion>]
     >(
       ([aborting, kept], entry) =>
-        entry.sessionId === sessionId ? [[...aborting, entry], kept] : [aborting, [...kept, entry]],
+        sessionId === undefined || entry.sessionId === sessionId
+          ? [[...aborting, entry], kept]
+          : [aborting, [...kept, entry]],
       [[], []],
     );
     if (toAbort.length === 0) {
@@ -1241,8 +1250,10 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
           );
         }),
       cancel: Effect.gen(function* () {
-        const started = yield* runtime.start();
-        yield* abortPendingPromptCompletions(pendingXAiPromptCompletionsRef, started.sessionId);
+        // Do not call start here: cancellation must be able to reach the
+        // underlying runtime when startup is stalled. Pending entries already
+        // carry their session ids, and this runtime owns all of them.
+        yield* abortPendingPromptCompletions(pendingXAiPromptCompletionsRef);
         yield* runtime.cancel;
       }),
     } satisfies AcpSessionRuntime.AcpSessionRuntime["Service"];

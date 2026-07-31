@@ -3,17 +3,26 @@ import * as DateTime from "effect/DateTime";
 
 import type { ThreadRunSummary, ThreadRuntimeSummary } from "./models.ts";
 
-const ACTIVE_RUN_STATUSES = new Set(["preparing", "queued", "starting", "running", "waiting"]);
+const ACTIVITY_RUN_STATUSES = new Set(["preparing", "starting", "running", "waiting"]);
+const INTERRUPTIBLE_RUN_STATUSES = new Set(["preparing", "starting", "running"]);
 
-export function deriveLatestThreadRun(
+function latestMatchingRun(
   projection: OrchestrationV2ThreadProjection,
-): ThreadRunSummary | null {
-  const run = projection.runs.reduce<(typeof projection.runs)[number] | null>(
+  predicate: (run: OrchestrationV2ThreadProjection["runs"][number]) => boolean,
+): OrchestrationV2ThreadProjection["runs"][number] | null {
+  return projection.runs.reduce<OrchestrationV2ThreadProjection["runs"][number] | null>(
     (latest, candidate) =>
-      latest === null || candidate.ordinal > latest.ordinal ? candidate : latest,
+      predicate(candidate) && (latest === null || candidate.ordinal > latest.ordinal)
+        ? candidate
+        : latest,
     null,
   );
-  if (run === null) return null;
+}
+
+function summarizeThreadRun(
+  projection: OrchestrationV2ThreadProjection,
+  run: OrchestrationV2ThreadProjection["runs"][number],
+): ThreadRunSummary {
   return {
     runId: run.id,
     status: run.status,
@@ -28,22 +37,53 @@ export function deriveLatestThreadRun(
   };
 }
 
+export function deriveLatestThreadRun(
+  projection: OrchestrationV2ThreadProjection,
+): ThreadRunSummary | null {
+  const run = latestMatchingRun(projection, () => true);
+  return run === null ? null : summarizeThreadRun(projection, run);
+}
+
+/**
+ * Returns the run that owns live provider work, falling back to the newest run
+ * once the thread is idle. A newer queued run must not make an older executing
+ * run look settled in clients that render per-run activity.
+ */
+export function deriveThreadActivityRun(
+  projection: OrchestrationV2ThreadProjection,
+): ThreadRunSummary | null {
+  const run =
+    latestMatchingRun(projection, (candidate) => ACTIVITY_RUN_STATUSES.has(candidate.status)) ??
+    latestMatchingRun(projection, () => true);
+  return run === null ? null : summarizeThreadRun(projection, run);
+}
+
 export function deriveThreadRuntime(
   projection: OrchestrationV2ThreadProjection,
 ): ThreadRuntimeSummary | null {
   const latestRun = deriveLatestThreadRun(projection);
+  const activityRun = deriveThreadActivityRun(projection);
   const providerSession = projection.providerSessions.findLast(
     (session) => session.providerInstanceId === projection.thread.providerInstanceId,
   );
   if (latestRun === null && projection.thread.activeProviderThreadId === null) return null;
   const activeRunId =
-    projection.runs.findLast((run) => ACTIVE_RUN_STATUSES.has(run.status))?.id ?? null;
+    latestMatchingRun(projection, (run) => INTERRUPTIBLE_RUN_STATUSES.has(run.status))?.id ?? null;
   return {
-    status: latestRun?.status ?? "idle",
+    // Queueing creates a newer run, but does not replace the provider work
+    // already in flight. Present the executing run's status until it reaches
+    // a terminal state so clients do not flash from "running" to "queued".
+    status: activityRun?.status ?? "idle",
     activeRunId,
     providerInstanceId: projection.thread.providerInstanceId,
     providerName: providerSession?.driver ?? null,
     lastError: providerSession?.lastError ?? null,
     updatedAt: DateTime.formatIso(projection.updatedAt),
   };
+}
+
+export function threadRuntimeHasInterruptibleRun(
+  runtime: ThreadRuntimeSummary | null | undefined,
+): boolean {
+  return runtime?.activeRunId !== null && runtime?.activeRunId !== undefined;
 }

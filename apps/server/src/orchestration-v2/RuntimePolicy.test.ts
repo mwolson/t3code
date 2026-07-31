@@ -50,6 +50,7 @@ function makeThread(input: {
     archivedAt: null,
     settledOverride: null,
     settledAt: null,
+    lastVisitedAt: null,
     deletedAt: null,
   };
 }
