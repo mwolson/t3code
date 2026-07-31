@@ -70,6 +70,27 @@ export interface OrchestrationEffectExecutorV2Shape {
   readonly execute: (
     effect: OrchestrationEffectV2,
   ) => Effect.Effect<void, OrchestrationEffectExecutionError>;
+  /**
+   * Runs when the worker decides to dead-letter an effect, before the terminal
+   * `outbox.fail` settles. Effect types that own a run lifecycle must
+   * transition that run to its failed terminal state here, or the run hangs
+   * forever with nothing else responsible for it. Compensating first keeps the
+   * transition durable: a crash between compensation and the fail leaves the
+   * effect unsettled, so startup reconciliation still settles the run, whereas
+   * the reverse order would leave a terminal effect with a hung run.
+   * Compensation is idempotent and projection-guarded, so a lost lease or a
+   * concurrent transition makes it a no-op. That guard is sufficient without
+   * a lease re-check because `EffectOutbox.claimNext` never reclaims a
+   * `running` row (lease expiry is not part of the claim predicate), and the
+   * only operation that frees the per-thread claim gate under a live worker
+   * is `cancelUnsettled`, whose callers terminalize the owning run in the
+   * same commit, so the run CAS observes a non-`starting` run. Must not
+   * fail: compensation problems are logged, not retried.
+   */
+  readonly compensateDeadLetter: (
+    effect: OrchestrationEffectV2,
+    error: string,
+  ) => Effect.Effect<void>;
 }
 
 export class OrchestrationEffectExecutorV2 extends Context.Service<
@@ -365,6 +386,29 @@ export const executorLayer: Layer.Layer<
               );
         }
       },
+      compensateDeadLetter: (effect, error) => {
+        switch (effect.request.type) {
+          case "provider-turn.start":
+          case "provider-turn.restart":
+            return providerTurnStart
+              .failFromDeadLetter({
+                threadId: effect.threadId,
+                runId: effect.request.runId,
+                error,
+              })
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logError("Failed to fail the run for a dead-lettered turn start", {
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    error: Cause.pretty(cause),
+                  }),
+                ),
+              );
+          default:
+            return Effect.void;
+        }
+      },
     });
   }),
 );
@@ -589,9 +633,12 @@ export const layerWithOptions = (
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
             : effect.attemptCount >= maxAttempts
-              ? yield* outbox
-                  .fail({ effectId: effect.id, workerId, error })
-                  .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
+              ? yield* Effect.uninterruptible(
+                  executor.compensateDeadLetter(effect, error).pipe(
+                    Effect.andThen(outbox.fail({ effectId: effect.id, workerId, error })),
+                    Effect.onError((cause) => terminalizeClaim(effect, cause)),
+                  ),
+                )
               : yield* outbox
                   .retry({
                     effectId: effect.id,

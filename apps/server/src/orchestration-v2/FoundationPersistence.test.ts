@@ -1048,6 +1048,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
         OrchestrationEffectExecutorV2,
         OrchestrationEffectExecutorV2.of({
           execute: () => Ref.update(executionCount, (count) => count + 1),
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({ workerId: "recovery-worker" }).pipe(
@@ -1465,6 +1466,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
                 Deferred.succeed(interrupted, undefined).pipe(Effect.ignore),
               ),
             ),
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
@@ -1531,7 +1533,10 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       });
       const executorLayer = Layer.succeed(
         OrchestrationEffectExecutorV2,
-        OrchestrationEffectExecutorV2.of({ execute: () => Effect.void }),
+        OrchestrationEffectExecutorV2.of({
+          execute: () => Effect.void,
+          compensateDeadLetter: () => Effect.void,
+        }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
         workerId: "settlement-race-worker",
@@ -1587,6 +1592,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
         OrchestrationEffectExecutorV2,
         OrchestrationEffectExecutorV2.of({
           execute: () => Ref.update(executionCount, (count) => count + 1),
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
@@ -1922,6 +1928,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
               }
               yield* Deferred.succeed(completed, undefined);
             }),
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
@@ -1992,6 +1999,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
               Effect.andThen(Deferred.await(gate.release)),
             );
           },
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
@@ -2091,6 +2099,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
                   : Effect.void,
               ),
             ),
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
@@ -2553,6 +2562,7 @@ it.live("keeps claiming new work after repeated idle periods", () =>
             ? Effect.die(`Missing completion signal for ${effect.id}`)
             : Deferred.succeed(completion, undefined).pipe(Effect.asVoid);
         },
+        compensateDeadLetter: () => Effect.void,
       }),
     );
     const workerLayer = effectWorkerLayerWithOptions({
