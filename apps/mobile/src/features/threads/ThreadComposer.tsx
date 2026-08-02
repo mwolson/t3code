@@ -69,6 +69,7 @@ import {
 import { resolveProviderOptionDescriptors } from "../../lib/providerOptions";
 import { useComposerPathSearch } from "../../state/use-composer-path-search";
 import { ComposerCommandPopover, type ComposerCommandItem } from "./ComposerCommandPopover";
+import { collapsedComposerActions } from "./ThreadComposer.logic";
 import {
   type ExistingThreadSettingsRouteSession,
   useExistingThreadSettingsRoutePresentation,
@@ -333,7 +334,12 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     setIsFocused(false);
     onEditorFocusChange?.(false);
   }, [onEditorFocusChange]);
-  const showStopAction = props.canStopThread;
+  const { showStopPrimary: showStopPrimaryAction, showStopSecondary: showStopSecondaryAction } =
+    collapsedComposerActions({
+      canStopThread: props.canStopThread,
+      hasContent,
+      activeThreadBusy: props.activeThreadBusy,
+    });
 
   const sendLabel =
     props.connectionState !== "connected" || props.queueCount > 0 ? "Queue" : "Send";
@@ -711,6 +717,33 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     [navigation, settingsSheetPresentation.onStackTransitionsFinished],
   );
 
+  let collapsedPrimaryAction: ReactNode = (
+    <ControlPill icon="arrow.up" variant="primary" disabled={!canSend} onPress={handleSend} />
+  );
+  if (showStopSecondaryAction) {
+    collapsedPrimaryAction = (
+      <View className="flex-row items-center gap-1">
+        <ControlPill
+          icon="stop.fill"
+          accessibilityLabel="Stop"
+          variant="danger"
+          onPress={props.onStopThread}
+        />
+        <ControlPill
+          icon="arrow.up"
+          accessibilityLabel="Send"
+          variant="primary"
+          disabled={!canSend}
+          onPress={handleSend}
+        />
+      </View>
+    );
+  } else if (showStopPrimaryAction) {
+    collapsedPrimaryAction = (
+      <ControlPill icon="stop.fill" variant="danger" onPress={props.onStopThread} />
+    );
+  }
+
   return (
     <Animated.View
       className="px-4"
@@ -852,16 +885,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           ) : null}
           {!isExpanded ? (
             <Animated.View entering={FadeIn.duration(180)} exiting={FadeOut.duration(100)}>
-              {showStopAction ? (
-                <ControlPill icon="stop.fill" variant="danger" onPress={props.onStopThread} />
-              ) : (
-                <ControlPill
-                  icon="arrow.up"
-                  variant="primary"
-                  disabled={!canSend}
-                  onPress={handleSend}
-                />
-              )}
+              {collapsedPrimaryAction}
             </Animated.View>
           ) : null}
           {isExpanded ? (
@@ -887,7 +911,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                   maxWidth={152}
                   onPress={openSettings}
                 />
-                {showStopAction ? (
+                {props.canStopThread && (
                   <ComposerToolbarButton
                     accessibilityLabel="Stop"
                     icon="stop.fill"
@@ -895,7 +919,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                     onPress={props.onStopThread}
                     showChevron={false}
                   />
-                ) : null}
+                )}
               </ComposerToolbarScroller>
               <ComposerToolbarButton
                 accessibilityLabel={sendLabel}

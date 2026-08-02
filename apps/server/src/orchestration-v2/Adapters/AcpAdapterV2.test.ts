@@ -11684,6 +11684,7 @@ describe("AcpAdapterV2", () => {
             header: "Approve",
             question: "Approve stale generation 1?",
             options: [{ label: "yes", description: "Approve" }],
+            multiSelect: false,
           },
         ],
       }).pipe(Effect.exit, Effect.forkScoped);
@@ -11760,6 +11761,7 @@ describe("AcpAdapterV2", () => {
             header: "Approve",
             question: "Approve missing transport?",
             options: [{ label: "yes", description: "Approve" }],
+            multiSelect: false,
           },
         ],
       }).pipe(Effect.exit);
@@ -11793,6 +11795,7 @@ describe("AcpAdapterV2", () => {
             header: "Approve",
             question: "Approve live generation 2?",
             options: [{ label: "yes", description: "Approve" }],
+            multiSelect: false,
           },
         ],
       }).pipe(Effect.forkScoped);

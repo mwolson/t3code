@@ -4623,6 +4623,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
                     header: nonEmptyText(record?.title, `Question ${index + 1}`),
                     question: nonEmptyText(record?.description, params.message),
                     options,
+                    multiSelect: false,
                   };
                 },
               );
