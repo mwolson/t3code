@@ -16,6 +16,7 @@ import {
   ModelEsque,
   getTriggerDisplayModelLabel,
   getTriggerDisplayModelName,
+  resolveProviderModelPickerAriaLabel,
 } from "./providerIconUtils";
 import { shouldShowInstanceBadge, type ProviderInstanceEntry } from "../../providerInstances";
 import { ComposerControl, ComposerControlChevron } from "./ComposerControl";
@@ -70,6 +71,12 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     : props.model;
   const showInstanceBadge =
     activeEntry !== null && shouldShowInstanceBadge(activeEntry, props.instanceEntries);
+  const activeInstanceIconClassName = showInstanceBadge ? "size-5" : "size-4";
+  const triggerAriaLabel = activeEntry ? `${activeEntry.displayName}, ${triggerLabel}` : undefined;
+  const resolvedTriggerAriaLabel = resolveProviderModelPickerAriaLabel(
+    props.triggerAriaLabel,
+    triggerAriaLabel,
+  );
 
   const setIsMenuOpen = (open: boolean) => {
     props.onOpenChange?.(open);
@@ -146,9 +153,9 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       <PopoverTrigger
         render={
           <ComposerControl
-            aria-label={props.triggerAriaLabel}
             variant={props.triggerVariant ?? "ghost"}
             data-chat-provider-model-picker="true"
+            {...(resolvedTriggerAriaLabel ? { "aria-label": resolvedTriggerAriaLabel } : {})}
             className={cn(
               "min-w-0 justify-between whitespace-nowrap",
               props.compact ? "max-w-42 shrink-0" : "max-w-48 shrink sm:max-w-56",
@@ -165,7 +172,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
               displayName={activeEntry.displayName}
               accentColor={activeEntry.accentColor}
               showBadge={showInstanceBadge}
-              className="size-4"
+              className={activeInstanceIconClassName}
               iconClassName={cn("size-4", props.activeProviderIconClassName)}
               indicatorBackground="var(--contrast-input)"
               badgeClassName={cn(

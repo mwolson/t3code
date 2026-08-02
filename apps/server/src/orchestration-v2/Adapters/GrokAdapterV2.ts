@@ -176,6 +176,7 @@ const registerGrokAskUserQuestionExtensions = ({
           header: question.header,
           question: question.question,
           options: [...question.options],
+          multiSelect: question.multiSelect === true,
         }));
         return requestUserInput({
           nativeItemId: `${identity.sessionId}:xai-question:${identity.toolCallId}`,

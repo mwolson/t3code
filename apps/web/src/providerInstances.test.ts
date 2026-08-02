@@ -5,6 +5,7 @@ import {
   deriveProviderEntriesByEnvironment,
   deriveProviderInstanceEntries,
   getDefaultProviderInstanceModel,
+  isProviderInstanceInitialProbePending,
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
   resolveDefaultProviderModelSelection,
@@ -17,6 +18,7 @@ function provider(input: {
   provider: ProviderDriverKind;
   instanceId: string;
   enabled?: boolean;
+  installed?: boolean;
   availability?: ServerProvider["availability"];
   displayName?: string;
   accentColor?: string;
@@ -29,7 +31,7 @@ function provider(input: {
     ...(input.displayName ? { displayName: input.displayName } : {}),
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     enabled: input.enabled ?? true,
-    installed: true,
+    installed: input.installed ?? true,
     version: null,
     status: input.status ?? "ready",
     ...(input.availability ? { availability: input.availability } : {}),
@@ -47,6 +49,62 @@ const model = (slug: string, isCustom = false, isDefault = false) => ({
   isCustom,
   ...(isDefault ? { isDefault: true } : {}),
   capabilities: {},
+});
+
+describe("isProviderInstanceInitialProbePending", () => {
+  const opencode2 = ProviderDriverKind.make("opencode2");
+
+  it("recognizes the snapshot shape the server uses while a first probe runs", () => {
+    const [entry] = deriveProviderInstanceEntries([
+      provider({
+        provider: opencode2,
+        instanceId: "opencode2",
+        installed: false,
+        status: "warning",
+      }),
+    ]);
+
+    expect(entry && isProviderInstanceInitialProbePending(entry)).toBe(true);
+    // Still not "ready": a pending probe must not contribute models.
+    expect(entry && isProviderInstancePickerReady(entry)).toBe(false);
+  });
+
+  it("is scoped to OpenCode 2, whose first probe boots a server", () => {
+    const entries = deriveProviderInstanceEntries(
+      ["opencode", "codex", "claudeAgent"].map((driver) =>
+        provider({
+          provider: ProviderDriverKind.make(driver),
+          instanceId: driver,
+          installed: false,
+          status: "warning",
+        }),
+      ),
+    );
+
+    expect(entries.map(isProviderInstanceInitialProbePending)).toEqual([false, false, false]);
+  });
+
+  it("does not treat a settled or disabled instance as pending", () => {
+    const entries = deriveProviderInstanceEntries([
+      provider({ provider: opencode2, instanceId: "ready", status: "ready" }),
+      provider({ provider: opencode2, instanceId: "failed", status: "error" }),
+      provider({ provider: opencode2, instanceId: "limited", status: "warning" }),
+      provider({
+        provider: opencode2,
+        instanceId: "off",
+        enabled: false,
+        installed: false,
+        status: "warning",
+      }),
+    ]);
+
+    expect(entries.map(isProviderInstanceInitialProbePending)).toEqual([
+      false,
+      false,
+      false,
+      false,
+    ]);
+  });
 });
 
 describe("isProviderInstancePickerReady", () => {
@@ -173,6 +231,29 @@ describe("deriveProviderInstanceEntries", () => {
     expect(entry?.instanceId).toBe("codex_personal");
     expect(entry?.driverKind).toBe("codex");
     expect(entry?.isDefault).toBe(false);
+  });
+
+  it("uses the canonical OpenCode 2 display name for its default instance", () => {
+    const [entry] = deriveProviderInstanceEntries([
+      provider({
+        provider: ProviderDriverKind.make("opencode2"),
+        instanceId: "opencode2",
+      }),
+    ]);
+
+    expect(entry?.displayName).toBe("OpenCode 2");
+  });
+
+  it("distinguishes a non-default OpenCode 2 instance by its instance id", () => {
+    const [entry] = deriveProviderInstanceEntries([
+      provider({
+        provider: ProviderDriverKind.make("opencode2"),
+        instanceId: "opencode2_zen",
+        displayName: "OpenCode 2",
+      }),
+    ]);
+
+    expect(entry?.displayName).toBe("Opencode2 Zen");
   });
 });
 
@@ -401,6 +482,16 @@ describe("getDefaultProviderInstanceModel", () => {
     );
     expect(typeof resolved).toBe("string");
     expect(resolved?.length).toBeGreaterThan(0);
+  });
+
+  it("uses the OpenCode 2 driver default while its model inventory is pending", () => {
+    const providers = [
+      provider({ provider: ProviderDriverKind.make("opencode2"), instanceId: "opencode2" }),
+    ];
+
+    expect(getDefaultProviderInstanceModel(providers, ProviderInstanceId.make("opencode2"))).toBe(
+      "opencode/glm-5.2",
+    );
   });
 
   it("honors the instance's declared default before model-list order", () => {
