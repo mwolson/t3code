@@ -9,7 +9,9 @@ import {
   ORCHESTRATION_V2_WS_METHODS,
   PlanId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
+  ProviderThreadId,
   RunId,
   ThreadId,
   WS_METHODS,
@@ -816,6 +818,61 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 
+  it.effect("dispatches a run-less interrupt for provider-native background work", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const projectionRequests: Array<{ readonly threadId: string }> = [];
+      const now = DateTime.makeUnsafe("2026-06-20T01:00:00.000Z");
+      const driver = ProviderDriverKind.make("opencode2");
+      const projection: OrchestrationV2ThreadProjection = {
+        ...v2Projection,
+        subagents: [
+          {
+            id: NodeId.make("node:provider-native-command-test"),
+            threadId: v2ThreadId,
+            runId: null,
+            parentNodeId: NodeId.make("node:provider-native-command-parent"),
+            origin: "provider_native",
+            createdBy: "agent",
+            driver,
+            providerInstanceId: v2Projection.thread.providerInstanceId,
+            providerThreadId: ProviderThreadId.make("provider-thread:provider-native-command-test"),
+            childThreadId: ThreadId.make("thread:provider-native-command-test"),
+            nativeTaskRef: { driver, nativeId: "native-task", strength: "strong" },
+            prompt: "background work",
+            title: null,
+            model: null,
+            status: "running",
+            result: null,
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+          },
+        ],
+      };
+      const supervisor = yield* makeSupervisor({
+        commands,
+        projects: [],
+        projection,
+        projectionRequests,
+      });
+
+      yield* interruptThreadTurn({
+        commandId: CommandId.make("interrupt-provider-native-command"),
+        threadId: v2ThreadId,
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(projectionRequests).toEqual([{ threadId: v2ThreadId }]);
+      expect(commands).toEqual([
+        {
+          type: "run.interrupt",
+          commandId: "interrupt-provider-native-command",
+          threadId: v2ThreadId,
+          intent: "provider_native_only",
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
   it.effect("prefers runId over turnId when both are supplied", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];

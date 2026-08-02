@@ -704,7 +704,6 @@ function nonTerminalToolMessageIds(turn: ActiveOpenCodeTurn): Set<string> {
 function isInterruptedToolError(part: ToolPart): boolean {
   return part.state.status === "error" && recordValue(part.state.metadata, "interrupted") === true;
 }
-
 function toolInput(part: ToolPart): Record<string, unknown> {
   return part.state.input;
 }
@@ -1596,6 +1595,7 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
               label: option.label.trim() || "Option",
               description: option.description.trim() || option.label.trim() || "Option",
             })),
+            multiSelect: false,
           }));
 
         const runtimeRequestTurnItem = (

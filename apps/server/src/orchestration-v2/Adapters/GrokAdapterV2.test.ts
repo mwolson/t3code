@@ -3,9 +3,12 @@ import * as Effect from "effect/Effect";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { type ModelSelection, ProviderInstanceId } from "@t3tools/contracts";
 
+import { XAiAskUserQuestionRequest } from "../../provider/acp/XAiAcpExtension.ts";
+import type * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
 import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
 import { GROK_REASONING_EFFORT_OPTION_ID } from "../../provider/acp/GrokAcpSupport.ts";
 import {
+  type AcpAdapterV2ExtensionContext,
   AcpProviderCapabilitiesV2,
   acpCompletedTurnShouldTerminalizeTool,
   acpPermissionDisposition,
@@ -22,6 +25,7 @@ import {
 import {
   makeGrokAcpAdapterFlavor,
   GrokProviderCapabilitiesV2,
+  registerGrokAcpExtensions,
   type GrokAdapterV2Options,
 } from "./GrokAdapterV2.ts";
 
@@ -226,6 +230,53 @@ describe("acpRootTurnIsIdle", () => {
 });
 
 describe("GrokAdapterV2 capabilities", () => {
+  it.effect("forwards native Grok multiselect questions to requestUserInput", () =>
+    Effect.gen(function* () {
+      type RequestHandler = (
+        payload: typeof XAiAskUserQuestionRequest.Type,
+      ) => Effect.Effect<unknown>;
+      let requestHandler: RequestHandler | undefined;
+      const runtime = {
+        handleExtNotification: () => Effect.void,
+        handleExtRequest: (method: string, _payload: unknown, handler: RequestHandler) =>
+          Effect.sync(() => {
+            if (method === "x.ai/ask_user_question") requestHandler = handler;
+          }),
+      } as unknown as AcpSessionRuntime.AcpSessionRuntime["Service"];
+      const requests: Array<Parameters<AcpAdapterV2ExtensionContext["requestUserInput"]>[0]> = [];
+
+      yield* registerGrokAcpExtensions({
+        runtime,
+        applyBackgroundTaskMutation: () => Effect.void,
+        requestUserInput: (request) =>
+          Effect.sync(() => {
+            requests.push(request);
+            return {
+              acknowledgeNativeResponse: Effect.void,
+              answers: null,
+            };
+          }),
+      });
+
+      assert.isDefined(requestHandler);
+      yield* requestHandler!({
+        sessionId: "session-1",
+        toolCallId: "tool-call-1",
+        mode: "default",
+        questions: [
+          {
+            id: "scope",
+            question: "Which scopes should Grok use?",
+            multiSelect: true,
+            options: [{ label: "Tests" }, { label: "Docs" }],
+          },
+        ],
+      });
+
+      assert.isTrue(requests[0]?.questions[0]?.multiSelect);
+    }),
+  );
+
   it("wires hard Stop teardown but soft non-Stop interrupts in the constructor flavor", () => {
     const flavor = makeGrokAcpAdapterFlavor({
       makeRuntime: () => Effect.never,
