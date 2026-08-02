@@ -47,6 +47,7 @@ export interface ThreadRunSummary {
 export interface ThreadRuntimeSummary {
   readonly status: OrchestrationV2RunStatus | "idle";
   readonly activeRunId: RunId | null;
+  readonly hasInterruptibleProviderNativeBackgroundWork?: boolean;
   readonly providerInstanceId: ProviderInstanceId;
   readonly providerName: string | null;
   readonly lastError: string | null;
@@ -150,6 +151,8 @@ function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary 
   return {
     status,
     activeRunId: thread.activeRunId,
+    hasInterruptibleProviderNativeBackgroundWork:
+      thread.hasInterruptibleProviderNativeBackgroundWork === true,
     providerInstanceId: thread.providerInstanceId,
     providerName: null,
     lastError: thread.lastError ?? null,

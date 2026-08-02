@@ -1643,6 +1643,7 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
               label: option.label.trim() || "Option",
               description: option.description.trim() || option.label.trim() || "Option",
             })),
+            multiSelect: false,
           }));
 
         const runtimeRequestTurnItem = (

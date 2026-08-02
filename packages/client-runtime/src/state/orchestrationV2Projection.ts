@@ -219,6 +219,9 @@ export function applyOrchestrationV2ProjectionEvent(
               }),
         }),
       };
+    case "provider-turn.interrupt-requested":
+    case "run.interrupt-noop":
+      return base;
     case "runtime-request.updated":
       return { ...base, runtimeRequests: upsertEntity(base.runtimeRequests, event.payload) };
     case "message.updated":

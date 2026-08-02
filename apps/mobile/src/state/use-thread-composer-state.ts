@@ -3,6 +3,7 @@ import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
 import {
   deriveThreadActivityRun,
   deriveThreadRuntime,
+  threadRuntimeHasInterruptibleWork,
   threadRuntimeHasInterruptibleRun,
 } from "@t3tools/client-runtime/state/thread-execution";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -206,6 +207,7 @@ export function useThreadComposerState() {
   const interruptibleRunId = threadRuntimeHasInterruptibleRun(selectedThreadRuntime)
     ? (selectedThreadRuntime?.activeRunId ?? null)
     : null;
+  const canInterruptThread = threadRuntimeHasInterruptibleWork(selectedThreadRuntime);
 
   const onSendMessage = useCallback(async () => {
     if (!selectedThreadShell) {
@@ -517,6 +519,7 @@ export function useThreadComposerState() {
     interactionMode,
     activeThreadBusy,
     interruptibleRunId,
+    canInterruptThread,
     onChangeDraftMessage,
     onPickDraftMedia,
     onPickDraftFiles,
