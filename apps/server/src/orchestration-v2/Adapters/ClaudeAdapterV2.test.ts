@@ -3685,7 +3685,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           (event) => event.turnItem.threadId === harness.threadId,
         );
         assert.equal(parentAssistantItems.length, 1);
-        assert.equal(parentAssistantItems[0]?.turnItem.text, "Delegation completed.");
+        const parentTurnItem = parentAssistantItems[0]?.turnItem;
+        if (parentTurnItem?.type !== "assistant_message") {
+          throw new Error("Parent turn item must be an assistant message.");
+        }
+        assert.equal(parentTurnItem.text, "Delegation completed.");
       }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
     ),
   );

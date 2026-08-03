@@ -47,6 +47,11 @@ export const MESSAGE_STEERING_INITIAL_PROMPT =
   "Respond with exactly: steering fixture initial response";
 export const SUBAGENT_PROMPT =
   "Spawn 2 subagents, one to read package.json and one to read tsconfig.json";
+export const SUBAGENT_TEXT_NARRATION_MARKER = "SUBAGENT NARRATION MARKER";
+export const SUBAGENT_TEXT_FINAL_MARKER = "SUBAGENT FINAL MARKER";
+export const SUBAGENT_TEXT_PARENT_MARKER = "PARENT FINAL MARKER";
+export const SUBAGENT_TEXT_PROMPT =
+  "Use the Agent tool with run_in_background set to true to spawn exactly one subagent with this prompt: 'Reply with a message that is exactly: SUBAGENT NARRATION MARKER. Then read package.json in the current working directory. Then finish with a final message that is exactly: SUBAGENT FINAL MARKER.' Then call the TaskOutput tool repeatedly until the task reports it has completed; do not end your turn while the task is still running. Once it has completed, do not repeat or quote the subagent's output; respond with exactly: PARENT FINAL MARKER";
 export const SUBAGENT_V2_PROMPT = "just say hello";
 export const OPENCODE_SUBAGENT_PROMPT =
   "Use the task tool exactly once. Delegate to the general subagent with this prompt: Respond exactly CHILD_OK. After the task completes, respond exactly PARENT_OK.";

@@ -47,6 +47,8 @@ import { subagentInput } from "./subagent/input.ts";
 import { assertCursorSubagentOutput } from "./subagent/cursor_output.ts";
 import { assertSubagentContinueOutput } from "./subagent_continue/codex_output.ts";
 import { subagentContinueInput } from "./subagent_continue/input.ts";
+import { assertClaudeSubagentTextOutput } from "./subagent_text/claude_output.ts";
+import { subagentTextInput } from "./subagent_text/input.ts";
 import { assertSubagentV2Output } from "./subagent_v2/codex_output.ts";
 import { subagentV2Input } from "./subagent_v2/input.ts";
 import { assertSubagentV2NestedOutput } from "./subagent_v2_nested/codex_output.ts";
@@ -386,6 +388,18 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: CURSOR_MODEL_SELECTION,
         runtimePolicyOverride: READ_ONLY_NEVER_POLICY,
         assertOutput: assertCursorSubagentOutput,
+      },
+    ],
+  },
+  {
+    name: "subagent_text",
+    buildInput: subagentTextInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        transcriptFile: new URL("./subagent_text/claude_transcript.ndjson", import.meta.url),
+        modelSelection: CLAUDE_MODEL_SELECTION,
+        assertOutput: assertClaudeSubagentTextOutput,
       },
     ],
   },

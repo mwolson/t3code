@@ -1299,6 +1299,7 @@ const CLAUDE_KNOWN_TOOL_CLASSIFICATIONS: Record<
   notebookedit: { itemType: "file_change", requestKind: "file-change" },
   read: { itemType: "dynamic_tool", requestKind: "file-read" },
   task: { itemType: "dynamic_tool", requestKind: "command" },
+  taskoutput: { itemType: "dynamic_tool", requestKind: "command" },
   todowrite: { itemType: "dynamic_tool", requestKind: "command" },
   toolsearch: { itemType: "dynamic_tool", requestKind: "command" },
   webfetch: { itemType: "web_search", requestKind: "command" },

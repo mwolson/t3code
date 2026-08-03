@@ -27,6 +27,7 @@ import {
   MULTI_TURN_SECOND_PROMPT,
   SIMPLE_PROMPT,
   SUBAGENT_PROMPT,
+  SUBAGENT_TEXT_PROMPT,
   THREAD_FORK_NATIVE_PRIOR_TURN_ALPHA_PROMPT,
   THREAD_FORK_NATIVE_PRIOR_TURN_BETA_PROMPT,
   THREAD_FORK_NATIVE_PRIOR_TURN_REPEAT_PROMPT,
@@ -159,6 +160,12 @@ const CLAUDE_RECORDINGS = {
   subagent: {
     prompts: [SUBAGENT_PROMPT],
     defaultTranscriptFile: "fixtures/subagent/claude_transcript.ndjson",
+    queryMode: "streaming",
+    enableTools: true,
+  },
+  subagent_text: {
+    prompts: [SUBAGENT_TEXT_PROMPT],
+    defaultTranscriptFile: "fixtures/subagent_text/claude_transcript.ndjson",
     queryMode: "streaming",
     enableTools: true,
   },
@@ -373,7 +380,10 @@ const cwd =
     : await makeCheckpointWorkspace(`claude-agent-sdk-record-${scenario}`));
 const shouldRemoveCwd = process.env.T3_CLAUDE_REPLAY_CWD === undefined;
 
-if (shouldRemoveCwd && (scenario === "tool_call_read_only" || scenario === "subagent")) {
+if (
+  shouldRemoveCwd &&
+  (scenario === "tool_call_read_only" || scenario === "subagent" || scenario === "subagent_text")
+) {
   await runFileSystem(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
