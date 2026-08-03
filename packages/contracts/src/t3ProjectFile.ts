@@ -1,9 +1,8 @@
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
-import { ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
-import { ProjectScriptIcon } from "./orchestration.ts";
-import type { ProjectScopedServerSettingKey, ServerSettings } from "./settings.ts";
+import { ThreadEnvMode } from "./environment.ts";
+import { ProjectScriptIcon } from "./project.ts";
 
 /** File name of the checked-in T3 project file, resolved at the workspace root. */
 export const T3_PROJECT_FILE_NAME = "t3.json";

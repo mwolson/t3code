@@ -23,7 +23,6 @@ interface ComposerPrimaryActionsProps {
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
   isSendBusy: boolean;
-  sendDisabledReason: string | null;
   isConnecting: boolean;
   isEnvironmentUnavailable: boolean;
   isPreparingWorktree: boolean;
@@ -68,7 +67,6 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   showPlanFollowUpPrompt,
   promptHasText,
   isSendBusy,
-  sendDisabledReason,
   isConnecting,
   isEnvironmentUnavailable,
   isPreparingWorktree,
@@ -86,6 +84,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   const stageBackdropVariant = useSidebarStageBackdropVariant(
     environmentIdentificationMode === "artwork",
   );
+>>>>>>> ab978b6ee3 (fix: reconcile rebase with latest main)
 
   const renderStopGenerationButton = (insidePendingAction: boolean) => (
     <button
@@ -176,7 +175,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           type="submit"
           className={cn(messageActionPillClassName, "h-9 sm:h-8", compact ? "px-3" : "px-4")}
           {...pointerFocusProps}
-          disabled={isSendBusy || isSendDisabled || isConnecting || isEnvironmentUnavailable}
+          disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
         >
           {isConnecting || isSendBusy ? "Sending..." : "Refine"}
         </button>
@@ -189,7 +188,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           type="submit"
           className={cn(messageActionPillClassName, "h-9 rounded-r-none px-4 sm:h-8")}
           {...pointerFocusProps}
-          disabled={isSendBusy || isSendDisabled || isConnecting || isEnvironmentUnavailable}
+          disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
         >
           {isConnecting || isSendBusy ? "Sending..." : "Implement"}
         </button>
@@ -204,7 +203,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
                 )}
                 aria-label="Implementation actions"
                 {...pointerFocusProps}
-                disabled={isSendBusy || isSendDisabled || isConnecting || isEnvironmentUnavailable}
+                disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
               />
             }
           >
@@ -212,7 +211,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           </MenuTrigger>
           <MenuPopup align="end" side="top">
             <MenuItem
-              disabled={isSendBusy || isSendDisabled || isConnecting || isEnvironmentUnavailable}
+              disabled={isSendBusy || isConnecting || isEnvironmentUnavailable}
               onClick={() => void onImplementPlanInNewThread()}
             >
               Implement in a new thread
@@ -233,13 +232,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           : "bg-message-action text-message-action-foreground enabled:shadow-message-action/24 hover:bg-message-action-hover",
       )}
       {...pointerFocusProps}
-      disabled={
-        isSendBusy ||
-        isSendDisabled ||
-        isConnecting ||
-        isEnvironmentUnavailable ||
-        !hasSendableContent
-      }
+      disabled={isSendBusy || isConnecting || isEnvironmentUnavailable || !hasSendableContent}
       aria-label={
         isEnvironmentUnavailable
           ? "Environment disconnected"

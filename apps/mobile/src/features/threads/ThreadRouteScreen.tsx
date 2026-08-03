@@ -667,7 +667,7 @@ function ThreadRouteContent(
     terminalDebugLog("terminal-menu:open-new", {
       hasThread: Boolean(selectedThread),
       hasWorkspaceRoot: Boolean(selectedThreadProject?.workspaceRoot),
-      listedTerminalIds: terminalMenuSessions.map((runtime) => runtime.terminalId),
+      listedTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
     });
 
     if (!selectedThread || !selectedThreadProject?.workspaceRoot) {
@@ -675,7 +675,7 @@ function ThreadRouteContent(
     }
 
     const nextId = nextOpenTerminalId({
-      listedTerminalIds: terminalMenuSessions.map((runtime) => runtime.terminalId),
+      listedTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
     });
     void navigation.navigate("ThreadTerminal", {
       environmentId: String(selectedThread.environmentId),
@@ -702,9 +702,9 @@ function ThreadRouteContent(
       }
 
       const targetTerminalId = resolveProjectScriptTerminalId({
-        existingTerminalIds: terminalMenuSessions.map((runtime) => runtime.terminalId),
+        existingTerminalIds: terminalMenuSessions.map((session) => session.terminalId),
         hasRunningTerminal: terminalMenuSessions.some(
-          (runtime) => runtime.status === "running" || runtime.status === "starting",
+          (session) => session.status === "running" || session.status === "starting",
         ),
       });
       const preferredWorktreePath = resolvePreferredThreadWorktreePath({
