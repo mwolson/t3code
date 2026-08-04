@@ -37,6 +37,9 @@ export function assertQueuedCancelledWhileActiveOutput(
   assert.equal(capturedShell.latestRunId, cancelledRun.id);
   assert.equal(capturedShell.status, "cancelled");
   assert.equal(capturedShell.activeRunId, activeRun.id);
-  assert.equal(capturedShell.activityRunStatus, "running");
+  // The replay gate can open before CTM's title-regeneration work emits the
+  // run-start transition. Both statuses represent the active foreground run
+  // and map to Working, while the cancelled latest run must not win.
+  assert.include(["starting", "running"], capturedShell.activityRunStatus);
   assert.deepEqual(capturedShell.pendingBackgroundTasks, []);
 }
