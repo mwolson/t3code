@@ -74,6 +74,7 @@ import { RunExecutionServiceV2 } from "./RunExecutionService.ts";
 import { RunFinalizationService } from "./RunFinalizationService.ts";
 import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
 import { RuntimeRequestServiceV2 } from "./RuntimeRequestService.ts";
+import { ThreadTitleRegenerationService } from "./ThreadTitleRegenerationService.ts";
 
 const databaseLayer = SqlitePersistenceMemory;
 const eventStoreProvided = eventStoreLayer.pipe(Layer.provideMerge(databaseLayer));
@@ -2785,6 +2786,10 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
             Layer.mock(CheckpointRollbackServiceV2)({}),
             Layer.mock(RuntimeRequestServiceV2)({}),
             Layer.mock(RunFinalizationService)({}),
+            Layer.succeed(
+              ThreadTitleRegenerationService,
+              ThreadTitleRegenerationService.of({ execute: () => Effect.void }),
+            ),
           ),
         ),
       );

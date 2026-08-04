@@ -1651,8 +1651,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
         case "thread.mark-unread":
           return { ...thread, lastVisitedAt: markUnreadVisitedAt };
-        case "thread.delete":
-          return { ...thread, deletedAt: thread.deletedAt ?? now, updatedAt: now };
         case "thread.metadata.update":
           return {
             ...thread,
