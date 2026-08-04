@@ -784,7 +784,6 @@ describe("resolveSidebarV2Status", () => {
       "waiting",
     );
   });
-
   it("keeps Waiting static while Working shows elapsed duration", () => {
     expect(shouldShowSidebarV2Duration("waiting")).toBe(false);
     expect(shouldShowSidebarV2Duration("working")).toBe(true);
