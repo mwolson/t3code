@@ -11,11 +11,15 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 
+export const PROVIDER_CONTINUATION_MESSAGE_TEXT = "Background task completed.";
+
 export interface ProviderContinuationRequest {
   readonly threadId: ThreadId;
   readonly providerThreadId: ProviderThreadId;
   readonly driver: ProviderDriverKind;
   readonly detail: string | null;
+  /** Overrides the queued message text without discarding provider-specific detail. */
+  readonly messageText?: string;
   /**
    * Durable ownership for an app-owned delegated-task completion delivery.
    * The continuation worker re-reads the cohort before dispatching so a later

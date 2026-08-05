@@ -111,10 +111,22 @@ describe("ProviderContinuationService", () => {
       const dispatched = yield* Queue.unbounded<unknown>();
       yield* Effect.gen(function* () {
         const requests = yield* ProviderContinuationRequests;
-        yield* requests.offer(request());
-        const command = (yield* Queue.take(dispatched)) as { readonly creationSource: string };
+        yield* requests.offer({
+          ...request(undefined, "Raw child task summary."),
+          messageText: "Background task completed.",
+        });
+        const command = (yield* Queue.take(dispatched)) as {
+          readonly createdBy: string;
+          readonly creationSource: string;
+          readonly dispatchMode: { readonly type: string };
+          readonly text: string;
+        };
         // ClaudeAdapterV2 keys on this to attach buffered CLI output.
+        assert.equal(command.createdBy, "agent");
         assert.equal(command.creationSource, "provider");
+        assert.deepEqual(command.dispatchMode, { type: "queue_after_active" });
+        assert.equal(command.text, "Background task completed.");
+        assert.notEqual(command.text, "Raw child task summary.");
       }).pipe(
         Effect.provide(
           testLayer({ dispatched, getThreadProjection: () => Effect.succeed(projection) }),
@@ -123,6 +135,30 @@ describe("ProviderContinuationService", () => {
       );
     });
   });
+
+  it.effect(
+    "preserves adapter-buffered provider detail without an explicit message override",
+    () => {
+      return Effect.gen(function* () {
+        const dispatched = yield* Queue.unbounded<unknown>();
+        yield* Effect.gen(function* () {
+          const requests = yield* ProviderContinuationRequests;
+          yield* requests.offer(request(undefined, "Background command completed: sleep 20"));
+          const command = (yield* Queue.take(dispatched)) as {
+            readonly creationSource: string;
+            readonly text: string;
+          };
+          assert.equal(command.creationSource, "provider");
+          assert.equal(command.text, "Background command completed: sleep 20");
+        }).pipe(
+          Effect.provide(
+            testLayer({ dispatched, getThreadProjection: () => Effect.succeed(projection) }),
+          ),
+          Effect.scoped,
+        );
+      });
+    },
+  );
 
   it.effect("delivers a message_text wake as a real prompt, not a buffered wake", () => {
     return Effect.gen(function* () {

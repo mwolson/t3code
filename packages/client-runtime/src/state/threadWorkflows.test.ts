@@ -126,6 +126,58 @@ describe("thread workflows", () => {
     ]);
   });
 
+  it("hides provider-buffered automatic continuations from the visible queue", () => {
+    const state = deriveThreadQueueWorkflowState({
+      thread: { id: "thread", activeProviderThreadId: null },
+      runs: [
+        {
+          id: "provider-automatic",
+          status: "queued",
+          userMessageId: "message-provider-automatic",
+          ordinal: 1,
+          queuePosition: 1,
+        },
+        {
+          id: "user-provider-message",
+          status: "queued",
+          userMessageId: "message-user-provider",
+          ordinal: 2,
+          queuePosition: 2,
+        },
+        {
+          id: "visible",
+          status: "queued",
+          userMessageId: "message-visible",
+          ordinal: 3,
+          queuePosition: 3,
+        },
+      ],
+      messages: [
+        {
+          id: "message-provider-automatic",
+          text: "Background task completed.",
+          createdBy: "agent",
+          creationSource: "provider",
+        },
+        {
+          id: "message-user-provider",
+          text: "User-created provider message",
+          createdBy: "user",
+          creationSource: "provider",
+        },
+        { id: "message-visible", text: "Visible queued message" },
+      ],
+      providerTurns: [],
+      providerThreads: [],
+      providerSessions: [],
+    } as never);
+
+    expect(state.queuedRuns.map(({ run, text }) => [run.id, text])).toEqual([
+      ["user-provider-message", "User-created provider message"],
+      ["visible", "Visible queued message"],
+    ]);
+  });
+
   it("removes only the promoted head from the visible queue", () => {
     const state = deriveThreadQueueWorkflowState({
       thread: { id: "thread", activeProviderThreadId: "provider-thread" },
