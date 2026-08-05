@@ -795,4 +795,34 @@ describe("ProviderContinuationService", () => {
       );
     });
   });
+
+  it.effect("releases a guarded adapter wake when dispatch fails", () => {
+    return Effect.gen(function* () {
+      const attempts = yield* Ref.make(0);
+      const released = yield* Ref.make(false);
+      const threads = Layer.mock(ThreadManagementService)({
+        getThreadProjection: () => Effect.succeed(projection),
+        dispatch: () =>
+          Ref.update(attempts, (count) => count + 1).pipe(
+            Effect.andThen(Effect.fail(new Error("simulated adapter dispatch failure") as never)),
+          ),
+      });
+      const worker = workerLive.pipe(
+        Layer.provide(Layer.mergeAll(idAllocatorLayer, continuationRequestsLayer, threads)),
+      );
+
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests;
+        yield* requests.offer({
+          ...request((effect) => effect.pipe(Effect.map(Option.some))),
+          failIfCurrent: () => Ref.set(released, true),
+        });
+        for (let attempt = 0; attempt < 20 && !(yield* Ref.get(released)); attempt += 1) {
+          yield* Effect.yieldNow;
+        }
+        assert.isTrue(yield* Ref.get(released));
+        assert.equal(yield* Ref.get(attempts), 1);
+      }).pipe(Effect.provide(Layer.merge(continuationRequestsLayer, worker)), Effect.scoped);
+    });
+  });
 });
