@@ -122,6 +122,7 @@ import {
   ProviderContinuationRequests,
 } from "../ProviderContinuationRequests.ts";
 import {
+  hasSubagentPromptText,
   makeSubagentChildThread,
   makeSubagentConversationArtifacts,
   subagentThreadTitle,
@@ -3165,8 +3166,135 @@ export function makeClaudeAdapterV2(
             ) {
               return current;
             }
-            return new Map(current).set(input.taskId, subagent);
+            const isNew = registered === undefined;
+            const lifecycleChanged =
+              isNew ||
+              registered.task.status !== input.status ||
+              (input.reopen === true && input.status === "running");
+            const childThreadId = registered?.childThreadId ?? derivedChildThreadId;
+            const childRootNodeId = registered?.childRootNodeId ?? derivedChildRootNodeId;
+            const priorTask =
+              registered === undefined
+                ? undefined
+                : isReopen
+                  ? (({ progress: _staleProgress, ...rest }) => ({ ...rest, result: null }))(
+                      registered.task,
+                    )
+                  : registered.task;
+            const task = {
+              ...(priorTask ?? {
+                id: derivedNodeId,
+                threadId: input.context.input.threadId,
+                runId: input.context.input.runId,
+                parentNodeId: input.context.input.rootNodeId,
+                origin: "provider_native" as const,
+                createdBy: "agent" as const,
+                driver: CLAUDE_PROVIDER,
+                providerInstanceId: input.context.input.modelSelection.instanceId,
+                providerThreadId: null,
+                childThreadId,
+                nativeTaskRef: {
+                  driver: CLAUDE_PROVIDER,
+                  nativeId: input.taskId,
+                  strength: "strong" as const,
+                },
+                prompt: input.prompt ?? "",
+                title: input.title ?? null,
+                model: input.context.input.modelSelection.model,
+                result: null,
+                startedAt: now,
+              }),
+              status: input.status,
+              ...(isReopen ? { runId: input.context.input.runId } : {}),
+              ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+              ...(input.title === undefined ? {} : { title: input.title }),
+              ...(input.progress === undefined ? {} : { progress: input.progress }),
+              ...(input.result === undefined ? {} : { result: input.result }),
+              completedAt: input.status === "running" ? null : now,
+              updatedAt: now,
+            } satisfies OrchestrationV2Subagent;
+            // A task_progress frame can register a subagent before any frame
+            // carries its prompt, so the opening message waits for the first
+            // prompt that actually has text instead of being tied to isNew.
+            const emitPromptMessage =
+              hasSubagentPromptText(task.prompt) && !hasSubagentPromptText(priorTask?.prompt);
+            const subagent = {
+              ...(registered ?? {
+                childThreadId,
+                childRootNodeId,
+                nativeThreadId: input.context.nativeThreadId,
+                turnItemId: idAllocator.derive.turnItemFromProviderItem({
+                  driver: CLAUDE_PROVIDER,
+                  nativeItemId: `${nativeItemId}:subagent`,
+                }),
+                turnItemOrdinal: derivedTurnItemOrdinal,
+                providerThreadId: input.context.input.providerThread.id,
+                providerTurnId: input.context.providerTurnId,
+                launchToolUseId: input.toolUseId ?? null,
+                nextChildItemOrdinal: 100,
+                childItemOrdinalsByNativeItemId: new Map<string, number>(),
+                activeToolCallsByNativeItemId: new Map<string, ActiveClaudeToolCall>(),
+                progressItemOrdinal: null,
+                progressStartedAt: null,
+                resultItemOrdinal: null,
+                emittedTextNativeItemIds: new Set<string>(),
+                emittedTerminalResultNativeItemIds: new Set<string>(),
+                generation: 0,
+                streamedTexts: [],
+                terminalResultTexts: [],
+              }),
+              task,
+              providerThreadId: input.context.input.providerThread.id,
+              providerTurnId: input.context.providerTurnId,
+              ...(isReopen
+                ? { activeToolCallsByNativeItemId: new Map<string, ActiveClaudeToolCall>() }
+                : {}),
+              ...(terminalNativeItemId === undefined
+                ? {}
+                : {
+                    emittedTerminalResultNativeItemIds: addToBoundedSet(
+                      registered?.emittedTerminalResultNativeItemIds ?? new Set<string>(),
+                      terminalNativeItemId,
+                      MAX_CLAUDE_SUBAGENT_TERMINAL_NATIVE_ITEM_IDS,
+                    ),
+                  }),
+              ...(isReopen
+                ? {
+                    resultItemOrdinal: null,
+                    generation: (registered?.generation ?? 0) + 1,
+                    streamedTexts: [],
+                    terminalResultTexts: [],
+                  }
+                : {}),
+            } satisfies ActiveClaudeSubagent;
+            const subagentsByTaskId = new Map(nativeThreadState.subagentsByTaskId);
+            subagentsByTaskId.set(input.taskId, subagent);
+            const taskIdByToolUseId = new Map(nativeThreadState.taskIdByToolUseId);
+            if (input.toolUseId !== undefined) {
+              taskIdByToolUseId.set(input.toolUseId, input.taskId);
+            }
+            const pendingResumeTaskIds = new Set(nativeThreadState.pendingResumeTaskIds);
+            pendingResumeTaskIds.delete(input.taskId);
+            const byNativeThreadId = new Map(state.byNativeThreadId);
+            byNativeThreadId.set(input.context.nativeThreadId, {
+              ...nativeThreadState,
+              subagentsByTaskId,
+              taskIdByToolUseId,
+              pendingResumeTaskIds,
+            });
+            return [
+              { subagent, isNew, lifecycleChanged, terminalNativeItemId, emitPromptMessage },
+              { byNativeThreadId },
+            ] as const;
           });
+          if (installation === undefined) {
+            return;
+          }
+          const { subagent, isNew, lifecycleChanged, emitPromptMessage } = installation;
+          const task = subagent.task;
+          const nodeId = task.id;
+          const childRootNodeId = subagent.childRootNodeId;
+          const childThreadId = subagent.childThreadId;
 
           if (existingSubagent === undefined) {
             const childThread = makeSubagentChildThread({
@@ -3244,7 +3372,7 @@ export function makeClaudeAdapterV2(
               },
             });
           }
-          if (existingSubagent === undefined) {
+          if (emitPromptMessage) {
             const promptNativeItemId = `${nativeItemId}:prompt`;
             const promptArtifacts = makeSubagentConversationArtifacts({
               messageId: idAllocator.derive.messageFromProviderItem({
