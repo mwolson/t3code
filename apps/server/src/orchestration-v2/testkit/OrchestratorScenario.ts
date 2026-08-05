@@ -503,6 +503,41 @@ export function runOrchestratorV2Scenario(
           return yield* releaseReplayGate(label, attemptsRemaining - 1);
         });
 
+      const waitForSubagentStatus = (
+        threadId: ThreadId,
+        status: OrchestrationV2Subagent["status"],
+        subagentId?: OrchestrationV2Subagent["id"],
+        attemptsRemaining = SCENARIO_WAIT_ATTEMPTS,
+        deadlineAt = scenarioWaitDeadline(),
+      ): Effect.Effect<void, OrchestratorV2Error | OrchestratorV2ScenarioStepError, never> =>
+        Effect.gen(function* () {
+          const projection = yield* orchestrator.getThreadProjection(threadId);
+          if (
+            projection.subagents.some(
+              (subagent) =>
+                subagent.threadId === threadId &&
+                subagent.status === status &&
+                (subagentId === undefined || subagent.id === subagentId),
+            )
+          ) {
+            return;
+          }
+          if (scenarioWaitExhausted(attemptsRemaining, deadlineAt)) {
+            return yield* new OrchestratorV2ScenarioStepError({
+              scenario: scenario.name,
+              step: `await_subagent_status:${threadId}:${subagentId ?? "any"}:${status}`,
+            });
+          }
+          yield* yieldToRuntime;
+          return yield* waitForSubagentStatus(
+            threadId,
+            status,
+            subagentId,
+            attemptsRemaining - 1,
+            deadlineAt,
+          );
+        });
+
       for (const step of scenarioSteps(scenario)) {
         switch (step.type) {
           case "dispatch": {
