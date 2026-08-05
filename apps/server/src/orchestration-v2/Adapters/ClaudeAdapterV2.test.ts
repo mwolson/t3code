@@ -4005,6 +4005,257 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect("waits for explicit aliases when sibling task starts are ambiguous", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const firstTaskId = "task-ambiguous-first";
+        const firstToolUseId = "toolu-ambiguous-first";
+        const firstChildText = "First ambiguous child text.";
+        const secondTaskId = "task-ambiguous-second";
+        const secondToolUseId = "toolu-ambiguous-second";
+        const secondChildText = "Second ambiguous child text.";
+        const subagentEvents = () =>
+          harness.events.filter(
+            (event): event is Extract<ProviderAdapterV2Event, { type: "subagent.updated" }> =>
+              event.type === "subagent.updated",
+          );
+        const assistantItems = () =>
+          harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+              ? [event.turnItem]
+              : [],
+          );
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-ambiguous-launch-alias"),
+            text: "Delegate two tasks.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "assistant",
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: firstToolUseId,
+                  name: "Agent",
+                  input: { prompt: "Return the first child result.", run_in_background: true },
+                },
+                {
+                  type: "tool_use",
+                  id: secondToolUseId,
+                  name: "Agent",
+                  input: { prompt: "Return the second child result.", run_in_background: true },
+                },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000639",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000640",
+            text: secondChildText,
+            parentToolUseId: secondToolUseId,
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000641",
+            text: firstChildText,
+            parentToolUseId: firstToolUseId,
+          }),
+        );
+        for (const [taskId, description, uuid] of [
+          [secondTaskId, "Second task starts first", "00000000-0000-4000-8000-000000000642"],
+          [firstTaskId, "First task starts second", "00000000-0000-4000-8000-000000000643"],
+        ] as const) {
+          yield* Queue.offer(
+            harness.sdkMessages,
+            claudeSdkFrame({
+              type: "system",
+              subtype: "task_started",
+              task_id: taskId,
+              description,
+              subagent_type: "general-purpose",
+              task_type: "local_agent",
+              prompt: description,
+              uuid,
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+        }
+        yield* awaitUntil(() => subagentEvents().length === 2, "ambiguous sibling registrations");
+        assert.notIncludeMembers(
+          assistantItems().map((item) => item.text),
+          [firstChildText, secondChildText],
+        );
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_progress",
+            task_id: firstTaskId,
+            tool_use_id: firstToolUseId,
+            description: "Explicit progress alias available",
+            uuid: "00000000-0000-4000-8000-000000000644",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: secondTaskId,
+            tool_use_id: secondToolUseId,
+            status: "completed",
+            output_file: "",
+            summary: "Second child notification fallback.",
+            uuid: "00000000-0000-4000-8000-000000000645",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* awaitUntil(
+          () =>
+            assistantItems().some((item) => item.text === firstChildText) &&
+            assistantItems().some((item) => item.text === secondChildText),
+          "ambiguous sibling buffers drained",
+        );
+
+        const firstChildThreadId = subagentEvents().find(
+          (event) => event.subagent.nativeTaskRef?.nativeId === firstTaskId,
+        )?.subagent.childThreadId;
+        const secondChildThreadId = subagentEvents().find(
+          (event) => event.subagent.nativeTaskRef?.nativeId === secondTaskId,
+        )?.subagent.childThreadId;
+        assert.ok(firstChildThreadId);
+        assert.ok(secondChildThreadId);
+        assert.equal(
+          assistantItems().find((item) => item.text === firstChildText)?.threadId,
+          firstChildThreadId,
+        );
+        assert.equal(
+          assistantItems().find((item) => item.text === secondChildText)?.threadId,
+          secondChildThreadId,
+        );
+        assert.isFalse(
+          assistantItems().some(
+            (item) =>
+              item.threadId === harness.threadId &&
+              (item.text === firstChildText || item.text === secondChildText),
+          ),
+        );
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "user",
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: firstToolUseId,
+                  content: "First child terminal result.",
+                },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000646",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* awaitUntil(
+          () =>
+            subagentEvents().some(
+              (event) =>
+                event.subagent.nativeTaskRef?.nativeId === firstTaskId &&
+                event.subagent.status === "completed",
+            ),
+          "late launch alias terminal result",
+        );
+        assert.equal(
+          subagentEvents().findLast(
+            (event) => event.subagent.nativeTaskRef?.nativeId === firstTaskId,
+          )?.subagent.result,
+          "First child terminal result.",
+        );
+        assert.isFalse(
+          harness.events.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "dynamic_tool" &&
+              event.turnItem.threadId === harness.threadId &&
+              event.turnItem.nativeItemRef?.nativeId === firstToolUseId,
+          ),
+        );
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "user",
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: secondToolUseId,
+                  content: "Second child terminal result.",
+                },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000647",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* awaitUntil(
+          () =>
+            subagentEvents().some(
+              (event) =>
+                event.subagent.nativeTaskRef?.nativeId === secondTaskId &&
+                event.subagent.result === "Second child terminal result.",
+            ),
+          "notification alias terminal result",
+        );
+        assert.isFalse(
+          harness.events.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "dynamic_tool" &&
+              event.turnItem.threadId === harness.threadId &&
+              event.turnItem.nativeItemRef?.nativeId === secondToolUseId,
+          ),
+        );
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000648",
+            result: "Root delegation complete.",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "root turn terminal");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
   it.effect("extracts text from direct content-block subagent results", () =>
     Effect.scoped(
       Effect.gen(function* () {

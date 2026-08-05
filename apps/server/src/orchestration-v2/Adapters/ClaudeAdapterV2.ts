@@ -2011,6 +2011,7 @@ interface ActiveClaudeTurnContext {
   };
   readonly toolCalls: Map<string, ActiveClaudeToolCall>;
   readonly pendingSubagentLaunchToolUseIds: Array<string>;
+  subagentLaunchAliasInferenceDisabled: boolean;
   readonly ignoredTaskIds: Set<string>;
 }
 
@@ -2092,14 +2093,24 @@ function takePendingSubagentLaunchToolUseId(
   context: ActiveClaudeTurnContext,
   explicitToolUseId: string | undefined,
 ): string | undefined {
-  if (explicitToolUseId === undefined) {
-    return context.pendingSubagentLaunchToolUseIds.shift();
+  if (explicitToolUseId !== undefined) {
+    const index = context.pendingSubagentLaunchToolUseIds.indexOf(explicitToolUseId);
+    if (index >= 0) {
+      context.pendingSubagentLaunchToolUseIds.splice(index, 1);
+    }
+    return explicitToolUseId;
   }
-  const index = context.pendingSubagentLaunchToolUseIds.indexOf(explicitToolUseId);
-  if (index >= 0) {
-    context.pendingSubagentLaunchToolUseIds.splice(index, 1);
+
+  if (
+    context.subagentLaunchAliasInferenceDisabled ||
+    context.pendingSubagentLaunchToolUseIds.length !== 1
+  ) {
+    context.subagentLaunchAliasInferenceDisabled = true;
+    context.pendingSubagentLaunchToolUseIds.splice(0);
+    return undefined;
   }
-  return explicitToolUseId;
+
+  return context.pendingSubagentLaunchToolUseIds.shift();
 }
 
 function normalizeClaudeTerminalText(text: string): string {
@@ -2318,18 +2329,31 @@ export function makeClaudeAdapterV2(
         }) {
           yield* Ref.update(sessionSubagents, (state) => {
             const nativeThreadState = state.byNativeThreadId.get(input.nativeThreadId);
+            const subagent = nativeThreadState?.subagentsByTaskId.get(input.taskId);
+            if (nativeThreadState === undefined || subagent === undefined) {
+              return state;
+            }
+            const remembersLaunchToolUseId =
+              subagent.generation === 0 && subagent.launchToolUseId === null;
             if (
-              nativeThreadState === undefined ||
-              !nativeThreadState.subagentsByTaskId.has(input.taskId) ||
+              !remembersLaunchToolUseId &&
               nativeThreadState.taskIdByToolUseId.get(input.toolUseId) === input.taskId
             ) {
               return state;
+            }
+            const subagentsByTaskId = new Map(nativeThreadState.subagentsByTaskId);
+            if (remembersLaunchToolUseId) {
+              subagentsByTaskId.set(input.taskId, {
+                ...subagent,
+                launchToolUseId: input.toolUseId,
+              });
             }
             const taskIdByToolUseId = new Map(nativeThreadState.taskIdByToolUseId);
             taskIdByToolUseId.set(input.toolUseId, input.taskId);
             const byNativeThreadId = new Map(state.byNativeThreadId);
             byNativeThreadId.set(input.nativeThreadId, {
               ...nativeThreadState,
+              subagentsByTaskId,
               taskIdByToolUseId,
             });
             return { byNativeThreadId };
@@ -4996,6 +5020,13 @@ export function makeClaudeAdapterV2(
               activeContext: context,
             });
             if (!wasBackgroundTask && !context.ignoredTaskIds.has(message.task_id)) {
+              if (message.tool_use_id !== undefined) {
+                yield* registerSessionSubagentToolUseAlias({
+                  nativeThreadId: context.nativeThreadId,
+                  taskId: message.task_id,
+                  toolUseId: message.tool_use_id,
+                });
+              }
               yield* updateClaudeSubagentNode({
                 context,
                 taskId: message.task_id,
@@ -5557,6 +5588,7 @@ export function makeClaudeAdapterV2(
               },
               toolCalls: new Map(),
               pendingSubagentLaunchToolUseIds: [],
+              subagentLaunchAliasInferenceDisabled: false,
               ignoredTaskIds: new Set(),
             };
             // Continuation turns attach to the wake output the CLI already
