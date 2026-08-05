@@ -57,6 +57,7 @@ import {
   CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS,
   CLAUDE_T3_MCP_TOOL_WILDCARD,
   ClaudeProviderCapabilitiesV2,
+  ClaudeAgentSdkQueryRunnerError,
   claudeEffectiveQueryPolicyKey,
   claudeMcpQueryOverrides,
   claudeQueryMessages,
@@ -126,6 +127,8 @@ function makeClaudeTestTurnInput(input: {
   readonly providerTurnOrdinal?: number;
   readonly messageCreatedBy?: ProviderAdapterV2TurnInput["message"]["createdBy"];
   readonly messageCreationSource?: ProviderAdapterV2TurnInput["message"]["creationSource"];
+  readonly modelSelection?: ModelSelection;
+  readonly runtimePolicy?: ProviderAdapterV2RuntimePolicy;
 }): ProviderAdapterV2TurnInput {
   return {
     appThread: makeClaudeTestAppThread(input),
@@ -143,8 +146,8 @@ function makeClaudeTestTurnInput(input: {
       text: input.text,
       attachments: input.attachments,
     },
-    modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-    runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+    modelSelection: input.modelSelection ?? CLAUDE_TEST_MODEL_SELECTION,
+    runtimePolicy: input.runtimePolicy ?? CLAUDE_TEST_RUNTIME_POLICY,
   };
 }
 
@@ -1124,6 +1127,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   const WAKE_NATIVE_SESSION = "native-thread-claude-wake";
   const WAKE_TASK_ID = "task-wake-build";
   const WAKE_SUMMARY = "Background build completed successfully";
+  const WAKE_ASSISTANT_TEXT = "The background build has finished.";
   const WAKE_RESULT_TEXT = "The background build finished; everything passed.";
 
   function claudeSdkFrame(frame: unknown): SDKMessage {
@@ -1181,10 +1185,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly isError?: boolean;
     readonly errors?: ReadonlyArray<string>;
     readonly apiErrorStatus?: number;
+    readonly terminalReason?: string;
   }) =>
     claudeSdkFrame({
       type: "result",
       subtype: input.subtype ?? "success",
+      ...(input.terminalReason === undefined ? {} : { terminal_reason: input.terminalReason }),
       duration_ms: 10,
       duration_api_ms: 10,
       is_error: input.isError ?? false,
@@ -1218,6 +1224,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     output_file: "/tmp/task-wake-build.log",
     summary: WAKE_SUMMARY,
     uuid: "00000000-0000-4000-8000-000000000103",
+    session_id: WAKE_NATIVE_SESSION,
+  });
+  const wakeAssistant = claudeSdkFrame({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: WAKE_ASSISTANT_TEXT }],
+    },
+    parent_tool_use_id: null,
+    uuid: "00000000-0000-4000-8000-000000000107",
     session_id: WAKE_NATIVE_SESSION,
   });
   const wakeResult = makeResultFrame({
@@ -1451,6 +1467,528 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  const providerThreadRosterEvents = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+    events.filter(
+      (event): event is Extract<ProviderAdapterV2Event, { type: "provider_thread.updated" }> =>
+        event.type === "provider_thread.updated",
+    );
+
+  it.effect(
+    "projects an authoritative background_tasks_changed roster on the provider thread",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const rosterSnapshot = claudeSdkFrame({
+            type: "system",
+            subtype: "background_tasks_changed",
+            tasks: [
+              {
+                task_id: WAKE_TASK_ID,
+                description: "npm run build",
+                task_type: "local_bash",
+              },
+            ],
+            uuid: "00000000-0000-4000-8000-000000000201",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-roster-snapshot"),
+              text: "Run the build in the background.",
+              attachments: [],
+            }),
+          );
+          yield* Queue.offer(harness.sdkMessages, rosterSnapshot);
+          yield* Queue.offer(harness.sdkMessages, turnOneResult);
+          yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+
+          const rosterEvents = providerThreadRosterEvents(harness.events).filter(
+            (event) => (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
+          );
+          assert.isAtLeast(rosterEvents.length, 1);
+          assert.deepEqual(rosterEvents.at(-1)?.providerThread.pendingBackgroundTasks ?? [], [
+            {
+              taskId: WAKE_TASK_ID,
+              description: "npm run build",
+              taskType: "local_bash",
+            },
+          ]);
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect(
+    "uses task_started as an incremental roster fallback and clears on empty snapshot",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const emptyRoster = claudeSdkFrame({
+            type: "system",
+            subtype: "background_tasks_changed",
+            tasks: [],
+            uuid: "00000000-0000-4000-8000-000000000202",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-roster-fallback"),
+              text: "Run the build in the background.",
+              attachments: [],
+            }),
+          );
+          yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+          yield* Queue.offer(harness.sdkMessages, turnOneResult);
+          yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+
+          const afterStart = providerThreadRosterEvents(harness.events).filter(
+            (event) => (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
+          );
+          assert.isAtLeast(afterStart.length, 1);
+          assert.equal(
+            (afterStart.at(-1)?.providerThread.pendingBackgroundTasks ?? [])[0]?.taskId,
+            WAKE_TASK_ID,
+          );
+
+          yield* Queue.offer(harness.sdkMessages, emptyRoster);
+          yield* awaitUntil(
+            () =>
+              providerThreadRosterEvents(harness.events).some(
+                (event) =>
+                  event.providerThread.status === "idle" &&
+                  (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
+              ),
+            "empty roster clear",
+          );
+          assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect("clears the roster when a turn fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const failedResult = claudeSdkFrame({
+          type: "result",
+          subtype: "error_during_execution",
+          duration_ms: 10,
+          duration_api_ms: 10,
+          is_error: true,
+          num_turns: 1,
+          result: "boom",
+          stop_reason: "end_turn",
+          total_cost_usd: 0,
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+          modelUsage: {},
+          permission_denials: [],
+          errors: ["boom"],
+          uuid: "00000000-0000-4000-8000-000000000203",
+          session_id: WAKE_NATIVE_SESSION,
+        });
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-roster-fail"),
+            text: "Run the build in the background.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+        yield* awaitUntil(
+          () =>
+            providerThreadRosterEvents(harness.events).some(
+              (event) => (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
+            ),
+          "roster after task_started",
+        );
+        yield* Queue.offer(harness.sdkMessages, failedResult);
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "failed terminal");
+        assert.equal(harness.terminalEvents()[0]?.status, "failed");
+
+        const afterFailure = providerThreadRosterEvents(harness.events).at(-1);
+        assert.deepEqual(afterFailure?.providerThread.pendingBackgroundTasks ?? [], []);
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("clears the native-thread roster when a turn is interrupted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const idAllocator = yield* IdAllocatorV2;
+        const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-claude-v2-roster-interrupt-",
+        });
+        const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+        const events: Array<ProviderAdapterV2Event> = [];
+        const adapter = makeClaudeAdapterV2({
+          instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+          settings: DEFAULT_CLAUDE_SETTINGS,
+          environment: {},
+          attachmentsDir,
+          fileSystem,
+          idAllocator,
+          continuationRequests: { offer: () => Effect.void },
+          queryRunner: {
+            allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
+            open: () =>
+              Effect.succeed({
+                messages: Stream.fromQueue(sdkMessages),
+                offer: () => Effect.void,
+                setModel: () => Effect.void,
+                interrupt: Effect.void,
+                // End the message stream so interruptTurn's closed wait resolves
+                // via stream exit finalize (interrupted status clears roster).
+                close: Queue.shutdown(sdkMessages),
+              }),
+            forkSession: () => Effect.die("unused forkSession"),
+            assertComplete: Effect.void,
+          },
+        });
+        const threadId = ThreadId.make("thread-claude-roster-interrupt");
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-claude-roster-interrupt"),
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+        yield* runtime.events.pipe(
+          Stream.runForEach((event) =>
+            Effect.sync(() => {
+              events.push(event);
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        if (runtime.hasPendingBackgroundWork === undefined) {
+          return yield* Effect.die("Claude adapter runtime must expose hasPendingBackgroundWork.");
+        }
+        const now = yield* DateTime.now;
+
+        yield* runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId,
+            providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-roster-interrupt"),
+            text: "Run the build in the background.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(sdkMessages, wakeTaskStarted);
+        yield* awaitUntil(
+          () =>
+            providerThreadRosterEvents(events).some(
+              (event) => (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
+            ),
+          "roster after task_started",
+        );
+
+        const providerTurnId = events.find(
+          (event): event is Extract<ProviderAdapterV2Event, { type: "provider_turn.updated" }> =>
+            event.type === "provider_turn.updated",
+        )?.providerTurn.id;
+        assert.isDefined(providerTurnId);
+        yield* runtime.interruptTurn({
+          providerThread,
+          providerTurnId: providerTurnId!,
+        });
+        yield* awaitUntil(
+          () =>
+            events.some(
+              (event) => event.type === "turn.terminal" && event.status === "interrupted",
+            ),
+          "interrupted terminal",
+        );
+
+        const afterInterrupt = providerThreadRosterEvents(events).at(-1);
+        assert.deepEqual(afterInterrupt?.providerThread.pendingBackgroundTasks ?? [], []);
+        assert.isFalse(yield* runtime.hasPendingBackgroundWork);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect(
+    "clears the replaced sibling native thread roster when openQuery switches processes",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const idAllocator = yield* IdAllocatorV2;
+          const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-claude-v2-sibling-replace-",
+          });
+          const nativeIds = ["native-thread-roster-a", "native-thread-roster-b"] as const;
+          let allocateIndex = 0;
+          // Real two-process model: each openQuery owns its own message queue.
+          // A shared queue would mask sibling process death on replacement.
+          const processQueues: Array<{
+            readonly nativeThreadId: string;
+            readonly queue: Queue.Queue<SDKMessage>;
+          }> = [];
+          const events: Array<ProviderAdapterV2Event> = [];
+          const adapter = makeClaudeAdapterV2({
+            instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+            settings: DEFAULT_CLAUDE_SETTINGS,
+            environment: {},
+            attachmentsDir,
+            fileSystem,
+            idAllocator,
+            continuationRequests: {
+              offer: () => Effect.void,
+            },
+            queryRunner: {
+              allocateSessionId: Effect.sync(() => {
+                const next =
+                  nativeIds[allocateIndex] ?? `native-thread-roster-extra-${allocateIndex}`;
+                allocateIndex += 1;
+                return next;
+              }),
+              open: (openInput) =>
+                Effect.gen(function* () {
+                  const nativeThreadId = openInput.options.sessionId ?? openInput.options.resume;
+                  if (typeof nativeThreadId !== "string" || nativeThreadId.length === 0) {
+                    return yield* Effect.die("openQuery must supply a native session id");
+                  }
+                  const queue = yield* Queue.unbounded<SDKMessage>();
+                  processQueues.push({ nativeThreadId, queue });
+                  return {
+                    messages: Stream.fromQueue(queue),
+                    offer: () => Effect.void,
+                    setModel: () => Effect.void,
+                    interrupt: Effect.void,
+                    close: Queue.shutdown(queue),
+                  };
+                }),
+              forkSession: () => Effect.die("unused forkSession"),
+              assertComplete: Effect.void,
+            },
+          });
+          const appThreadA = ThreadId.make("thread-claude-roster-a");
+          const appThreadB = ThreadId.make("thread-claude-roster-b");
+          const runtime = yield* adapter.openSession({
+            threadId: appThreadA,
+            providerSessionId: ProviderSessionId.make("provider-session-claude-sibling-replace"),
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          const providerThreadA = yield* runtime.ensureThread({
+            threadId: appThreadA,
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          const providerThreadB = yield* runtime.ensureThread({
+            threadId: appThreadB,
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          assert.notEqual(
+            providerThreadA.nativeThreadRef?.nativeId,
+            providerThreadB.nativeThreadRef?.nativeId,
+          );
+          yield* runtime.events.pipe(
+            Stream.runForEach((event) =>
+              Effect.sync(() => {
+                events.push(event);
+              }),
+            ),
+            Effect.forkScoped,
+          );
+          if (runtime.hasPendingBackgroundWork === undefined) {
+            return yield* Effect.die(
+              "Claude adapter runtime must expose hasPendingBackgroundWork.",
+            );
+          }
+          if (runtime.hasPendingBackgroundWorkForThread === undefined) {
+            return yield* Effect.die(
+              "Claude adapter runtime must expose hasPendingBackgroundWorkForThread.",
+            );
+          }
+          const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+          const hasPendingBackgroundWorkForThread = runtime.hasPendingBackgroundWorkForThread;
+          const now = yield* DateTime.now;
+          const taskA = "task-roster-a";
+          const taskB = "task-roster-b";
+
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: appThreadA,
+              providerThread: providerThreadA,
+              now,
+              attemptId: RunAttemptId.make("attempt-roster-iso-a"),
+              text: "Background work on A.",
+              attachments: [],
+            }),
+          );
+          assert.equal(processQueues.length, 1);
+          const processA = processQueues[0]!;
+          yield* Queue.offer(
+            processA.queue,
+            claudeSdkFrame({
+              type: "system",
+              subtype: "task_started",
+              task_id: taskA,
+              description: "work on A",
+              task_type: "local_bash",
+              uuid: "00000000-0000-4000-8000-000000000301",
+              session_id: nativeIds[0],
+            }),
+          );
+          yield* Queue.offer(
+            processA.queue,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000302",
+              result: "A settled with background work.",
+            }),
+          );
+          yield* awaitUntil(
+            () =>
+              events.some(
+                (event) =>
+                  event.type === "turn.terminal" &&
+                  event.providerThreadId === providerThreadA.id &&
+                  event.status === "completed",
+              ),
+            "thread A terminal",
+          );
+          const rosterAAfterSettle = providerThreadRosterEvents(events).findLast(
+            (event) => event.providerThread.id === providerThreadA.id,
+          )?.providerThread.pendingBackgroundTasks;
+          assert.deepEqual(rosterAAfterSettle ?? [], [
+            { taskId: taskA, description: "work on A", taskType: "local_bash" },
+          ]);
+          assert.isTrue(yield* hasPendingBackgroundWork);
+          assert.isTrue(yield* hasPendingBackgroundWorkForThread(providerThreadA));
+          assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadB));
+
+          // Starting B closes A's only live query. A can never emit a roster
+          // clear from a dead process, so openQuery must idle-clear A.
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: appThreadB,
+              providerThread: { ...providerThreadB, status: "active" },
+              now,
+              attemptId: RunAttemptId.make("attempt-roster-iso-b"),
+              text: "Background work on B.",
+              attachments: [],
+            }),
+          );
+          assert.equal(processQueues.length, 2);
+          yield* awaitUntil(
+            () =>
+              providerThreadRosterEvents(events).some(
+                (event) =>
+                  event.providerThread.id === providerThreadA.id &&
+                  event.providerThread.status === "idle" &&
+                  (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
+              ),
+            "sibling A roster cleared idle on process replacement",
+          );
+          assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadA));
+
+          const processB = processQueues[1]!;
+          yield* Queue.offer(
+            processB.queue,
+            claudeSdkFrame({
+              type: "system",
+              subtype: "task_started",
+              task_id: taskB,
+              description: "work on B",
+              task_type: "local_bash",
+              uuid: "00000000-0000-4000-8000-000000000303",
+              session_id: nativeIds[1],
+            }),
+          );
+          yield* awaitUntil(
+            () =>
+              providerThreadRosterEvents(events).some(
+                (event) =>
+                  event.providerThread.id === providerThreadB.id &&
+                  (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
+              ),
+            "thread B roster populated",
+          );
+          assert.isTrue(yield* hasPendingBackgroundWorkForThread(providerThreadB));
+          assert.isTrue(yield* hasPendingBackgroundWork);
+          // Starting B's process clears only B's process-scoped level; A stays
+          // empty from the sibling replacement clear above.
+          assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadA));
+
+          yield* Queue.offer(
+            processB.queue,
+            claudeSdkFrame({
+              type: "result",
+              subtype: "error_during_execution",
+              duration_ms: 10,
+              duration_api_ms: 10,
+              is_error: true,
+              num_turns: 1,
+              result: "B failed",
+              stop_reason: "end_turn",
+              total_cost_usd: 0,
+              usage: {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+              modelUsage: {},
+              permission_denials: [],
+              errors: ["B failed"],
+              uuid: "00000000-0000-4000-8000-000000000304",
+              session_id: nativeIds[1],
+            }),
+          );
+          yield* awaitUntil(
+            () =>
+              events.some(
+                (event) =>
+                  event.type === "turn.terminal" &&
+                  event.providerThreadId === providerThreadB.id &&
+                  event.status === "failed",
+              ),
+            "thread B failed terminal",
+          );
+
+          const rosterBAfterFail = providerThreadRosterEvents(events).findLast(
+            (event) => event.providerThread.id === providerThreadB.id,
+          )?.providerThread.pendingBackgroundTasks;
+          assert.deepEqual(rosterBAfterFail ?? [], []);
+          assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadA));
+          assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadB));
+          assert.isFalse(yield* hasPendingBackgroundWork);
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
   it.effect("buffers wake output and requests a single continuation run", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1475,6 +2013,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.lengthOf(harness.continuationRequests, 0);
 
         yield* Queue.offer(harness.sdkMessages, wakeNotification);
+        let quietYields = 0;
+        yield* awaitUntil(() => quietYields++ >= 50, "notification-only quiet window");
+        assert.lengthOf(harness.continuationRequests, 0);
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+
+        yield* Queue.offer(harness.sdkMessages, wakeAssistant);
         yield* awaitUntil(() => harness.continuationRequests.length === 1, "continuation request");
         assert.equal(harness.continuationRequests[0]?.threadId, harness.threadId);
         assert.equal(harness.continuationRequests[0]?.providerThreadId, harness.providerThread.id);
@@ -1488,6 +2032,57 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.lengthOf(harness.continuationRequests, 1);
         assert.lengthOf(harness.terminalEvents(), 1);
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("does not offer a continuation for notification-only opaque work", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-notification-only"),
+            text: "Start opaque background work.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+
+        yield* Queue.offer(harness.sdkMessages, wakeNotification);
+        let quietYields = 0;
+        yield* awaitUntil(() => quietYields++ >= 100, "notification-only quiet window");
+        assert.lengthOf(harness.continuationRequests, 0);
+        assert.lengthOf(harness.terminalEvents(), 1);
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-notification-only-continuation"),
+            text: "Background task completed.",
+            attachments: [],
+            providerTurnOrdinal: 2,
+            messageCreatedBy: "agent",
+            messageCreationSource: "provider",
+          }),
+        );
+        yield* awaitUntil(
+          () => harness.terminalEvents().length === 2,
+          "notification-only continuation terminal",
+        );
+        assert.equal(harness.terminalEvents()[1]?.status, "completed");
+        assert.lengthOf(harness.offeredMessages, 1);
       }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
     ),
   );
@@ -1543,7 +2138,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         // The background task never renders as a subagent node.
         assert.isFalse(
-          harness.events.some((event) => JSON.stringify(event).includes(WAKE_TASK_ID)),
+          harness.events.some(
+            (event) =>
+              event.type !== "provider_thread.updated" &&
+              JSON.stringify(event).includes(WAKE_TASK_ID),
+          ),
         );
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
@@ -1630,7 +2229,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         );
         assert.isFalse(
-          harness.events.some((event) => JSON.stringify(event).includes(WAKE_TASK_ID)),
+          harness.events.some(
+            (event) =>
+              event.type !== "provider_thread.updated" &&
+              JSON.stringify(event).includes(WAKE_TASK_ID),
+          ),
         );
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
       }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
@@ -2064,7 +2667,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("invalidates an offered continuation when the native query is replaced", () =>
+  it.effect("preserves an offered continuation when its buffered wake survives replacement", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeWakeHarness;
@@ -2119,8 +2722,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             dispatched = true;
           }),
         );
-        assert.isTrue(Option.isNone(guardedDispatch));
-        assert.isFalse(dispatched);
+        assert.isTrue(Option.isSome(guardedDispatch));
+        assert.isTrue(dispatched);
       }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
     ),
   );
@@ -2190,6 +2793,572 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "failed terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "failed");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("keeps a steered turn alive across the CLI's handoff result", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const idAllocator = yield* IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const attemptId = RunAttemptId.make("attempt-claude-steer-handoff");
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId,
+            text: "Run the long command, then report.",
+            attachments: [],
+          }),
+        );
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: RunId.make("run-claude-steer-handoff"),
+          providerThread: harness.providerThread,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${attemptId}`,
+          }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-claude-steer-handoff"),
+            text: "Actually, just report now.",
+            attachments: [],
+          },
+        });
+        yield* awaitUntil(() => harness.offeredMessages.length === 2, "steer offered");
+
+        // The CLI takes the steer by ending the native turn: mid-tool that is
+        // terminal_reason "aborted_tools", not "aborted_streaming". The steered
+        // work has not been answered yet, so the T3 turn must stay alive.
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000201",
+            result: "",
+            terminalReason: "aborted_tools",
+          }),
+        );
+        let handoffYields = 0;
+        yield* awaitUntil(() => handoffYields++ >= 50, "handoff result to be consumed");
+        assert.lengthOf(harness.terminalEvents(), 0);
+        assert.lengthOf(harness.continuationRequests, 0);
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000202",
+            text: "Reporting now, as asked.",
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000203",
+            result: "Reporting now, as asked.",
+            terminalReason: "completed",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "steered turn terminal");
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        // The answer attaches to the run that carries the steer; no
+        // continuation run is needed to rescue it.
+        assert.lengthOf(harness.continuationRequests, 0);
+        assert.isTrue(
+          harness.events.some(
+            (event) =>
+              event.type === "message.updated" && event.message.text === "Reporting now, as asked.",
+          ),
+        );
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("terminalizes a steered turn on a completed result that answers it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const idAllocator = yield* IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const attemptId = RunAttemptId.make("attempt-claude-steer-absorbed-completed");
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId,
+            text: "Run the long command, then report.",
+            attachments: [],
+          }),
+        );
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: RunId.make("run-claude-steer-absorbed-completed"),
+          providerThread: harness.providerThread,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${attemptId}`,
+          }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-claude-steer-absorbed-completed"),
+            text: "Actually, just report now.",
+            attachments: [],
+          },
+        });
+        yield* awaitUntil(() => harness.offeredMessages.length === 2, "steer offered");
+
+        // A clean success carrying text has answered something, so it ends the
+        // turn even with a steer outstanding. Swallowing it would hold the run
+        // open until the handoff bound expired on every turn that the CLI
+        // absorbs a steer into.
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000232",
+            result: "Reported, including the change you asked for.",
+            terminalReason: "completed",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "steered turn terminal");
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("terminalizes a steered turn on an aborted success that answers it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const idAllocator = yield* IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const attemptId = RunAttemptId.make("attempt-claude-steer-absorbed");
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId,
+            text: "Run the long command, then report.",
+            attachments: [],
+          }),
+        );
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: RunId.make("run-claude-steer-absorbed"),
+          providerThread: harness.providerThread,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${attemptId}`,
+          }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-claude-steer-absorbed"),
+            text: "Actually, just report now.",
+            attachments: [],
+          },
+        });
+        yield* awaitUntil(() => harness.offeredMessages.length === 2, "steer offered");
+
+        // A clean aborted_tools success carrying text has answered something,
+        // so it ends the turn even with a steer outstanding. Swallowing it
+        // would hold the run open until the handoff bound expires.
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000231",
+            result: "Reported, including the change you asked for.",
+            terminalReason: "aborted_tools",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "steered turn terminal");
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("terminalizes a steered turn on a non-handoff terminal reason", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const idAllocator = yield* IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const attemptId = RunAttemptId.make("attempt-claude-steer-max-turns");
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId,
+            text: "Keep going until it is done.",
+            attachments: [],
+          }),
+        );
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: RunId.make("run-claude-steer-max-turns"),
+          providerThread: harness.providerThread,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${attemptId}`,
+          }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-claude-steer-max-turns"),
+            text: "Actually, stop after this step.",
+            attachments: [],
+          },
+        });
+        yield* awaitUntil(() => harness.offeredMessages.length === 2, "steer offered");
+
+        // max_turns ends the turn for real even though it arrives as an empty
+        // success. Only "completed" (or an older CLI that omits the field)
+        // means the CLI is about to open another native turn.
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000241",
+            result: "",
+            terminalReason: "max_turns",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "steered turn terminal");
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("settles a steered turn when the CLI never opens the handoff turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const idAllocator = yield* IdAllocatorV2;
+        const now = yield* DateTime.now;
+        const attemptId = RunAttemptId.make("attempt-claude-steer-silent");
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId,
+            text: "Run the long command, then report.",
+            attachments: [],
+          }),
+        );
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: RunId.make("run-claude-steer-silent"),
+          providerThread: harness.providerThread,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${attemptId}`,
+          }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-claude-steer-silent"),
+            text: "Actually, just report now.",
+            attachments: [],
+          },
+        });
+        yield* awaitUntil(() => harness.offeredMessages.length === 2, "steer offered");
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000211",
+            result: "",
+            terminalReason: "aborted_tools",
+          }),
+        );
+        let handoffYields = 0;
+        yield* awaitUntil(() => handoffYields++ >= 50, "handoff result to be consumed");
+        assert.lengthOf(harness.terminalEvents(), 0);
+
+        // Nothing follows the handoff, so the bound settles the turn rather
+        // than leaving the run running for the rest of the session. It settles
+        // as a failure: the steer was accepted and never answered.
+        yield* TestClock.adjust("60 seconds");
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "bounded handoff terminal");
+        assert.equal(harness.terminalEvents()[0]?.status, "failed");
+
+        // A frame that arrives after the bound has claimed the turn must not
+        // produce a second terminal for it. The bound and the message handler
+        // run on separate fibers, so the claim inside finalizeActiveTurn is
+        // what keeps this to one.
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000212",
+            result: "Late answer that lost the race.",
+            terminalReason: "completed",
+          }),
+        );
+        let lateYields = 0;
+        yield* awaitUntil(() => lateYields++ >= 50, "late result to be handled");
+        assert.lengthOf(harness.terminalEvents(), 1);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect(
+    "requests a continuation immediately for stranded output with no relevant background work",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const strandedText = "Output produced after the run had already settled.";
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-stranded-1"),
+              text: "Do the thing.",
+              attachments: [],
+            }),
+          );
+          yield* Queue.offer(harness.sdkMessages, turnOneResult);
+          yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+          assert.lengthOf(harness.continuationRequests, 0);
+
+          // No background task and no notification: just the model still talking
+          // after an early terminal left it with no turn to talk into. Without a
+          // continuation these frames sit in the buffer until the session
+          // recycles, which is how the output disappears.
+          yield* Queue.offer(
+            harness.sdkMessages,
+            makeAssistantTextFrame({
+              uuid: "00000000-0000-4000-8000-000000000221",
+              text: strandedText,
+            }),
+          );
+          yield* awaitUntil(
+            () => harness.continuationRequests.length === 1,
+            "continuation request",
+          );
+          assert.equal(harness.continuationRequests[0]?.threadId, harness.threadId);
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-stranded-2"),
+              text: "Continuing.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          yield* awaitUntil(
+            () =>
+              harness.events.some(
+                (event) => event.type === "message.updated" && event.message.text === strandedText,
+              ),
+            "stranded output projected",
+          );
+          assert.lengthOf(harness.offeredMessages, 1);
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect("lets a later task notification own the buffered output continuation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const strandedText = "The background build finished before its notification arrived.";
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-stranded-notify-1"),
+            text: "Run the build in the background.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000222",
+            text: strandedText,
+          }),
+        );
+        let bufferedYields = 0;
+        yield* awaitUntil(() => bufferedYields++ >= 50, "stranded output to buffer");
+        assert.lengthOf(harness.continuationRequests, 0);
+
+        yield* TestClock.adjust("1 second");
+        assert.lengthOf(harness.continuationRequests, 0);
+        yield* Queue.offer(harness.sdkMessages, wakeNotification);
+        yield* awaitUntil(() => harness.continuationRequests.length === 1, "continuation request");
+        assert.equal(harness.continuationRequests[0]?.detail, WAKE_SUMMARY);
+
+        yield* TestClock.adjust("2 seconds");
+        assert.lengthOf(harness.continuationRequests, 1);
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-stranded-notify-2"),
+            text: "Background task completed.",
+            attachments: [],
+            providerTurnOrdinal: 2,
+            messageCreatedBy: "agent",
+            messageCreationSource: "provider",
+          }),
+        );
+        yield* awaitUntil(
+          () =>
+            harness.events.some(
+              (event) => event.type === "message.updated" && event.message.text === strandedText,
+            ),
+          "stranded output projected",
+        );
+        yield* Queue.offer(harness.sdkMessages, wakeResult);
+        yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("offers buffered output after the notification fallback bound", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-stranded-fallback"),
+            text: "Run the build in the background.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000223",
+            text: "The notification never arrived, but this output must not remain stranded.",
+          }),
+        );
+        let bufferedYields = 0;
+        yield* awaitUntil(() => bufferedYields++ >= 50, "stranded output to buffer");
+        assert.lengthOf(harness.continuationRequests, 0);
+
+        yield* TestClock.adjust("1 second");
+        assert.lengthOf(harness.continuationRequests, 0);
+        yield* TestClock.adjust("1 second");
+        yield* awaitUntil(() => harness.continuationRequests.length === 1, "fallback request");
+        assert.isNull(harness.continuationRequests[0]?.detail);
+
+        yield* TestClock.adjust("2 seconds");
+        assert.lengthOf(harness.continuationRequests, 1);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("does not continue for post-settle frames that carry no output", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-stranded-quiet"),
+            text: "Do the thing.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+
+        // Tool chatter after settle is the model working, not speaking. The
+        // notification or result that follows it owns the continuation and its
+        // detail, so these frames must buffer without offering.
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "assistant",
+            message: {
+              role: "assistant",
+              content: [
+                { type: "tool_use", id: "toolu_quiet", name: "Bash", input: { command: "ls" } },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000251",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "user",
+            message: {
+              role: "user",
+              content: [{ type: "tool_result", tool_use_id: "toolu_quiet", content: [] }],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000252",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        let quietYields = 0;
+        yield* awaitUntil(() => quietYields++ >= 50, "tool frames to buffer");
+        assert.lengthOf(harness.continuationRequests, 0);
+
+        // Two text frames in the same stranded burst still share one request.
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000253",
+            text: "First stranded line.",
+          }),
+        );
+        yield* awaitUntil(() => harness.continuationRequests.length === 1, "continuation request");
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000254",
+            text: "Second stranded line.",
+          }),
+        );
+        let duplicateYields = 0;
+        yield* awaitUntil(() => duplicateYields++ >= 50, "second text frame to buffer");
+        assert.lengthOf(harness.continuationRequests, 1);
       }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
     ),
   );
@@ -2277,10 +3446,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             session_id: WAKE_NATIVE_SESSION,
           }),
         );
+        yield* Queue.offer(harness.sdkMessages, wakeResult);
         yield* awaitUntil(() => harness.continuationRequests.length === 1, "continuation request");
         assert.isNull(harness.continuationRequests[0]?.detail);
 
-        yield* Queue.offer(harness.sdkMessages, wakeResult);
         yield* harness.runtime.startTurn(
           makeClaudeTestTurnInput({
             threadId: harness.threadId,
@@ -2415,6 +3584,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         // subagent pins idle release like a background task.
         assert.equal(subagentEvents().at(-1)?.subagent.status, "running");
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        assert.lengthOf(harness.continuationRequests, 0);
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000206",
+            text: "The background subagent has finished.",
+          }),
+        );
+        let bufferedYields = 0;
+        yield* awaitUntil(() => bufferedYields++ >= 50, "subagent output to buffer");
         assert.lengthOf(harness.continuationRequests, 0);
 
         yield* Queue.offer(harness.sdkMessages, subagentNotification);
@@ -3669,6 +4849,1281 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         // The completion keeps the resuming run's attribution.
         assert.equal(finalSubagent?.runId, "run-attempt-claude-wake-9c");
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect(
+    "orders nonempty level, empty level, notification, and continuation drain without subagent projection",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const nonemptyRoster = claudeSdkFrame({
+            type: "system",
+            subtype: "background_tasks_changed",
+            tasks: [
+              {
+                task_id: WAKE_TASK_ID,
+                description: "npm run build",
+                task_type: "local_bash",
+              },
+            ],
+            uuid: "00000000-0000-4000-8000-000000000600",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          const emptyRoster = claudeSdkFrame({
+            type: "system",
+            subtype: "background_tasks_changed",
+            tasks: [],
+            uuid: "00000000-0000-4000-8000-000000000601",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          const duplicateNotification = claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: WAKE_TASK_ID,
+            status: "completed",
+            output_file: "/tmp/task-wake-build-dup.log",
+            summary: "duplicate should not re-buffer",
+            uuid: "00000000-0000-4000-8000-000000000605",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-level-before-edge-a"),
+              text: "Run the build in the background.",
+              attachments: [],
+            }),
+          );
+          // 1) Nonempty authoritative level admits local_bash to Waiting +
+          // wake eligibility.
+          yield* Queue.offer(harness.sdkMessages, nonemptyRoster);
+          yield* awaitUntil(
+            () =>
+              providerThreadRosterEvents(harness.events).some(
+                (event) => (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
+              ),
+            "nonempty level populated Waiting roster",
+          );
+          assert.deepEqual(
+            providerThreadRosterEvents(harness.events).at(-1)?.providerThread
+              .pendingBackgroundTasks ?? [],
+            [
+              {
+                taskId: WAKE_TASK_ID,
+                description: "npm run build",
+                taskType: "local_bash",
+              },
+            ],
+          );
+          yield* Queue.offer(harness.sdkMessages, turnOneResult);
+          yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+
+          // 2) Empty level clears Waiting but keeps wake eligibility so the
+          // later notification can still offer exactly one continuation.
+          yield* Queue.offer(harness.sdkMessages, emptyRoster);
+          yield* awaitUntil(
+            () =>
+              providerThreadRosterEvents(harness.events).some(
+                (event) =>
+                  event.providerThread.status === "idle" &&
+                  (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
+              ),
+            "empty level cleared Waiting roster",
+          );
+          assert.isFalse(yield* harness.hasPendingBackgroundWork);
+          assert.lengthOf(harness.continuationRequests, 0);
+
+          // 3) First idle notification buffers and consumes eligibility. The
+          // following native assistant frame proves Claude began a wake turn.
+          yield* Queue.offer(harness.sdkMessages, wakeNotification);
+          yield* Queue.offer(harness.sdkMessages, wakeAssistant);
+          yield* awaitUntil(
+            () => harness.continuationRequests.length === 1,
+            "continuation after level-before-edge",
+          );
+          assert.equal(harness.continuationRequests[0]?.detail, WAKE_SUMMARY);
+
+          // A duplicate notification must not re-buffer or re-offer.
+          yield* Queue.offer(harness.sdkMessages, duplicateNotification);
+          let settleYields = 0;
+          yield* awaitUntil(() => settleYields++ >= 50, "duplicate notification settle");
+          assert.lengthOf(harness.continuationRequests, 1);
+
+          // 4) Continuation drain classifies the buffered notification as
+          // local_bash (replay tombstone) and never fabricates a subagent.
+          yield* Queue.offer(harness.sdkMessages, wakeResult);
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-level-before-edge-b"),
+              text: "Background task completed.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
+          assert.equal(harness.terminalEvents()[1]?.status, "completed");
+          assert.lengthOf(harness.continuationRequests, 1);
+          assert.isTrue(
+            harness.events.some(
+              (event) =>
+                event.type === "message.updated" && event.message.text === WAKE_ASSISTANT_TEXT,
+            ),
+          );
+          assert.isFalse(
+            harness.events.some(
+              (event) =>
+                event.type === "subagent.updated" ||
+                (event.type === "node.updated" && event.node.kind === "subagent"),
+            ),
+          );
+          assert.isFalse(
+            harness.events.some(
+              (event) =>
+                event.type !== "provider_thread.updated" &&
+                JSON.stringify(event).includes(WAKE_TASK_ID),
+            ),
+          );
+          assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect("resets Waiting roster and wake eligibility when the CLI process is replaced", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const idAllocator = yield* IdAllocatorV2;
+        const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-claude-v2-process-reset-",
+        });
+        const processQueues: Array<Queue.Queue<SDKMessage>> = [];
+        const events: Array<ProviderAdapterV2Event> = [];
+        const continuationRequests: Array<ProviderContinuationRequest> = [];
+        const adapter = makeClaudeAdapterV2({
+          instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+          settings: DEFAULT_CLAUDE_SETTINGS,
+          environment: {},
+          attachmentsDir,
+          fileSystem,
+          idAllocator,
+          continuationRequests: {
+            offer: (request) =>
+              Effect.sync(() => {
+                continuationRequests.push(request);
+              }),
+          },
+          queryRunner: {
+            allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
+            open: () =>
+              Effect.gen(function* () {
+                const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+                processQueues.push(sdkMessages);
+                return {
+                  messages: Stream.fromQueue(sdkMessages),
+                  offer: () => Effect.void,
+                  setModel: () => Effect.void,
+                  interrupt: Effect.void,
+                  // End this process stream so openQuery can replace it.
+                  close: Queue.shutdown(sdkMessages),
+                };
+              }),
+            forkSession: () => Effect.die("unused forkSession"),
+            assertComplete: Effect.void,
+          },
+        });
+        const threadId = ThreadId.make("thread-claude-process-reset");
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-claude-process-reset"),
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+        yield* runtime.events.pipe(
+          Stream.runForEach((event) =>
+            Effect.sync(() => {
+              events.push(event);
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        if (runtime.hasPendingBackgroundWork === undefined) {
+          return yield* Effect.die("Claude adapter runtime must expose hasPendingBackgroundWork.");
+        }
+        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const now = yield* DateTime.now;
+
+        yield* runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId,
+            providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-process-reset-a"),
+            text: "Run the build in the background.",
+            attachments: [],
+          }),
+        );
+        assert.equal(processQueues.length, 1);
+        const firstProcess = processQueues[0]!;
+        yield* Queue.offer(firstProcess, wakeTaskStarted);
+        yield* Queue.offer(firstProcess, turnOneResult);
+        yield* awaitUntil(
+          () => events.some((event) => event.type === "turn.terminal"),
+          "first turn terminal",
+        );
+        assert.isTrue(yield* hasPendingBackgroundWork);
+        yield* Queue.offer(
+          firstProcess,
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000601",
+            text: "Output buffered before the query process is replaced.",
+          }),
+        );
+        let bufferedYields = 0;
+        yield* awaitUntil(() => bufferedYields++ >= 50, "pre-replacement output to buffer");
+        assert.lengthOf(continuationRequests, 0);
+
+        const alternateModel = {
+          ...CLAUDE_TEST_MODEL_SELECTION,
+          model: "claude-haiku-4-5-20251001",
+        } satisfies ModelSelection;
+        // ProviderTurnStartService marks the thread active before startTurn;
+        // the process-reset clear must preserve that status.
+        const activeProviderThread = {
+          ...providerThread,
+          status: "active" as const,
+        } satisfies OrchestrationV2ProviderThread;
+        yield* runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId,
+            providerThread: activeProviderThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-process-reset-b"),
+            text: "Continue after process restart.",
+            attachments: [],
+            providerTurnOrdinal: 2,
+            modelSelection: alternateModel,
+          }),
+        );
+        assert.equal(processQueues.length, 2);
+
+        // Process-scoped level resets to empty on CLI (re)start while the
+        // starting turn's provider thread remains active (not idle).
+        yield* awaitUntil(
+          () =>
+            providerThreadRosterEvents(events).some(
+              (event) =>
+                event.providerThread.status === "active" &&
+                (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0 &&
+                // Prefer the post-replace clear over the initial empty thread.
+                event.providerThread.updatedAt !== undefined,
+            ),
+          "roster cleared on process replace while remaining active",
+        );
+        // The process-scoped roster is gone, but the already-buffered output
+        // still pins the session until its continuation can drain it.
+        assert.isTrue(yield* hasPendingBackgroundWork);
+        const emptyActiveRosterEvents = providerThreadRosterEvents(events).filter(
+          (event) =>
+            event.providerThread.status === "active" &&
+            (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
+        );
+        assert.isAtLeast(emptyActiveRosterEvents.length, 1);
+        assert.deepEqual(
+          emptyActiveRosterEvents.at(-1)?.providerThread.pendingBackgroundTasks ?? [],
+          [],
+        );
+        assert.equal(emptyActiveRosterEvents.at(-1)?.providerThread.status, "active");
+        yield* TestClock.adjust("2 seconds");
+        yield* awaitUntil(() => continuationRequests.length === 1, "preserved output fallback");
+        assert.isNull(continuationRequests[0]?.detail);
+
+        // A late notification from the previous process must not wake after
+        // eligibility was reset with the process. Offer on the new process
+        // stream (the old queue is shut down).
+        const secondProcess = processQueues[1]!;
+        yield* Queue.offer(secondProcess, wakeNotification);
+        let settleYields = 0;
+        yield* awaitUntil(() => settleYields++ >= 50, "stale notification settle");
+        assert.lengthOf(continuationRequests, 1);
+
+        yield* Queue.offer(
+          secondProcess,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000602",
+            result: "Process restart turn finished.",
+          }),
+        );
+        yield* awaitUntil(
+          () => events.filter((event) => event.type === "turn.terminal").length === 2,
+          "second turn terminal",
+        );
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("admits only local_bash from a mixed background_tasks_changed snapshot", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const SUBAGENT_TASK_ID = "task-mixed-snapshot-subagent";
+        const SUBAGENT_TOOL_USE_ID = "toolu-mixed-snapshot-subagent";
+        const mixedSnapshot = claudeSdkFrame({
+          type: "system",
+          subtype: "background_tasks_changed",
+          tasks: [
+            {
+              task_id: WAKE_TASK_ID,
+              description: "npm run build",
+              task_type: "local_bash",
+            },
+            {
+              task_id: SUBAGENT_TASK_ID,
+              description: "Agent review",
+              task_type: "local_agent",
+            },
+            {
+              task_id: "task-mixed-foreground-agent",
+              description: "Backgrounded foreground agent",
+              task_type: "local_agent",
+            },
+          ],
+          uuid: "00000000-0000-4000-8000-000000000603",
+          session_id: WAKE_NATIVE_SESSION,
+        });
+        const subagentTaskStarted = claudeSdkFrame({
+          type: "system",
+          subtype: "task_started",
+          task_id: SUBAGENT_TASK_ID,
+          tool_use_id: SUBAGENT_TOOL_USE_ID,
+          description: "Agent review",
+          subagent_type: "general-purpose",
+          task_type: "local_agent",
+          prompt: "Review the change.",
+          uuid: "00000000-0000-4000-8000-000000000604",
+          session_id: WAKE_NATIVE_SESSION,
+        });
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-mixed-snapshot"),
+            text: "Background a bash task and a subagent.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, subagentTaskStarted);
+        yield* awaitUntil(
+          () =>
+            harness.events.some(
+              (event) =>
+                event.type === "subagent.updated" &&
+                event.subagent.nativeTaskRef?.nativeId === SUBAGENT_TASK_ID,
+            ),
+          "subagent projected normally",
+        );
+        yield* Queue.offer(harness.sdkMessages, mixedSnapshot);
+        yield* awaitUntil(
+          () =>
+            providerThreadRosterEvents(harness.events).some(
+              (event) => (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
+            ),
+          "roster after mixed snapshot",
+        );
+
+        const roster = providerThreadRosterEvents(harness.events).at(-1)?.providerThread
+          .pendingBackgroundTasks;
+        assert.deepEqual(roster ?? [], [
+          {
+            taskId: WAKE_TASK_ID,
+            description: "npm run build",
+            taskType: "local_bash",
+          },
+        ]);
+        // Subagent lifecycle stays on the subagent path, not the Waiting roster.
+        assert.isTrue(
+          harness.events.some(
+            (event) =>
+              event.type === "subagent.updated" &&
+              event.subagent.nativeTaskRef?.nativeId === SUBAGENT_TASK_ID &&
+              event.subagent.status === "running",
+          ),
+        );
+        assert.isFalse((roster ?? []).some((task) => task.taskId === SUBAGENT_TASK_ID));
+
+        yield* Queue.offer(harness.sdkMessages, turnOneResult);
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect(
+    "preserves buffered local_bash notification classification across model/policy query replacement",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const idAllocator = yield* IdAllocatorV2;
+          const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-claude-v2-buffer-replace-",
+          });
+          const processQueues: Array<Queue.Queue<SDKMessage>> = [];
+          const events: Array<ProviderAdapterV2Event> = [];
+          const continuationRequests: Array<ProviderContinuationRequest> = [];
+          const adapter = makeClaudeAdapterV2({
+            instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+            settings: DEFAULT_CLAUDE_SETTINGS,
+            environment: {},
+            attachmentsDir,
+            fileSystem,
+            idAllocator,
+            continuationRequests: {
+              offer: (request) =>
+                Effect.sync(() => {
+                  continuationRequests.push(request);
+                }),
+            },
+            queryRunner: {
+              allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
+              open: () =>
+                Effect.gen(function* () {
+                  const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+                  processQueues.push(sdkMessages);
+                  return {
+                    messages: Stream.fromQueue(sdkMessages),
+                    offer: () => Effect.void,
+                    setModel: () => Effect.void,
+                    interrupt: Effect.void,
+                    close: Queue.shutdown(sdkMessages),
+                  };
+                }),
+              forkSession: () => Effect.die("unused forkSession"),
+              assertComplete: Effect.void,
+            },
+          });
+          const threadId = ThreadId.make("thread-claude-buffer-replace");
+          const runtime = yield* adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make("provider-session-claude-buffer-replace"),
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          yield* runtime.events.pipe(
+            Stream.runForEach((event) =>
+              Effect.sync(() => {
+                events.push(event);
+              }),
+            ),
+            Effect.forkScoped,
+          );
+          if (runtime.hasPendingBackgroundWork === undefined) {
+            return yield* Effect.die(
+              "Claude adapter runtime must expose hasPendingBackgroundWork.",
+            );
+          }
+          const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+          const now = yield* DateTime.now;
+
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-buffer-replace-a"),
+              text: "Run the build in the background.",
+              attachments: [],
+            }),
+          );
+          assert.equal(processQueues.length, 1);
+          const firstProcess = processQueues[0]!;
+          yield* Queue.offer(firstProcess, wakeTaskStarted);
+          yield* Queue.offer(firstProcess, turnOneResult);
+          yield* awaitUntil(
+            () => events.some((event) => event.type === "turn.terminal"),
+            "first turn terminal",
+          );
+          assert.isTrue(yield* hasPendingBackgroundWork);
+
+          // Idle completion notification buffers before any continuation runs.
+          yield* Queue.offer(firstProcess, wakeNotification);
+          let quietYields = 0;
+          yield* awaitUntil(() => quietYields++ >= 50, "notification-only quiet window");
+          assert.lengthOf(continuationRequests, 0);
+
+          // User turn changes model, replacing the query while the wake buffer
+          // stays queued for the later provider continuation.
+          const alternateModel = {
+            ...CLAUDE_TEST_MODEL_SELECTION,
+            model: "claude-haiku-4-5-20251001",
+          } satisfies ModelSelection;
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread: { ...providerThread, status: "active" },
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-buffer-replace-user"),
+              text: "Switch model while background work completes.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              modelSelection: alternateModel,
+            }),
+          );
+          assert.equal(processQueues.length, 2);
+          const secondProcess = processQueues[1]!;
+          yield* Queue.offer(
+            secondProcess,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000701",
+              result: "User turn finished after model switch.",
+            }),
+          );
+          yield* awaitUntil(
+            () => events.filter((event) => event.type === "turn.terminal").length === 2,
+            "user turn terminal after replace",
+          );
+          // The terminal notification remains buffered for classification, but
+          // notification-only traffic no longer pins pending work.
+          assert.isFalse(yield* hasPendingBackgroundWork);
+          assert.lengthOf(continuationRequests, 0);
+
+          // Continuation drains the buffered local_bash notification with no
+          // fabricated subagent/node and attributes the wake result text.
+          yield* Queue.offer(secondProcess, wakeResult);
+          yield* awaitUntil(() => continuationRequests.length === 1, "continuation after result");
+          assert.equal(continuationRequests[0]?.detail, WAKE_SUMMARY);
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread: { ...providerThread, status: "active" },
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-buffer-replace-cont"),
+              text: "Background task completed.",
+              attachments: [],
+              providerTurnOrdinal: 3,
+              modelSelection: alternateModel,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          yield* awaitUntil(
+            () => events.filter((event) => event.type === "turn.terminal").length === 3,
+            "continuation terminal after buffered drain",
+          );
+          assert.isTrue(
+            events.some(
+              (event) =>
+                event.type === "message.updated" && event.message.text === WAKE_RESULT_TEXT,
+            ),
+          );
+          assert.isFalse(
+            events.some(
+              (event) =>
+                event.type === "subagent.updated" ||
+                (event.type === "node.updated" && event.node.kind === "subagent"),
+            ),
+          );
+          // Must not re-project the opaque task id as anything but roster history.
+          assert.isFalse(
+            events.some(
+              (event) =>
+                event.type !== "provider_thread.updated" &&
+                JSON.stringify(event).includes(WAKE_TASK_ID),
+            ),
+          );
+          assert.isFalse(yield* hasPendingBackgroundWork);
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect(
+    "does not opaque-misclassify a buffered subagent notification across model/policy query replacement",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const SUBAGENT_TASK_ID = "task-buffer-replace-subagent";
+          const SUBAGENT_TOOL_USE_ID = "toolu-buffer-replace-subagent";
+          const SUBAGENT_SUMMARY = "SUB_BUFFER_REPLACE_DONE";
+          const subagentTaskStarted = claudeSdkFrame({
+            type: "system",
+            subtype: "task_started",
+            task_id: SUBAGENT_TASK_ID,
+            tool_use_id: SUBAGENT_TOOL_USE_ID,
+            description: "Background research",
+            subagent_type: "general-purpose",
+            task_type: "local_agent",
+            prompt: "Research then return SUB_BUFFER_REPLACE_DONE.",
+            uuid: "00000000-0000-4000-8000-000000000801",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          const subagentNotification = claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: SUBAGENT_TASK_ID,
+            tool_use_id: SUBAGENT_TOOL_USE_ID,
+            status: "completed",
+            output_file: "/tmp/task-buffer-replace-subagent.output",
+            summary: SUBAGENT_SUMMARY,
+            uuid: "00000000-0000-4000-8000-000000000802",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          const subagentAsyncAck = claudeSdkFrame({
+            type: "user",
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: SUBAGENT_TOOL_USE_ID,
+                  content: [{ type: "text", text: "Async agent launched successfully." }],
+                },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000803",
+            session_id: WAKE_NATIVE_SESSION,
+            tool_use_result: {
+              isAsync: true,
+              status: "async_launched",
+              agentId: SUBAGENT_TASK_ID,
+              prompt: "Research then return SUB_BUFFER_REPLACE_DONE.",
+            },
+          });
+
+          const fileSystem = yield* FileSystem.FileSystem;
+          const idAllocator = yield* IdAllocatorV2;
+          const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-claude-v2-subagent-buffer-replace-",
+          });
+          const processQueues: Array<Queue.Queue<SDKMessage>> = [];
+          const events: Array<ProviderAdapterV2Event> = [];
+          const continuationRequests: Array<ProviderContinuationRequest> = [];
+          const adapter = makeClaudeAdapterV2({
+            instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+            settings: DEFAULT_CLAUDE_SETTINGS,
+            environment: {},
+            attachmentsDir,
+            fileSystem,
+            idAllocator,
+            continuationRequests: {
+              offer: (request) =>
+                Effect.sync(() => {
+                  continuationRequests.push(request);
+                }),
+            },
+            queryRunner: {
+              allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
+              open: () =>
+                Effect.gen(function* () {
+                  const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+                  processQueues.push(sdkMessages);
+                  return {
+                    messages: Stream.fromQueue(sdkMessages),
+                    offer: () => Effect.void,
+                    setModel: () => Effect.void,
+                    interrupt: Effect.void,
+                    close: Queue.shutdown(sdkMessages),
+                  };
+                }),
+              forkSession: () => Effect.die("unused forkSession"),
+              assertComplete: Effect.void,
+            },
+          });
+          const threadId = ThreadId.make("thread-claude-subagent-buffer-replace");
+          const runtime = yield* adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make(
+              "provider-session-claude-subagent-buffer-replace",
+            ),
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          yield* runtime.events.pipe(
+            Stream.runForEach((event) =>
+              Effect.sync(() => {
+                events.push(event);
+              }),
+            ),
+            Effect.forkScoped,
+          );
+          if (runtime.hasPendingBackgroundWork === undefined) {
+            return yield* Effect.die(
+              "Claude adapter runtime must expose hasPendingBackgroundWork.",
+            );
+          }
+          const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+          const subagentEvents = () =>
+            events.filter(
+              (event): event is Extract<ProviderAdapterV2Event, { type: "subagent.updated" }> =>
+                event.type === "subagent.updated",
+            );
+          const now = yield* DateTime.now;
+
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-subagent-buffer-replace-a"),
+              text: "Spawn a background subagent and stop.",
+              attachments: [],
+            }),
+          );
+          assert.equal(processQueues.length, 1);
+          const firstProcess = processQueues[0]!;
+          yield* Queue.offer(firstProcess, subagentTaskStarted);
+          yield* awaitUntil(() => subagentEvents().length >= 1, "subagent node created");
+          assert.equal(subagentEvents()[0]?.subagent.status, "running");
+          yield* Queue.offer(firstProcess, subagentAsyncAck);
+          yield* Queue.offer(
+            firstProcess,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000804",
+              result: "Spawned the subagent in the background.",
+            }),
+          );
+          yield* awaitUntil(
+            () => events.some((event) => event.type === "turn.terminal"),
+            "first turn terminal",
+          );
+          assert.isTrue(yield* hasPendingBackgroundWork);
+
+          // Session-registered subagent completion buffers; no opaque tombstone.
+          yield* Queue.offer(firstProcess, subagentNotification);
+          yield* awaitUntil(() => continuationRequests.length === 1, "continuation after notify");
+          assert.equal(continuationRequests[0]?.detail, SUBAGENT_SUMMARY);
+
+          // Model-changing user turn replaces the query while continuation stays
+          // queued. Process reset must not invent opaque classification for the
+          // buffered subagent notification.
+          const alternateModel = {
+            ...CLAUDE_TEST_MODEL_SELECTION,
+            model: "claude-haiku-4-5-20251001",
+          } satisfies ModelSelection;
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread: { ...providerThread, status: "active" },
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-subagent-buffer-replace-user"),
+              text: "Switch model while the subagent completes.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              modelSelection: alternateModel,
+            }),
+          );
+          assert.equal(processQueues.length, 2);
+          const secondProcess = processQueues[1]!;
+          yield* Queue.offer(
+            secondProcess,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000805",
+              result: "User turn finished after model switch.",
+            }),
+          );
+          yield* awaitUntil(
+            () => events.filter((event) => event.type === "turn.terminal").length === 2,
+            "user turn terminal after replace",
+          );
+          assert.isTrue(yield* hasPendingBackgroundWork);
+          assert.lengthOf(continuationRequests, 1);
+
+          yield* Queue.offer(
+            secondProcess,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000806",
+              result: "The subagent finished with SUB_BUFFER_REPLACE_DONE.",
+            }),
+          );
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread: { ...providerThread, status: "active" },
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-subagent-buffer-replace-cont"),
+              text: "Background task completed.",
+              attachments: [],
+              providerTurnOrdinal: 3,
+              modelSelection: alternateModel,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          yield* awaitUntil(
+            () => events.filter((event) => event.type === "turn.terminal").length === 3,
+            "continuation terminal after buffered subagent drain",
+          );
+
+          const finalSubagent = subagentEvents().at(-1)?.subagent;
+          assert.equal(finalSubagent?.status, "completed");
+          assert.equal(finalSubagent?.result, SUBAGENT_SUMMARY);
+          assert.equal(finalSubagent?.runId, subagentEvents()[0]?.subagent.runId);
+          const subagentNodeEvents = events.filter(
+            (event): event is Extract<ProviderAdapterV2Event, { type: "node.updated" }> =>
+              event.type === "node.updated" &&
+              event.node.kind === "subagent" &&
+              event.node.nativeItemRef?.nativeId === SUBAGENT_TASK_ID,
+          );
+          assert.equal(subagentNodeEvents.at(-1)?.node.status, "completed");
+          assert.isFalse(yield* hasPendingBackgroundWork);
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect(
+    "clears process-scoped roster when same-native-thread replacement open fails after close",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const idAllocator = yield* IdAllocatorV2;
+          const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-claude-v2-replace-open-fail-",
+          });
+          let openCount = 0;
+          const processQueues: Array<Queue.Queue<SDKMessage>> = [];
+          const events: Array<ProviderAdapterV2Event> = [];
+          const adapter = makeClaudeAdapterV2({
+            instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+            settings: DEFAULT_CLAUDE_SETTINGS,
+            environment: {},
+            attachmentsDir,
+            fileSystem,
+            idAllocator,
+            continuationRequests: {
+              offer: () => Effect.void,
+            },
+            queryRunner: {
+              allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
+              open: () => {
+                openCount += 1;
+                if (openCount === 2) {
+                  return Effect.fail(
+                    new ClaudeAgentSdkQueryRunnerError({
+                      method: "open",
+                      cause: "forced replacement open failure",
+                    }),
+                  );
+                }
+                return Effect.gen(function* () {
+                  const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+                  processQueues.push(sdkMessages);
+                  return {
+                    messages: Stream.fromQueue(sdkMessages),
+                    offer: () => Effect.void,
+                    setModel: () => Effect.void,
+                    interrupt: Effect.void,
+                    close: Queue.shutdown(sdkMessages),
+                  };
+                });
+              },
+              forkSession: () => Effect.die("unused forkSession"),
+              assertComplete: Effect.void,
+            },
+          });
+          const threadId = ThreadId.make("thread-claude-replace-open-fail");
+          const runtime = yield* adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make("provider-session-claude-replace-open-fail"),
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          yield* runtime.events.pipe(
+            Stream.runForEach((event) =>
+              Effect.sync(() => {
+                events.push(event);
+              }),
+            ),
+            Effect.forkScoped,
+          );
+          if (runtime.hasPendingBackgroundWork === undefined) {
+            return yield* Effect.die(
+              "Claude adapter runtime must expose hasPendingBackgroundWork.",
+            );
+          }
+          const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+          const now = yield* DateTime.now;
+
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-replace-open-fail-a"),
+              text: "Run the build in the background.",
+              attachments: [],
+            }),
+          );
+          assert.equal(processQueues.length, 1);
+          yield* Queue.offer(processQueues[0]!, wakeTaskStarted);
+          yield* Queue.offer(processQueues[0]!, turnOneResult);
+          yield* awaitUntil(
+            () => events.some((event) => event.type === "turn.terminal"),
+            "first turn terminal",
+          );
+          assert.isTrue(yield* hasPendingBackgroundWork);
+
+          const alternateModel = {
+            ...CLAUDE_TEST_MODEL_SELECTION,
+            model: "claude-haiku-4-5-20251001",
+          } satisfies ModelSelection;
+          const failedStart = yield* runtime
+            .startTurn(
+              makeClaudeTestTurnInput({
+                threadId,
+                providerThread: { ...providerThread, status: "active" },
+                now,
+                attemptId: RunAttemptId.make("attempt-claude-replace-open-fail-b"),
+                text: "Replace process but fail open.",
+                attachments: [],
+                providerTurnOrdinal: 2,
+                modelSelection: alternateModel,
+              }),
+            )
+            .pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(failedStart));
+          // Old process was closed before the failed open: roster must not stick.
+          yield* awaitUntil(
+            () =>
+              providerThreadRosterEvents(events).some(
+                (event) =>
+                  event.providerThread.status === "idle" &&
+                  (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
+              ),
+            "roster cleared after failed same-thread replacement open",
+          );
+          assert.isFalse(yield* hasPendingBackgroundWork);
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect(
+    "preserves buffered wake and continuation state when same-native-thread replacement open fails",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const idAllocator = yield* IdAllocatorV2;
+          const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-claude-v2-replace-open-fail-wake-",
+          });
+          let openCount = 0;
+          const processQueues: Array<Queue.Queue<SDKMessage>> = [];
+          const events: Array<ProviderAdapterV2Event> = [];
+          const continuationRequests: Array<ProviderContinuationRequest> = [];
+          const adapter = makeClaudeAdapterV2({
+            instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+            settings: DEFAULT_CLAUDE_SETTINGS,
+            environment: {},
+            attachmentsDir,
+            fileSystem,
+            idAllocator,
+            continuationRequests: {
+              offer: (request) =>
+                Effect.sync(() => {
+                  continuationRequests.push(request);
+                }),
+            },
+            queryRunner: {
+              allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
+              open: () => {
+                openCount += 1;
+                if (openCount === 2) {
+                  return Effect.fail(
+                    new ClaudeAgentSdkQueryRunnerError({
+                      method: "open",
+                      cause: "forced replacement open failure",
+                    }),
+                  );
+                }
+                return Effect.gen(function* () {
+                  const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+                  processQueues.push(sdkMessages);
+                  return {
+                    messages: Stream.fromQueue(sdkMessages),
+                    offer: () => Effect.void,
+                    setModel: () => Effect.void,
+                    interrupt: Effect.void,
+                    close: Queue.shutdown(sdkMessages),
+                  };
+                });
+              },
+              forkSession: () => Effect.die("unused forkSession"),
+              assertComplete: Effect.void,
+            },
+          });
+          const threadId = ThreadId.make("thread-claude-replace-open-fail-wake");
+          const runtime = yield* adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make(
+              "provider-session-claude-replace-open-fail-wake",
+            ),
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          });
+          yield* runtime.events.pipe(
+            Stream.runForEach((event) =>
+              Effect.sync(() => {
+                events.push(event);
+              }),
+            ),
+            Effect.forkScoped,
+          );
+          if (runtime.hasPendingBackgroundWork === undefined) {
+            return yield* Effect.die(
+              "Claude adapter runtime must expose hasPendingBackgroundWork.",
+            );
+          }
+          const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+          const now = yield* DateTime.now;
+
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-replace-open-fail-wake-a"),
+              text: "Run the build in the background.",
+              attachments: [],
+            }),
+          );
+          yield* Queue.offer(processQueues[0]!, wakeTaskStarted);
+          yield* Queue.offer(processQueues[0]!, turnOneResult);
+          yield* awaitUntil(
+            () => events.filter((event) => event.type === "turn.terminal").length === 1,
+            "first turn terminal",
+          );
+          yield* Queue.offer(processQueues[0]!, wakeNotification);
+          yield* Queue.offer(processQueues[0]!, wakeAssistant);
+          yield* awaitUntil(() => continuationRequests.length === 1, "first continuation request");
+          assert.isTrue(yield* hasPendingBackgroundWork);
+
+          const alternateModel = {
+            ...CLAUDE_TEST_MODEL_SELECTION,
+            model: "claude-haiku-4-5-20251001",
+          } satisfies ModelSelection;
+          const failedStart = yield* runtime
+            .startTurn(
+              makeClaudeTestTurnInput({
+                threadId,
+                providerThread: { ...providerThread, status: "active" },
+                now,
+                attemptId: RunAttemptId.make("attempt-claude-replace-open-fail-wake-b"),
+                text: "Replace process but fail open.",
+                attachments: [],
+                providerTurnOrdinal: 2,
+                modelSelection: alternateModel,
+              }),
+            )
+            .pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(failedStart));
+          assert.isTrue(yield* hasPendingBackgroundWork);
+          assert.lengthOf(continuationRequests, 1);
+
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread: { ...providerThread, status: "active" },
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-replace-open-fail-wake-c"),
+              text: "Retry after the failed replacement.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              modelSelection: alternateModel,
+            }),
+          );
+          const retryProcess = processQueues[1]!;
+          const retryTaskId = "task-wake-build-after-retry";
+          yield* Queue.offer(
+            retryProcess,
+            claudeSdkFrame({
+              type: "system",
+              subtype: "task_started",
+              task_id: retryTaskId,
+              description: "npm run build after retry",
+              task_type: "local_bash",
+              uuid: "00000000-0000-4000-8000-000000000901",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* Queue.offer(
+            retryProcess,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000902",
+              result: "Kicked off the retry build in the background.",
+            }),
+          );
+          yield* awaitUntil(
+            () => events.filter((event) => event.type === "turn.terminal").length === 2,
+            "retry turn terminal",
+          );
+
+          // The already-requested continuation survives the failed process
+          // replacement and drains the wake output after the user retry.
+          yield* Queue.offer(retryProcess, wakeResult);
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread: { ...providerThread, status: "active" },
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-replace-open-fail-wake-d"),
+              text: "Background task completed.",
+              attachments: [],
+              providerTurnOrdinal: 3,
+              modelSelection: alternateModel,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          yield* awaitUntil(
+            () => events.filter((event) => event.type === "turn.terminal").length === 3,
+            "preserved continuation terminal",
+          );
+          assert.lengthOf(continuationRequests, 1);
+
+          yield* Queue.offer(
+            retryProcess,
+            claudeSdkFrame({
+              type: "system",
+              subtype: "task_notification",
+              task_id: retryTaskId,
+              status: "completed",
+              output_file: "/tmp/task-wake-build-after-retry.log",
+              summary: "Retry build completed successfully",
+              uuid: "00000000-0000-4000-8000-000000000903",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* Queue.offer(
+            retryProcess,
+            claudeSdkFrame({
+              type: "assistant",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "The retry build has finished." }],
+              },
+              parent_tool_use_id: null,
+              uuid: "00000000-0000-4000-8000-000000000904",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* awaitUntil(
+            () => continuationRequests.length === 2,
+            "continuation request after retry",
+          );
+          assert.equal(continuationRequests[1]?.detail, "Retry build completed successfully");
+        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect("does not invent process reset state on a first-ever failed open", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const idAllocator = yield* IdAllocatorV2;
+        const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-claude-v2-first-open-fail-",
+        });
+        const events: Array<ProviderAdapterV2Event> = [];
+        const adapter = makeClaudeAdapterV2({
+          instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+          settings: DEFAULT_CLAUDE_SETTINGS,
+          environment: {},
+          attachmentsDir,
+          fileSystem,
+          idAllocator,
+          continuationRequests: {
+            offer: () => Effect.void,
+          },
+          queryRunner: {
+            allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
+            open: () =>
+              Effect.fail(
+                new ClaudeAgentSdkQueryRunnerError({
+                  method: "open",
+                  cause: "forced first open failure",
+                }),
+              ),
+            forkSession: () => Effect.die("unused forkSession"),
+            assertComplete: Effect.void,
+          },
+        });
+        const threadId = ThreadId.make("thread-claude-first-open-fail");
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-claude-first-open-fail"),
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+        yield* runtime.events.pipe(
+          Stream.runForEach((event) =>
+            Effect.sync(() => {
+              events.push(event);
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        const now = yield* DateTime.now;
+        const failedStart = yield* runtime
+          .startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-first-open-fail"),
+              text: "First open fails.",
+              attachments: [],
+            }),
+          )
+          .pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(failedStart));
+        // No live process ever existed: do not emit a fabricated empty roster.
+        assert.lengthOf(providerThreadRosterEvents(events), 0);
       }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
     ),
   );
