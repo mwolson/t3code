@@ -2311,6 +2311,31 @@ export function makeClaudeAdapterV2(
           return subagent === undefined ? undefined : { taskId, subagent };
         });
 
+        const registerSessionSubagentToolUseAlias = Effect.fnUntraced(function* (input: {
+          readonly nativeThreadId: string;
+          readonly taskId: string;
+          readonly toolUseId: string;
+        }) {
+          yield* Ref.update(sessionSubagents, (state) => {
+            const nativeThreadState = state.byNativeThreadId.get(input.nativeThreadId);
+            if (
+              nativeThreadState === undefined ||
+              !nativeThreadState.subagentsByTaskId.has(input.taskId) ||
+              nativeThreadState.taskIdByToolUseId.get(input.toolUseId) === input.taskId
+            ) {
+              return state;
+            }
+            const taskIdByToolUseId = new Map(nativeThreadState.taskIdByToolUseId);
+            taskIdByToolUseId.set(input.toolUseId, input.taskId);
+            const byNativeThreadId = new Map(state.byNativeThreadId);
+            byNativeThreadId.set(input.nativeThreadId, {
+              ...nativeThreadState,
+              taskIdByToolUseId,
+            });
+            return { byNativeThreadId };
+          });
+        });
+
         const countSessionSubagents = Effect.fnUntraced(function* (nativeThreadId: string) {
           const state = yield* Ref.get(sessionSubagents);
           return state.byNativeThreadId.get(nativeThreadId)?.subagentsByTaskId.size ?? 0;
@@ -4936,11 +4961,16 @@ export function makeClaudeAdapterV2(
               liveQuery.nativeThreadId,
               message.task_id,
             );
-            if (
-              progress.length > 0 &&
-              !context.ignoredTaskIds.has(message.task_id) &&
-              !isBackgroundTask
-            ) {
+            const isSubagentTask =
+              !context.ignoredTaskIds.has(message.task_id) && !isBackgroundTask;
+            if (isSubagentTask && message.tool_use_id !== undefined) {
+              yield* registerSessionSubagentToolUseAlias({
+                nativeThreadId: liveQuery.nativeThreadId,
+                taskId: message.task_id,
+                toolUseId: message.tool_use_id,
+              });
+            }
+            if (progress.length > 0 && isSubagentTask) {
               yield* updateClaudeSubagentNode({
                 context,
                 taskId: message.task_id,

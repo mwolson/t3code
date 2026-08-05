@@ -6361,7 +6361,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             subtype: "task_progress",
             task_id: taskId,
             tool_use_id: toolUseId,
-            description: "Alias registered after settle",
+            description: "   ",
             uuid: "00000000-0000-4000-8000-000000000628",
             session_id: WAKE_NATIVE_SESSION,
           }),
