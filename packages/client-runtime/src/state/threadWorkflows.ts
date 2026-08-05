@@ -16,6 +16,7 @@ const MERGE_BACK_BLOCKING_RUN_STATUSES = new Set<Run["status"]>([
   "starting",
   "running",
 ]);
+const PROVIDER_BUFFERED_CONTINUATION_TEXT = "Background task completed.";
 
 export interface QueuedThreadRun {
   readonly run: Run;
@@ -95,7 +96,9 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
       .filter(
         (message) =>
           message.delegatedCompletion !== undefined ||
-          (message.createdBy === "agent" && message.creationSource === "provider"),
+          (message.createdBy === "agent" &&
+            message.creationSource === "provider" &&
+            message.text === PROVIDER_BUFFERED_CONTINUATION_TEXT),
       )
       .map((message) => message.id),
   );

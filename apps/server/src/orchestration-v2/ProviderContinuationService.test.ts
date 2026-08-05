@@ -768,4 +768,31 @@ describe("ProviderContinuationService", () => {
       );
     });
   });
+
+  it.effect("releases an adapter wake when projection lookup fails", () => {
+    return Effect.gen(function* () {
+      const dispatched = yield* Queue.unbounded<unknown>();
+      const released = yield* Ref.make(false);
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests;
+        yield* requests.offer({
+          ...request(),
+          failIfCurrent: () => Ref.set(released, true),
+        });
+        for (let attempt = 0; attempt < 20 && !(yield* Ref.get(released)); attempt += 1) {
+          yield* Effect.yieldNow;
+        }
+        assert.isTrue(yield* Ref.get(released));
+        assert.isTrue(Option.isNone(yield* Queue.poll(dispatched)));
+      }).pipe(
+        Effect.provide(
+          testLayer({
+            dispatched,
+            getThreadProjection: () => Effect.die("projection unavailable"),
+          }),
+        ),
+        Effect.scoped,
+      );
+    });
+  });
 });

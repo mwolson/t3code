@@ -145,11 +145,18 @@ describe("thread workflows", () => {
           queuePosition: 2,
         },
         {
+          id: "provider-detail",
+          status: "queued",
+          userMessageId: "message-provider-detail",
+          ordinal: 3,
+          queuePosition: 3,
+        },
+        {
           id: "visible",
           status: "queued",
           userMessageId: "message-visible",
-          ordinal: 3,
-          queuePosition: 3,
+          ordinal: 4,
+          queuePosition: 4,
         },
       ],
       messages: [
@@ -165,6 +172,12 @@ describe("thread workflows", () => {
           createdBy: "user",
           creationSource: "provider",
         },
+        {
+          id: "message-provider-detail",
+          text: "Background command completed: sleep 20",
+          createdBy: "agent",
+          creationSource: "provider",
+        },
         { id: "message-visible", text: "Visible queued message" },
       ],
       providerTurns: [],
@@ -174,6 +187,7 @@ describe("thread workflows", () => {
 
     expect(state.queuedRuns.map(({ run, text }) => [run.id, text])).toEqual([
       ["user-provider-message", "User-created provider message"],
+      ["provider-detail", "Background command completed: sleep 20"],
       ["visible", "Visible queued message"],
     ]);
   });

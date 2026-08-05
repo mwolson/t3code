@@ -6,6 +6,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import type * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -48,6 +49,8 @@ export interface ProviderContinuationRequest {
   ) => Effect.Effect<Option.Option<A>, E, R>;
   /** Clears a pending offer that the continuation worker intentionally drops. */
   readonly clearIfCurrent?: () => Effect.Effect<void>;
+  /** Releases adapter state when continuation preparation or dispatch fails. */
+  readonly failIfCurrent?: (cause: Cause.Cause<unknown>) => Effect.Effect<void>;
 }
 
 /**

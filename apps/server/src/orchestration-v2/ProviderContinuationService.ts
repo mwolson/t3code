@@ -196,8 +196,20 @@ export const workerLive = Layer.effectDiscard(
                   ),
                   Effect.forkScoped,
                 );
+                return;
               }
-            }),
+              if (request.failIfCurrent !== undefined) {
+                yield* request.failIfCurrent(cause);
+              }
+            }).pipe(
+              Effect.catchCause((cleanupCause) =>
+                Effect.logWarning("orchestration-v2.provider-continuation.failure-cleanup-failed", {
+                  threadId: request.threadId,
+                  providerThreadId: request.providerThreadId,
+                  cause: cleanupCause,
+                }),
+              ),
+            ),
           ),
         ),
       ),
