@@ -155,6 +155,7 @@ function makeProviderThread(input: {
   readonly id: ProviderThreadId;
   readonly threadId: ThreadId;
   readonly now: DateTime.Utc;
+  readonly pendingBackgroundTasks?: OrchestrationV2ProviderThread["pendingBackgroundTasks"];
 }): OrchestrationV2ProviderThread {
   return {
     id: input.id,
@@ -174,6 +175,7 @@ function makeProviderThread(input: {
     lastRunOrdinal: 1,
     handoffIds: [],
     forkedFrom: null,
+    pendingBackgroundTasks: input.pendingBackgroundTasks ?? [],
     createdAt: input.now,
     updatedAt: input.now,
   };
@@ -965,5 +967,152 @@ it.layer(TestLayer)("OrchestratorV2 provider-native Stop invariants", (it) => {
           ),
         );
       }),
+  );
+});
+
+it.layer(TestLayer)("OrchestratorV2 settled lifecycle invariants", (it) => {
+  it.effect("settles an idle thread and rejects settle while a run is queued", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* OrchestratorV2;
+      const eventSink = yield* EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:settle-queued");
+      const projectId = ProjectId.make("project:settle-queued");
+
+      yield* orchestrator.dispatch(
+        createThreadCommand({
+          commandId: "cmd:settle-queued:create",
+          threadId,
+          projectId,
+        }),
+      );
+
+      const idleSettle = yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("cmd:settle-queued:idle"),
+        threadId,
+      });
+      assert.equal(idleSettle.storedEvents[0]?.event.type, "thread.settled");
+
+      // Unsettle so the next settle attempt is not an idempotent re-emit.
+      yield* orchestrator.dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("cmd:settle-queued:unsettle"),
+        threadId,
+        reason: "user",
+      });
+
+      const runId = RunId.make("run:settle-queued");
+      const runEvent = {
+        id: EventId.make("event:settle-queued:run"),
+        type: "run.created" as const,
+        threadId,
+        runId,
+        nodeId: NodeId.make("node:settle-queued"),
+        providerInstanceId: modelSelection.instanceId,
+        occurredAt: now,
+        payload: makeRun({ runId, threadId, status: "queued", now }),
+      } satisfies OrchestrationV2DomainEvent;
+      yield* eventSink.write({ events: [runEvent] });
+
+      const rejected = yield* orchestrator
+        .dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make("cmd:settle-queued:blocked"),
+          threadId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(rejected._tag, "OrchestratorDispatchError");
+      if (rejected._tag === "OrchestratorDispatchError") {
+        assert.match(String(rejected.cause), /queued run/i);
+      }
+
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(projection.thread.settledOverride, "active");
+    }),
+  );
+
+  it.effect("rejects settle while pending background tasks remain on the shell", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* OrchestratorV2;
+      const eventSink = yield* EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:settle-background");
+      const projectId = ProjectId.make("project:settle-background");
+      const providerThreadId = ProviderThreadId.make("provider-thread:settle-background");
+      const runId = RunId.make("run:settle-background");
+
+      yield* orchestrator.dispatch(
+        createThreadCommand({
+          commandId: "cmd:settle-background:create",
+          threadId,
+          projectId,
+        }),
+      );
+
+      const created = yield* orchestrator.getThreadProjection(threadId);
+      // Terminal latest run + non-empty background roster on the active
+      // provider thread: shell is waiting and must not settle.
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:settle-background:run"),
+            type: "run.created",
+            threadId,
+            runId,
+            nodeId: NodeId.make("node:settle-background"),
+            providerInstanceId: modelSelection.instanceId,
+            occurredAt: now,
+            payload: {
+              ...makeRun({
+                runId,
+                threadId,
+                status: "completed",
+                now,
+                providerThreadId,
+              }),
+              completedAt: now,
+            },
+          },
+          {
+            id: EventId.make("event:settle-background:provider-thread"),
+            type: "provider-thread.updated",
+            threadId,
+            providerInstanceId: modelSelection.instanceId,
+            occurredAt: now,
+            payload: makeProviderThread({
+              id: providerThreadId,
+              threadId,
+              now,
+              pendingBackgroundTasks: [{ taskId: "bg-1", description: "sleep 30" }],
+            }),
+          },
+          {
+            id: EventId.make("event:settle-background:pin-active-provider"),
+            type: "thread.metadata-updated",
+            threadId,
+            providerInstanceId: modelSelection.instanceId,
+            occurredAt: now,
+            payload: {
+              ...created.thread,
+              activeProviderThreadId: providerThreadId,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+
+      const rejected = yield* orchestrator
+        .dispatch({
+          type: "thread.settle",
+          commandId: CommandId.make("cmd:settle-background:blocked"),
+          threadId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(rejected._tag, "OrchestratorDispatchError");
+      if (rejected._tag === "OrchestratorDispatchError") {
+        assert.match(String(rejected.cause), /background tasks/i);
+      }
+    }),
   );
 });
