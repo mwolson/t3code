@@ -172,7 +172,6 @@ import { RightPanelTabs } from "./RightPanelTabs";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
-import PlanSidebar from "./PlanSidebar";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
   AlarmClockIcon,
@@ -272,6 +271,11 @@ import {
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { ThreadDetailsPanel, type ThreadDetailsPanelProps } from "./chat/ThreadDetailsPanel";
 import { NoActiveThreadState } from "./NoActiveThreadState";
+import { AgentsPanel } from "./AgentsPanel";
+import {
+  deriveAgentPanelModel,
+  projectedSubagentsToRuntime,
+} from "@t3tools/client-runtime/state/subagentRuntime";
 import { resolveEffectiveEnvMode, resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
   getProviderStatusBannerKey,
@@ -1290,6 +1294,17 @@ function ChatViewContent(props: ChatViewProps) {
   });
   const serverThreadProjection = useThreadProjection(routeThreadDetailRef);
   const serverProjection = serverThreadProjection?.projection ?? null;
+  // Agents surface (#5219): on orchestration-v2 the panel model comes from the
+  // projected subagent entities — the v2 leg of the spec's mapper swap. The
+  // native-activity fold never runs on this branch.
+  const agentPanelModel = useMemo(
+    () =>
+      deriveAgentPanelModel({
+        agents: [],
+        v2Projection: projectedSubagentsToRuntime(serverProjection?.subagents ?? []),
+      }),
+    [serverProjection?.subagents],
+  );
   const serverVisibleTurnItems = useThreadVisibleTurnItems(routeThreadDetailRef);
   const committedServerMessageIds = useMemo(
     () => deriveCommittedServerUserMessageIds(serverVisibleTurnItems),
@@ -1311,7 +1326,6 @@ function ChatViewContent(props: ChatViewProps) {
     (store) => store.setStickyModelSelection,
   );
   const timestampFormat = settings.timestampFormat;
-  const autoOpenPlanSidebar = settings.autoOpenPlanSidebar;
   const navigate = useNavigate();
   const citationLocation = useLocation({
     select: (location) => ({
@@ -1405,10 +1419,8 @@ function ChatViewContent(props: ChatViewProps) {
   const previewPanelInlineSize = usePreviewPanelInlineSize();
   const threadPanelPopoverAnchorRef = useRef<HTMLElement | null>(null);
   // Tracks whether the user explicitly dismissed the sidebar for the active turn.
-  const planSidebarDismissedForTurnRef = useRef<string | null>(null);
   // When set, the thread-change reset effect will open the sidebar instead of closing it.
   // Used by "Implement in a new thread" to carry the sidebar-open intent across navigation.
-  const planSidebarOpenOnNextThreadRef = useRef(false);
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
   const [pullRequestDialogState, setPullRequestDialogState] =
     useState<PullRequestDialogState | null>(null);
@@ -1778,8 +1790,6 @@ function ChatViewContent(props: ChatViewProps) {
     activeThreadRef,
     previewPanelOpen,
   ]);
-
-  const planSidebarOpen = activeRightPanelKind === "plan";
 
   const existingOpenTerminalThreadKeys = useMemo(() => {
     const existingThreadKeys = new Set<string>([...serverThreadKeys, ...draftThreadKeys]);
@@ -2268,10 +2278,7 @@ function ChatViewContent(props: ChatViewProps) {
             : "Client and server versions differ",
         description:
           updateInProgress || updateFailed ? (
-            <ServerUpdateProgress
-              fromVersion={serverUpdateState.fromVersion}
-              state={serverUpdateState}
-            />
+            <ServerUpdateProgress state={serverUpdateState} />
           ) : versionMismatch ? (
             <>
               Client {versionMismatch.clientVersion} is connected to {versionMismatchServerLabel}{" "}
@@ -2395,7 +2402,6 @@ function ChatViewContent(props: ChatViewProps) {
     () => deriveActivePlanState(serverProjection, activeLatestRun?.runId ?? undefined),
     [activeLatestRun?.runId, serverProjection],
   );
-  const planSidebarLabel = sidebarProposedPlan || interactionMode === "plan" ? "Plan" : "Tasks";
   const showPlanFollowUpPrompt =
     pendingUserInputs.length === 0 &&
     interactionMode === "plan" &&
@@ -3411,44 +3417,19 @@ function ChatViewContent(props: ChatViewProps) {
   const toggleInteractionMode = useCallback(() => {
     handleInteractionModeChange(interactionMode === "plan" ? "default" : "plan");
   }, [handleInteractionModeChange, interactionMode]);
-  const dismissPlanSidebarForCurrentTurn = useCallback(() => {
-    planSidebarDismissedForTurnRef.current =
-      activePlan?.runId ?? sidebarProposedPlan?.runId ?? "__dismissed__";
-  }, [activePlan?.runId, sidebarProposedPlan?.runId]);
-  const togglePlanSidebar = useCallback(() => {
+  const addAgentsSurface = useCallback(() => {
     if (!activeThreadRef) return;
-    if (planSidebarOpen) {
-      dismissPlanSidebarForCurrentTurn();
-    } else {
-      planSidebarDismissedForTurnRef.current = null;
-    }
-    useRightPanelStore.getState().toggle(activeThreadRef, "plan");
-  }, [activeThreadRef, dismissPlanSidebarForCurrentTurn, planSidebarOpen]);
-  const closePlanSidebar = useCallback(() => {
-    if (!activeThreadRef) return;
-    setMaximizedRightPanelThreadKey(null);
-    useRightPanelStore.getState().close(activeThreadRef);
-    dismissPlanSidebarForCurrentTurn();
-  }, [activeThreadRef, dismissPlanSidebarForCurrentTurn]);
+    useRightPanelStore.getState().open(activeThreadRef, "agents");
+  }, [activeThreadRef]);
   const createBrowserSurface = useCallback(() => {
     if (!activeThreadRef) return;
     void addBrowserSurface({ threadRef: activeThreadRef, openPreview });
   }, [activeThreadRef, openPreview]);
   const addDiffSurface = useCallback(() => {
     if (!activeThreadRef || !isServerThread || !isGitRepo) return;
-    if (planSidebarOpen) {
-      dismissPlanSidebarForCurrentTurn();
-    }
     useRightPanelStore.getState().open(activeThreadRef, "diff");
     onDiffPanelOpen?.();
-  }, [
-    activeThreadRef,
-    dismissPlanSidebarForCurrentTurn,
-    isGitRepo,
-    isServerThread,
-    onDiffPanelOpen,
-    planSidebarOpen,
-  ]);
+  }, [activeThreadRef, isGitRepo, isServerThread, onDiffPanelOpen]);
   const openChangesFromThreadPanel = useCallback(() => {
     addDiffSurface();
   }, [addDiffSurface]);
@@ -3583,11 +3564,6 @@ function ChatViewContent(props: ChatViewProps) {
   const activateRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
-      if (surface.kind === "plan") {
-        planSidebarDismissedForTurnRef.current = null;
-      } else if (planSidebarOpen) {
-        dismissPlanSidebarForCurrentTurn();
-      }
       useRightPanelStore.getState().activateSurface(activeThreadRef, surface.id);
       if (surface.kind === "preview" && surface.resourceId) {
         setActivePreviewTab(activeThreadRef, surface.resourceId);
@@ -3599,20 +3575,16 @@ function ChatViewContent(props: ChatViewProps) {
         onDiffPanelOpen?.();
       }
     },
-    [activeThreadRef, diffOpen, dismissPlanSidebarForCurrentTurn, onDiffPanelOpen, planSidebarOpen],
+    [activeThreadRef, diffOpen, onDiffPanelOpen],
   );
   const toggleRightPanel = useCallback(() => {
     if (!activeThreadRef) return;
     if (rightPanelOpen) {
-      if (planSidebarOpen) {
-        closePlanSidebar();
-      } else {
-        closePreviewPanel();
-      }
+      closePreviewPanel();
       return;
     }
     useRightPanelStore.getState().toggleVisibility(activeThreadRef);
-  }, [activeThreadRef, closePlanSidebar, closePreviewPanel, planSidebarOpen, rightPanelOpen]);
+  }, [activeThreadRef, closePreviewPanel, rightPanelOpen]);
   const toggleThreadPanel = useCallback(() => {
     if (!activeThreadRef) return;
     useRightPanelStore.getState().toggleThreadPanel(activeThreadRef, threadPanelPresentation);
@@ -3630,10 +3602,6 @@ function ChatViewContent(props: ChatViewProps) {
   const cleanupRightPanelSurfaces = useCallback(
     (surfaces: readonly RightPanelSurface[]) => {
       if (!activeThreadRef) return;
-      if (surfaces.some((surface) => surface.kind === "plan")) {
-        dismissPlanSidebarForCurrentTurn();
-      }
-
       for (const surface of surfaces) {
         if (surface.kind === "preview" && surface.resourceId) {
           void closePreviewSession({
@@ -3659,7 +3627,6 @@ function ChatViewContent(props: ChatViewProps) {
       activePreviewState.sessions,
       closePreview,
       closeTerminalMutation,
-      dismissPlanSidebarForCurrentTurn,
       storeCloseTerminal,
     ],
   );
@@ -4240,37 +4207,8 @@ function ChatViewContent(props: ChatViewProps) {
     activeTimelineAnchorIndexRef.current = null;
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
-    if (planSidebarOpenOnNextThreadRef.current) {
-      planSidebarOpenOnNextThreadRef.current = false;
-      if (activeThreadRef) {
-        useRightPanelStore.getState().open(activeThreadRef, "plan");
-      }
-    }
-    planSidebarDismissedForTurnRef.current = null;
     // activeThreadRef resets transitively with the active thread.
   }, [activeThread?.id, routeThreadKey]);
-
-  // Auto-open the plan sidebar when plan/todo steps arrive for the current turn.
-  // Don't auto-open for plans carried over from a previous turn (the user can open manually).
-  useEffect(() => {
-    if (!autoOpenPlanSidebar) return;
-    if (!activePlan) return;
-    if (planSidebarOpen) return;
-    const latestRunId = activeLatestRun?.runId ?? null;
-    if (latestRunId && activePlan.runId !== latestRunId) return;
-    const turnKey = activePlan.runId ?? sidebarProposedPlan?.runId ?? "__dismissed__";
-    if (planSidebarDismissedForTurnRef.current === turnKey) return;
-    if (activeThreadRef) {
-      useRightPanelStore.getState().open(activeThreadRef, "plan");
-    }
-  }, [
-    activePlan,
-    activeLatestRun?.runId,
-    activeThreadRef,
-    autoOpenPlanSidebar,
-    planSidebarOpen,
-    sidebarProposedPlan?.runId,
-  ]);
 
   useEffect(() => {
     setIsRevertingCheckpoint(false);
@@ -5897,15 +5835,6 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     if (failure === null) {
-      // Optimistically open the plan sidebar when implementing (not refining).
-      // "default" mode here means the agent is executing the plan, which produces
-      // step-tracking activities that the sidebar will display.
-      if (nextInteractionMode === "default" && autoOpenPlanSidebar) {
-        planSidebarDismissedForTurnRef.current = null;
-        if (activeThreadRef) {
-          useRightPanelStore.getState().open(activeThreadRef, "plan");
-        }
-      }
       sendInFlightRef.current = false;
       resetLocalDispatch();
       return;
@@ -6022,8 +5951,6 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     if (failure === null) {
-      // Signal that the plan sidebar should open on the new thread when enabled.
-      planSidebarOpenOnNextThreadRef.current = autoOpenPlanSidebar;
       const navigateResult = await settlePromise(() =>
         navigate({
           to: "/$environmentId/$threadId",
@@ -6080,7 +6007,6 @@ function ChatViewContent(props: ChatViewProps) {
     resetLocalDispatch,
     runtimeMode,
     startThreadTurn,
-    autoOpenPlanSidebar,
     environmentId,
     composerRef,
   ]);
@@ -6313,17 +6239,11 @@ function ChatViewContent(props: ChatViewProps) {
           workspaceMutationId={workspaceMutationId}
         />
       </Suspense>
-    ) : activeRightPanelSurface?.kind === "plan" ? (
-      <PlanSidebar
-        activePlan={activePlan}
-        activeProposedPlan={sidebarProposedPlan}
-        label={planSidebarLabel}
-        environmentId={environmentId}
-        threadRef={activeThreadRef}
-        markdownCwd={gitCwd ?? undefined}
-        workspaceRoot={activeWorkspaceRoot}
-        timestampFormat={timestampFormat}
-        mode="embedded"
+    ) : activeRightPanelSurface?.kind === "agents" ? (
+      <AgentsPanel
+        model={agentPanelModel}
+        environmentId={activeThreadRef?.environmentId ?? null}
+        threadId={activeThreadRef?.threadId ?? null}
       />
     ) : (activeRightPanelSurface?.kind === "files" || activeRightPanelSurface?.kind === "file") &&
       activeProject &&
@@ -6685,8 +6605,6 @@ function ChatViewContent(props: ChatViewProps) {
                             activeProposedPlan={activeProposedPlan}
                             activePlan={activePlan}
                             sidebarProposedPlan={sidebarProposedPlan}
-                            planSidebarLabel={planSidebarLabel}
-                            planSidebarOpen={planSidebarOpen}
                             runtimeMode={runtimeMode}
                             interactionMode={interactionMode}
                             lockedProvider={modelPickerLockedProvider}
@@ -6727,7 +6645,6 @@ function ChatViewContent(props: ChatViewProps) {
                             toggleInteractionMode={toggleInteractionMode}
                             handleRuntimeModeChange={handleRuntimeModeChange}
                             handleInteractionModeChange={handleInteractionModeChange}
-                            togglePlanSidebar={togglePlanSidebar}
                             focusComposer={focusComposer}
                             scheduleComposerFocus={scheduleComposerFocus}
                             setThreadError={setThreadError}
@@ -6762,6 +6679,7 @@ function ChatViewContent(props: ChatViewProps) {
                                 <BranchToolbar
                                   environmentId={activeThread.environmentId}
                                   threadId={activeThread.id}
+                                  showGitControls={isGitRepo}
                                   {...(routeKind === "draft" && draftId ? { draftId } : {})}
                                   onEnvModeChange={onEnvModeChange}
                                   startFromOrigin={startFromOrigin}
@@ -6903,6 +6821,7 @@ function ChatViewContent(props: ChatViewProps) {
           onAddTerminal={addTerminalSurface}
           onAddDiff={addDiffSurface}
           onAddFiles={addFilesSurface}
+          onAddAgents={addAgentsSurface}
           browserAvailable={isPreviewSupportedInRuntime()}
           diffAvailable={isServerThread && isGitRepo}
           filesAvailable={activeProject !== null}
@@ -6911,7 +6830,7 @@ function ChatViewContent(props: ChatViewProps) {
         </RightPanelTabs>
       ) : null}
       {shouldUsePlanSidebarSheet && rightPanelOpen && activeThreadRef ? (
-        <RightPanelSheet open onClose={planSidebarOpen ? closePlanSidebar : closePreviewPanel}>
+        <RightPanelSheet open onClose={closePreviewPanel}>
           <RightPanelTabs
             mode="sheet"
             inlineSize={previewPanelInlineSize}
@@ -6931,6 +6850,7 @@ function ChatViewContent(props: ChatViewProps) {
             onAddTerminal={addTerminalSurface}
             onAddDiff={addDiffSurface}
             onAddFiles={addFilesSurface}
+            onAddAgents={addAgentsSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             diffAvailable={isServerThread && isGitRepo}
             filesAvailable={activeProject !== null}
