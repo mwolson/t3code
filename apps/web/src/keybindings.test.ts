@@ -717,7 +717,6 @@ describe("chat/editor shortcuts", () => {
     );
   });
 
-<<<<<<< HEAD
   it("matches themeEditor.toggle on macOS and Windows", () => {
     assert.strictEqual(
       resolveShortcutCommand(
@@ -734,7 +733,9 @@ describe("chat/editor shortcuts", () => {
         { platform: "Win32" },
       ),
       "themeEditor.toggle",
-=======
+    );
+  });
+
   it("matches filePicker.toggle shortcut outside terminal focus", () => {
     assert.strictEqual(
       resolveShortcutCommand(event({ key: "p", metaKey: true }), DEFAULT_BINDINGS, {
@@ -766,7 +767,6 @@ describe("chat/editor shortcuts", () => {
         context: { terminalFocus: true },
       }),
       "projectSearch.toggle",
->>>>>>> 0c15987295 (fix: reconcile rebase with latest main)
     );
   });
 
