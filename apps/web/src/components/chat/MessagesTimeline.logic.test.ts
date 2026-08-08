@@ -415,6 +415,57 @@ describe("normalizeCompactToolLabel", () => {
   });
 });
 
+describe("resolveTimelineToolPresentation", () => {
+  it("pretty prints Claude and Cursor T3 MCP tool names", () => {
+    expect(resolveTimelineToolPresentation("mcp__t3-code__t3_thread_read")).toEqual({
+      displayName: "Read a T3 thread",
+      logo: "t3-code",
+    });
+  });
+
+  it("pretty prints Codex T3 MCP tool names", () => {
+    expect(resolveTimelineToolPresentation("t3-code.create_threads")).toEqual({
+      displayName: "Create T3 threads",
+      logo: "t3-code",
+    });
+  });
+
+  it("pretty prints Grok ACP T3 MCP tool names", () => {
+    expect(resolveTimelineToolPresentation("t3-code__t3_thread_start")).toEqual({
+      displayName: "Start a T3 thread",
+      logo: "t3-code",
+    });
+    expect(resolveTimelineToolPresentation("t3-code__delegate_task")).toEqual({
+      displayName: "Delegate a child task",
+      logo: "t3-code",
+    });
+  });
+
+  it("pretty prints bare T3 MCP toolkit names", () => {
+    expect(resolveTimelineToolPresentation("list_scheduled_tasks")).toEqual({
+      displayName: "List scheduled tasks",
+      logo: "t3-code",
+    });
+  });
+
+  it("pretty prints OpenCode 2 execute-bridged T3 MCP tool names from input", () => {
+    expect(
+      resolveTimelineToolPresentation("execute", {
+        input: {
+          code: `await tools["t3-code"].t3_thread_read({ threadId: "x" });`,
+        },
+      }),
+    ).toEqual({
+      displayName: "Read a T3 thread",
+      logo: "t3-code",
+    });
+  });
+
+  it("keeps unknown MCP tools on the generic renderer path", () => {
+    expect(resolveTimelineToolPresentation("mcp__github__search_issues")).toBeNull();
+  });
+});
+
 describe("resolveAssistantMessageCopyState", () => {
   it("returns enabled copy state for completed assistant messages", () => {
     expect(
