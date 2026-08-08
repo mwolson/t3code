@@ -853,10 +853,11 @@ export function openCode2SessionSelectionParameters(
  * Current 2.x builds replaced the fork body's optional exclusive `messageID`
  * with a required `boundary` union: `{type: "before", messageID}` keeps the
  * old exclusive semantics and `{type: "through"}` copies the whole head. The
- * old shape is rejected with 400 `Missing key at ["boundary"]`. The pinned SDK
- * (next-16233, still npm's `next` tag) predates the change and only maps
- * `messageID` into the body, so this rides the generated client's `$body_`
- * escape hatch to place `boundary` there.
+ * old shape is rejected with 400 `Missing key at ["boundary"]`. Session3 has no
+ * `session.fork` method; production posts `{ boundary }` via the raw HTTP
+ * client. `$body_boundary` remains the parameter shape for the generated
+ * client's `$body_` escape hatch (Session2 / replay mocks that still expose
+ * `.fork`).
  *
  * @internal exported for tests
  */
@@ -2087,12 +2088,30 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           }
 
           if (context.childSessionId === null) {
-            const matchingChild = Array.from(nativeChildSessions.values()).find(
-              (candidate) =>
-                candidate.parentID === state.nativeSessionId &&
-                !subagentsByChildSessionId.has(candidate.id) &&
-                (context.title === null || candidate.title === context.title),
-            );
+            // Prefer an explicit child session id from tool metadata when the
+            // provider reports it (background launch structured.sessionID).
+            // Title match is only a fallback and can misbind parallel children
+            // that share a title or both lack one.
+            const structuredSessionId = recordString(part.structured, "sessionID", "sessionId");
+            const matchingChild =
+              structuredSessionId !== undefined
+                ? (() => {
+                    const byId = nativeChildSessions.get(structuredSessionId);
+                    if (
+                      byId !== undefined &&
+                      byId.parentID === state.nativeSessionId &&
+                      !subagentsByChildSessionId.has(byId.id)
+                    ) {
+                      return byId;
+                    }
+                    return undefined;
+                  })()
+                : Array.from(nativeChildSessions.values()).find(
+                    (candidate) =>
+                      candidate.parentID === state.nativeSessionId &&
+                      !subagentsByChildSessionId.has(candidate.id) &&
+                      (context.title === null || candidate.title === context.title),
+                  );
             if (matchingChild !== undefined) yield* bindSubagentChild(context, matchingChild);
           }
           yield* emitSubagentContext(context);
@@ -3568,18 +3587,17 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 activeExecution !== null &&
                 !activeExecution.claimedByPromotion &&
                 !activeExecution.inputIds.has(rootInputId) &&
-                activeExecution.inputIds.size === 0 &&
                 (active.turn.isRoot || active.state.postSettleWakes.length === 0)
               ) {
                 const previousOwnerInputIds = new Set(activeExecution.inputIds);
                 // `session.execution.started` has only a session id. A
                 // promoted owner wins this boundary. Otherwise the ordinary
                 // admission claims the execution here, including when the
-                // fallback temporarily held pending wake ids. A later
-                // retired promotion joins the same boundary and remains
-                // suppressed. OpenCode cannot tell these orderings apart
-                // without an execution id, so this is the smallest
-                // deterministic policy.
+                // fallback temporarily held pending wake ids (inputIds may be
+                // non-empty). A later retired promotion joins the same
+                // boundary and remains suppressed. OpenCode cannot tell these
+                // orderings apart without an execution id, so this is the
+                // smallest deterministic policy.
                 activeExecution.inputIds.clear();
                 activeExecution.inputIds.add(rootInputId);
                 active.turn.executionStarted = true;
@@ -4300,14 +4318,19 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 consecutiveStreamFailures = 0;
               }
             } else if (!hasActiveTurn) {
-              // Clean EOF while idle: wait for session close rather than opening a
-              // second subscribe. Replay fixtures end the stream this way; a live
-              // idle session almost never EOFs cleanly, and the next openSession
-              // creates a fresh adapter when needed.
-              while (!abortController.signal.aborted) {
-                yield* Effect.sleep("1 second");
+              // Replay fixtures end the SSE stream cleanly once the transcript
+              // is drained; park until the adapter scope aborts instead of
+              // opening a second subscribe the harness did not record.
+              // Live servers can also clean-EOF while idle (proxy idle timeout,
+              // process recycle). Resubscribe so a later startTurn on this
+              // same session still receives events; openSession is not re-run.
+              if (connection.url.startsWith("replay://")) {
+                while (!abortController.signal.aborted) {
+                  yield* Effect.sleep("1 second");
+                }
+                return;
               }
-              return;
+              consecutiveStreamFailures = 0;
             }
 
             lastEventAtMs = yield* Clock.currentTimeMillis;
@@ -4527,20 +4550,22 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           };
         };
 
-        const postSessionPrompt = (input: {
-          readonly sessionID: string;
-          readonly text: string;
-          readonly files?: ReturnType<typeof toOpenCode2FileAttachments>;
-          readonly delivery?: "steer" | "queue";
-        }) => {
-          const rawClient = (
+        const rawHttpClient = () =>
+          (
             client as unknown as {
               client: {
                 post: (options: Record<string, unknown>) => Promise<unknown>;
               };
             }
           ).client;
-          return rawClient.post({
+
+        const postSessionPrompt = (input: {
+          readonly sessionID: string;
+          readonly text: string;
+          readonly files?: ReturnType<typeof toOpenCode2FileAttachments>;
+          readonly delivery?: "steer" | "queue";
+        }) =>
+          rawHttpClient().post({
             url: "/api/session/{sessionID}/prompt",
             path: { sessionID: input.sessionID },
             body: {
@@ -4553,7 +4578,19 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             headers: { "Content-Type": "application/json" },
             throwOnError: true,
           });
-        };
+
+        // Session3 has no session.fork. The HTTP route still exists; current
+        // binaries require body.boundary (not the older messageID-only shape
+        // Session2 still maps). Post through the raw hey-api client so the wire
+        // matches, same pattern as flat session.prompt.
+        const postSessionFork = (parameters: ReturnType<typeof openCode2ForkParameters>) =>
+          rawHttpClient().post({
+            url: "/api/session/{sessionID}/fork",
+            path: { sessionID: parameters.sessionID },
+            body: { boundary: parameters.$body_boundary },
+            headers: { "Content-Type": "application/json" },
+            throwOnError: true,
+          });
 
         const readSnapshot = Effect.fnUntraced(function* (
           providerThread: OrchestrationV2ProviderThread,
@@ -4933,6 +4970,11 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 if (replayWake !== undefined) state.promotedInputIds.delete(replayWake.inputId);
                 return replayWake;
               })();
+              // Build the prompt payload before arming activeTurn so an empty
+              // message fails cleanly without wedging the session as active.
+              const promptBody = providerBufferedContinuation
+                ? undefined
+                : promptPayload(turnInput.message);
               const startedAt = yield* DateTime.now;
               const syntheticNativeTurnId = `${sessionID}:attempt:${turnInput.attemptId}`;
               const providerTurnId = idAllocator.derive.providerTurn({
@@ -4996,21 +5038,19 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 }
                 return;
               }
-              const payload = promptPayload(turnInput.message);
+              const payload = promptBody!;
+              const finalizeFailedTurn = (cause: unknown) =>
+                finalizeTurn(state, turn, "failed", {
+                  failure: makeProviderFailure({ cause, class: "provider_error" }),
+                });
               yield* alignSessionSelection(
                 state,
                 turnInput.modelSelection,
                 turnInput.runtimePolicy.interactionMode,
-              );
+              ).pipe(Effect.tapError(finalizeFailedTurn));
               const prompted = yield* sdkCall("session.prompt", { sessionID, ...payload }, () =>
                 postSessionPrompt({ sessionID, ...payload }),
-              ).pipe(
-                Effect.tapError((cause) =>
-                  finalizeTurn(state, turn, "failed", {
-                    failure: makeProviderFailure({ cause, class: "provider_error" }),
-                  }),
-                ),
-              );
+              ).pipe(Effect.tapError(finalizeFailedTurn));
               // Arm the stall watchdog from the prompt boundary so a long first
               // token does not immediately resubscribe, but a dead stream after
               // prompt still recovers.
@@ -5208,13 +5248,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   `OpenCode 2 approval request ${requestInput.requestId} requires a decision`,
                 );
               }
-              if (requestInput.decision === "acceptForSession") {
-                rememberOpenCode2SessionPermission(
-                  sessionPermissions,
-                  sessionID,
-                  pending.permission,
-                );
-              }
               const reply =
                 requestInput.decision === "accept" || requestInput.decision === "acceptForSession"
                   ? ("once" as const)
@@ -5222,6 +5255,15 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               yield* sdkCall("session.permission.reply", { sessionID, requestID, reply }, () =>
                 client.v2.session.permission.reply({ sessionID, requestID, reply }),
               );
+              // Remember the session grant only after a successful reply so a
+              // failed provider write does not auto-allow later matching tools.
+              if (requestInput.decision === "acceptForSession") {
+                rememberOpenCode2SessionPermission(
+                  sessionPermissions,
+                  sessionID,
+                  pending.permission,
+                );
+              }
             }).pipe(
               Effect.mapError(
                 (cause) =>
@@ -5328,11 +5370,17 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 boundaryMessageId = openCodeBoundaryAfterProviderTurn(sourceTurns, selected.id);
               }
               const parameters = openCode2ForkParameters(sessionID, boundaryMessageId);
-              const response = yield* sdkCall("session.fork", parameters, () =>
-                Promise.reject(
-                  new Error("OpenCode 2 beta session.fork is not available on Session3"),
-                ),
-              );
+              // Prefer a typed/mock session.fork when present (replay testkit);
+              // production Session3 has none, so post the boundary body raw.
+              const response = yield* sdkCall("session.fork", parameters, () => {
+                const sessionWithFork = client.v2.session as {
+                  fork?: (params: ReturnType<typeof openCode2ForkParameters>) => Promise<unknown>;
+                };
+                if (typeof sessionWithFork.fork === "function") {
+                  return sessionWithFork.fork(parameters);
+                }
+                return postSessionFork(parameters);
+              });
               const nativeSession = yield* unwrapOpenCode2Data<SessionInfoV2>(
                 "session.fork",
                 response,
