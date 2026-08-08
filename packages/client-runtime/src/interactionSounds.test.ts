@@ -1,6 +1,6 @@
-import { EnvironmentId, MessageId, ThreadId, TurnId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import type { EnvironmentThreadShell } from "./state/shell.ts";
+import type { EnvironmentThreadShell, ThreadRunSummary } from "./state/models.ts";
 import {
   captureThreadSoundState,
   captureThreadSoundStatePreservingUnobserved,
@@ -10,130 +10,129 @@ import {
   shouldPlayInteractionSound,
 } from "./interactionSounds.ts";
 
+function makeRun(overrides: Partial<ThreadRunSummary> = {}): ThreadRunSummary {
+  return {
+    runId: RunId.make("run-1"),
+    status: "running",
+    requestedAt: "2026-07-11T12:00:02.000Z",
+    startedAt: "2026-07-11T12:00:03.000Z",
+    completedAt: null,
+    assistantMessageId: null,
+    ...overrides,
+  };
+}
+
 function makeThread(overrides: Partial<EnvironmentThreadShell> = {}): EnvironmentThreadShell {
   return {
-    environmentId: "environment-1",
-    id: "thread-1",
-    projectId: "project-1",
+    environmentId: EnvironmentId.make("environment-1"),
+    id: ThreadId.make("thread-1"),
+    projectId: ProjectId.make("project-1"),
     title: "Thread",
-    modelSelection: null,
+    providerInstanceId: ProviderInstanceId.make("provider-1"),
+    modelSelection: {
+      instanceId: ProviderInstanceId.make("provider-1"),
+      model: "claude-sonnet",
+    },
     runtimeMode: "full-access",
     interactionMode: "default",
     branch: null,
     worktreePath: null,
-    latestTurn: null,
-    createdAt: "2026-07-11T12:00:00.000Z",
-    updatedAt: "2026-07-11T12:00:00.000Z",
-    archivedAt: null,
-    session: null,
+    lineage: {
+      parentThreadId: null,
+      relationshipToParent: null,
+      rootThreadId: ThreadId.make("thread-1"),
+    },
+    forkedFrom: null,
+    activeProviderThreadId: null,
+    latestRun: null,
+    runtime: null,
     latestUserMessageAt: null,
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    pendingBackgroundTasks: [],
+    itemCount: 0,
+    visibleItemCount: 0,
+    createdAt: "2026-07-11T12:00:00.000Z",
+    updatedAt: "2026-07-11T12:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    snoozedUntil: null,
+    snoozedAt: null,
+    pinnedAt: null,
+    titleRegeneration: null,
+    deletedAt: null,
+    source: {} as EnvironmentThreadShell["source"],
     ...overrides,
-  } as EnvironmentThreadShell;
+  };
 }
 
 describe("interaction sounds", () => {
-  it("plays success when a turn is associated with its initiating user message", () => {
-    const running = makeThread({
-      latestTurn: {
-        turnId: TurnId.make("turn-1"),
-        initiatingUserMessageId: MessageId.make("message-1"),
-        state: "running",
-        requestedAt: "2026-07-11T12:00:02.000Z",
-        startedAt: "2026-07-11T12:00:03.000Z",
-        completedAt: null,
-        assistantMessageId: null,
-      },
-    });
-    const completed = makeThread({
-      latestTurn: {
-        ...running.latestTurn!,
-        state: "completed",
-        completedAt: "2026-07-11T12:00:05.000Z",
-      },
-    });
-
-    expect(deriveInteractionSoundCues(captureThreadSoundState([running]), [completed])).toEqual([
-      "success",
-    ]);
-  });
-
-  it("supports older shells where a normal user message precedes provider startup", () => {
+  it("plays success when a run is associated with a nearby user message", () => {
     const running = makeThread({
       latestUserMessageAt: "2026-07-11T12:00:00.000Z",
-      latestTurn: {
-        turnId: TurnId.make("legacy-turn"),
-        state: "running",
-        requestedAt: "2026-07-11T12:00:02.000Z",
-        startedAt: "2026-07-11T12:00:03.000Z",
-        completedAt: null,
-        assistantMessageId: null,
-      },
+      latestRun: makeRun({ status: "running" }),
     });
     const completed = makeThread({
       latestUserMessageAt: running.latestUserMessageAt,
-      latestTurn: {
-        ...running.latestTurn!,
-        state: "completed",
+      latestRun: makeRun({
+        status: "completed",
         completedAt: "2026-07-11T12:00:05.000Z",
-      },
+      }),
     });
 
     expect(deriveInteractionSoundCues(captureThreadSoundState([running]), [completed])).toEqual([
       "success",
     ]);
-  });
-
-  it("does not let a later steering message associate a background subagent turn", () => {
-    const backgroundRunning = makeThread({
-      latestUserMessageAt: "2026-07-11T12:00:00.000Z",
-      latestTurn: {
-        turnId: TurnId.make("subagent-turn"),
-        initiatingUserMessageId: null,
-        state: "running",
-        requestedAt: "2026-07-11T12:05:00.000Z",
-        startedAt: "2026-07-11T12:05:00.000Z",
-        completedAt: null,
-        assistantMessageId: null,
-      },
-    });
-    const completedAfterSteering = makeThread({
-      latestUserMessageAt: "2026-07-11T12:06:00.000Z",
-      latestTurn: {
-        ...backgroundRunning.latestTurn!,
-        state: "completed",
-        completedAt: "2026-07-11T12:06:05.000Z",
-      },
-    });
-
-    expect(
-      deriveInteractionSoundCues(captureThreadSoundState([backgroundRunning]), [
-        completedAfterSteering,
-      ]),
-    ).toEqual([]);
   });
 
   it("does not associate an old user message with later background work", () => {
     const beforeBackgroundWork = makeThread({
       latestUserMessageAt: "2026-07-11T12:00:00.000Z",
     });
-    const completedBackgroundTurn = makeThread({
+    const completedBackgroundRun = makeThread({
       latestUserMessageAt: beforeBackgroundWork.latestUserMessageAt,
-      latestTurn: {
-        turnId: TurnId.make("background-turn"),
-        state: "completed",
+      latestRun: makeRun({
+        runId: RunId.make("background-run"),
+        status: "completed",
         requestedAt: "2026-07-11T12:05:00.000Z",
         startedAt: "2026-07-11T12:05:00.000Z",
         completedAt: "2026-07-11T12:05:05.000Z",
-        assistantMessageId: null,
-      },
+      }),
     });
 
     expect(
       deriveInteractionSoundCues(captureThreadSoundState([beforeBackgroundWork]), [
-        completedBackgroundTurn,
+        completedBackgroundRun,
+      ]),
+    ).toEqual([]);
+  });
+
+  it("does not let a later steering message associate a background run", () => {
+    const backgroundRunning = makeThread({
+      latestUserMessageAt: "2026-07-11T12:00:00.000Z",
+      latestRun: makeRun({
+        runId: RunId.make("subagent-run"),
+        status: "running",
+        requestedAt: "2026-07-11T12:05:00.000Z",
+        startedAt: "2026-07-11T12:05:00.000Z",
+      }),
+    });
+    const completedAfterSteering = makeThread({
+      latestUserMessageAt: "2026-07-11T12:06:00.000Z",
+      latestRun: makeRun({
+        runId: RunId.make("subagent-run"),
+        status: "completed",
+        requestedAt: "2026-07-11T12:05:00.000Z",
+        startedAt: "2026-07-11T12:05:00.000Z",
+        completedAt: "2026-07-11T12:06:05.000Z",
+      }),
+    });
+
+    expect(
+      deriveInteractionSoundCues(captureThreadSoundState([backgroundRunning]), [
+        completedAfterSteering,
       ]),
     ).toEqual([]);
   });
@@ -181,37 +180,35 @@ describe("interaction sounds", () => {
       latestUserMessageAt: "2026-07-11T12:00:00.000Z",
       hasPendingUserInput: true,
       hasPendingApprovals: true,
-      latestTurn: {
-        turnId: TurnId.make("turn-1"),
-        state: "completed",
+      latestRun: makeRun({
+        status: "completed",
         requestedAt: "2026-07-11T12:00:00.000Z",
         startedAt: "2026-07-11T12:00:01.000Z",
         completedAt: "2026-07-11T12:00:05.000Z",
-        assistantMessageId: null,
-      },
+      }),
     });
 
     expect(deriveInteractionSoundCues(captureThreadSoundState([thread]), [thread])).toEqual([]);
   });
 
-  it("does not replay success when a completed turn timestamp is corrected", () => {
+  it("does not replay success when a completed run timestamp is corrected", () => {
     const completed = makeThread({
       latestUserMessageAt: "2026-07-11T12:00:00.000Z",
-      latestTurn: {
-        turnId: TurnId.make("turn-1"),
-        state: "completed",
+      latestRun: makeRun({
+        status: "completed",
         requestedAt: "2026-07-11T12:00:01.000Z",
         startedAt: "2026-07-11T12:00:02.000Z",
         completedAt: "2026-07-11T12:00:05.000Z",
-        assistantMessageId: null,
-      },
+      }),
     });
     const corrected = makeThread({
       latestUserMessageAt: completed.latestUserMessageAt,
-      latestTurn: {
-        ...completed.latestTurn!,
+      latestRun: makeRun({
+        status: "completed",
+        requestedAt: "2026-07-11T12:00:01.000Z",
+        startedAt: "2026-07-11T12:00:02.000Z",
         completedAt: "2026-07-11T12:00:06.000Z",
-      },
+      }),
     });
 
     expect(deriveInteractionSoundCues(captureThreadSoundState([completed]), [corrected])).toEqual(
@@ -222,14 +219,12 @@ describe("interaction sounds", () => {
   it("does not play cues while existing threads are first hydrated", () => {
     const thread = makeThread({
       hasPendingUserInput: true,
-      latestTurn: {
-        turnId: TurnId.make("turn-1"),
-        state: "completed",
+      latestRun: makeRun({
+        status: "completed",
         requestedAt: "2026-07-11T12:00:00.000Z",
         startedAt: "2026-07-11T12:00:01.000Z",
         completedAt: "2026-07-11T12:00:05.000Z",
-        assistantMessageId: null,
-      },
+      }),
     });
 
     expect(deriveInteractionSoundCues(new Map(), [thread])).toEqual([]);
@@ -238,22 +233,15 @@ describe("interaction sounds", () => {
   it("preserves pre-hydration thread state so cues can play after settings hydrate", () => {
     const running = makeThread({
       latestUserMessageAt: "2026-07-11T12:00:00.000Z",
-      latestTurn: {
-        turnId: TurnId.make("turn-1"),
-        state: "running",
-        requestedAt: "2026-07-11T12:00:01.000Z",
-        startedAt: "2026-07-11T12:00:01.000Z",
-        completedAt: null,
-        assistantMessageId: null,
-      },
+      latestRun: makeRun({ status: "running", requestedAt: "2026-07-11T12:00:01.000Z" }),
     });
     const completed = makeThread({
       latestUserMessageAt: running.latestUserMessageAt,
-      latestTurn: {
-        ...running.latestTurn!,
-        state: "completed",
+      latestRun: makeRun({
+        status: "completed",
+        requestedAt: "2026-07-11T12:00:01.000Z",
         completedAt: "2026-07-11T12:00:05.000Z",
-      },
+      }),
     });
 
     const seeded = captureThreadSoundStateWhileSettingsHydrating(null, [running]);
@@ -264,22 +252,16 @@ describe("interaction sounds", () => {
 
   it("preserves a thread baseline while its environment is synchronizing", () => {
     const running = makeThread({
-      latestTurn: {
-        turnId: TurnId.make("turn-1"),
-        initiatingUserMessageId: MessageId.make("message-1"),
-        state: "running",
-        requestedAt: "2026-07-11T12:00:01.000Z",
-        startedAt: "2026-07-11T12:00:01.000Z",
-        completedAt: null,
-        assistantMessageId: null,
-      },
+      latestUserMessageAt: "2026-07-11T12:00:00.000Z",
+      latestRun: makeRun({ status: "running", requestedAt: "2026-07-11T12:00:01.000Z" }),
     });
     const completedDuringSync = makeThread({
-      latestTurn: {
-        ...running.latestTurn!,
-        state: "completed",
+      latestUserMessageAt: running.latestUserMessageAt,
+      latestRun: makeRun({
+        status: "completed",
+        requestedAt: "2026-07-11T12:00:01.000Z",
         completedAt: "2026-07-11T12:00:05.000Z",
-      },
+      }),
     });
     const beforeSync = captureThreadSoundState([running]);
     const whileSynchronizing = captureThreadSoundStatePreservingUnobserved(
