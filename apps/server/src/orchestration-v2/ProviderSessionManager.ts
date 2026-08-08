@@ -1610,21 +1610,37 @@ export const layerWithOptions = (
               input.providerInstanceId !== undefined &&
               input.providerSession !== undefined
             ) {
-              const adapter = yield* registry.get(input.providerInstanceId);
-              const deleteDetachedThread = adapter.deleteDetachedThread;
-              if (deleteDetachedThread !== undefined) {
-                const providerSession = input.providerSession;
-                const exits = yield* Effect.scoped(
-                  Effect.forEach(providerThreads.values(), (providerThread) =>
-                    Effect.exit(
-                      deleteDetachedThread({
-                        providerSession,
-                        providerThread,
-                      }),
+              // Historical / retry detach: the live entry may already be gone
+              // and the adapter may be unregistered. Wrap registry.get so a
+              // missing adapter still reaches clearMcpSession below when
+              // revokeMcpCredential is set.
+              const adapterExit = yield* Effect.exit(registry.get(input.providerInstanceId));
+              if (Exit.isSuccess(adapterExit)) {
+                const deleteDetachedThread = adapterExit.value.deleteDetachedThread;
+                if (deleteDetachedThread !== undefined) {
+                  const providerSession = input.providerSession;
+                  const exits = yield* Effect.scoped(
+                    Effect.forEach(providerThreads.values(), (providerThread) =>
+                      Effect.exit(
+                        deleteDetachedThread({
+                          providerSession,
+                          providerThread,
+                        }),
+                      ),
                     ),
-                  ),
+                  );
+                  deletionFailure = exits.find(Exit.isFailure) ?? null;
+                }
+              } else {
+                yield* Effect.logWarning(
+                  "orchestration-v2.driver-session.detach-adapter-unavailable",
+                  {
+                    providerSessionId: input.providerSessionId,
+                    threadId: input.threadId,
+                    providerInstanceId: input.providerInstanceId,
+                    cause: adapterExit.cause,
+                  },
                 );
-                deletionFailure = exits.find(Exit.isFailure) ?? null;
               }
             }
             if (
