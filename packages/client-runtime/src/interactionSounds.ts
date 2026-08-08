@@ -1,10 +1,10 @@
-import type { EnvironmentThreadShell } from "./state/shell.ts";
+import type { EnvironmentThreadShell } from "./state/models.ts";
 
 export type InteractionSoundCue = "bloom" | "success";
 
 interface ThreadSoundState {
-  readonly completedTurn: string | null;
-  readonly userInitiatedTurn: string | null;
+  readonly completedRun: string | null;
+  readonly userInitiatedRun: string | null;
   readonly hasPendingUserInput: boolean;
   readonly hasPendingApprovals: boolean;
 }
@@ -29,50 +29,45 @@ function threadKey(thread: EnvironmentThreadShell): string {
   return `${thread.environmentId}:${thread.id}`;
 }
 
-function completedTurn(thread: EnvironmentThreadShell): string | null {
-  const latestTurn = thread.latestTurn;
-  if (latestTurn?.state !== "completed" || latestTurn.completedAt === null) {
+function completedRun(thread: EnvironmentThreadShell): string | null {
+  const latestRun = thread.latestRun;
+  if (latestRun === null || latestRun.completedAt === null) {
     return null;
   }
-  return latestTurn.turnId;
+  if (latestRun.status !== "completed") {
+    return null;
+  }
+  return latestRun.runId;
 }
 
-const USER_TURN_START_WINDOW_MS = 2 * 60 * 1_000;
+const USER_RUN_START_WINDOW_MS = 2 * 60 * 1_000;
 
-function userInitiatedTurn(thread: EnvironmentThreadShell): string | null {
-  const latestTurn = thread.latestTurn;
-  if (latestTurn === null) {
+function userInitiatedRun(thread: EnvironmentThreadShell): string | null {
+  const latestRun = thread.latestRun;
+  if (latestRun === null) {
     return null;
   }
 
-  // Current servers expose the exact message/turn association from the
-  // projection. A null association explicitly identifies synthetic provider
-  // work, while undefined means the shell came from an older server.
-  if (latestTurn.initiatingUserMessageId !== undefined) {
-    return latestTurn.initiatingUserMessageId === null ? null : latestTurn.turnId;
-  }
-
-  if (thread.latestUserMessageAt === null) {
+  // V2 shells do not yet expose initiatingUserMessageId on latestRun. Associate
+  // a completed run with a nearby user message so synthetic background work
+  // does not fire success cues. A later steering message falls after
+  // requestedAt and is excluded by the positive startup delay check.
+  if (thread.latestUserMessageAt === null || latestRun.requestedAt === null) {
     return null;
   }
 
-  const requestedAt = Date.parse(latestTurn.requestedAt);
+  const requestedAt = Date.parse(latestRun.requestedAt);
   const latestUserMessageAt = Date.parse(thread.latestUserMessageAt);
   if (!Number.isFinite(requestedAt) || !Number.isFinite(latestUserMessageAt)) {
     return null;
   }
 
-  // A normal prompt is recorded before provider startup, while synthetic
-  // background turns have no nearby initiating message. Keep the same bounded
-  // adoption window used for queued turn starts so an old prompt cannot claim
-  // unrelated background work. A later steering message is also excluded
-  // because it falls after requestedAt.
   const startupDelay = requestedAt - latestUserMessageAt;
-  if (startupDelay < 0 || startupDelay > USER_TURN_START_WINDOW_MS) {
+  if (startupDelay < 0 || startupDelay > USER_RUN_START_WINDOW_MS) {
     return null;
   }
 
-  return latestTurn.turnId;
+  return latestRun.runId;
 }
 
 export function captureThreadSoundState(
@@ -82,8 +77,8 @@ export function captureThreadSoundState(
     threads.map((thread) => [
       threadKey(thread),
       {
-        completedTurn: completedTurn(thread),
-        userInitiatedTurn: userInitiatedTurn(thread),
+        completedRun: completedRun(thread),
+        userInitiatedRun: userInitiatedRun(thread),
         hasPendingUserInput: thread.hasPendingUserInput,
         hasPendingApprovals: thread.hasPendingApprovals,
       },
@@ -139,14 +134,14 @@ export function deriveInteractionSoundCues(
 
   for (const thread of threads) {
     const prior = previous.get(threadKey(thread));
-    const nextCompletedTurn = completedTurn(thread);
-    const nextUserInitiatedTurn = userInitiatedTurn(thread);
+    const nextCompletedRun = completedRun(thread);
+    const nextUserInitiatedRun = userInitiatedRun(thread);
 
     if (
       prior &&
-      nextCompletedTurn !== null &&
-      prior.completedTurn !== nextCompletedTurn &&
-      nextUserInitiatedTurn === nextCompletedTurn
+      nextCompletedRun !== null &&
+      prior.completedRun !== nextCompletedRun &&
+      nextUserInitiatedRun === nextCompletedRun
     ) {
       cues.push("success");
     }
