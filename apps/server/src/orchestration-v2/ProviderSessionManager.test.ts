@@ -2817,7 +2817,7 @@ it.effect(
 );
 
 it.effect(
-  "ProviderSessionManagerV2 keeps the committed session live during post-commit interruption",
+  "ProviderSessionManagerV2 releases the committed session during post-commit interruption",
   () =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
@@ -2854,8 +2854,7 @@ it.effect(
 
         const exit = yield* Fiber.await(openFiber);
         assert.isTrue(Exit.isFailure(exit) && exit.cause.reasons.some(Cause.isInterruptReason));
-        assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
-        yield* manager.close(providerSessionId);
+        assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
       });
 
       yield* effect.pipe(
