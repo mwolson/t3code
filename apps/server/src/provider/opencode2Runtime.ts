@@ -80,6 +80,7 @@ export const OpenCode2RuntimeOperation = Schema.Literals([
   "session.context",
   "session.create",
   "session.fork",
+  "session.form.reply",
   "session.generate",
   "session.get",
   "session.instructions.entry.put",
