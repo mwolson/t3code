@@ -61,6 +61,7 @@ import {
   removeOpenCode2Session,
   unwrapOpenCode2Data,
 } from "./OpenCode2AdapterV2.ts";
+import { openCode2WireInputID } from "./openCode2Wire.ts";
 
 const v2Event = (event: unknown) => event as V2Event;
 
@@ -74,6 +75,23 @@ const t3McpSession = {
 };
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+describe("OpenCode 2 wire input ids", () => {
+  it("reads every supported input id alias", () => {
+    for (const key of ["inputID", "inputId", "messageID", "messageId", "id"]) {
+      assert.strictEqual(openCode2WireInputID({ data: { [key]: `input:${key}` } }), `input:${key}`);
+    }
+  });
+
+  it("prefers the native input id over compatibility aliases", () => {
+    assert.strictEqual(
+      openCode2WireInputID({
+        data: { inputID: "native", inputId: "camel", messageID: "message" },
+      }),
+      "native",
+    );
+  });
+});
 
 describe("unwrapOpenCode2Data", () => {
   it.effect("reads through both envelopes", () =>

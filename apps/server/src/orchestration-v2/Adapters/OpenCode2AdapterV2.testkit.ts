@@ -413,6 +413,32 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
     await controller.expectOutbound({ type: operation, input });
     return { data: { data: await controller.response(operation) } };
   };
+  const rawPost = async (input: Record<string, unknown>) => {
+    const path = frameRecord(input.path);
+    const body = frameRecord(input.body);
+    if (input.url === "/api/session/{sessionID}/prompt") {
+      if (
+        path?.sessionID === undefined ||
+        typeof body?.text !== "string" ||
+        body.prompt !== undefined
+      ) {
+        throw new Error("Replay session.prompt must use a flat text body.");
+      }
+      const { delivery, ...prompt } = body;
+      return request("session.prompt", {
+        sessionID: path.sessionID,
+        prompt,
+        ...(typeof delivery === "string" ? { delivery } : {}),
+      });
+    }
+    if (input.url === "/api/session/{sessionID}/fork") {
+      return request("session.fork", {
+        sessionID: path?.sessionID,
+        $body_boundary: body?.boundary,
+      });
+    }
+    throw new Error(`Unsupported replay POST route: ${String(input.url)}`);
+  };
   /**
    * Catalog probes may run at openSession/ensureThread before the transcript
    * records them. Prefer the transcript when present; otherwise return canned
@@ -439,6 +465,9 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
     return request(operation, input);
   };
   return {
+    client: {
+      post: rawPost,
+    },
     v2: {
       agent: {
         list: (input: unknown) =>

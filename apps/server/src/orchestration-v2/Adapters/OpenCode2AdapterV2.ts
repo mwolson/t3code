@@ -1710,9 +1710,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             client?: { delete: (options: Record<string, unknown>) => Promise<unknown> };
           }
         ).client?.delete;
-        yield* runOpenCode2Sdk("session.interrupt", () =>
-          client.v2.session.interrupt({ sessionID }).catch(() => ({ data: { data: true } })),
-        ).pipe(Effect.catchCause(() => Effect.void));
         yield* removeOpenCode2Session(
           sessionID,
           runOpenCode2Sdk("session.remove", () => {
@@ -3499,8 +3496,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           event: any,
           suppressContinuation: boolean,
         ) {
+          const inputId = openCode2WireInputID(event);
+          if (inputId === undefined) return;
           const wake: OpenCode2PostSettleWake = {
-            inputId: event.data.inputID,
+            inputId,
             events: [event],
             disposition: suppressContinuation ? "suppress" : "replay",
             promotedAfterExecutionStarted: false,
@@ -3570,6 +3569,15 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           const promotedOwners = state.sawInputPromotion
             ? Array.from(state.promotedInputIds).filter((inputId) => candidateInputIds.has(inputId))
             : [];
+          const promotedReplayOwners = promotedOwners.filter((inputId) =>
+            state.postSettleWakes.some(
+              (wake) => wake.inputId === inputId && wake.disposition === "replay",
+            ),
+          );
+          const activeInputIsPromoted =
+            activeInputId !== null &&
+            activeInputId !== undefined &&
+            promotedOwners.includes(activeInputId);
 
           // OpenCode's promoted event is the authoritative input-to-execution
           // boundary. Older clients omitted it, so the bounded fallback gives
@@ -3579,10 +3587,24 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           // is safer than allowing it into the active visible turn.
           const fallbackInputIds =
             activeInputId !== null && activeInputId !== undefined ? [activeInputId] : wakeInputIds;
-          const ownership =
-            promotedOwners.length > 0
-              ? { inputIds: new Set(promotedOwners), claimedByPromotion: true }
-              : { inputIds: new Set(fallbackInputIds), claimedByPromotion: false };
+          // Cancelled synthetic wakes can promote after a recovery input has
+          // arrived. They suppress late output but must not own the recovery
+          // execution. A promoted replay wake still takes ownership because
+          // its buffered output belongs to a continuation turn.
+          const ownershipInputIds =
+            promotedReplayOwners.length > 0
+              ? promotedReplayOwners
+              : activeInputIsPromoted
+                ? [activeInputId]
+                : promotedOwners.length > 0
+                  ? promotedOwners
+                  : fallbackInputIds;
+          const ownership = {
+            inputIds: new Set(ownershipInputIds),
+            claimedByPromotion:
+              promotedReplayOwners.length > 0 ||
+              (!activeInputIsPromoted && promotedOwners.length > 0),
+          };
           state.activeExecution = ownership;
           for (const inputId of ownership.inputIds) {
             state.promotedInputIds.delete(inputId);
@@ -3777,6 +3799,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             // execution.started chooses a session-wide execution owner.
             if (inputId !== undefined && input === undefined) {
               eventState.sawInputPromotion = true;
+              eventState.promotedInputIds.add(inputId);
               const wake = eventState.postSettleWakes.find(
                 (candidate) => candidate.inputId === inputId,
               );
@@ -3784,7 +3807,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 wake.promotedAfterExecutionStarted =
                   eventState.activeExecution !== null ||
                   eventState.activeTurn?.executionStarted === true;
-                eventState.promotedInputIds.add(inputId);
                 return;
               }
             }
@@ -3918,18 +3940,23 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               return;
             }
             case "session.input.admitted": {
-              const state = threads.get(event.data.sessionID);
+              const sessionID =
+                openCode2WireSessionID(wire) ?? recordString(event.data, "sessionID");
+              if (sessionID === undefined) return;
+              const state = threads.get(sessionID);
+              const inputId = openCode2WireInputID(wire);
               if (
                 state !== undefined &&
                 state.activeTurn === null &&
-                state.parentSubagent !== null
+                state.parentSubagent !== null &&
+                inputId !== undefined
               ) {
-                yield* createChildTurn(state, event.data.inputID);
+                yield* createChildTurn(state, inputId);
               }
-              const active = activeFor(event.data.sessionID);
+              const active = activeFor(sessionID);
               if (active === null) return;
-              if (active.turn.nativeInputId === null) {
-                active.turn.nativeInputId = event.data.inputID;
+              if (active.turn.nativeInputId === null && inputId !== undefined) {
+                active.turn.nativeInputId = inputId;
                 yield* emitProviderTurn(active.state, active.turn, "running", null);
               }
               const rootInputId = active.turn.nativeInputId;
@@ -4012,7 +4039,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
               const now = yield* DateTime.now;
-              const nativeItemId = String(event.data.inputID ?? event.id ?? "");
+              const nativeItemId = String(openCode2WireInputID(wire) ?? event.id ?? "");
               if (nativeItemId.length === 0) return;
               const current = active.turn.activeCompaction;
               if (current !== null && current.id !== nativeItemId && current.status === "running") {
@@ -5518,17 +5545,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const prompted = yield* sdkCall(
                 "session.prompt",
                 { sessionID, prompt: payload },
-                () => {
-                  const prompt = (
-                    client.v2.session as {
-                      prompt?: (input: unknown) => Promise<unknown>;
-                    }
-                  ).prompt;
-                  if (typeof prompt === "function") {
-                    return prompt({ sessionID, prompt: payload });
-                  }
-                  return postSessionPrompt({ sessionID, ...payload });
-                },
+                () => postSessionPrompt({ sessionID, ...payload }),
               ).pipe(Effect.tapError(finalizeFailedTurn));
               // Arm the stall watchdog from the prompt boundary so a long first
               // token does not immediately resubscribe, but a dead stream after
@@ -5591,17 +5608,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               yield* sdkCall(
                 "session.prompt",
                 { sessionID, prompt: payload, delivery: "steer" },
-                () => {
-                  const prompt = (
-                    client.v2.session as {
-                      prompt?: (input: unknown) => Promise<unknown>;
-                    }
-                  ).prompt;
-                  if (typeof prompt === "function") {
-                    return prompt({ sessionID, prompt: payload, delivery: "steer" });
-                  }
-                  return postSessionPrompt({ sessionID, ...payload, delivery: "steer" });
-                },
+                () => postSessionPrompt({ sessionID, ...payload, delivery: "steer" }),
               );
             }).pipe(
               Effect.mapError(
