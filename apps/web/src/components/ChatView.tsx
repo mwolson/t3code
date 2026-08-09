@@ -400,6 +400,7 @@ import {
   resolveFileAttachmentUrl,
   reconcileMountedTerminalThreadIds,
   resolveComposerInteractionMode,
+  resolveEffectiveInteractionMode,
   resolveComposerProviderSelection,
   observeProactivePanelUserChoice,
   resolveProactiveTurnDiffAction,
@@ -1932,6 +1933,11 @@ export default function ChatView(props: ChatViewProps) {
   // the branch mismatch banner.
   const [, setThreadErrorBannerDismissTick] = useState(0);
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
+  const interactionMode = resolveEffectiveInteractionMode({
+    planModeEnabled: settings.planModeEnabled,
+    composerInteractionMode,
+    threadInteractionMode: activeThread?.interactionMode,
+  });
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
@@ -7155,9 +7161,10 @@ export default function ChatView(props: ChatViewProps) {
       });
       return;
     }
-    // Providers without the legacy toggle receive their native commands unchanged.
+    // Legacy plan mode: /plan and /default only act when the beta flag is on;
+    // otherwise they send as plain text like any other message.
     const standaloneSlashCommand =
-      sendInteractionModeEnabled &&
+      settings.planModeEnabled &&
       composerImages.length === 0 &&
       composerFiles.length === 0 &&
       sendableComposerTerminalContexts.length === 0 &&
