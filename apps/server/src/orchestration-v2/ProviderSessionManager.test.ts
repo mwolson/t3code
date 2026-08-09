@@ -380,6 +380,7 @@ function makeTestLayer(input: {
   readonly afterOpenSetup?: (input: {
     readonly providerSessionId: ProviderSessionId;
   }) => Effect.Effect<void>;
+  readonly afterEntryCommit?: Effect.Effect<void>;
   readonly failReleaseEventWrites?: boolean;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hangSessionScopeClose?: boolean;
@@ -417,6 +418,7 @@ function makeTestLayer(input: {
     providerSessionManagerLayerWithOptions({
       idleTimeoutMs: input.idleTimeoutMs,
       ...(input.maxIdlePinMs === undefined ? {} : { maxIdlePinMs: input.maxIdlePinMs }),
+      ...(input.afterEntryCommit === undefined ? {} : { afterEntryCommit: input.afterEntryCommit }),
     }).pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -2727,6 +2729,145 @@ it.effect(
             idleTimeoutMs: 60_000,
             mcpConfigs,
             afterOpenSetup,
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 revokes a reused credential when a replacement open is interrupted",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const mcpConfigs = yield* Ref.make<
+        ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+      >([]);
+      const parkReplacement = yield* Ref.make(false);
+      const openEntered = yield* Deferred.make<void>();
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSinkV2;
+        const idAllocator = yield* IdAllocatorV2;
+        const manager = yield* ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-reused-interrupt");
+        const firstSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const replacementSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        yield* manager.open({
+          threadId,
+          providerSessionId: firstSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const original = (yield* Ref.get(mcpConfigs)).at(-1);
+        const originalToken = original?.authorizationHeader.replace(/^Bearer\s+/, "");
+        assert.isDefined(originalToken);
+        yield* Ref.set(parkReplacement, true);
+
+        const openFiber = yield* manager
+          .open({
+            threadId,
+            providerSessionId: replacementSessionId,
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(openEntered);
+
+        // The old entry releases while the replacement open holds the reused
+        // credential reservation. The old release must leave the credential
+        // alone until the replacement either commits or cleans it up.
+        yield* manager.detach({ providerSessionId: firstSessionId, threadId });
+        yield* manager.close(firstSessionId);
+        yield* Fiber.interrupt(openFiber);
+        const exit = yield* Fiber.await(openFiber);
+        assert.isTrue(Exit.isFailure(exit) && exit.cause.reasons.some(Cause.isInterruptReason));
+
+        assert.isUndefined(yield* registry.resolve(originalToken!));
+        assert.isUndefined(McpProviderSession.readMcpProviderSession(threadId));
+        assert.isTrue(Option.isNone(yield* manager.get(replacementSessionId)));
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          makeTestLayer({
+            state,
+            idleTimeoutMs: 60_000,
+            mcpConfigs,
+            afterOpenSetup: () =>
+              Effect.gen(function* () {
+                if (yield* Ref.getAndSet(parkReplacement, false)) {
+                  yield* Deferred.succeed(openEntered, undefined);
+                  return yield* Effect.never;
+                }
+              }),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 keeps the committed session live during post-commit interruption",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const entryCommitted = yield* Deferred.make<void>();
+      const releaseTail = yield* Deferred.make<void>();
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSinkV2;
+        const idAllocator = yield* IdAllocatorV2;
+        const manager = yield* ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-commit-interrupt");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const openFiber = yield* manager
+          .open({
+            threadId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(entryCommitted);
+
+        const interruptFiber = yield* Fiber.interrupt(openFiber).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(releaseTail, undefined);
+        yield* Fiber.join(interruptFiber);
+
+        const exit = yield* Fiber.await(openFiber);
+        assert.isTrue(Exit.isFailure(exit) && exit.cause.reasons.some(Cause.isInterruptReason));
+        assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
+        yield* manager.close(providerSessionId);
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          makeTestLayer({
+            state,
+            idleTimeoutMs: 60_000,
+            afterEntryCommit: Deferred.succeed(entryCommitted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseTail)),
+            ),
           }),
         ),
       );
