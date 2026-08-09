@@ -2669,7 +2669,14 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = false;
   const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);
-  const toolPresentation = resolveTimelineToolPresentation(workEntry.toolTitle ?? workEntry.label);
+  const toolPresentation = resolveTimelineToolPresentation(workEntry.toolTitle ?? workEntry.label, {
+    input:
+      workEntry.toolData !== null &&
+      typeof workEntry.toolData === "object" &&
+      "input" in workEntry.toolData
+        ? (workEntry.toolData as { input?: unknown }).input
+        : workEntry.toolData,
+  });
   const heading = toolPresentation?.displayName ?? toolWorkEntryHeading(workEntry);
   const rawPreview = workEntryPreview(workEntry, workspaceRoot);
   const preview =
