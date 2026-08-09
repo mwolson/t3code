@@ -328,6 +328,13 @@ export const OrchestrationV2AppThread = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /**
+   * When the current settledOverride was established. Stable across metadata
+   * renames that advance updatedAt. Omitted/null on pre-field payloads.
+   */
+  settledOverrideAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -1426,6 +1433,10 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  // Pre-field payloads omit settledOverrideAt; fall back in pure helpers.
+  settledOverrideAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
