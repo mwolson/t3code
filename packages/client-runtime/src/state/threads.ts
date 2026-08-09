@@ -25,7 +25,7 @@ import { ThreadSnapshotLoader } from "./threadSnapshotHttp.ts";
 import { parseThreadKey, threadKey } from "./entities.ts";
 import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection.ts";
 import { getThreadOpenTailLimit, maybeTailThreadProjection } from "./threadOpenTail.ts";
-import { THREAD_STATE_IDLE_TTL_MS } from "./threadRetention.ts";
+import { getThreadStateIdleTtlMs } from "./threadRetention.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 import {
   EMPTY_ENVIRONMENT_THREAD_STATE,
@@ -173,16 +173,20 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       status: waiting ? "synchronizing" : "live",
       error: Option.none(),
     });
-    // Skip offline cache when we dropped rows for the open-tail window so we
-    // never write a truncated body that later pretends to be the full thread.
-    // Live events keep reducing against the published (possibly tailed) body;
-    // a later full snapshot re-seeds the window from the server.
-    if (
-      shouldPersistThread(thread) &&
-      stored.visibleTurnItems.length === thread.visibleTurnItems.length
-    ) {
-      const snapshotSequence = yield* SubscriptionRef.get(lastSequence);
-      yield* Queue.offer(persistence, { snapshotSequence, projection: thread });
+    // Persist a lean offline body when possible:
+    // - open-tail off: full projection only (never a truncated write)
+    // - open-tail on: the published window so reopen can paint without waiting
+    //   on HTTP, without retaining unbounded history on disk
+    if (shouldPersistThread(thread)) {
+      const openTailActive = getThreadOpenTailLimit() !== null;
+      const isFullBody = stored.visibleTurnItems.length === thread.visibleTurnItems.length;
+      if (openTailActive || isFullBody) {
+        const snapshotSequence = yield* SubscriptionRef.get(lastSequence);
+        yield* Queue.offer(persistence, {
+          snapshotSequence,
+          projection: openTailActive ? stored : thread,
+        });
+      }
     }
   });
 
@@ -375,16 +379,10 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       Effect.flatMap(([current, snapshotSequence]) =>
         Option.match(current.data, {
           onNone: () => Effect.void,
-          onSome: (projection) => {
-            // Only persist when the open-tail is disabled (full body in state).
-            const limit = getThreadOpenTailLimit();
-            if (limit !== null) {
-              return Effect.void;
-            }
-            return shouldPersistThread(projection)
+          onSome: (projection) =>
+            shouldPersistThread(projection)
               ? persist({ snapshotSequence, projection })
-              : Effect.void;
-          },
+              : Effect.void,
         }),
       ),
     ),
@@ -413,7 +411,7 @@ export function createEnvironmentThreadStateAtoms<R, E>(
         initialValue: EMPTY_ENVIRONMENT_THREAD_STATE,
       })
       .pipe(
-        Atom.setIdleTTL(THREAD_STATE_IDLE_TTL_MS),
+        Atom.setIdleTTL(getThreadStateIdleTtlMs()),
         Atom.withLabel(`environment-thread-state:${key}`),
       );
   });
@@ -431,5 +429,6 @@ export * from "./composerPathSearch.ts";
 export * from "./threadCommands.ts";
 export * from "./threadDetail.ts";
 export * from "./threadOpenTail.ts";
+export * from "./threadRetention.ts";
 export * from "./threadShell.ts";
 export * from "./threadState.ts";
