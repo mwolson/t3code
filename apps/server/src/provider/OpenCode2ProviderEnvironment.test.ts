@@ -12,7 +12,34 @@ import {
   seedOpenCode2ManagedDataHome,
 } from "./OpenCode2ProviderEnvironment.ts";
 
+// oxlint-disable-next-line t3code/no-global-process-runtime -- platform is only used to skip POSIX filesystem-mode assertions.
+const isWindows = NodeOS.platform() === "win32";
+
 describe("applyOpenCode2ProviderEnvironment", () => {
+  it("scopes managed state to the host user", () => {
+    const first = openCode2ManagedStateRoot({ TMPDIR: "/tmp/opencode2-root", HOME: "/home/alice" });
+    const second = openCode2ManagedStateRoot({ TMPDIR: "/tmp/opencode2-root", HOME: "/home/bob" });
+    expect(first).not.toBe(second);
+    expect(first).toBe(
+      openCode2ManagedStateRoot({ TMPDIR: "/tmp/opencode2-root", HOME: "/home/alice" }),
+    );
+  });
+
+  it("does not write through a planted managed-state symlink", () => {
+    if (isWindows) return;
+    const tmp = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "opencode2-state-link-"));
+    const stateRoot = openCode2ManagedStateRoot({ TMPDIR: tmp, HOME: "/home/test-user" });
+    const target = NodePath.join(tmp, "outside");
+    NodeFS.mkdirSync(target);
+    NodeFS.symlinkSync(target, stateRoot, "dir");
+    const environment = { TMPDIR: tmp, HOME: "/home/test-user" };
+
+    expect(
+      applyOpenCode2ProviderEnvironment({ backgroundSubagents: true, serverUrl: "" }, environment),
+    ).toBe(environment);
+    expect(NodeFS.readdirSync(target)).toEqual([]);
+  });
+
   it("explicitly enables background subagents for a managed server", () => {
     const env = applyOpenCode2ProviderEnvironment(
       { backgroundSubagents: true, serverUrl: "" },
@@ -224,6 +251,57 @@ describe("seedOpenCode2ManagedDataHome", () => {
     } finally {
       managedDb.close();
     }
+  });
+
+  it("clears managed credentials when the host database disappears", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "opencode2-seed-missing-db-"));
+    const host = NodePath.join(root, "host");
+    const managed = NodePath.join(root, "managed");
+    const hostOpenCode = NodePath.join(host, "opencode");
+    NodeFS.mkdirSync(hostOpenCode, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(hostOpenCode, "auth.json"), "{}");
+    writeHostOpenCodeDb(hostOpenCode, {
+      credentials: [
+        { id: "cred_1", integration_id: "opencode", label: "default", value: "secret" },
+      ],
+      withSession: false,
+    });
+    seedOpenCode2ManagedDataHome(managed, host);
+
+    NodeFS.unlinkSync(NodePath.join(hostOpenCode, "opencode.db"));
+    NodeFS.unlinkSync(NodePath.join(hostOpenCode, "auth.json"));
+    seedOpenCode2ManagedDataHome(managed, host);
+
+    const managedDb = new NodeSqlite.DatabaseSync(
+      NodePath.join(managed, "opencode", "opencode.db"),
+    );
+    try {
+      expect(managedDb.prepare("SELECT COUNT(*) AS n FROM credential").get()).toEqual({ n: 0 });
+    } finally {
+      managedDb.close();
+    }
+    expect(NodeFS.existsSync(NodePath.join(managed, "opencode", "auth.json"))).toBe(false);
+  });
+
+  it("keeps managed directories and files private", () => {
+    if (isWindows) return;
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "opencode2-seed-mode-"));
+    const host = NodePath.join(root, "host");
+    const managed = NodePath.join(root, "managed");
+    const hostOpenCode = NodePath.join(host, "opencode");
+    NodeFS.mkdirSync(hostOpenCode, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(hostOpenCode, "auth.json"), "{}");
+    writeHostOpenCodeDb(hostOpenCode, { credentials: [], withSession: false });
+    seedOpenCode2ManagedDataHome(managed, host);
+
+    expect(NodeFS.statSync(managed).mode & 0o777).toBe(0o700);
+    expect(NodeFS.statSync(NodePath.join(managed, "opencode")).mode & 0o777).toBe(0o700);
+    expect(NodeFS.statSync(NodePath.join(managed, "opencode", "auth.json")).mode & 0o777).toBe(
+      0o600,
+    );
+    expect(NodeFS.statSync(NodePath.join(managed, "opencode", "opencode.db")).mode & 0o777).toBe(
+      0o600,
+    );
   });
 
   it("keeps the prior credential set when a refresh insert fails", () => {

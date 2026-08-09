@@ -156,6 +156,7 @@ export class OpenCode2ReplayController {
   private readonly waiters = new Set<() => void>();
   private failure: unknown = null;
   private readonly transcript: OpenCode2SdkReplayTranscript;
+  private readonly abortController = new AbortController();
 
   constructor(transcript: OpenCode2SdkReplayTranscript) {
     this.transcript = transcript;
@@ -235,7 +236,7 @@ export class OpenCode2ReplayController {
           this.claimedResponseCursor = claimedCursor;
           try {
             if (entry.afterMs !== undefined && entry.afterMs > 0) {
-              await Effect.runPromise(Effect.sleep(Duration.millis(entry.afterMs)));
+              await waitForReplayDelay(entry.afterMs, this.abortController.signal);
             }
             this.throwFailure();
             this.advance();
@@ -249,7 +250,7 @@ export class OpenCode2ReplayController {
           this.claimedResponseCursor = claimedCursor;
           try {
             if (entry.afterMs !== undefined && entry.afterMs > 0) {
-              await Effect.runPromise(Effect.sleep(Duration.millis(entry.afterMs)));
+              await waitForReplayDelay(entry.afterMs, this.abortController.signal);
             }
             this.throwFailure();
             this.advance();
@@ -279,7 +280,7 @@ export class OpenCode2ReplayController {
 
   async *events(signal?: AbortSignal): AsyncIterable<V2Event> {
     while (true) {
-      if (isSignalAborted(signal)) return;
+      if (isSignalAborted(signal) || this.abortController.signal.aborted) return;
       this.throwFailure();
       if (this.successfulRuntimeExit) return;
       if (this.claimedEventCursor === this.cursor || this.claimedResponseCursor === this.cursor) {
@@ -294,7 +295,10 @@ export class OpenCode2ReplayController {
           this.claimedEventCursor = claimedCursor;
           try {
             if (entry.afterMs !== undefined && entry.afterMs > 0) {
-              const delayCompleted = await waitForReplayDelay(entry.afterMs, signal);
+              const delayCompleted = await waitForReplayDelay(
+                entry.afterMs,
+                this.replaySignal(signal),
+              );
               if (!delayCompleted || isSignalAborted(signal)) return;
             }
             this.throwFailure();
@@ -345,6 +349,12 @@ export class OpenCode2ReplayController {
     }
   }
 
+  /** Abort every pending replay consumer when its owning runtime scope closes. */
+  abort(): void {
+    this.abortController.abort();
+    this.notifyWaiters();
+  }
+
   private advance(): void {
     this.cursor += 1;
     this.notifyWaiters();
@@ -368,8 +378,15 @@ export class OpenCode2ReplayController {
   }
 
   private fail(cause: unknown): void {
-    this.failure = cause;
+    if (this.failure === null) this.failure = cause;
+    this.abortController.abort();
     this.notifyWaiters();
+  }
+
+  private replaySignal(signal?: AbortSignal): AbortSignal {
+    return signal === undefined
+      ? this.abortController.signal
+      : AbortSignal.any([signal, this.abortController.signal]);
   }
 
   private throwFailure(): void {
@@ -377,15 +394,16 @@ export class OpenCode2ReplayController {
   }
 
   private changed(signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted === true) return Promise.resolve();
+    const replaySignal = this.replaySignal(signal);
+    if (replaySignal.aborted) return Promise.resolve();
     return new Promise((resolve) => {
       const done = () => {
-        signal?.removeEventListener("abort", done);
+        replaySignal.removeEventListener("abort", done);
         this.waiters.delete(done);
         resolve();
       };
       this.waiters.add(done);
-      signal?.addEventListener("abort", done, { once: true });
+      replaySignal.addEventListener("abort", done, { once: true });
     });
   }
 }
@@ -401,6 +419,16 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
    * data so event.subscribe stays first and fixtures do not deadlock.
    */
   const optionalCatalog = async (
+    operation: OpenCode2RuntimeOperation,
+    input: unknown,
+    canned: unknown,
+  ) => {
+    if (!controller.expectsOutbound(operation)) {
+      return { data: { data: canned } };
+    }
+    return request(operation, input);
+  };
+  const optionalRequest = async (
     operation: OpenCode2RuntimeOperation,
     input: unknown,
     canned: unknown,
@@ -446,7 +474,8 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
         // transcripts still label the operation message.list.
         messages: (input: unknown) => request("message.list", input),
         pending: {
-          list: (input: unknown) => request("session.pending.list", input),
+          list: (input: unknown) =>
+            optionalRequest("session.pending.list", input, [] as Array<unknown>),
         },
         permission: {
           reply: (input: unknown) => request("session.permission.reply", input),
@@ -465,7 +494,7 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
         wait: (input: unknown) => request("session.wait", input),
       },
       shell: {
-        list: (input: unknown) => request("shell.list", input),
+        list: (input: unknown) => optionalRequest("shell.list", input, [] as Array<unknown>),
         output: (input: unknown) => request("shell.output", input),
         remove: (input: unknown) => request("shell.remove", input),
       },
@@ -480,6 +509,7 @@ function makeOpenCode2ReplayRuntimeLayer(transcript: OpenCode2SdkReplayTranscrip
       const controller = new OpenCode2ReplayController(transcript);
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
+          controller.abort();
           controller.assertComplete();
         }),
       );

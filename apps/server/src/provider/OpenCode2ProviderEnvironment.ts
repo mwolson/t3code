@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import type { OpenCode2Settings } from "@t3tools/contracts";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -37,7 +38,12 @@ const OPENCODE2_SESSION_TABLES = [
  * table (not only auth.json), and without that seed only free models appear.
  */
 export function openCode2ManagedStateRoot(environment: NodeJS.ProcessEnv = process.env): string {
-  return NodePath.join(environment.TMPDIR?.trim() || NodeOS.tmpdir(), "t3-opencode2-state");
+  const home = environment.HOME?.trim() || NodeOS.homedir();
+  const userKey = NodeCrypto.createHash("sha256").update(home).digest("hex").slice(0, 12);
+  return NodePath.join(
+    environment.TMPDIR?.trim() || NodeOS.tmpdir(),
+    `t3-opencode2-state-${userKey}`,
+  );
 }
 
 export function openCode2HostDataHome(environment: NodeJS.ProcessEnv = process.env): string {
@@ -49,6 +55,105 @@ export function openCode2HostDataHome(environment: NodeJS.ProcessEnv = process.e
 
 function sqlQuoteLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+function currentUserId(): number | undefined {
+  return typeof process.getuid === "function" ? process.getuid() : undefined;
+}
+
+function isOwnedDirectory(stat: NodeFS.Stats): boolean {
+  if (!stat.isDirectory()) return false;
+  const uid = currentUserId();
+  return uid === undefined || stat.uid === uid;
+}
+
+/**
+ * Create or validate a directory that T3 writes to. `lstat` is intentional:
+ * following a pre-existing symlink here would let a different local process
+ * redirect provider credentials outside the managed tree.
+ */
+function ensureManagedDirectory(path: string): boolean {
+  try {
+    const existing = NodeFS.lstatSync(path);
+    if (!isOwnedDirectory(existing)) return false;
+    try {
+      NodeFS.chmodSync(path, 0o700);
+    } catch {
+      return false;
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+  }
+
+  try {
+    NodeFS.mkdirSync(path, { recursive: true, mode: 0o700 });
+    const created = NodeFS.lstatSync(path);
+    if (!isOwnedDirectory(created)) return false;
+    NodeFS.chmodSync(path, 0o700);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type ManagedFileState = "missing" | "safe" | "unsafe";
+
+function managedFileState(path: string): ManagedFileState {
+  let stat: NodeFS.Stats;
+  try {
+    stat = NodeFS.lstatSync(path);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unsafe";
+  }
+  const uid = currentUserId();
+  if (!stat.isFile() || (uid !== undefined && stat.uid !== uid)) return "unsafe";
+  try {
+    NodeFS.chmodSync(path, 0o600);
+  } catch {
+    return "unsafe";
+  }
+  return "safe";
+}
+
+function copyManagedFile(source: string, target: string): void {
+  if (managedFileState(target) === "unsafe") return;
+  const temporary = `${target}.${process.pid}.${NodeCrypto.randomBytes(8).toString("hex")}.tmp`;
+  try {
+    // COPYFILE_EXCL prevents a pre-created temporary symlink from redirecting
+    // copyFileSync before the atomic rename replaces the destination.
+    NodeFS.copyFileSync(source, temporary, NodeFS.constants.COPYFILE_EXCL);
+    NodeFS.chmodSync(temporary, 0o600);
+    NodeFS.renameSync(temporary, target);
+  } finally {
+    try {
+      NodeFS.unlinkSync(temporary);
+    } catch {
+      // The rename normally removed it.
+    }
+  }
+}
+
+function revokeManagedCredentials(managedDb: string): void {
+  if (managedFileState(managedDb) !== "safe") return;
+  const managed = new NodeSqlite.DatabaseSync(managedDb);
+  try {
+    managed.exec("BEGIN IMMEDIATE");
+    try {
+      managed.exec("DELETE FROM credential");
+      managed.exec("COMMIT");
+    } catch (error) {
+      try {
+        managed.exec("ROLLBACK");
+      } catch {
+        // Connection may already be aborted.
+      }
+      throw error;
+    }
+  } finally {
+    managed.close();
+    managedFileState(managedDb);
+  }
 }
 
 /**
@@ -65,21 +170,23 @@ export function seedOpenCode2ManagedDataHome(
 ): void {
   const hostOpenCode = NodePath.join(hostDataHome, "opencode");
   const managedOpenCode = NodePath.join(managedDataHome, "opencode");
-  NodeFS.mkdirSync(managedOpenCode, { recursive: true });
+  if (!ensureManagedDirectory(managedDataHome) || !ensureManagedDirectory(managedOpenCode)) {
+    return;
+  }
 
   for (const name of OPENCODE2_AUTH_FILES) {
     const source = NodePath.join(hostOpenCode, name);
     const target = NodePath.join(managedOpenCode, name);
     if (!NodeFS.existsSync(source)) {
       try {
-        if (NodeFS.existsSync(target)) NodeFS.unlinkSync(target);
+        if (managedFileState(target) === "safe") NodeFS.unlinkSync(target);
       } catch {
         // Best-effort revoke: a locked managed auth file should not block spawn.
       }
       continue;
     }
     try {
-      NodeFS.copyFileSync(source, target);
+      copyManagedFile(source, target);
     } catch {
       // Best-effort: a locked or unreadable host auth file should not block spawn.
     }
@@ -87,10 +194,21 @@ export function seedOpenCode2ManagedDataHome(
 
   const hostDb = NodePath.join(hostOpenCode, "opencode.db");
   const managedDb = NodePath.join(managedOpenCode, "opencode.db");
-  if (!NodeFS.existsSync(hostDb)) return;
+  const managedState = managedFileState(managedDb);
+  if (managedState === "unsafe") return;
+  if (!NodeFS.existsSync(hostDb)) {
+    if (managedState === "safe") {
+      try {
+        revokeManagedCredentials(managedDb);
+      } catch {
+        // A locked managed DB is retried on the next provider startup.
+      }
+    }
+    return;
+  }
 
   try {
-    if (!NodeFS.existsSync(managedDb)) {
+    if (managedState === "missing") {
       // First managed spawn: take a transactionally consistent host snapshot
       // (VACUUM INTO, not a live main-db file copy without WAL companions),
       // then prune sessions so we keep credentials without replaying host chats.
@@ -100,6 +218,7 @@ export function seedOpenCode2ManagedDataHome(
       } finally {
         hostSnapshot.close();
       }
+      managedFileState(managedDb);
       const db = new NodeSqlite.DatabaseSync(managedDb);
       try {
         for (const table of OPENCODE2_SESSION_TABLES) {
@@ -174,7 +293,9 @@ export function applyOpenCode2ProviderEnvironment(
   const xdgStateHome = NodePath.join(stateRoot, "state");
   const xdgDataHome = NodePath.join(stateRoot, "data");
   for (const dir of [xdgStateHome, xdgDataHome]) {
-    NodeFS.mkdirSync(dir, { recursive: true });
+    if (!ensureManagedDirectory(stateRoot) || !ensureManagedDirectory(dir)) {
+      return environment;
+    }
   }
   seedOpenCode2ManagedDataHome(xdgDataHome, hostDataHome);
 
