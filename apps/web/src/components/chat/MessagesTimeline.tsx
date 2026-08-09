@@ -3022,7 +3022,14 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = false;
   const entryIconName = showWarningIndicator ? "circle-alert" : workEntryIconName(workEntry);
-  const toolPresentation = resolveTimelineToolPresentation(workEntry.toolTitle ?? workEntry.label);
+  const toolPresentation = resolveTimelineToolPresentation(workEntry.toolTitle ?? workEntry.label, {
+    input:
+      workEntry.toolData !== null &&
+      typeof workEntry.toolData === "object" &&
+      "input" in workEntry.toolData
+        ? (workEntry.toolData as { input?: unknown }).input
+        : workEntry.toolData,
+  });
   // Command rows read as the command itself; stdout and the full payload
   // stay behind the expander instead of leaking into the collapsed line.
   const command = workEntry.command?.trim().replaceAll(/\s+/g, " ");
