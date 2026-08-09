@@ -49,6 +49,9 @@ export type OpenCode2CanonicalEventType =
   | "question.asked"
   | "question.replied"
   | "question.rejected"
+  | "form.created"
+  | "form.replied"
+  | "form.cancelled"
   | "server.connected"
   | "unknown";
 
@@ -132,6 +135,11 @@ const PASSTHROUGH_TYPES = new Set<string>([
   "question.asked",
   "question.replied",
   "question.rejected",
+  // next-line question tool routes through the form API; without these the
+  // events become "unknown" and the user never sees an Input card.
+  "form.created",
+  "form.replied",
+  "form.cancelled",
 ]);
 
 export function normalizeOpenCode2WireType(type: string): OpenCode2CanonicalEventType {

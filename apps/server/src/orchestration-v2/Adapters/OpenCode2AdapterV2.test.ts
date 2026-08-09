@@ -28,6 +28,8 @@ import {
   openCode2EnvironmentWithPermission,
   openCode2EnvironmentWithT3Mcp,
   openCode2EventEndsExecution,
+  openCode2FormAnswer,
+  openCode2FormQuestions,
   openCode2ForkParameters,
   openCode2InterruptedThreadDisposition,
   openCode2IsCancelledPostSettleWake,
@@ -1109,6 +1111,53 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
         lastEventAgeMs: OPENCODE2_EVENT_STALL_MS,
         stallMs: OPENCODE2_EVENT_STALL_MS,
       }),
+    );
+    // Quiet stream while waiting for Input is not a dead transport.
+    assert.isFalse(
+      openCode2ShouldResubscribeStalledStream({
+        sessionAborted: false,
+        hasActiveTurn: true,
+        hasPendingRuntimeRequest: true,
+        lastEventAgeMs: OPENCODE2_EVENT_STALL_MS * 3,
+        stallMs: OPENCODE2_EVENT_STALL_MS,
+      }),
+    );
+  });
+
+  it("maps form.created question fields onto the UI question shape", () => {
+    const mapped = openCode2FormQuestions({
+      id: "form_1",
+      title: "Handoff model",
+      fields: [
+        {
+          key: "model",
+          title: "Handoff model",
+          description: "Which provider/model should the handoff use?",
+          options: [
+            {
+              label: "Inherited: GLM-5.2 (Recommended)",
+              value: "inherit",
+              description: "Same as current.",
+            },
+            { label: "Claude Fable 5", value: "fable", description: "claudeAgent." },
+          ],
+        },
+      ],
+    });
+    assert.deepStrictEqual(mapped.fieldKeys, ["model"]);
+    assert.strictEqual(mapped.questions[0]?.header, "Handoff model");
+    assert.strictEqual(mapped.questions[0]?.options[0]?.label, "Inherited: GLM-5.2 (Recommended)");
+    assert.deepStrictEqual(mapped.optionValuesByLabel[0], {
+      "Inherited: GLM-5.2 (Recommended)": "inherit",
+      "Claude Fable 5": "fable",
+    });
+    assert.deepStrictEqual(
+      openCode2FormAnswer(
+        mapped.fieldKeys,
+        [["Inherited: GLM-5.2 (Recommended)"]],
+        mapped.optionValuesByLabel,
+      ),
+      { model: "inherit" },
     );
   });
 
