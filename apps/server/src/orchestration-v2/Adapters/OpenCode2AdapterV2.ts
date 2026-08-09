@@ -3456,14 +3456,27 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           ) {
             return;
           }
+          // Admission accepts data.input or legacy data.prompt; detail must
+          // use the same alias or a prompt-only wake throws and drops the offer.
+          const admittedInput = event.data?.input ?? event.data?.prompt;
+          const admittedData =
+            admittedInput !== undefined &&
+            admittedInput !== null &&
+            typeof admittedInput === "object"
+              ? ((admittedInput as { data?: unknown }).data ?? admittedInput)
+              : undefined;
+          const syntheticDescription =
+            admittedInput !== undefined &&
+            admittedInput !== null &&
+            typeof admittedInput === "object" &&
+            (admittedInput as { type?: unknown }).type === "synthetic"
+              ? recordString(admittedData, "description")
+              : null;
           yield* continuationRequests.offer({
             threadId: state.appThread.id,
             providerThreadId: state.providerThread.id,
             driver: OPENCODE2_PROVIDER,
-            detail:
-              event.data.input.type === "synthetic"
-                ? (event.data.input.data.description ?? null)
-                : null,
+            detail: syntheticDescription,
           });
         });
 
