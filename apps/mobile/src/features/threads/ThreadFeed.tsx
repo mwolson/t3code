@@ -2087,6 +2087,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             // user overscroll back to the adjusted rest position.
             scrollToOverflowEnabled
             estimatedItemSize={180}
+            // Match HomeScreen/sidebar: recycle rows (default false remounts).
+            recycleItems
             // Chat-style bottom alignment: when a thread is shorter than the
             // viewport, pad above the content so messages rest just above the
             // composer instead of under the header. No effect on threads that

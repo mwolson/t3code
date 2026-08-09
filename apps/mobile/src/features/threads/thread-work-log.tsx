@@ -47,7 +47,12 @@ function compactActivityDetail(detail: string | null): string | null {
   }
 
   const cleaned = stripShellWrapper(detail).replace(/\s+/g, " ").trim();
-  return cleaned.length > 0 ? cleaned : null;
+  if (cleaned.length === 0) {
+    return null;
+  }
+  // Collapsed work rows only need a short preview; full output is in expand.
+  const maxPreviewChars = 160;
+  return cleaned.length > maxPreviewChars ? `${cleaned.slice(0, maxPreviewChars)}…` : cleaned;
 }
 
 function workRowSymbolName(icon: ThreadFeedActivity["icon"]): AppSymbolName {

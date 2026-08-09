@@ -24,6 +24,7 @@ import { subscribeDynamic } from "../rpc/client.ts";
 import { ThreadSnapshotLoader } from "./threadSnapshotHttp.ts";
 import { parseThreadKey, threadKey } from "./entities.ts";
 import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection.ts";
+import { getThreadOpenTailLimit, maybeTailThreadProjection } from "./threadOpenTail.ts";
 import { THREAD_STATE_IDLE_TTL_MS } from "./threadRetention.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 import {
@@ -73,7 +74,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   );
   const cachedThread = Option.map(cached, (snapshot) => snapshot.projection);
   const state = yield* SubscriptionRef.make<EnvironmentThreadState>({
-    data: cachedThread,
+    data: Option.map(cachedThread, maybeTailThreadProjection),
     status: statusWithoutLiveData(cachedThread),
     error: Option.none(),
   });
@@ -144,26 +145,83 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       ),
     );
 
-  const setThread = Effect.fn("EnvironmentThreadState.setThread")(function* (
+  // Coalesce tool-update storms: many domain events per second become one
+  // React/Hermes commit after a short quiet window. Snapshots bump generation
+  // so a delayed flush cannot overwrite a fresher full apply.
+  const pendingCoalescedProjection = yield* Ref.make(
+    Option.none<OrchestrationV2ThreadProjection>(),
+  );
+  const coalesceGeneration = yield* Ref.make(0);
+  // Wall-clock debounce so production UI pacing is real time and TestClock
+  // harnesses (forkDetach + Effect.sleep) do not hang forever.
+  const coalesceWallSleep = Effect.callback<void>((resume) => {
+    const handle = setTimeout(() => {
+      resume(Effect.void);
+    }, 48);
+    return Effect.sync(() => {
+      clearTimeout(handle);
+    });
+  });
+
+  const flushProjection = Effect.fn("EnvironmentThreadState.flushProjection")(function* (
     thread: OrchestrationV2ThreadProjection,
   ) {
     const waiting = yield* Ref.get(awaitingCompletion);
+    const stored = maybeTailThreadProjection(thread);
     yield* SubscriptionRef.set(state, {
-      data: Option.some(thread),
+      data: Option.some(stored),
       status: waiting ? "synchronizing" : "live",
       error: Option.none(),
     });
-    // Active projections can update many times per second and retain large tool
-    // payloads. Persist once the run settles so cache encoding stays off the
-    // streaming path.
-    if (shouldPersistThread(thread)) {
+    // Skip offline cache when we dropped rows for the open-tail window so we
+    // never write a truncated body that later pretends to be the full thread.
+    // Live events keep reducing against the published (possibly tailed) body;
+    // a later full snapshot re-seeds the window from the server.
+    if (
+      shouldPersistThread(thread) &&
+      stored.visibleTurnItems.length === thread.visibleTurnItems.length
+    ) {
       const snapshotSequence = yield* SubscriptionRef.get(lastSequence);
       yield* Queue.offer(persistence, { snapshotSequence, projection: thread });
     }
   });
 
+  const setThread = Effect.fn("EnvironmentThreadState.setThread")(function* (
+    thread: OrchestrationV2ThreadProjection,
+    options?: { readonly coalesce?: boolean },
+  ) {
+    if (options?.coalesce === true) {
+      yield* Ref.set(pendingCoalescedProjection, Option.some(thread));
+      const generation = yield* Ref.updateAndGet(coalesceGeneration, (value) => value + 1);
+      // Fork so the event stream is not blocked for the debounce window.
+      // forkDetach avoids Scope requirements on the event apply path.
+      yield* coalesceWallSleep.pipe(
+        Effect.flatMap(() =>
+          Effect.gen(function* () {
+            const currentGeneration = yield* Ref.get(coalesceGeneration);
+            if (currentGeneration !== generation) {
+              return;
+            }
+            const pending = yield* Ref.getAndSet(pendingCoalescedProjection, Option.none());
+            if (Option.isSome(pending)) {
+              yield* flushProjection(pending.value);
+            }
+          }),
+        ),
+        Effect.forkDetach,
+      );
+      return;
+    }
+    // Snapshots flush immediately and invalidate any in-flight coalesced body.
+    yield* Ref.update(coalesceGeneration, (value) => value + 1);
+    yield* Ref.set(pendingCoalescedProjection, Option.none());
+    yield* flushProjection(thread);
+  });
+
   const setDeleted = Effect.fn("EnvironmentThreadState.setDeleted")(function* () {
     yield* Ref.set(awaitingCompletion, false);
+    yield* Ref.update(coalesceGeneration, (value) => value + 1);
+    yield* Ref.set(pendingCoalescedProjection, Option.none());
     yield* SubscriptionRef.set(state, {
       data: Option.none(),
       status: "deleted",
@@ -207,8 +265,12 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     }
     yield* SubscriptionRef.set(lastSequence, item.sequence);
 
-    const current = yield* SubscriptionRef.get(state);
-    if (Option.isNone(current.data)) {
+    // Prefer the in-flight coalesced body so rapid events reduce in order;
+    // otherwise reduce against the last published window (possibly tailed).
+    const pending = yield* Ref.get(pendingCoalescedProjection);
+    const published = yield* SubscriptionRef.get(state);
+    const base = Option.isSome(pending) ? pending : published.data;
+    if (Option.isNone(base)) {
       if (item.event.type === "thread.deleted") {
         yield* setDeleted();
       }
@@ -218,9 +280,10 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       yield* setDeleted();
       return;
     }
-    const next = applyOrchestrationV2ProjectionEvent(current.data.value, item.event);
+    const next = applyOrchestrationV2ProjectionEvent(base.value, item.event);
     if (next !== null) {
-      yield* setThread(next);
+      // Live domain events coalesce; snapshots stay synchronous above.
+      yield* setThread(next, { coalesce: true });
     }
   });
 
@@ -312,10 +375,16 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       Effect.flatMap(([current, snapshotSequence]) =>
         Option.match(current.data, {
           onNone: () => Effect.void,
-          onSome: (projection) =>
-            shouldPersistThread(projection)
+          onSome: (projection) => {
+            // Only persist when the open-tail is disabled (full body in state).
+            const limit = getThreadOpenTailLimit();
+            if (limit !== null) {
+              return Effect.void;
+            }
+            return shouldPersistThread(projection)
               ? persist({ snapshotSequence, projection })
-              : Effect.void,
+              : Effect.void;
+          },
         }),
       ),
     ),
@@ -361,5 +430,6 @@ export * from "./threadSnapshotHttp.ts";
 export * from "./composerPathSearch.ts";
 export * from "./threadCommands.ts";
 export * from "./threadDetail.ts";
+export * from "./threadOpenTail.ts";
 export * from "./threadShell.ts";
 export * from "./threadState.ts";
