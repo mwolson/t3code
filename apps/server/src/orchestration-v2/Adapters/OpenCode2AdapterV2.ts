@@ -3470,7 +3470,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             admittedInput !== null &&
             typeof admittedInput === "object" &&
             (admittedInput as { type?: unknown }).type === "synthetic"
-              ? recordString(admittedData, "description")
+              ? (recordString(admittedData, "description") ?? null)
               : null;
           yield* continuationRequests.offer({
             threadId: state.appThread.id,
