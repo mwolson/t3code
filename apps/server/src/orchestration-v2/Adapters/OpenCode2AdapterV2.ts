@@ -1647,19 +1647,38 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           directory: input.providerSession.cwd,
           serverPassword: connection.password,
         });
+        const detachedSessionRemove = (
+          client as unknown as {
+            v2?: { session?: { remove?: (input: { sessionID: string }) => Promise<unknown> } };
+            client?: { delete: (options: Record<string, unknown>) => Promise<unknown> };
+          }
+        ).v2?.session?.remove;
+        const detachedHttpDelete = (
+          client as unknown as {
+            client?: { delete: (options: Record<string, unknown>) => Promise<unknown> };
+          }
+        ).client?.delete;
+        yield* runOpenCode2Sdk("session.interrupt", () =>
+          client.v2.session.interrupt({ sessionID }).catch(() => ({ data: { data: true } })),
+        ).pipe(Effect.catchCause(() => Effect.void));
         yield* removeOpenCode2Session(
           sessionID,
-          runOpenCode2Sdk("session.interrupt", () =>
-            client.v2.session.get({ sessionID }, { throwOnError: false }).then(async () => {
-              // Beta Session3 has no remove(); best-effort interrupt then rely on GC.
-              try {
-                await client.v2.session.interrupt({ sessionID });
-              } catch {
-                /* ignore */
-              }
-              return { data: { data: true } };
-            }),
-          ),
+          runOpenCode2Sdk("session.remove", () => {
+            if (detachedSessionRemove !== undefined) {
+              return detachedSessionRemove({ sessionID });
+            }
+            if (detachedHttpDelete === undefined) {
+              return Promise.resolve({
+                error: { message: "OpenCode 2 session remove is unavailable" },
+                response: { status: 500 },
+              });
+            }
+            return detachedHttpDelete({
+              url: "/api/session/{sessionID}",
+              path: { sessionID },
+              throwOnError: false,
+            });
+          }),
         );
       }).pipe(
         Effect.mapError((cause) =>
@@ -1702,6 +1721,87 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           directory: cwd,
           serverPassword: connection.password,
         });
+
+        // Session3 typed SDK omits some routes that still exist on the wire
+        // (session delete, shell remove/output). Use the raw hey-api client.
+        type OpenCode2RawHttpClient = {
+          readonly delete: (options: Record<string, unknown>) => Promise<unknown>;
+          readonly get: (options: Record<string, unknown>) => Promise<unknown>;
+          readonly post: (options: Record<string, unknown>) => Promise<unknown>;
+        };
+        const rawHttpClient = (): OpenCode2RawHttpClient =>
+          (client as unknown as { client: OpenCode2RawHttpClient }).client;
+
+        // Prefer typed/mock SDK methods when present (replay testkit); fall back
+        // to raw HTTP for Session3 builds that omit these on client.v2.
+        const v2Shell = (
+          client as unknown as {
+            v2?: {
+              shell?: {
+                output?: (input: Record<string, unknown>) => Promise<unknown>;
+                remove?: (input: Record<string, unknown>) => Promise<unknown>;
+              };
+              session?: {
+                remove?: (input: Record<string, unknown>) => Promise<unknown>;
+              };
+            };
+          }
+        ).v2;
+
+        const deleteSessionHttp = (sessionID: string) => {
+          if (v2Shell?.session?.remove !== undefined) {
+            return v2Shell.session.remove({ sessionID });
+          }
+          return rawHttpClient().delete({
+            url: "/api/session/{sessionID}",
+            path: { sessionID },
+            throwOnError: false,
+          });
+        };
+
+        const removeShellHttp = (input: {
+          readonly id: string;
+          readonly location: SessionInfoV2["location"];
+        }) => {
+          if (v2Shell?.shell?.remove !== undefined) {
+            return v2Shell.shell.remove({
+              id: input.id,
+              location: input.location,
+            });
+          }
+          return rawHttpClient().delete({
+            url: "/api/shell/{id}",
+            path: { id: input.id },
+            query: { directory: input.location.directory },
+            throwOnError: false,
+          });
+        };
+
+        const readShellOutputHttp = (input: {
+          readonly id: string;
+          readonly location: SessionInfoV2["location"];
+          readonly cursor: string;
+          readonly limit: string;
+        }) => {
+          if (v2Shell?.shell?.output !== undefined) {
+            return v2Shell.shell.output({
+              id: input.id,
+              location: input.location,
+              cursor: input.cursor,
+              limit: input.limit,
+            });
+          }
+          return rawHttpClient().get({
+            url: "/api/shell/{id}/output",
+            path: { id: input.id },
+            query: {
+              cursor: input.cursor,
+              limit: input.limit,
+              directory: input.location.directory,
+            },
+            throwOnError: false,
+          });
+        };
 
         const now = yield* DateTime.now;
         let sessionEntity: OrchestrationV2ProviderSession = {
@@ -3205,8 +3305,11 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               limit: String(64 * 1024),
             };
             const response = yield* sdkCall("shell.output", parameters, () =>
-              Promise.resolve({
-                data: { data: { output: "", cursor: 0, size: 0, truncated: false } },
+              readShellOutputHttp({
+                id: shellId,
+                location,
+                cursor: String(cursor),
+                limit: String(64 * 1024),
               }),
             );
             const page = yield* unwrapOpenCode2Data<{
@@ -3283,7 +3386,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               location: projection.location,
             };
             yield* sdkCall("shell.remove", parameters, () =>
-              Promise.resolve({ data: { data: true } }),
+              removeShellHttp({
+                id: projection.shellId,
+                location: projection.location,
+              }),
             ).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("Failed to stop an interrupted OpenCode 2 shell.", {
@@ -4411,7 +4517,17 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 const hasActiveTurn = Array.from(threads.values()).some(
                   (threadState) => threadState.activeTurn !== null,
                 );
-                const hasPendingRuntimeRequest = pendingRequests.size > 0;
+                // Suppress stall recovery only when every active turn is blocked
+                // on a pending Input/permission. A quiet wait on one thread must
+                // not freeze dead-SSE recovery for an unrelated active turn.
+                const hasPendingRuntimeRequest = Array.from(threads.values()).every(
+                  (threadState) => {
+                    if (threadState.activeTurn === null) return true;
+                    return Array.from(pendingRequests.values()).some(
+                      (pending) => pending.turn === threadState.activeTurn,
+                    );
+                  },
+                );
                 const now = yield* Clock.currentTimeMillis;
                 const lastEventAgeMs = now - lastEventAtMs;
                 if (
@@ -4739,15 +4855,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             ...(files.length === 0 ? {} : { files }),
           };
         };
-
-        const rawHttpClient = () =>
-          (
-            client as unknown as {
-              client: {
-                post: (options: Record<string, unknown>) => Promise<unknown>;
-              };
-            }
-          ).client;
 
         const postSessionPrompt = (input: {
           readonly sessionID: string;
@@ -5092,19 +5199,14 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           deleteThread: (providerThread) =>
             Effect.gen(function* () {
               const sessionID = nativeThreadId(providerThread);
+              // Best-effort interrupt, then real DELETE so the native session
+              // does not leak after the app thread is gone.
+              yield* sdkCall("session.interrupt", { sessionID }, () =>
+                client.v2.session.interrupt({ sessionID }).catch(() => ({ data: { data: true } })),
+              ).pipe(Effect.catchCause(() => Effect.void));
               yield* removeOpenCode2Session(
                 sessionID,
-                sdkCall("session.remove", { sessionID }, () =>
-                  client.v2.session.get({ sessionID }, { throwOnError: false }).then(async () => {
-                    // Beta Session3 has no remove(); best-effort interrupt then rely on GC.
-                    try {
-                      await client.v2.session.interrupt({ sessionID });
-                    } catch {
-                      /* ignore */
-                    }
-                    return { data: { data: true } };
-                  }),
-                ),
+                sdkCall("session.remove", { sessionID }, () => deleteSessionHttp(sessionID)),
               );
               threads.delete(sessionID);
               sessionPermissions.delete(sessionID);
