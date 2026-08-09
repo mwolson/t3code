@@ -1789,8 +1789,7 @@ function ChatViewContent(props: ChatViewProps) {
     planModeEnabled: settings.planModeEnabled,
     composerInteractionMode,
     threadInteractionMode: activeThread?.interactionMode,
-  });
-  const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
+  });  const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
   // Prefer the larger of turn-item-committed ids and projection messages so
@@ -5966,7 +5965,10 @@ function ChatViewContent(props: ChatViewProps) {
       });
       return;
     }
+    // Legacy plan mode: /plan and /default only act when the beta flag is on;
+    // otherwise they send as plain text like any other message.
     const standaloneSlashCommand =
+      settings.planModeEnabled &&
       composerImages.length === 0 &&
       composerFiles.length === 0 &&
       sendableComposerTerminalContexts.length === 0 &&
