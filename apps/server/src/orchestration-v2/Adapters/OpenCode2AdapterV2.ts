@@ -59,6 +59,27 @@ type SessionPendingInfo = {
   readonly type?: string;
   readonly id?: string;
 };
+/**
+ * Shape of `form.created` payloads on current 2.x builds. The beta SDK does not
+ * type this event, but the question tool surfaces here (not via question.v2.asked).
+ */
+type FormInfo = {
+  readonly id: string;
+  readonly title: string;
+  readonly sessionID?: string;
+  readonly fields: ReadonlyArray<{
+    readonly key: string;
+    readonly title?: string;
+    readonly description?: string;
+    readonly type?: string;
+    readonly custom?: boolean;
+    readonly options?: ReadonlyArray<{
+      readonly label: string;
+      readonly value: string;
+      readonly description?: string;
+    }>;
+  }>;
+};
 type ShellInfoV2 = {
   readonly id: string;
   readonly status: "running" | "exited" | "timeout" | "killed" | string;
@@ -512,6 +533,13 @@ interface PendingOpenCode2Request {
     readonly save: ReadonlyArray<string>;
   };
   readonly questions?: ReadonlyArray<QuestionV2Info>;
+  /**
+   * Present when the questions came from a form (`form.created`); index-aligned
+   * with `questions`, and the reply must go through `session.form.reply`.
+   */
+  readonly formFieldKeys?: ReadonlyArray<string>;
+  /** Index-aligned label-to-value maps for translating UI answers. */
+  readonly formOptionValues?: ReadonlyArray<Readonly<Record<string, string>>>;
 }
 
 export interface OpenCode2SessionPermission {
@@ -650,10 +678,16 @@ export function openCode2ShouldForceInterruptFinalize(input: {
 export function openCode2ShouldResubscribeStalledStream(input: {
   readonly sessionAborted: boolean;
   readonly hasActiveTurn: boolean;
+  /** Pending permission/question UI holds the turn while the stream is quiet. */
+  readonly hasPendingRuntimeRequest?: boolean;
   readonly lastEventAgeMs: number;
   readonly stallMs: number;
 }): boolean {
-  return !input.sessionAborted && input.hasActiveTurn && input.lastEventAgeMs >= input.stallMs;
+  if (input.sessionAborted || !input.hasActiveTurn) return false;
+  // Waiting for user Input is not a dead stream; fail-closed stall recovery
+  // would otherwise mark the turn Failed after ~90s with no UI.
+  if (input.hasPendingRuntimeRequest === true) return false;
+  return input.lastEventAgeMs >= input.stallMs;
 }
 
 export const openCode2PendingWorkForSession = Effect.fnUntraced(function* (input: {
@@ -1133,6 +1167,76 @@ export function openCode2QuestionId(index: number, header: string): string {
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return slug.length > 0 ? `question-${index}-${slug}` : `question-${index}`;
+}
+
+/**
+ * Current 2.x builds surface the question tool through the form API
+ * (`form.created`) instead of `question.v2.asked`, which still exists but no
+ * longer fires for it. Map a form onto the question request shape so the UI
+ * renders the Input card, and keep index-aligned field keys so the reply can
+ * address `session.form.reply`.
+ *
+ * @internal exported for tests
+ */
+export function openCode2FormQuestions(form: FormInfo): {
+  readonly questions: ReadonlyArray<QuestionV2Info>;
+  readonly fieldKeys: ReadonlyArray<string>;
+  readonly optionValuesByLabel: ReadonlyArray<Readonly<Record<string, string>>>;
+} {
+  const questions: Array<QuestionV2Info> = [];
+  const fieldKeys: Array<string> = [];
+  const optionValuesByLabel: Array<Readonly<Record<string, string>>> = [];
+  for (const field of form.fields) {
+    const title = field.title?.trim() ?? "";
+    const description = field.description?.trim() ?? "";
+    const options = "options" in field ? (field.options ?? []) : [];
+    // The UI answers with labels; the wire wants option values.
+    questions.push({
+      header: title || form.title,
+      question: description || title || form.title,
+      options: options.map((option) => ({
+        label: option.label.trim() || option.value,
+        description: option.description?.trim() ?? "",
+      })),
+      ...(("custom" in field && field.custom) === true ? { custom: true } : {}),
+      ...(field.type === "multiselect" ? { multiple: true } : {}),
+    });
+    fieldKeys.push(field.key);
+    const valuesByLabel = Object.create(null) as Record<string, string>;
+    for (const option of options) {
+      valuesByLabel[option.label.trim() || option.value] = option.value;
+    }
+    optionValuesByLabel.push(valuesByLabel);
+  }
+  return { questions, fieldKeys, optionValuesByLabel };
+}
+
+/**
+ * Builds the `session.form.reply` answer map from per-question answer arrays.
+ * Answer labels translate back to option values where a mapping exists
+ * (free-text custom answers pass through), a single selection collapses to
+ * the plain string a non-multiselect field expects, and unanswered fields are
+ * omitted rather than sent as empty arrays.
+ *
+ * @internal exported for tests
+ */
+export function openCode2FormAnswer(
+  fieldKeys: ReadonlyArray<string>,
+  answers: ReadonlyArray<ReadonlyArray<string>>,
+  optionValuesByLabel?: ReadonlyArray<Readonly<Record<string, string>>>,
+  multiselectFields?: ReadonlyArray<boolean>,
+): Record<string, string | Array<string>> {
+  const answer = Object.create(null) as Record<string, string | Array<string>>;
+  fieldKeys.forEach((key, index) => {
+    const valuesByLabel = optionValuesByLabel?.[index];
+    const values = (answers[index] ?? []).map((value) => {
+      if (valuesByLabel === undefined || !Object.hasOwn(valuesByLabel, value)) return value;
+      return valuesByLabel[value]!;
+    });
+    if (values.length === 0) return;
+    answer[key] = multiselectFields?.[index] === true || values.length > 1 ? values : values[0]!;
+  });
+  return answer;
 }
 
 /**
@@ -2129,10 +2233,15 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
            */
           terminal?: TerminalTurnStatus,
         ) {
-          if (part.name.toLowerCase() === "subagent") {
+          const normalizedTool = part.name.toLowerCase();
+          if (normalizedTool === "subagent") {
             yield* emitSubagent(state, turn, part, terminal);
             return;
           }
+          // form.created carries the respondable Input card. Projecting the
+          // implementation tool as well would show a stuck "question" row with
+          // no UI (observed live when form.created was unhandled).
+          if (normalizedTool === "question") return;
           const emittedAt = yield* DateTime.now;
           const status =
             terminal === undefined ? toolNodeStatus(part.status) : terminalToolStatus(terminal);
@@ -2403,6 +2512,8 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             | {
                 readonly type: "question";
                 readonly questions: ReadonlyArray<QuestionV2Info>;
+                readonly formFieldKeys?: ReadonlyArray<string>;
+                readonly formOptionValues?: ReadonlyArray<Readonly<Record<string, string>>>;
               },
         ) {
           if (pendingRequestsByNativeId.has(nativeRequestId)) return;
@@ -2443,6 +2554,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             pending = {
               ...pendingBase,
               questions: request.questions,
+              ...(request.formFieldKeys === undefined
+                ? {}
+                : { formFieldKeys: request.formFieldKeys }),
+              ...(request.formOptionValues === undefined
+                ? {}
+                : { formOptionValues: request.formOptionValues }),
             };
           }
           pendingRequests.set(String(requestId), pending);
@@ -3887,6 +4004,39 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             case "question.v2.rejected":
               yield* resolveRuntimeRequest(event.data.requestID, "cancelled");
               return;
+            // Current 2.x builds route the question tool through the form API;
+            // question.v2.asked no longer fires for it.
+            case "form.created": {
+              const form = (event.data?.form ?? event.data) as FormInfo | undefined;
+              if (form === undefined || typeof form.id !== "string") return;
+              const sessionID =
+                form.sessionID ??
+                recordString(event.data, "sessionID") ??
+                recordString(recordValue(event.data, "form"), "sessionID");
+              if (sessionID === undefined) return;
+              const active = activeFor(sessionID);
+              if (active === null) return;
+              const { questions, fieldKeys, optionValuesByLabel } = openCode2FormQuestions(form);
+              if (questions.length === 0) return;
+              const projection = runtimeRequestProjectionFor(active);
+              yield* emitRuntimeRequest(projection.state, projection.turn, sessionID, form.id, {
+                type: "question",
+                questions,
+                formFieldKeys: fieldKeys,
+                formOptionValues: optionValuesByLabel,
+              });
+              return;
+            }
+            case "form.replied": {
+              const formId = recordString(event.data, "id", "formID", "requestID");
+              if (formId !== undefined) yield* resolveRuntimeRequest(formId, "resolved");
+              return;
+            }
+            case "form.cancelled": {
+              const formId = recordString(event.data, "id", "formID", "requestID");
+              if (formId !== undefined) yield* resolveRuntimeRequest(formId, "cancelled");
+              return;
+            }
             case "permission.asked": {
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
@@ -4223,12 +4373,14 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 const hasActiveTurn = Array.from(threads.values()).some(
                   (threadState) => threadState.activeTurn !== null,
                 );
+                const hasPendingRuntimeRequest = pendingRequests.size > 0;
                 const now = yield* Clock.currentTimeMillis;
                 const lastEventAgeMs = now - lastEventAtMs;
                 if (
                   !openCode2ShouldResubscribeStalledStream({
                     sessionAborted: abortController.signal.aborted,
                     hasActiveTurn,
+                    hasPendingRuntimeRequest,
                     lastEventAgeMs,
                     stallMs: OPENCODE2_EVENT_STALL_MS,
                   })
@@ -5234,6 +5386,29 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   if (typeof raw === "string") return raw.trim().length > 0 ? [raw] : [];
                   return [];
                 });
+                if (pending.formFieldKeys !== undefined) {
+                  const answer = openCode2FormAnswer(
+                    pending.formFieldKeys,
+                    answers,
+                    pending.formOptionValues,
+                    pending.questions.map((question) => question.multiple === true),
+                  );
+                  // Session3 has no session.form client method; post the form
+                  // reply body that current next-line binaries accept.
+                  yield* sdkCall(
+                    "session.form.reply",
+                    { sessionID, formID: requestID, answer },
+                    () =>
+                      rawHttpClient().post({
+                        url: "/api/session/{sessionID}/form/{formID}/reply",
+                        path: { sessionID, formID: requestID },
+                        body: { answer },
+                        headers: { "Content-Type": "application/json" },
+                        throwOnError: true,
+                      }),
+                  );
+                  return;
+                }
                 yield* sdkCall("session.question.reply", { sessionID, requestID, answers }, () =>
                   client.v2.session.question.reply({
                     sessionID,
