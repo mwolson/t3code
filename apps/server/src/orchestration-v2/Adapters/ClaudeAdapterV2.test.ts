@@ -127,6 +127,7 @@ function makeClaudeTestAppThread(input: {
     archivedAt: null,
     settledOverride: null,
     settledAt: null,
+    settledOverrideAt: null,
     lastVisitedAt: null,
     deletedAt: null,
   };
@@ -1447,6 +1448,7 @@ describe("ClaudeAdapterV2 native fork", () => {
             archivedAt: null,
             settledOverride: null,
             settledAt: null,
+            settledOverrideAt: null,
             lastVisitedAt: null,
             deletedAt: null,
           },

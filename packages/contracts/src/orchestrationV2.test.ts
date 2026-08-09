@@ -803,6 +803,7 @@ describe("orchestration V2 contracts", () => {
       archivedAt: null,
       settledOverride: null,
       settledAt: null,
+      settledOverrideAt: null,
       deletedAt: null,
     });
 
