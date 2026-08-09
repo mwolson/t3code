@@ -43,11 +43,14 @@ import {
   openCode2SessionErrorStatus,
   openCode2SessionErrorTargetSessionIds,
   openCode2CanAdoptMissingExecutionStart,
+  openCode2ShouldFailActiveTurnsAfterCleanEof,
   openCode2ShouldForceInterruptFinalize,
+  openCode2ShouldQuarantineInterruptedSession,
   openCode2ShouldResubscribeStalledStream,
   openCode2ShouldSettleTurn,
   openCode2ToolNeedsTerminalOverride,
   normalizeOpenCode2PermissionEvent,
+  OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
   OPENCODE2_EVENT_STALL_MS,
   OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
   OPENCODE2_PROMOTED_INPUT_ID_LIMIT,
@@ -1075,6 +1078,65 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
         stillActive: true,
         waitedMs: OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
         settleTimeoutMs: OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
+      }),
+    );
+  });
+
+  it("quarantines a session only when the interrupt or shell removal is unconfirmed", () => {
+    // Confirmed interrupt request and shells stopped: reusable.
+    assert.isFalse(
+      openCode2ShouldQuarantineInterruptedSession({
+        interruptRequestConfirmed: true,
+        shellRemovalConfirmed: true,
+      }),
+    );
+    // A timed-out or failed session.interrupt leaves the native execution
+    // running; Stop still force-finalizes locally, but the session must not
+    // be reused by a follow-up turn.
+    assert.isTrue(
+      openCode2ShouldQuarantineInterruptedSession({
+        interruptRequestConfirmed: false,
+        shellRemovalConfirmed: true,
+      }),
+    );
+    // An owned shell that could not be stopped may still run the interrupted
+    // work on the same native session.
+    assert.isTrue(
+      openCode2ShouldQuarantineInterruptedSession({
+        interruptRequestConfirmed: true,
+        shellRemovalConfirmed: false,
+      }),
+    );
+    assert.isTrue(
+      openCode2ShouldQuarantineInterruptedSession({
+        interruptRequestConfirmed: false,
+        shellRemovalConfirmed: false,
+      }),
+    );
+  });
+
+  it("fails active turns only after the clean-EOF budget with no idle penalty", () => {
+    assert.isFalse(
+      openCode2ShouldFailActiveTurnsAfterCleanEof({
+        consecutiveCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES - 1,
+        maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        hasActiveTurn: true,
+      }),
+    );
+    assert.isTrue(
+      openCode2ShouldFailActiveTurnsAfterCleanEof({
+        consecutiveCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        hasActiveTurn: true,
+      }),
+    );
+    // Idle reconnects (normal resubscription) and replay parking never count
+    // toward the budget.
+    assert.isFalse(
+      openCode2ShouldFailActiveTurnsAfterCleanEof({
+        consecutiveCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES * 10,
+        maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        hasActiveTurn: false,
       }),
     );
   });
