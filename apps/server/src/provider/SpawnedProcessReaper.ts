@@ -413,6 +413,12 @@ export const makeSpawnedProcessReaper = Effect.fn("SpawnedProcessReaper.make")(f
         if (tracked.size === 0) {
           respawnAttempts = 0;
           spawnRetryAttempts = 0;
+          // Drop a stale cooldown fiber so a later track can schedule fresh
+          // 100ms retries instead of waiting out the prior 60s pause.
+          if (retryFiber !== null) {
+            yield* Fiber.interrupt(retryFiber);
+            retryFiber = null;
+          }
         }
         const candidate = sidecar;
         if (candidate !== null && !(yield* writeMessage(candidate, { op: "untrack", pid }))) {
