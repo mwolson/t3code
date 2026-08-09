@@ -82,6 +82,7 @@ const emptyProjection = {
     archivedAt: null,
     settledOverride: null,
     settledAt: null,
+    settledOverrideAt: null,
     lastVisitedAt: null,
     deletedAt: null,
   },
@@ -362,6 +363,7 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
           title: "Pinned",
           settledOverride: override,
           settledAt: override === "settled" ? pinAt : null,
+          settledOverrideAt: pinAt,
           updatedAt: pinAt,
         },
       };
@@ -375,6 +377,7 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
           title: "Stale",
           settledOverride: null,
           settledAt: null,
+          settledOverrideAt: null,
           updatedAt: delayedActivityAt,
         },
       } as OrchestrationV2DomainEvent;
@@ -384,5 +387,41 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
       expect(next?.thread.settledOverride).toBe(override);
       expect(next?.thread.title).toBe("Pinned");
     }
+  });
+
+  it("clears keep-active after rename when settledOverrideAt is stable", () => {
+    const pinAt = DateTime.makeUnsafe("2026-06-20T01:00:00.000Z");
+    const renameAt = DateTime.makeUnsafe("2026-06-20T03:00:00.000Z");
+    const activityAt = DateTime.makeUnsafe("2026-06-20T02:00:00.000Z");
+    const projection = {
+      ...emptyProjection,
+      thread: {
+        ...emptyProjection.thread,
+        title: "Renamed keep-active",
+        settledOverride: "active" as const,
+        settledAt: null,
+        settledOverrideAt: pinAt,
+        updatedAt: renameAt,
+      },
+    };
+    const event = {
+      id: "event-keep-active-rename-activity",
+      type: "thread.unsettled",
+      threadId,
+      occurredAt: activityAt,
+      payload: {
+        ...projection.thread,
+        settledOverride: null,
+        settledAt: null,
+        settledOverrideAt: null,
+        updatedAt: activityAt,
+      },
+    } as OrchestrationV2DomainEvent;
+
+    const next = applyOrchestrationV2ProjectionEvent(projection, event);
+    expect(next?.thread.settledOverride).toBeNull();
+    expect(next?.thread.settledOverrideAt).toBeNull();
+    expect(next?.thread.title).toBe("Renamed keep-active");
+    expect(next?.thread.updatedAt).toEqual(renameAt);
   });
 });
