@@ -243,6 +243,7 @@ export function applyToProjection(
         settlement: {
           settledOverride: event.payload.settledOverride,
           settledAt: event.payload.settledAt,
+          settledOverrideAt: event.payload.settledOverrideAt ?? null,
           updatedAt: event.payload.updatedAt,
           ...(event.type === "thread.settled" ? { pinnedAt: event.payload.pinnedAt ?? null } : {}),
         },
@@ -253,6 +254,10 @@ export function applyToProjection(
             projection.thread.settledAt === null
               ? null
               : DateTime.toEpochMillis(projection.thread.settledAt),
+          settledOverrideAtMs:
+            projection.thread.settledOverrideAt == null
+              ? null
+              : DateTime.toEpochMillis(projection.thread.settledOverrideAt),
           updatedAtMs: DateTime.toEpochMillis(projection.thread.updatedAt),
         },
       });
@@ -1378,6 +1383,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   settlement: {
                     settledOverride: event.payload.settledOverride,
                     settledAt: event.payload.settledAt,
+                    settledOverrideAt: event.payload.settledOverrideAt ?? null,
                     updatedAt: event.payload.updatedAt,
                     ...(event.type === "thread.settled"
                       ? { pinnedAt: event.payload.pinnedAt ?? null }
@@ -1390,6 +1396,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       currentThread.settledAt === null
                         ? null
                         : DateTime.toEpochMillis(currentThread.settledAt),
+                    settledOverrideAtMs:
+                      currentThread.settledOverrideAt == null
+                        ? null
+                        : DateTime.toEpochMillis(currentThread.settledOverrideAt),
                     updatedAtMs: DateTime.toEpochMillis(currentThread.updatedAt),
                   },
                 });
