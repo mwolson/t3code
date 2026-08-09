@@ -104,6 +104,7 @@ type WireEvent = {
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import { extractOpenCode2ExecuteT3McpToolName } from "@t3tools/shared/t3McpToolPresentation";
 import {
   type ChatAttachment,
   type ModelSelection,
@@ -1100,6 +1101,34 @@ function stableJson(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+/**
+ * OpenCode 2 reports MCP as execute({code}) and skills as skill({id}). Project
+ * those into names the timeline already pretty-prints (t3-code.* / skill id).
+ */
+function projectOpenCode2DynamicToolName(
+  normalizedTool: string,
+  fallbackName: string,
+  input: unknown,
+): string {
+  if (normalizedTool === "execute") {
+    const code = recordString(input, "code");
+    if (code !== undefined) {
+      const embedded = extractOpenCode2ExecuteT3McpToolName(code);
+      if (embedded !== null) {
+        return `t3-code.${embedded}`;
+      }
+    }
+    return fallbackName;
+  }
+  if (normalizedTool === "skill") {
+    const skillId = recordString(input, "id", "name");
+    if (skillId !== undefined) {
+      return skillId;
+    }
+  }
+  return fallbackName;
 }
 
 function sdkResponseForRawLog(value: unknown): unknown {
@@ -2330,10 +2359,19 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               ...(pattern === undefined ? {} : { patterns: [pattern] }),
             };
           } else {
+            // OpenCode 2 bridges MCP through execute({ code: tools["t3-code"].x(...) })
+            // and skills through skill({ id }). Prefer projected names so the timeline
+            // can show T3 product icons / skill ids instead of bare "execute"/"skill".
+            const projectedToolName = projectOpenCode2DynamicToolName(
+              normalizedTool,
+              part.name,
+              part.input,
+            );
             turnItem = {
               ...base,
+              title: projectedToolName,
               type: "dynamic_tool",
-              toolName: part.name,
+              toolName: projectedToolName,
               input: part.input,
               ...(part.output === undefined ? {} : { output: part.output }),
             };
