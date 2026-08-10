@@ -29,6 +29,7 @@ import {
   makeProjectionReplayState,
   ProjectionStoreV2,
   layer as projectionStoreLayer,
+  threadShellFromProjection,
 } from "./ProjectionStore.ts";
 
 const TestLayer = Layer.mergeAll(
@@ -1472,6 +1473,10 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
       const rolledBackShellThread = shell.threads.find((entry) => entry.id === threadId);
       assert.isDefined(rolledBackShellThread);
       assert.isNull(rolledBackShellThread.latestVisibleMessage);
+      assert.isNull(rolledBackShellThread.latestUserMessageAt);
+      const memoryShell = threadShellFromProjection(projection);
+      assert.isNull(memoryShell.latestVisibleMessage);
+      assert.isNull(memoryShell.latestUserMessageAt);
       assert.deepEqual(rolledBackShellThread?.pendingBackgroundTasks ?? [], []);
     }),
   );
@@ -1669,6 +1674,34 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
       );
 
       yield* projectionStore.apply({
+        id: EventId.make("event:projection-fork-source-rollback:run-1-rolled-back"),
+        type: "run.updated",
+        threadId: sourceThreadId,
+        runId: sourceRun1Id,
+        nodeId: sourceRun1NodeId,
+        driver,
+        occurredAt: now,
+        payload: {
+          id: sourceRun1Id,
+          threadId: sourceThreadId,
+          ordinal: 1,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId: sourceProviderThreadId,
+          userMessageId: MessageId.make("message:projection-fork-source-rollback:user:1"),
+          rootNodeId: sourceRun1NodeId,
+          activeAttemptId: null,
+          status: "rolled_back",
+          requestedAt: now,
+          startedAt: now,
+          completedAt: now,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      });
+      assert.equal((yield* projectionStore.getThreadShell(targetThreadId))?.visibleItemCount, 5);
+
+      yield* projectionStore.apply({
         id: EventId.make("event:projection-fork-source-rollback:run-2-rolled-back"),
         type: "run.updated",
         threadId: sourceThreadId,
@@ -1711,6 +1744,37 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
           ["inherited", "assistant_message", "two"],
           ["synthetic", "fork", "Forked from conversation"],
         ],
+      );
+
+      const shellAfterRollback = yield* projectionStore.getThreadShell(targetThreadId);
+      assert.equal(shellAfterRollback?.visibleItemCount, 5);
+
+      const sourceProjection = yield* projectionStore.getThreadProjection(sourceThreadId);
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-fork-source-rollback:source-deleted"),
+        type: "thread.deleted",
+        threadId: sourceThreadId,
+        occurredAt: now,
+        payload: {
+          ...sourceProjection.thread,
+          archivedAt: sourceProjection.thread.archivedAt ?? now,
+          deletedAt: now,
+          updatedAt: now,
+        },
+      });
+
+      const shellAfterSourceDelete = yield* projectionStore.getThreadShell(targetThreadId);
+      assert.equal(shellAfterSourceDelete?.visibleItemCount, 5);
+      assert.isNull(yield* projectionStore.getThreadShell(sourceThreadId));
+
+      const snapshotAfterSourceDelete = yield* projectionStore.getShellSnapshot();
+      assert.isUndefined(
+        snapshotAfterSourceDelete.threads.find((thread) => thread.id === sourceThreadId),
+      );
+      assert.equal(
+        snapshotAfterSourceDelete.threads.find((thread) => thread.id === targetThreadId)
+          ?.visibleItemCount,
+        5,
       );
     }),
   );
