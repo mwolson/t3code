@@ -584,6 +584,21 @@ export interface OpenCode2AdapterV2Options {
   };
 }
 
+export function openCode2ForkEventPumpInScope<E, R>(input: {
+  readonly scope: Scope.Scope;
+  readonly abort: Effect.Effect<void>;
+  readonly pump: Effect.Effect<void, E, R>;
+  readonly afterFork?: Effect.Effect<void>;
+}): Effect.Effect<void, never, R> {
+  return Effect.uninterruptible(
+    Effect.gen(function* () {
+      yield* input.pump.pipe(Effect.interruptible, Effect.forkIn(input.scope));
+      if (input.afterFork !== undefined) yield* input.afterFork;
+      yield* Scope.addFinalizer(input.scope, input.abort);
+    }),
+  );
+}
+
 /**
  * OpenCode admits a background-child result as a synthetic root input. The
  * admission itself does not identify its execution boundary: an ordinary
@@ -4666,7 +4681,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
 
         // Resubscribe loop: `/api/event` is volatile (slow consumer overflows).
         // A single failed or hung pull must not leave active turns uninterruptible.
-        yield* Effect.gen(function* () {
+        const eventPump = Effect.gen(function* () {
           let pendingStream: AsyncIterable<unknown> | null = firstSubscription.stream;
           let streamController = firstStreamController;
           let onSessionAbort = onFirstSessionAbort;
@@ -4867,7 +4882,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             lastEventAtMs = yield* Clock.currentTimeMillis;
             yield* Effect.sleep(`${resubscribeDelayMs} millis`);
           }
-        }).pipe(Effect.forkIn(scope));
+        });
+        yield* openCode2ForkEventPumpInScope({
+          scope,
+          abort: Effect.sync(() => abortController.abort()),
+          pump: eventPump,
+        });
 
         if (!connection.external && connection.exitCode !== null) {
           yield* connection.exitCode.pipe(
