@@ -42,13 +42,14 @@ import {
   type ProviderAdapterV2SessionRuntime,
 } from "./ProviderAdapter.ts";
 import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
-import { ProjectionStoreV2 } from "./ProjectionStore.ts";
+import { ProjectionStoreThreadNotFoundError, ProjectionStoreV2 } from "./ProjectionStore.ts";
 import { randomUuidV4 } from "./RandomUuid.ts";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
 const RELEASE_SCOPE_CLOSE_TIMEOUT_MS = 30 * 1000;
 const RUNTIME_OPERATION_DRAIN_TIMEOUT_MS = 30 * 1000;
+const isProjectionStoreThreadNotFoundError = Schema.is(ProjectionStoreThreadNotFoundError);
 
 export const ProviderSessionReleaseReason = Schema.Literals([
   "idle_timeout",
@@ -149,6 +150,9 @@ export interface ProviderSessionManagerV2Shape {
   readonly get: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<Option.Option<ProviderAdapterV2SessionRuntime>, ProviderSessionManagerV2Error>;
+  readonly listAttached: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationV2ProviderSession>>;
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -161,6 +165,8 @@ export interface ProviderSessionManagerV2Shape {
     readonly providerSessionId: ProviderSessionId;
     readonly threadId: ThreadId;
     readonly detail?: string;
+    /** Archive generation that must still be current before mutating a live runtime. */
+    readonly expectedArchivedAt?: string;
     /**
      * True for terminal detaches (thread archived or deleted): the thread's
      * MCP credentials are revoked immediately instead of surviving for a
@@ -192,6 +198,8 @@ export class ProviderSessionManagerV2 extends Context.Service<
 interface LiveSessionEntry {
   readonly attachedThreadIds: ReadonlySet<ThreadId>;
   readonly loadedProviderThreadKeyByThread: ReadonlyMap<ThreadId, string>;
+  /** Latest native thread materialized by an admitted manager operation. */
+  readonly loadedProviderThreadByThread: ReadonlyMap<ThreadId, OrchestrationV2ProviderThread>;
   /**
    * MCP credential session id issued for each attached thread. Revocation on
    * detach/release is scoped to these ids so tearing down a superseded
@@ -242,6 +250,12 @@ export interface ProviderSessionManagerV2LayerOptions {
   readonly releaseScopeCloseTimeoutMs?: number;
   /** Override for deterministic runtime-operation drain timeout tests. */
   readonly runtimeOperationDrainTimeoutMs?: number;
+  /** Test hook that runs after the raw pump observes a provider turn. */
+  readonly afterProviderTurnObservation?: (
+    providerTurn: OrchestrationV2ProviderTurn,
+  ) => Effect.Effect<void>;
+  /** Test hook that parks a stale archive detach before its guarded restoration. */
+  readonly beforeStaleArchiveRestore?: Effect.Effect<void>;
 }
 
 function releaseStatusFor(
@@ -355,6 +369,18 @@ export const layerWithOptions = (
         0,
         options.runtimeOperationDrainTimeoutMs ?? RUNTIME_OPERATION_DRAIN_TIMEOUT_MS,
       );
+      const loadThreadProjectionIfPresent = (
+        threadId: ThreadId,
+        providerSessionId: ProviderSessionId,
+      ) =>
+        projectionStore.getThreadProjection(threadId).pipe(
+          Effect.map(Option.some),
+          Effect.catch((cause) =>
+            isProjectionStoreThreadNotFoundError(cause)
+              ? Effect.succeed(Option.none())
+              : Effect.fail(new ProviderSessionLookupError({ providerSessionId, cause })),
+          ),
+        );
       interface PreparedMcpCredential {
         readonly mcpCredentialId: string | undefined;
         /** True when this call minted the credential (vs reusing a live one). */
@@ -1085,11 +1111,14 @@ export const layerWithOptions = (
           attachedThreadIds.delete(input.threadId);
           const loadedProviderThreadKeyByThread = new Map(entry.loadedProviderThreadKeyByThread);
           loadedProviderThreadKeyByThread.delete(input.threadId);
+          const loadedProviderThreadByThread = new Map(entry.loadedProviderThreadByThread);
+          loadedProviderThreadByThread.delete(input.threadId);
           const updated = new Map(current);
           const updatedEntry = {
             ...entry,
             attachedThreadIds,
             loadedProviderThreadKeyByThread,
+            loadedProviderThreadByThread,
           };
           updated.set(key, updatedEntry);
           return [Option.some(updatedEntry), updated] as const;
@@ -1115,6 +1144,7 @@ export const layerWithOptions = (
         readonly providerSessionId: ProviderSessionId;
         readonly threadId: ThreadId;
         readonly providerThreadKey: string;
+        readonly providerThread: OrchestrationV2ProviderThread;
         readonly runtime: ProviderAdapterV2SessionRuntime;
       }) =>
         Ref.update(sessions, (current) => {
@@ -1125,8 +1155,14 @@ export const layerWithOptions = (
           }
           const loadedProviderThreadKeyByThread = new Map(entry.loadedProviderThreadKeyByThread);
           loadedProviderThreadKeyByThread.set(input.threadId, input.providerThreadKey);
+          const loadedProviderThreadByThread = new Map(entry.loadedProviderThreadByThread);
+          loadedProviderThreadByThread.set(input.threadId, input.providerThread);
           const updated = new Map(current);
-          updated.set(key, { ...entry, loadedProviderThreadKeyByThread });
+          updated.set(key, {
+            ...entry,
+            loadedProviderThreadKeyByThread,
+            loadedProviderThreadByThread,
+          });
           return updated;
         });
 
@@ -1491,6 +1527,7 @@ export const layerWithOptions = (
                       modelSelection: input.modelSelection,
                       runtimePolicy: input.runtimePolicy,
                     }),
+                    providerThread,
                     runtime,
                   }),
                 ),
@@ -1544,6 +1581,7 @@ export const layerWithOptions = (
                         ? {}
                         : { runtimePolicy: input.runtimePolicy }),
                     }),
+                    providerThread,
                     runtime,
                   }),
                 ),
@@ -1575,6 +1613,7 @@ export const layerWithOptions = (
                         ? {}
                         : { runtimePolicy: input.runtimePolicy }),
                     }),
+                    providerThread,
                     runtime,
                   }),
                 ),
@@ -1709,7 +1748,10 @@ export const layerWithOptions = (
               }
               return updated;
             });
-            if (providerTurn.runAttemptId !== null) {
+            if (options.afterProviderTurnObservation !== undefined) {
+              yield* options.afterProviderTurnObservation(providerTurn);
+            }
+            if (providerTurn.status !== "pending" && providerTurn.runAttemptId !== null) {
               const attemptKey = String(providerTurn.runAttemptId);
               const observation = yield* Ref.modify(entry.startTurnObservations, (current) => {
                 const existing = current.get(attemptKey);
@@ -1997,6 +2039,7 @@ export const layerWithOptions = (
                 const openedEntry: LiveSessionEntry = {
                   attachedThreadIds: new Set([input.threadId]),
                   loadedProviderThreadKeyByThread: new Map(),
+                  loadedProviderThreadByThread: new Map(),
                   mcpCredentialIdByThread:
                     mcpCredentialId === undefined
                       ? new Map()
@@ -2087,6 +2130,14 @@ export const layerWithOptions = (
                 }),
             ),
           ),
+        listAttached: (threadId) =>
+          Ref.get(sessions).pipe(
+            Effect.map((current) =>
+              [...current.values()].flatMap((entry) =>
+                entry.attachedThreadIds.has(threadId) ? [entry.runtime.providerSession] : [],
+              ),
+            ),
+          ),
         close: (providerSessionId) =>
           releaseEntry({ providerSessionId, reason: "manual_shutdown" }).pipe(
             Effect.mapError(
@@ -2100,28 +2151,86 @@ export const layerWithOptions = (
         release: releaseEntry,
         detach: (input) => {
           let drainingRuntime: ProviderAdapterV2SessionRuntime | undefined;
-          let deferredDeletionFailure: Cause.Cause<ProviderAdapterV2Error> | undefined;
+          let deferredDeletionFailure:
+            | Cause.Cause<ProviderAdapterV2Error | ProviderSessionLookupError>
+            | undefined;
           let detachedRelease:
             | { readonly input: ReleaseEntryInput; readonly state: ReleaseEntryState }
             | undefined;
           return Effect.gen(function* () {
             const key = sessionKey(input.providerSessionId);
             const currentEntry = (yield* Ref.get(sessions)).get(key);
-            if (currentEntry !== undefined) {
-              const expectedIncarnationId = input.providerSession?.incarnationId;
-              const expectedRuntimeDoesNotMatch =
-                (input.requireExpectedRuntime === true && expectedIncarnationId === undefined) ||
-                (expectedIncarnationId !== undefined &&
-                  currentEntry.runtime.providerSession.incarnationId !== expectedIncarnationId);
-              const terminalDetach =
-                input.revokeMcpCredential === true || input.deleteProviderThread === true;
-              if (expectedRuntimeDoesNotMatch && !terminalDetach) {
+            let archiveGenerationMatches = false;
+            if (input.expectedArchivedAt !== undefined) {
+              const projection = yield* loadThreadProjectionIfPresent(
+                input.threadId,
+                input.providerSessionId,
+              );
+              if (Option.isNone(projection)) return;
+              const archivedAt = projection.value.thread.archivedAt;
+              archiveGenerationMatches =
+                archivedAt !== null && DateTime.formatIso(archivedAt) === input.expectedArchivedAt;
+              if (!archiveGenerationMatches) {
+                if (archivedAt === null && currentEntry !== undefined) {
+                  const capturedRestoreRuntime = currentEntry.runtime;
+                  yield* sessionLifecycle.withLock(
+                    input.providerSessionId,
+                    Effect.gen(function* () {
+                      const refreshedProjection = yield* loadThreadProjectionIfPresent(
+                        input.threadId,
+                        input.providerSessionId,
+                      );
+                      if (
+                        Option.isNone(refreshedProjection) ||
+                        refreshedProjection.value.thread.archivedAt !== null
+                      ) {
+                        return;
+                      }
+                      const refreshedEntry = (yield* Ref.get(sessions)).get(key);
+                      const expectedIncarnationId = input.providerSession?.incarnationId;
+                      if (
+                        refreshedEntry === undefined ||
+                        refreshedEntry.runtime !== capturedRestoreRuntime ||
+                        !refreshedEntry.attachedThreadIds.has(input.threadId) ||
+                        (expectedIncarnationId !== undefined &&
+                          refreshedEntry.runtime.providerSession.incarnationId !==
+                            expectedIncarnationId)
+                      ) {
+                        return;
+                      }
+                      if (options.beforeStaleArchiveRestore !== undefined) {
+                        yield* options.beforeStaleArchiveRestore;
+                      }
+                      yield* writeProviderSessionEvents({
+                        runtime: refreshedEntry.runtime,
+                        threadIds: [input.threadId],
+                        type: "provider-session.attached",
+                        payload: refreshedEntry.runtime.providerSession,
+                      });
+                    }),
+                  );
+                }
                 return;
               }
+            }
+            const expectedIncarnationId = input.providerSession?.incarnationId;
+            const expectedRuntimeDoesNotMatch =
+              currentEntry !== undefined &&
+              ((input.requireExpectedRuntime === true && expectedIncarnationId === undefined) ||
+                (expectedIncarnationId !== undefined &&
+                  currentEntry.runtime.providerSession.incarnationId !== expectedIncarnationId));
+            if (
+              currentEntry !== undefined &&
+              expectedRuntimeDoesNotMatch &&
+              input.deleteProviderThread !== true &&
+              !archiveGenerationMatches
+            ) {
+              return;
             }
             // Capture runtime identity before any yield: a replacement session
             // can reuse the same providerSessionId while this fiber is parked.
             const capturedRuntime = currentEntry?.runtime;
+            let resolvedProviderSession = input.providerSession ?? capturedRuntime?.providerSession;
             if (capturedRuntime !== undefined) {
               drainingRuntime = capturedRuntime;
               yield* markRuntimeDraining(capturedRuntime);
@@ -2129,60 +2238,77 @@ export const layerWithOptions = (
             // Prefer caller-supplied threads for historical deletion and for
             // interrupt targets. Projection is refreshed after drain so any
             // already-admitted startTurn can project a running turn first.
-            let providerThreads: ReadonlyMap<
+            const providerThreads = new Map<string, OrchestrationV2ProviderThread>();
+            const providerThreadByLogicalId = new Map<
               OrchestrationV2ProviderThread["id"],
               OrchestrationV2ProviderThread
-            > =
-              input.providerThreads !== undefined
-                ? new Map(input.providerThreads.map((thread) => [thread.id, thread] as const))
-                : new Map();
+            >();
+            const addProviderThread = (providerThread: OrchestrationV2ProviderThread) => {
+              // A null native reference is only a logical placeholder. There
+              // is no provider-owned thread to interrupt or delete yet.
+              if (providerThread.nativeThreadRef === null) {
+                return;
+              }
+              if (!providerThreadByLogicalId.has(providerThread.id)) {
+                providerThreadByLogicalId.set(providerThread.id, providerThread);
+              }
+              const runtimeKey = providerThreadRuntimeKey(providerThread);
+              if (providerThreads.has(runtimeKey)) {
+                return;
+              }
+              providerThreads.set(runtimeKey, providerThread);
+            };
+            for (const providerThread of input.providerThreads ?? []) {
+              addProviderThread(providerThread);
+            }
             let deletionFailure: Exit.Exit<void, ProviderAdapterV2Error> | null = null;
             let nativeDeletionAttempted = false;
             const deleteDetachedProviderThreads = Effect.gen(function* () {
-              if (input.providerInstanceId === undefined || input.providerSession === undefined) {
+              if (providerThreads.size === 0) {
                 return null;
               }
-              const adapterExit = yield* Effect.exit(registry.get(input.providerInstanceId));
-              if (Exit.isSuccess(adapterExit)) {
-                const deleteDetachedThread = adapterExit.value.deleteDetachedThread;
-                if (deleteDetachedThread === undefined) return null;
-                const providerSession = input.providerSession;
-                const exits = yield* Effect.scoped(
-                  Effect.forEach(providerThreads.values(), (providerThread) =>
-                    Effect.exit(
-                      deleteDetachedThread({
-                        providerSession,
-                        providerThread,
-                      }),
-                    ),
-                  ),
-                );
-                return exits.find(Exit.isFailure) ?? null;
+              if (input.providerInstanceId === undefined || resolvedProviderSession === undefined) {
+                if (deferredDeletionFailure === undefined) {
+                  deferredDeletionFailure = Cause.fail(
+                    new ProviderSessionLookupError({
+                      providerSessionId: input.providerSessionId,
+                      cause: "Provider session metadata is unavailable for native deletion.",
+                    }),
+                  );
+                }
+                return null;
               }
-              yield* Effect.logWarning(
-                "orchestration-v2.driver-session.detach-adapter-unavailable",
-                {
-                  providerSessionId: input.providerSessionId,
-                  threadId: input.threadId,
-                  providerInstanceId: input.providerInstanceId,
-                  cause: adapterExit.cause,
-                },
+              const adapterExit = yield* Effect.exit(
+                registry.get(input.providerInstanceId).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderSessionLookupError({
+                        providerSessionId: input.providerSessionId,
+                        cause,
+                      }),
+                  ),
+                ),
               );
-              return null;
+              if (Exit.isFailure(adapterExit)) {
+                deferredDeletionFailure = adapterExit.cause;
+                return null;
+              }
+              const adapter = adapterExit.value;
+              const deleteDetachedThread = adapter.deleteDetachedThread;
+              if (deleteDetachedThread === undefined) return null;
+              const providerSession = resolvedProviderSession;
+              const exits = yield* Effect.scoped(
+                Effect.forEach(providerThreads.values(), (providerThread) =>
+                  Effect.exit(
+                    deleteDetachedThread({
+                      providerSession,
+                      providerThread,
+                    }),
+                  ),
+                ),
+              );
+              return exits.find(Exit.isFailure) ?? null;
             });
-            if (
-              input.deleteProviderThread === true &&
-              currentEntry === undefined &&
-              input.providerInstanceId !== undefined &&
-              input.providerSession !== undefined
-            ) {
-              // Historical / retry detach: the live entry may already be gone
-              // and the adapter may be unregistered. Wrap registry.get so a
-              // missing adapter still reaches clearMcpSession below when
-              // revokeMcpCredential is set.
-              nativeDeletionAttempted = true;
-              deletionFailure = yield* deleteDetachedProviderThreads;
-            }
             const stillOwnsCapturedRuntime = () =>
               Ref.get(sessions).pipe(
                 Effect.map((current) => {
@@ -2219,17 +2345,137 @@ export const layerWithOptions = (
               }
             }
             const shouldLoadProviderThreads =
-              currentEntry !== undefined &&
-              (currentEntry.supportsMultipleProviderThreads || input.deleteProviderThread === true);
+              input.deleteProviderThread === true ||
+              currentEntry?.supportsMultipleProviderThreads === true;
             const projection = shouldLoadProviderThreads
-              ? yield* Effect.option(projectionStore.getThreadProjection(input.threadId))
+              ? yield* loadThreadProjectionIfPresent(input.threadId, input.providerSessionId)
               : Option.none();
-            if (input.providerThreads === undefined && Option.isSome(projection)) {
-              providerThreads = new Map(
-                projection.value.providerThreads
-                  .filter((thread) => thread.providerSessionId === input.providerSessionId)
-                  .map((thread) => [thread.id, thread] as const),
+            if (Option.isSome(projection)) {
+              for (const providerThread of projection.value.providerThreads) {
+                if (providerThread.providerSessionId === input.providerSessionId) {
+                  addProviderThread(providerThread);
+                }
+              }
+            }
+            const refreshedEntry = (yield* Ref.get(sessions)).get(key);
+            if (refreshedEntry !== undefined && refreshedEntry.runtime === capturedRuntime) {
+              const loadedProviderThread = refreshedEntry.loadedProviderThreadByThread.get(
+                input.threadId,
               );
+              if (loadedProviderThread !== undefined) {
+                const loadedNativeThreadRef = loadedProviderThread.nativeThreadRef;
+                const loadedRuntimeKey = providerThreadRuntimeKey(loadedProviderThread);
+                const alreadyPersisted = Option.isSome(projection)
+                  ? projection.value.providerThreads.some(
+                      (providerThread) =>
+                        providerThread.providerSessionId === input.providerSessionId &&
+                        providerThreadRuntimeKey(providerThread) === loadedRuntimeKey,
+                    )
+                  : false;
+                let deletionTarget = loadedProviderThread;
+                if (
+                  input.deleteProviderThread === true &&
+                  loadedNativeThreadRef !== null &&
+                  !alreadyPersisted
+                ) {
+                  const placeholder = Option.isSome(projection)
+                    ? (projection.value.providerThreads.find(
+                        (providerThread) =>
+                          providerThread.nativeThreadRef === null &&
+                          providerThread.id === projection.value.thread.activeProviderThreadId &&
+                          providerThread.providerSessionId === input.providerSessionId,
+                      ) ??
+                      projection.value.providerThreads.find(
+                        (providerThread) =>
+                          providerThread.providerSessionId === input.providerSessionId &&
+                          providerThread.nativeThreadRef === null,
+                      ))
+                    : undefined;
+                  const projectedLogicalIdConflict = Option.isSome(projection)
+                    ? projection.value.providerThreads.some(
+                        (providerThread) =>
+                          providerThread.id === loadedProviderThread.id &&
+                          providerThread.nativeThreadRef !== null,
+                      )
+                    : false;
+                  deletionTarget =
+                    placeholder === undefined
+                      ? projectedLogicalIdConflict
+                        ? {
+                            ...loadedProviderThread,
+                            id: idAllocator.derive.providerThread({
+                              driver: loadedNativeThreadRef.driver,
+                              nativeThreadId: loadedNativeThreadRef.nativeId ?? loadedRuntimeKey,
+                            }),
+                          }
+                        : loadedProviderThread
+                      : {
+                          ...loadedProviderThread,
+                          id: placeholder.id,
+                          providerSessionId: input.providerSessionId,
+                          appThreadId: input.threadId,
+                          ownerNodeId: placeholder.ownerNodeId,
+                          firstRunOrdinal: placeholder.firstRunOrdinal,
+                          lastRunOrdinal: placeholder.lastRunOrdinal,
+                          handoffIds: placeholder.handoffIds,
+                          forkedFrom: placeholder.forkedFrom,
+                          createdAt: placeholder.createdAt,
+                        };
+                  const now = yield* DateTime.now;
+                  yield* eventSink.write({
+                    events: [
+                      {
+                        id: yield* idAllocator.allocate.event({ threadId: input.threadId }),
+                        type: "provider-thread.updated",
+                        threadId: input.threadId,
+                        driver: deletionTarget.driver,
+                        providerInstanceId: deletionTarget.providerInstanceId,
+                        occurredAt: now,
+                        payload: deletionTarget,
+                      },
+                    ],
+                  });
+                }
+                addProviderThread(deletionTarget);
+                providerThreadByLogicalId.set(loadedProviderThread.id, deletionTarget);
+                providerThreadByLogicalId.set(deletionTarget.id, deletionTarget);
+                if (Option.isSome(projection)) {
+                  for (const providerThread of projection.value.providerThreads) {
+                    if (
+                      providerThread.providerSessionId === input.providerSessionId &&
+                      providerThread.nativeThreadRef === null
+                    ) {
+                      providerThreadByLogicalId.set(providerThread.id, deletionTarget);
+                    }
+                  }
+                }
+              }
+            }
+            if (
+              input.deleteProviderThread === true &&
+              resolvedProviderSession === undefined &&
+              providerThreads.size > 0
+            ) {
+              const sessionLookup = yield* Effect.exit(
+                projectionStore
+                  .getProviderSessionsByIds(input.threadId, [input.providerSessionId])
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderSessionLookupError({
+                          providerSessionId: input.providerSessionId,
+                          cause,
+                        }),
+                    ),
+                  ),
+              );
+              if (Exit.isFailure(sessionLookup)) {
+                deferredDeletionFailure = sessionLookup.cause;
+              } else {
+                resolvedProviderSession = sessionLookup.value.find(
+                  (session) => session.id === input.providerSessionId,
+                );
+              }
             }
             if (
               currentEntry !== undefined &&
@@ -2245,7 +2491,7 @@ export const layerWithOptions = (
               const activeTurns = [
                 ...new Map(
                   [...projectedTurns, ...trackedTurns]
-                    .filter((turn) => providerThreads.has(turn.providerThreadId))
+                    .filter((turn) => providerThreadByLogicalId.has(turn.providerThreadId))
                     .map((turn) => [turn.id, turn] as const),
                 ).values(),
               ];
@@ -2254,7 +2500,7 @@ export const layerWithOptions = (
                 (turn) =>
                   capturedRuntime
                     .interruptTurn({
-                      providerThread: providerThreads.get(turn.providerThreadId)!,
+                      providerThread: providerThreadByLogicalId.get(turn.providerThreadId)!,
                       providerTurnId: turn.id,
                     })
                     .pipe(
@@ -2308,6 +2554,8 @@ export const layerWithOptions = (
                 entry.loadedProviderThreadKeyByThread,
               );
               loadedProviderThreadKeyByThread.delete(input.threadId);
+              const loadedProviderThreadByThread = new Map(entry.loadedProviderThreadByThread);
+              loadedProviderThreadByThread.delete(input.threadId);
               // For a plain (workspace-change) detach, the credential id stays
               // recorded: the thread may re-attach and reuse it, and
               // releaseEntry revokes it when the provider process finally goes
@@ -2325,6 +2573,7 @@ export const layerWithOptions = (
                 ...entry,
                 attachedThreadIds,
                 loadedProviderThreadKeyByThread,
+                loadedProviderThreadByThread,
                 mcpCredentialIdByThread,
               };
               const updated = new Map(current);
@@ -2338,11 +2587,16 @@ export const layerWithOptions = (
             // are revoked when the session entry is released (process gone)
             // or rotated on the next attach if they stopped resolving.
             // Terminal detaches (thread archived or deleted) revoke the
-            // thread's credentials immediately, even on a retry where the
-            // entry is already gone: there is no legitimate future re-attach,
-            // and the token must not outlive the thread.
+            // thread's credential once no live replacement or in-flight open
+            // holds it. A stale retry must not revoke a credential issued after
+            // the thread was unarchived and reopened.
             if (input.revokeMcpCredential === true) {
-              yield* mcpPrepareLock.withLock(input.threadId, clearMcpSession(input.threadId));
+              const credentialId = McpProviderSession.readMcpProviderSession(
+                input.threadId,
+              )?.providerSessionId;
+              if (credentialId !== undefined) {
+                yield* clearMcpSessionIfUnheld(input.threadId, credentialId);
+              }
             }
             if (Option.isSome(detached)) {
               if (
