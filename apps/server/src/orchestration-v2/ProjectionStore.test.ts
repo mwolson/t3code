@@ -34,7 +34,9 @@ import {
   makeProjectionReplayState,
   ProjectionStoreV2,
   layer as projectionStoreLayer,
-} from "./ProjectionStore.ts";
+=======
+  threadShellFromProjection,
+  visibleTurnItemsThroughRun,} from "./ProjectionStore.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -124,6 +126,111 @@ it("excludes cancelled queued prompts from fork history without hiding rolled-ba
     }),
   );
 });
+
+it.effect("orders fork-prefix local items by ordinal rather than array insertion order", () =>
+  Effect.gen(function* () {
+    const runId = RunId.make("run:projection-fork-prefix-order");
+    const nodeId = NodeId.make("node:projection-fork-prefix-order");
+    const threadId = ThreadId.make("thread:projection-fork-prefix-order");
+    const now = yield* DateTime.now;
+    const laterFirst = {
+      id: TurnItemId.make("turn-item:projection-fork-prefix-order:2"),
+      type: "user_message" as const,
+      createdBy: "user" as const,
+      creationSource: "web" as const,
+      inputIntent: "turn_start" as const,
+      messageId: MessageId.make("message:projection-fork-prefix-order:2"),
+      text: "second",
+      attachments: [],
+      threadId,
+      runId,
+      nodeId,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 2,
+      status: "completed" as const,
+      title: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: now,
+    };
+    const earlierSecond = {
+      ...laterFirst,
+      id: TurnItemId.make("turn-item:projection-fork-prefix-order:1"),
+      messageId: MessageId.make("message:projection-fork-prefix-order:1"),
+      text: "first",
+      ordinal: 1,
+    };
+    const prefix = visibleTurnItemsThroughRun({
+      sourceProjection: {
+        schemaVersion: 1 as never,
+        thread: {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId: ProjectId.make("project:projection-fork-prefix-order"),
+          title: "Order",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: {
+            parentThreadId: null,
+            relationshipToParent: null,
+            rootThreadId: threadId,
+          },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+        runs: [
+          {
+            id: runId,
+            threadId,
+            rootNodeId: nodeId,
+            ordinal: 1,
+            status: "completed",
+            activeAttemptId: null,
+            latestAttemptId: null,
+            createdAt: now,
+            updatedAt: now,
+            completedAt: now,
+          },
+        ],
+        attempts: [],
+        nodes: [],
+        subagents: [],
+        providerSessions: [],
+        providerThreads: [],
+        providerTurns: [],
+        runtimeRequests: [],
+        messages: [],
+        turnItems: [laterFirst, earlierSecond],
+        plans: [],
+        checkpointScopes: [],
+        checkpoints: [],
+        contextHandoffs: [],
+        contextTransfers: [],
+        visibleTurnItems: [],
+      } as never,
+      sourceRunId: runId,
+    });
+    assert.deepEqual(
+      prefix.map((row) => row.item.id),
+      [earlierSecond.id, laterFirst.id],
+    );
+  }),
+);
 
 it.effect("memory thread snapshots keep projection and sequence from one atomic state", () =>
   Effect.gen(function* () {

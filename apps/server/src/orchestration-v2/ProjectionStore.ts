@@ -871,7 +871,7 @@ export function isTurnItemAtOrBeforeRun(input: {
   return ordinal !== undefined && ordinal <= input.sourceRunOrdinal;
 }
 
-function visibleTurnItemsThroughRun(input: {
+export function visibleTurnItemsThroughRun(input: {
   readonly sourceProjection: OrchestrationV2ThreadProjection;
   readonly sourceRunId: NonNullable<OrchestrationV2TurnItem["runId"]>;
 }): Array<Omit<OrchestrationV2ProjectedTurnItem, "position">> {
@@ -892,24 +892,31 @@ function visibleTurnItemsThroughRun(input: {
       item: row.item,
     }));
   const localPrefix = inheritedVisibleTurnItemsFromLocalItems(
-    input.sourceProjection.turnItems.filter((item) => {
-      if (
-        !isTurnItemVisibleInForkPrefix({
-          item,
-          runs: input.sourceProjection.runs,
-          attempts: input.sourceProjection.attempts,
-          items: input.sourceProjection.turnItems,
-        })
-      ) {
-        return false;
-      }
-      return isTurnItemAtOrBeforeRun({
-        historyOrigin: input.sourceProjection.thread.historyOrigin,
-        itemRunId: item.runId,
-        runOrdinalById,
-        sourceRunOrdinal: sourceRun.ordinal,
-      });
-    }),
+    input.sourceProjection.turnItems
+      .filter((item) => {
+        if (
+          !isTurnItemVisibleInForkPrefix({
+            item,
+            runs: input.sourceProjection.runs,
+            attempts: input.sourceProjection.attempts,
+            items: input.sourceProjection.turnItems,
+          })
+        ) {
+          return false;
+        }
+        return isTurnItemAtOrBeforeRun({
+          historyOrigin: input.sourceProjection.thread.historyOrigin,
+          itemRunId: item.runId,
+          runOrdinalById,
+          sourceRunOrdinal: sourceRun.ordinal,
+        });
+      })
+      .toSorted((left, right) => {
+        if (left.ordinal !== right.ordinal) {
+          return left.ordinal - right.ordinal;
+        }
+        return String(left.id).localeCompare(String(right.id));
+      }),
   );
 
   return [...inheritedPrefix, ...localPrefix];
@@ -1085,7 +1092,6 @@ export function threadShellFromProjection(
     snoozedUntil: projection.thread.snoozedUntil ?? null,
     snoozedAt: projection.thread.snoozedAt ?? null,
     pinnedAt: projection.thread.pinnedAt ?? null,
-    pinOrderKey: projection.thread.pinOrderKey ?? null,
     lastVisitedAt: projection.thread.lastVisitedAt,
     titleRegeneration: projection.thread.titleRegeneration ?? null,
     deletedAt: projection.thread.deletedAt,
@@ -1268,7 +1274,6 @@ function shellFromState(input: {
     snoozedUntil: input.state.thread.snoozedUntil ?? null,
     snoozedAt: input.state.thread.snoozedAt ?? null,
     pinnedAt: input.state.thread.pinnedAt ?? null,
-    pinOrderKey: input.state.thread.pinOrderKey ?? null,
     lastVisitedAt: input.state.thread.lastVisitedAt,
     titleRegeneration: input.state.thread.titleRegeneration ?? null,
     deletedAt: input.state.thread.deletedAt,
@@ -1281,29 +1286,31 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     const sql = yield* SqlClient.SqlClient;
 
     const apply: ProjectionStoreV2Shape["apply"] = (event) =>
-      Effect.gen(function* () {
-        switch (event.type) {
-          case "thread.created":
-          case "thread.archived":
-          case "thread.unarchived":
-          case "thread.deleted":
-          case "thread.settled":
-          case "thread.unsettled":
-          case "thread.snoozed":
-          case "thread.unsnoozed":
-          case "thread.pinned":
-          case "thread.unpinned":
-          case "thread.pin-reordered":
-          case "thread.visited":
-          case "thread.marked-unread":
-          case "thread.metadata-updated":
-          case "thread.runtime-mode-updated":
-          case "thread.interaction-mode-updated":
-          case "thread.model-selection-updated":
-          case "thread.provider-switched": {
-            const payloadJson = yield* encodeThreadPayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            switch (event.type) {
+              case "thread.created":
+              case "thread.archived":
+              case "thread.unarchived":
+              case "thread.deleted":
+              case "thread.settled":
+              case "thread.unsettled":
+              case "thread.snoozed":
+              case "thread.unsnoozed":
+              case "thread.pinned":
+              case "thread.unpinned":
+              case "thread.pin-reordered":
+              case "thread.visited":
+              case "thread.marked-unread":
+              case "thread.metadata-updated":
+              case "thread.runtime-mode-updated":
+              case "thread.interaction-mode-updated":
+              case "thread.model-selection-updated":
+              case "thread.provider-switched": {
+                const payloadJson = yield* encodeThreadPayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_threads (
                 thread_id,
                 project_id,
@@ -1349,13 +1356,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 deleted_at = excluded.deleted_at,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-          case "run.created":
-          case "run.updated": {
-            const payloadJson = yield* encodeRunPayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+                break;
+              }
+              case "run.created":
+              case "run.updated": {
+                const payloadJson = yield* encodeRunPayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_runs (
                 run_id,
                 thread_id,
@@ -1404,12 +1411,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   ELSE excluded.payload_json
                 END
             `;
-            break;
-          }
-          case "run-attempt.created":
-          case "run-attempt.updated": {
-            const payloadJson = yield* encodeRunAttemptPayload(event.payload);
-            yield* sql`
+                break;
+              }
+              case "run-attempt.created":
+              case "run-attempt.updated": {
+                const payloadJson = yield* encodeRunAttemptPayload(event.payload);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_run_attempts (
                 attempt_id,
                 thread_id,
@@ -1449,12 +1456,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 status = excluded.status,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-          case "node.updated": {
-            const payloadJson = yield* encodeNodePayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+                break;
+              }
+              case "node.updated": {
+                const payloadJson = yield* encodeNodePayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_nodes (
                 node_id,
                 thread_id,
@@ -1503,12 +1510,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 completed_at = excluded.completed_at,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-          case "subagent.updated": {
-            const payloadJson = yield* encodeSubagentPayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+                break;
+              }
+              case "subagent.updated": {
+                const payloadJson = yield* encodeSubagentPayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_subagents (
                 subagent_id,
                 thread_id,
@@ -1572,23 +1579,23 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   ELSE excluded.payload_json
                 END
             `;
-            break;
-          }
-          case "provider-session.attached":
-          case "provider-session.updated": {
-            const payloadJson = yield* encodeProviderSessionPayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            const conflictUpdateGuard =
-              event.type === "provider-session.attached"
-                ? sql`WHERE EXISTS (
+                break;
+              }
+              case "provider-session.attached":
+              case "provider-session.updated": {
+                const payloadJson = yield* encodeProviderSessionPayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                const conflictUpdateGuard =
+                  event.type === "provider-session.attached"
+                    ? sql`WHERE EXISTS (
                     SELECT 1
                     FROM orchestration_v2_projection_threads
                     WHERE thread_id = ${event.threadId}
                       AND archived_at IS NULL
                       AND deleted_at IS NULL
                   )`
-                : sql``;
-            yield* sql`
+                    : sql``;
+                yield* sql`
               INSERT INTO orchestration_v2_projection_provider_sessions (
                 provider_session_id,
                 thread_id,
@@ -1623,8 +1630,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 payload_json = excluded.payload_json
               ${conflictUpdateGuard}
             `;
-            if (event.type === "provider-session.attached") {
-              yield* sql`
+                if (event.type === "provider-session.attached") {
+                  yield* sql`
                 INSERT OR IGNORE INTO orchestration_v2_projection_provider_session_bindings (
                   provider_session_id,
                   thread_id
@@ -1638,21 +1645,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     AND deleted_at IS NULL
                 )
               `;
-            }
-            break;
-          }
-          case "provider-session.detached": {
-            yield* sql`
+                }
+                break;
+              }
+              case "provider-session.detached": {
+                yield* sql`
               DELETE FROM orchestration_v2_projection_provider_session_bindings
               WHERE provider_session_id = ${event.payload.providerSessionId}
                 AND thread_id = ${event.threadId}
             `;
-            break;
-          }
-          case "provider-thread.updated": {
-            const payloadJson = yield* encodeProviderThreadPayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+                break;
+              }
+              case "provider-thread.updated": {
+                const payloadJson = yield* encodeProviderThreadPayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_provider_threads (
                 provider_thread_id,
                 thread_id,
@@ -1695,23 +1702,23 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at = excluded.updated_at,
                 payload_json = excluded.payload_json
             `;
-            if (event.payload.appThreadId !== null) {
-              const threadRows = yield* sql<PayloadRow>`
+                if (event.payload.appThreadId !== null) {
+                  const threadRows = yield* sql<PayloadRow>`
                 SELECT payload_json
                 FROM orchestration_v2_projection_threads
                 WHERE thread_id = ${event.payload.appThreadId}
                 LIMIT 1
               `;
-              const threadRow = threadRows[0];
-              if (threadRow !== undefined) {
-                const thread = yield* decodeThreadPayload(threadRow.payload_json);
-                const updatedThread = {
-                  ...thread,
-                  activeProviderThreadId: event.payload.id,
-                  updatedAt: event.payload.updatedAt,
-                };
-                const updatedThreadPayloadJson = yield* encodeThreadPayload(updatedThread);
-                yield* sql`
+                  const threadRow = threadRows[0];
+                  if (threadRow !== undefined) {
+                    const thread = yield* decodeThreadPayload(threadRow.payload_json);
+                    const updatedThread = {
+                      ...thread,
+                      activeProviderThreadId: event.payload.id,
+                      updatedAt: event.payload.updatedAt,
+                    };
+                    const updatedThreadPayloadJson = yield* encodeThreadPayload(updatedThread);
+                    yield* sql`
                   UPDATE orchestration_v2_projection_threads
                   SET
                     active_provider_thread_id = ${event.payload.id},
@@ -1719,6 +1726,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     payload_json = ${updatedThreadPayloadJson}
                   WHERE thread_id = ${event.payload.appThreadId}
                 `;
+                  }
+                }
+                break;
               }
             }
             break;
@@ -1743,8 +1753,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   )[0]!;
             const payloadJson = yield* encodeProviderTurnPayload(providerTurn);
             const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
-              INSERT INTO orchestration_v2_projection_provider_turns (
+            yield* sql`              INSERT INTO orchestration_v2_projection_provider_turns (
                 provider_turn_id,
                 thread_id,
                 provider_thread_id,
@@ -1780,12 +1789,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 completed_at = excluded.completed_at,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-          case "runtime-request.updated": {
-            const payloadJson = yield* encodeRuntimeRequestPayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+                break;
+              }
+              case "runtime-request.updated": {
+                const payloadJson = yield* encodeRuntimeRequestPayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_runtime_requests (
                 runtime_request_id,
                 thread_id,
@@ -1819,12 +1828,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 resolved_at = excluded.resolved_at,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-          case "message.updated": {
-            const payloadJson = yield* encodeMessagePayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+                break;
+              }
+              case "message.updated": {
+                const payloadJson = yield* encodeMessagePayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_messages (
                 message_id,
                 thread_id,
@@ -1858,11 +1867,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at = excluded.updated_at,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-          case "plan.updated": {
-            const payloadJson = yield* encodePlanPayload(event.payload);
-            yield* sql`
+                break;
+              }
+              case "plan.updated": {
+                const payloadJson = yield* encodePlanPayload(event.payload);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_plans (
                 plan_id,
                 thread_id,
@@ -1890,12 +1899,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 status = excluded.status,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-          case "turn-item.updated": {
-            const payloadJson = yield* encodeTurnItemPayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+                break;
+              }
+              case "turn-item.updated": {
+                const payloadJson = yield* encodeTurnItemPayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_turn_items (
                 turn_item_id,
                 thread_id,
@@ -1938,12 +1947,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at = excluded.updated_at,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-          case "checkpoint-scope.created": {
-            const payloadJson = yield* encodeCheckpointScopePayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+                break;
+              }
+              case "checkpoint-scope.created": {
+                const payloadJson = yield* encodeCheckpointScopePayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_checkpoint_scopes (
                 scope_id,
                 thread_id,
@@ -1983,12 +1992,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 created_at = excluded.created_at,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-          case "checkpoint.captured": {
-            const payloadJson = yield* encodeCheckpointPayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+                break;
+              }
+              case "checkpoint.captured": {
+                const payloadJson = yield* encodeCheckpointPayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_checkpoints (
                 checkpoint_id,
                 thread_id,
@@ -2028,16 +2037,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 captured_at = excluded.captured_at,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-          case "checkpoint.rollback-requested":
-          case "provider-turn.interrupt-requested":
-          case "run.interrupt-noop":
-            break;
-          case "context-handoff.updated": {
-            const payloadJson = yield* encodeContextHandoffPayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+                break;
+              }
+              case "checkpoint.rollback-requested":
+              case "provider-turn.interrupt-requested":
+              case "run.interrupt-noop":
+                break;
+              case "context-handoff.updated": {
+                const payloadJson = yield* encodeContextHandoffPayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_context_handoffs (
                 context_handoff_id,
                 thread_id,
@@ -2068,13 +2077,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at = excluded.updated_at,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-          case "context-transfer.created":
-          case "context-transfer.updated": {
-            const payloadJson = yield* encodeContextTransferPayload(event.payload);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`
+                break;
+              }
+              case "context-transfer.created":
+              case "context-transfer.updated": {
+                const payloadJson = yield* encodeContextTransferPayload(event.payload);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`
               INSERT INTO orchestration_v2_projection_context_transfers (
                 context_transfer_id,
                 source_thread_id,
@@ -2117,59 +2126,61 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at = excluded.updated_at,
                 payload_json = excluded.payload_json
             `;
-            break;
-          }
-        }
+                break;
+              }
+            }
 
-        if (
-          event.type !== "thread.created" &&
-          event.type !== "thread.archived" &&
-          event.type !== "thread.unarchived" &&
-          event.type !== "thread.deleted" &&
-          event.type !== "thread.settled" &&
-          event.type !== "thread.unsettled" &&
-          event.type !== "thread.snoozed" &&
-          event.type !== "thread.unsnoozed" &&
-          event.type !== "thread.pinned" &&
-          event.type !== "thread.unpinned" &&
-          event.type !== "thread.pin-reordered" &&
-          event.type !== "thread.visited" &&
-          event.type !== "thread.marked-unread" &&
-          event.type !== "thread.metadata-updated" &&
-          event.type !== "thread.runtime-mode-updated" &&
-          event.type !== "thread.interaction-mode-updated" &&
-          event.type !== "thread.model-selection-updated" &&
-          event.type !== "thread.provider-switched"
-        ) {
-          const rows = yield* sql<PayloadRow>`
-            SELECT payload_json
-            FROM orchestration_v2_projection_threads
-            WHERE thread_id = ${event.threadId}
-            LIMIT 1
-          `;
-          const row = rows[0];
-          if (row !== undefined) {
-            const thread = yield* decodeThreadPayload(row.payload_json);
-            const updatedThread = { ...thread, updatedAt: event.occurredAt };
-            const payloadJson = yield* encodeThreadPayload(updatedThread);
-            yield* sql`
-              UPDATE orchestration_v2_projection_threads
-              SET
-                updated_at = ${stringField(parseEncodedPayload(payloadJson), "updatedAt")},
-                payload_json = ${payloadJson}
-              WHERE thread_id = ${event.threadId}
-            `;
-          }
-        }
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProjectionStoreApplyEventError({
-              eventType: event.type,
-              cause,
-            }),
-        ),
-      );
+            if (
+              event.type !== "thread.created" &&
+              event.type !== "thread.archived" &&
+              event.type !== "thread.unarchived" &&
+              event.type !== "thread.deleted" &&
+              event.type !== "thread.settled" &&
+              event.type !== "thread.unsettled" &&
+              event.type !== "thread.snoozed" &&
+              event.type !== "thread.unsnoozed" &&
+              event.type !== "thread.pinned" &&
+              event.type !== "thread.unpinned" &&
+              event.type !== "thread.pin-reordered" &&
+              event.type !== "thread.visited" &&
+              event.type !== "thread.marked-unread" &&
+              event.type !== "thread.metadata-updated" &&
+              event.type !== "thread.runtime-mode-updated" &&
+              event.type !== "thread.interaction-mode-updated" &&
+              event.type !== "thread.model-selection-updated" &&
+              event.type !== "thread.provider-switched"
+            ) {
+              const rows = yield* sql<PayloadRow>`
+                SELECT payload_json
+                FROM orchestration_v2_projection_threads
+                WHERE thread_id = ${event.threadId}
+                LIMIT 1
+              `;
+              const row = rows[0];
+              if (row !== undefined) {
+                const thread = yield* decodeThreadPayload(row.payload_json);
+                const updatedThread = { ...thread, updatedAt: event.occurredAt };
+                const payloadJson = yield* encodeThreadPayload(updatedThread);
+                yield* sql`
+                  UPDATE orchestration_v2_projection_threads
+                  SET
+                    updated_at = ${stringField(parseEncodedPayload(payloadJson), "updatedAt")},
+                    payload_json = ${payloadJson}
+                  WHERE thread_id = ${event.threadId}
+                `;
+              }
+            }
+          }),
+        )
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProjectionStoreApplyEventError({
+                eventType: event.type,
+                cause,
+              }),
+          ),
+        );
 
     const readCanonicalProjection = (
       threadId: ThreadId,
