@@ -22,6 +22,8 @@ import { assertMultiTurnOutput } from "./multi_turn/codex_output.ts";
 import { multiTurnInput } from "./multi_turn/input.ts";
 import { openCodeChildApprovalInput } from "./opencode_child_approval/input.ts";
 import { assertOpenCodeChildApprovalOutput } from "./opencode_child_approval/output.ts";
+import { openCode2ArchiveThenDeleteInput } from "./opencode2_archive_then_delete/input.ts";
+import { assertOpenCode2ArchiveThenDeleteOutput } from "./opencode2_archive_then_delete/output.ts";
 import { openCode2BackgroundStopInput } from "./opencode2_background_stop/input.ts";
 import { assertOpenCode2BackgroundStopOutput } from "./opencode2_background_stop/output.ts";
 import { openCode2BackgroundChildStopInput } from "./opencode2_background_child_stop/input.ts";
@@ -499,6 +501,21 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         modelSelection: OPENCODE_MODEL_SELECTION,
         assertOutput: assertOpenCodeChildApprovalOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_archive_then_delete",
+    buildInput: openCode2ArchiveThenDeleteInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_archive_then_delete/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertOpenCode2ArchiveThenDeleteOutput,
       },
     ],
   },

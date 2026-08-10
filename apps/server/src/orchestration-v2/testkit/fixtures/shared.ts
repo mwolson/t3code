@@ -65,6 +65,8 @@ export const OPENCODE2_TWO_SUBAGENT_BACKGROUND_PROMPT =
 export const OPENCODE2_TWO_COMPLETED_SUBAGENT_PROMPT =
   "Start two background subagents: one with description alpha completed child fixture and prompt Respond exactly ALPHA_COMPLETED_OK, and one with description bravo completed child fixture and prompt Respond exactly BRAVO_COMPLETED_OK. Then respond exactly PARENT_RELEASED without waiting for either child.";
 export const OPENCODE2_THREAD_DELETE_PROMPT = "Respond exactly: native deletion fixture complete";
+export const OPENCODE2_ARCHIVE_THEN_DELETE_PROMPT =
+  "Respond exactly: archive then delete fixture complete";
 export const OPENCODE2_SHELL_PROJECTION_PROMPT =
   "Run a shell command that prints the paged shell fixture output, move it to background observation, then respond exactly: shell projection fixture complete";
 export const OPENCODE2_SHELL_FAILURE_PROMPT =
@@ -251,6 +253,9 @@ export type OrchestratorFixtureInputStep =
     }
   | {
       readonly type: "delete";
+    }
+  | {
+      readonly type: "archive";
     }
   | {
       readonly type: "approve_next_runtime_request";
@@ -861,6 +866,16 @@ export function materializeFixtureInput(input: {
             commandId: yield* idAllocator.allocate.command({
               fixtureName: input.scenario,
               commandName: "thread-delete",
+            }),
+            threadId: ids.threadId,
+          });
+          break;
+        case "archive":
+          pushDispatch({
+            type: "thread.archive",
+            commandId: yield* idAllocator.allocate.command({
+              fixtureName: input.scenario,
+              commandName: "thread-archive",
             }),
             threadId: ids.threadId,
           });
