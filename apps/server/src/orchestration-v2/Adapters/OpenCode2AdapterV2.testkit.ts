@@ -213,6 +213,9 @@ export class OpenCode2ReplayController {
   async response(operation: OpenCode2RuntimeOperation): Promise<unknown> {
     while (true) {
       this.throwFailure();
+      if (this.abortController.signal.aborted) {
+        throw new Error(`OpenCode 2 replay aborted while waiting for ${operation}.`);
+      }
       if (this.claimedResponseCursor === this.cursor) {
         await this.changed();
         continue;
@@ -236,7 +239,13 @@ export class OpenCode2ReplayController {
           this.claimedResponseCursor = claimedCursor;
           try {
             if (entry.afterMs !== undefined && entry.afterMs > 0) {
-              await waitForReplayDelay(entry.afterMs, this.abortController.signal);
+              const delayCompleted = await waitForReplayDelay(
+                entry.afterMs,
+                this.abortController.signal,
+              );
+              if (!delayCompleted) {
+                throw new Error(`OpenCode 2 replay aborted while waiting for ${operation}.`);
+              }
             }
             this.throwFailure();
             this.advance();
@@ -250,7 +259,13 @@ export class OpenCode2ReplayController {
           this.claimedResponseCursor = claimedCursor;
           try {
             if (entry.afterMs !== undefined && entry.afterMs > 0) {
-              await waitForReplayDelay(entry.afterMs, this.abortController.signal);
+              const delayCompleted = await waitForReplayDelay(
+                entry.afterMs,
+                this.abortController.signal,
+              );
+              if (!delayCompleted) {
+                throw new Error(`OpenCode 2 replay aborted while waiting for ${operation}.`);
+              }
             }
             this.throwFailure();
             this.advance();
@@ -454,16 +469,6 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
     }
     return request(operation, input);
   };
-  const optionalRequest = async (
-    operation: OpenCode2RuntimeOperation,
-    input: unknown,
-    canned: unknown,
-  ) => {
-    if (!controller.expectsOutbound(operation)) {
-      return { data: { data: canned } };
-    }
-    return request(operation, input);
-  };
   return {
     client: {
       post: rawPost,
@@ -503,8 +508,7 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
         // transcripts still label the operation message.list.
         messages: (input: unknown) => request("message.list", input),
         pending: {
-          list: (input: unknown) =>
-            optionalRequest("session.pending.list", input, [] as Array<unknown>),
+          list: (input: unknown) => request("session.pending.list", input),
         },
         permission: {
           reply: (input: unknown) => request("session.permission.reply", input),
@@ -523,7 +527,7 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
         wait: (input: unknown) => request("session.wait", input),
       },
       shell: {
-        list: (input: unknown) => optionalRequest("shell.list", input, [] as Array<unknown>),
+        list: (input: unknown) => request("shell.list", input),
         output: (input: unknown) => request("shell.output", input),
         remove: (input: unknown) => request("shell.remove", input),
       },
