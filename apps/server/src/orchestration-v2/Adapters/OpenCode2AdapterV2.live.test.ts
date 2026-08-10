@@ -67,6 +67,60 @@ function isOpenCode2CompactionEvent(event: V2Event): event is OpenCode2Compactio
 describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
   "OpenCode 2 adapter pending work (live)",
   () => {
+    it.live(
+      "accepts the flat Session3 prompt body used by the adapter",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const runtime = yield* OpenCode2Runtime.OpenCode2Runtime;
+            const server = yield* runtime.startOpenCode2ServerProcess({
+              binaryPath: "opencode2",
+            });
+            const client = runtime.createOpenCode2SdkClient({
+              baseUrl: server.url,
+              directory: process.cwd(),
+              serverPassword: server.password,
+            });
+            const rawClient = (
+              client as unknown as {
+                client: { post: (input: Record<string, unknown>) => Promise<unknown> };
+              }
+            ).client;
+            const created = yield* OpenCode2Runtime.runOpenCode2Sdk("session.create", () =>
+              client.v2.session.create({
+                location: { directory: process.cwd() },
+                model: { providerID: "opencode", id: "glm-5-free" },
+              }),
+            );
+            const session = yield* unwrapOpenCode2Data<{ readonly id: string }>(
+              "session.create",
+              created,
+            );
+            yield* Effect.addFinalizer(() =>
+              OpenCode2Runtime.runOpenCode2Sdk("session.remove", () =>
+                client.v2.session.remove({ sessionID: session.id }),
+              ).pipe(Effect.ignore),
+            );
+
+            const prompted = yield* OpenCode2Runtime.runOpenCode2Sdk("session.prompt", () =>
+              rawClient.post({
+                url: "/api/session/{sessionID}/prompt",
+                path: { sessionID: session.id },
+                body: { text: "Reply with OK." },
+                headers: { "Content-Type": "application/json" },
+                throwOnError: true,
+              }),
+            );
+            const admitted = yield* unwrapOpenCode2Data<{ readonly id: string }>(
+              "session.prompt",
+              prompted,
+            );
+            assert.isString(admitted.id);
+          }),
+        ).pipe(Effect.provide(layer)),
+      { timeout: 60_000 },
+    );
+
     it.effect(
       "pins only its running shells and emits a wake when the shell exits",
       () =>

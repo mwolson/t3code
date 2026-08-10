@@ -234,12 +234,12 @@ export const OPENCODE2_EVENT_STREAM_MAX_FAILURES = 5;
 /** Cap stall-driven resubscribes so a stuck turn cannot thrash subscribe forever. */
 export const OPENCODE2_EVENT_STALL_MAX_RESUBSCRIBES = 2;
 export const OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS = 250;
+export const OPENCODE2_EVENT_PENDING_RESUBSCRIBE_DELAY_MS = 5_000;
 /**
- * Cap consecutive clean SSE EOFs that happen while a turn is active. A clean
- * EOF resets the stall clock on every cycle, so a proxy recycle or dead server
- * that closes `/api/event` right after each reconnect could otherwise park an
- * active turn forever without a terminal. Idle reconnects and replay parking
- * are not counted.
+ * Require this many consecutive clean SSE EOFs while a turn is active, plus a
+ * full stall window, before failing it. The elapsed guard keeps short proxy
+ * recycle bursts harmless while still bounding an endless clean-close loop.
+ * Idle reconnects and replay parking are not counted.
  */
 export const OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES = 3;
 /** Bound Stop so a wedged `session.interrupt` HTTP call cannot hang the UI. */
@@ -814,8 +814,13 @@ export function openCode2CanAdoptMissingExecutionStart(turn: {
 export function openCode2ShouldQuarantineInterruptedSession(input: {
   readonly interruptRequestConfirmed: boolean;
   readonly shellRemovalConfirmed: boolean;
+  readonly forceFinalizedWithoutTerminal?: boolean;
 }): boolean {
-  return !input.interruptRequestConfirmed || !input.shellRemovalConfirmed;
+  return (
+    input.forceFinalizedWithoutTerminal === true ||
+    !input.interruptRequestConfirmed ||
+    !input.shellRemovalConfirmed
+  );
 }
 
 /**
@@ -830,9 +835,27 @@ export function openCode2ShouldQuarantineInterruptedSession(input: {
 export function openCode2ShouldFailActiveTurnsAfterCleanEof(input: {
   readonly consecutiveCleanEofs: number;
   readonly maxCleanEofs: number;
+  readonly cleanEofWindowAgeMs: number;
+  readonly minimumWindowMs: number;
   readonly hasActiveTurn: boolean;
 }): boolean {
-  return input.hasActiveTurn && input.consecutiveCleanEofs >= input.maxCleanEofs;
+  return (
+    input.hasActiveTurn &&
+    input.consecutiveCleanEofs >= input.maxCleanEofs &&
+    input.cleanEofWindowAgeMs >= input.minimumWindowMs
+  );
+}
+
+/** @internal exported for tests */
+export function openCode2CleanEofResubscribeDelayMs(
+  consecutiveCleanEofs: number,
+  awaitingRuntimeRequest: boolean,
+): number {
+  if (!awaitingRuntimeRequest) return OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS;
+  return Math.min(
+    OPENCODE2_EVENT_PENDING_RESUBSCRIBE_DELAY_MS,
+    OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS * 2 ** Math.min(Math.max(0, consecutiveCleanEofs - 1), 5),
+  );
 }
 
 export interface OpenCode2ProtocolLogEvent {
@@ -1885,6 +1908,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         let consecutiveStreamFailures = 0;
         let consecutiveStallResubscribes = 0;
         let consecutiveCleanEofResubscribes = 0;
+        let cleanEofWindowStartedAtMs: number | null = null;
         lastEventAtMs = yield* Clock.currentTimeMillis;
 
         const emitProviderEvent = (event: ProviderAdapterV2Event) =>
@@ -3491,6 +3515,14 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           }
         });
 
+        const allActiveTurnsAwaitRuntimeRequest = (): boolean =>
+          Array.from(threads.values()).every((threadState) => {
+            if (threadState.activeTurn === null) return true;
+            return Array.from(pendingRequests.values()).some(
+              (pending) => pending.turn === threadState.activeTurn,
+            );
+          });
+
         const offerPostSettleWake = Effect.fnUntraced(function* (
           state: OpenCode2ThreadState,
           event: any,
@@ -3790,7 +3822,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           const eventState =
             admittedState ??
             (eventSessionId === undefined ? undefined : threads.get(eventSessionId));
-          if (eventType === "session.input.admitted" && eventState !== undefined) {
+          if (!isReplay && eventType === "session.input.admitted" && eventState !== undefined) {
             const inputId = openCode2WireInputID(wire);
             const input = recordValue(event.data, "input") ?? recordValue(event.data, "prompt");
             // Session3 uses the same admitted event for the initial admission
@@ -3800,6 +3832,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             if (inputId !== undefined && input === undefined) {
               eventState.sawInputPromotion = true;
               eventState.promotedInputIds.add(inputId);
+              pruneOpenCode2PromotedInputIds(eventState.promotedInputIds);
               const wake = eventState.postSettleWakes.find(
                 (candidate) => candidate.inputId === inputId,
               );
@@ -4622,6 +4655,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   if ((event as { readonly type?: string }).type !== "server.connected") {
                     consecutiveStallResubscribes = 0;
                     consecutiveCleanEofResubscribes = 0;
+                    cleanEofWindowStartedAtMs = null;
                   }
                 }),
               ),
@@ -4657,14 +4691,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 // Suppress stall recovery only when every active turn is blocked
                 // on a pending Input/permission. A quiet wait on one thread must
                 // not freeze dead-SSE recovery for an unrelated active turn.
-                const hasPendingRuntimeRequest = Array.from(threads.values()).every(
-                  (threadState) => {
-                    if (threadState.activeTurn === null) return true;
-                    return Array.from(pendingRequests.values()).some(
-                      (pending) => pending.turn === threadState.activeTurn,
-                    );
-                  },
-                );
+                const hasPendingRuntimeRequest = allActiveTurnsAwaitRuntimeRequest();
                 const now = yield* Clock.currentTimeMillis;
                 const lastEventAgeMs = now - lastEventAtMs;
                 if (
@@ -4741,6 +4768,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             const hasActiveTurn = Array.from(threads.values()).some(
               (threadState) => threadState.activeTurn !== null,
             );
+            let resubscribeDelayMs = OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS;
 
             if (Exit.isFailure(exit)) {
               consecutiveStreamFailures += 1;
@@ -4760,14 +4788,32 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 yield* failActiveTurns(openCodeRuntimeErrorDetail(failure), "transport_error");
                 consecutiveStreamFailures = 0;
               }
+            } else if (hasActiveTurn && allActiveTurnsAwaitRuntimeRequest()) {
+              const now = yield* Clock.currentTimeMillis;
+              cleanEofWindowStartedAtMs ??= now;
+              consecutiveCleanEofResubscribes += 1;
+              resubscribeDelayMs = openCode2CleanEofResubscribeDelayMs(
+                consecutiveCleanEofResubscribes,
+                true,
+              );
+              yield* Effect.logWarning(
+                "OpenCode 2 event stream ended cleanly while awaiting user input; resubscribing with backoff.",
+                {
+                  provider: OPENCODE2_PROVIDER,
+                  consecutiveCleanEofResubscribes,
+                  resubscribeDelayMs,
+                },
+              );
             } else if (hasActiveTurn) {
               // A clean EOF while a turn is active leaves the turn without a
               // terminal and without a dead-stream signal: every cycle resets
               // the stall clock, so a proxy recycle or dead server that closes
               // /api/event right after each reconnect would park the turn
               // forever. Count event-less clean EOFs and fail active turns
-              // once the budget is exhausted; idle reconnects and replay
-              // parking stay unbounded below.
+              // once both the count and elapsed-time budgets are exhausted;
+              // idle reconnects and replay parking stay unbounded below.
+              const now = yield* Clock.currentTimeMillis;
+              cleanEofWindowStartedAtMs ??= now;
               consecutiveCleanEofResubscribes += 1;
               yield* Effect.logWarning(
                 "OpenCode 2 event stream ended cleanly while a turn is active; resubscribing.",
@@ -4780,6 +4826,8 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 openCode2ShouldFailActiveTurnsAfterCleanEof({
                   consecutiveCleanEofs: consecutiveCleanEofResubscribes,
                   maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+                  cleanEofWindowAgeMs: now - cleanEofWindowStartedAtMs,
+                  minimumWindowMs: OPENCODE2_EVENT_STALL_MS,
                   hasActiveTurn,
                 })
               ) {
@@ -4796,6 +4844,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   "transport_error",
                 );
                 consecutiveCleanEofResubscribes = 0;
+                cleanEofWindowStartedAtMs = null;
               }
             } else if (!hasActiveTurn) {
               // Replay fixtures end the SSE stream cleanly once the transcript
@@ -4811,10 +4860,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 return;
               }
               consecutiveStreamFailures = 0;
+              consecutiveCleanEofResubscribes = 0;
+              cleanEofWindowStartedAtMs = null;
             }
 
             lastEventAtMs = yield* Clock.currentTimeMillis;
-            yield* Effect.sleep(`${OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS} millis`);
+            yield* Effect.sleep(`${resubscribeDelayMs} millis`);
           }
         }).pipe(Effect.forkIn(scope));
 
@@ -5384,11 +5435,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           deleteThread: (providerThread) =>
             Effect.gen(function* () {
               const sessionID = nativeThreadId(providerThread);
-              // Best-effort interrupt, then real DELETE so the native session
-              // does not leak after the app thread is gone.
-              yield* sdkCall("session.interrupt", { sessionID }, () =>
-                client.v2.session.interrupt({ sessionID }).catch(() => ({ data: { data: true } })),
-              ).pipe(Effect.catchCause(() => Effect.void));
               yield* removeOpenCode2Session(
                 sessionID,
                 sdkCall("session.remove", { sessionID }, () => deleteSessionHttp(sessionID)),
@@ -5516,9 +5562,8 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               if (providerBufferedContinuation) {
                 // OpenCode already ran this input. The app turn only gives its
                 // buffered native events durable run ownership.
-                // A wake that never settled into an execution has no buffered
-                // terminal to replay: its output was already delivered to the
-                // ordinary turn that owned the shared execution.
+                // A still-pending wake was part of an ordinary shared execution;
+                // its output already belongs to that ordinary turn.
                 if (wake === undefined || wake.phase === "pending") {
                   yield* finalizeTurn(state, turn, "completed");
                   return;
@@ -5538,14 +5583,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 turnInput.modelSelection,
                 turnInput.runtimePolicy.interactionMode,
               ).pipe(Effect.tapError(finalizeFailedTurn));
-              // Prefer the typed SDK method when present (replay testkit): the
-              // pinned beta SDK maps the nested `{ prompt: { text } }` input to
-              // the flat next-line wire itself. Fall back to the raw HTTP post
-              // for beta builds that omit the route on client.v2.
-              const prompted = yield* sdkCall(
-                "session.prompt",
-                { sessionID, prompt: payload },
-                () => postSessionPrompt({ sessionID, ...payload }),
+              // The pinned beta SDK omits this route, so post the flat body that
+              // the next-line server accepts through the generated HTTP client.
+              const prompted = yield* sdkCall("session.prompt", { sessionID, ...payload }, () =>
+                postSessionPrompt({ sessionID, ...payload }),
               ).pipe(Effect.tapError(finalizeFailedTurn));
               // Arm the stall watchdog from the prompt boundary so a long first
               // token does not immediately resubscribe, but a dead stream after
@@ -5602,13 +5643,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 );
               }
               const payload = promptPayload(steerInput.message);
-              // Same SDK-first preference as startTurn: typed/mock clients
-              // (replay testkit) map the nested prompt input; raw HTTP is the
-              // fallback for beta builds that omit the route.
-              yield* sdkCall(
-                "session.prompt",
-                { sessionID, prompt: payload, delivery: "steer" },
-                () => postSessionPrompt({ sessionID, ...payload, delivery: "steer" }),
+              // Keep the protocol log aligned with the flat HTTP body.
+              yield* sdkCall("session.prompt", { sessionID, ...payload, delivery: "steer" }, () =>
+                postSessionPrompt({ sessionID, ...payload, delivery: "steer" }),
               );
             }).pipe(
               Effect.mapError(
@@ -5706,6 +5743,14 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 yield* Effect.sleep(`${OPENCODE2_INTERRUPT_SETTLE_POLL_MS} millis`);
               }
               if (turn.finalized || state.activeTurn !== turn) return;
+              // A local timeout is not proof that native execution stopped,
+              // even when the interrupt and shell-removal requests returned.
+              // Only a native execution terminal makes this session reusable.
+              state.quarantined = openCode2ShouldQuarantineInterruptedSession({
+                interruptRequestConfirmed,
+                shellRemovalConfirmed,
+                forceFinalizedWithoutTerminal: true,
+              });
               yield* Effect.logWarning(
                 "OpenCode 2 interrupt settle timed out; force-finalizing the turn.",
                 {
@@ -6005,13 +6050,24 @@ export const OpenCode2AdapterV2Driver: ProviderAdapterDriver<
       const interactionModeReflections = yield* ProviderInteractionModeReflections;
       const providerEventLoggers = yield* ProviderEventLoggers;
       const serverConfig = yield* ServerConfig;
+      const environment = yield* Effect.try({
+        try: () =>
+          applyOpenCode2ProviderEnvironment(
+            input.config,
+            mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+          ),
+        catch: (cause) =>
+          new ProviderAdapterDriverCreateError({
+            driver: OPENCODE2_DRIVER_KIND,
+            instanceId: input.instanceId,
+            detail: "Failed to prepare private OpenCode 2 provider state.",
+            cause,
+          }),
+      });
       return makeOpenCode2AdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: applyOpenCode2ProviderEnvironment(
-          input.config,
-          mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
-        ),
+        environment,
         runtime: openCode2Runtime,
         idAllocator,
         serverConfig,

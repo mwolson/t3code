@@ -312,6 +312,46 @@ describe("OpenCode2AdapterV2 replay testkit", () => {
     }),
   );
 
+  it.effect("rejects a response blocked on a nonmatching replay entry after abort", () =>
+    Effect.gen(function* () {
+      const controller = new OpenCode2ReplayController(
+        transcript([{ type: "expect_outbound", frame: { type: "session.create" } }]),
+      );
+      const pending = controller.response("session.get");
+
+      controller.abort();
+      const cause = yield* Effect.promise(() => pending.catch((error) => error));
+
+      assert.match(String(cause), /replay aborted/i);
+    }),
+  );
+
+  it.effect("rejects delayed and claimed responses after replay abort", () =>
+    Effect.gen(function* () {
+      const controller = new OpenCode2ReplayController(
+        transcript([
+          {
+            type: "emit_inbound",
+            frame: {
+              type: "sdk.response",
+              operation: "session.get",
+              data: { id: "never-delivered" },
+            },
+            afterMs: 60_000,
+          },
+        ]),
+      );
+      const delayed = controller.response("session.get");
+      const claimed = controller.response("session.get");
+
+      controller.abort();
+      const results = yield* Effect.promise(() => Promise.allSettled([delayed, claimed]));
+
+      assert.strictEqual(results[0]?.status, "rejected");
+      assert.strictEqual(results[1]?.status, "rejected");
+    }),
+  );
+
   it.effect("routes every adapter replay client operation through the transcript", () =>
     Effect.gen(function* () {
       const agentInput = { location: { directory: "/workspace" } };
