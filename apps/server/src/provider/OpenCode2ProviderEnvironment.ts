@@ -37,14 +37,36 @@ const OPENCODE2_SESSION_TABLES = [
  * a live `opencode.db` with a desktop `opencode2 serve --service`. Host auth is
  * bridged in: next-line stores provider credentials in the sqlite `credential`
  * table (not only auth.json), and without that seed only free models appear.
+ *
+ * When `instanceId` and `environmentIdentity` are provided, the root is stable
+ * per T3 environment + provider instance so neither separate servers nor
+ * multi-instance configurations share a live sqlite or password dir.
  */
-export function openCode2ManagedStateRoot(environment: NodeJS.ProcessEnv = process.env): string {
+export function openCode2ManagedStateRoot(
+  environment: NodeJS.ProcessEnv = process.env,
+  instanceId?: string,
+  environmentIdentity?: string,
+): string {
   const home = environment.HOME?.trim() || NodeOS.homedir();
-  const userKey = NodeCrypto.createHash("sha256").update(home).digest("hex").slice(0, 12);
+  const trimmedInstance = instanceId?.trim();
+  const trimmedEnvironmentIdentity = environmentIdentity?.trim();
+  const identity = [
+    home,
+    ...(trimmedEnvironmentIdentity === undefined || trimmedEnvironmentIdentity.length === 0
+      ? []
+      : [NodePath.resolve(trimmedEnvironmentIdentity)]),
+    ...(trimmedInstance === undefined || trimmedInstance.length === 0 ? [] : [trimmedInstance]),
+  ].join("\0");
+  const userKey = NodeCrypto.createHash("sha256").update(identity).digest("hex").slice(0, 12);
   return NodePath.join(
     environment.TMPDIR?.trim() || NodeOS.tmpdir(),
     `t3-opencode2-state-${userKey}`,
   );
+}
+
+/** Prior per-user root (home only). Used once when migrating to instance scope. */
+function previousPerUserManagedStateRoot(environment: NodeJS.ProcessEnv = process.env): string {
+  return openCode2ManagedStateRoot(environment);
 }
 
 function legacyOpenCode2ManagedStateRoot(environment: NodeJS.ProcessEnv = process.env): string {
@@ -73,6 +95,48 @@ function isOwnedDirectory(stat: NodeFS.Stats): boolean {
 }
 
 /**
+ * Set 0700 on a directory via fd when POSIX flags are available so a
+ * pathname symlink swap between lstat and chmod cannot redirect the mode
+ * change. Does not protect later pathname use of the same path.
+ */
+function setManagedDirectoryMode(path: string): boolean {
+  const { O_DIRECTORY, O_NOFOLLOW, O_RDONLY } = NodeFS.constants;
+  const supportsNoFollowDirectory =
+    typeof O_DIRECTORY === "number" &&
+    typeof O_NOFOLLOW === "number" &&
+    typeof NodeFS.fchmodSync === "function" &&
+    typeof NodeFS.fstatSync === "function";
+
+  if (!supportsNoFollowDirectory) {
+    try {
+      NodeFS.chmodSync(path, 0o700);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  let fd: number | undefined;
+  try {
+    fd = NodeFS.openSync(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    const stat = NodeFS.fstatSync(fd);
+    if (!isOwnedDirectory(stat)) return false;
+    NodeFS.fchmodSync(fd, 0o700);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        NodeFS.closeSync(fd);
+      } catch {
+        // Best-effort close.
+      }
+    }
+  }
+}
+
+/**
  * Create or validate a directory that T3 writes to. `lstat` is intentional:
  * following a pre-existing symlink here would let a different local process
  * redirect provider credentials outside the managed tree.
@@ -81,12 +145,7 @@ function ensureManagedDirectory(path: string): boolean {
   try {
     const existing = NodeFS.lstatSync(path);
     if (!isOwnedDirectory(existing)) return false;
-    try {
-      NodeFS.chmodSync(path, 0o700);
-    } catch {
-      return false;
-    }
-    return true;
+    return setManagedDirectoryMode(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
   }
@@ -95,29 +154,63 @@ function ensureManagedDirectory(path: string): boolean {
     NodeFS.mkdirSync(path, { recursive: true, mode: 0o700 });
     const created = NodeFS.lstatSync(path);
     if (!isOwnedDirectory(created)) return false;
-    NodeFS.chmodSync(path, 0o700);
-    return true;
+    return setManagedDirectoryMode(path);
   } catch {
     return false;
   }
 }
 
-function migrateLegacyManagedStateRoot(stateRoot: string, environment: NodeJS.ProcessEnv): void {
+function tryAdoptManagedStateRoot(sourceRoot: string, stateRoot: string): void {
+  if (sourceRoot === stateRoot) return;
   if (managedFileState(stateRoot) !== "missing") return;
-  const legacyRoot = legacyOpenCode2ManagedStateRoot(environment);
-  if (legacyRoot === stateRoot) return;
-  let legacy: NodeFS.Stats;
+  let source: NodeFS.Stats;
   try {
-    legacy = NodeFS.lstatSync(legacyRoot);
+    source = NodeFS.lstatSync(sourceRoot);
   } catch {
     return;
   }
-  if (!isOwnedDirectory(legacy)) return;
+  if (!isOwnedDirectory(source)) return;
   try {
-    NodeFS.chmodSync(legacyRoot, 0o700);
-    NodeFS.renameSync(legacyRoot, stateRoot);
+    if (!setManagedDirectoryMode(sourceRoot)) return;
+    NodeFS.renameSync(sourceRoot, stateRoot);
   } catch {
     // Another provider startup may have adopted or created the target first.
+  }
+}
+
+function migrateManagedStateRoot(
+  stateRoot: string,
+  environment: NodeJS.ProcessEnv,
+  instanceId?: string,
+  environmentIdentity?: string,
+): void {
+  if (managedFileState(stateRoot) !== "missing") return;
+
+  const home = environment.HOME?.trim() || NodeOS.homedir();
+  const trimmedEnvironmentIdentity = environmentIdentity?.trim();
+  const canAdoptGlobalRoot =
+    trimmedEnvironmentIdentity === undefined ||
+    trimmedEnvironmentIdentity.length === 0 ||
+    NodePath.resolve(trimmedEnvironmentIdentity) === NodePath.resolve(home, ".t3", "userdata");
+
+  const trimmedInstance = instanceId?.trim();
+  if (canAdoptGlobalRoot && trimmedInstance !== undefined && trimmedInstance.length > 0) {
+    if (trimmedEnvironmentIdentity !== undefined && trimmedEnvironmentIdentity.length > 0) {
+      // Adopt the pre-environment-identity instance root only for the default
+      // T3 home. A worktree or custom server must never steal live native
+      // sessions from the user's primary environment.
+      tryAdoptManagedStateRoot(openCode2ManagedStateRoot(environment, instanceId), stateRoot);
+      if (managedFileState(stateRoot) !== "missing") return;
+    }
+    // Adopt the previous per-user root once so existing native sessions survive
+    // the move to instance-scoped layout. Later instances seed isolated roots.
+    tryAdoptManagedStateRoot(previousPerUserManagedStateRoot(environment), stateRoot);
+    if (managedFileState(stateRoot) !== "missing") return;
+  }
+
+  // Still-older unkeyed legacy root.
+  if (canAdoptGlobalRoot) {
+    tryAdoptManagedStateRoot(legacyOpenCode2ManagedStateRoot(environment), stateRoot);
   }
 }
 
@@ -199,6 +292,140 @@ function copyManagedFile(source: string, target: string): void {
   }
 }
 
+function unlinkQuietly(path: string): void {
+  try {
+    NodeFS.unlinkSync(path);
+  } catch {
+    // Best-effort cleanup.
+  }
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+const MANAGED_DATABASE_TEMP_SUFFIXES = ["", "-journal", "-shm", "-wal"] as const;
+
+function cleanupManagedDatabaseTemp(temporary: string): void {
+  for (const suffix of MANAGED_DATABASE_TEMP_SUFFIXES) {
+    unlinkQuietly(`${temporary}${suffix}`);
+  }
+}
+
+function cleanupStaleManagedDatabaseTemps(managedOpenCode: string): void {
+  let names: ReadonlyArray<string>;
+  try {
+    names = NodeFS.readdirSync(managedOpenCode);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const match = /^opencode\.db\.(\d+)\.[0-9a-f]{16}\.tmp(?:-(?:journal|shm|wal))?$/.exec(name);
+    if (match === null) continue;
+    const pid = Number(match[1]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || processExists(pid)) continue;
+    const path = NodePath.join(managedOpenCode, name);
+    if (managedFileState(path) === "safe") unlinkQuietly(path);
+  }
+}
+
+/**
+ * Publish a fully prepared temporary managed database without overwriting an
+ * existing valid final path. A leftover temp must never count as initialized.
+ */
+function publishManagedDatabase(temporary: string, managedDb: string): boolean {
+  const lockPath = `${managedDb}.publish.lock`;
+  let lock: NodeSqlite.DatabaseSync | undefined;
+  try {
+    lock = new NodeSqlite.DatabaseSync(lockPath);
+    NodeFS.chmodSync(lockPath, 0o600);
+    lock.exec("PRAGMA busy_timeout = 30000; BEGIN EXCLUSIVE");
+  } catch {
+    lock?.close();
+    return false;
+  }
+  const publicationLock = lock;
+  try {
+    const finalState = managedFileState(managedDb);
+    if (finalState !== "missing") return false;
+    try {
+      // Hard-link is atomic and fails with EEXIST when the final path is taken.
+      NodeFS.linkSync(temporary, managedDb);
+      unlinkQuietly(temporary);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      // The exclusive sibling lock serializes this module's publishers, so a
+      // same-directory rename is a portable atomic fallback on filesystems
+      // that do not support hard links.
+      if (managedFileState(managedDb) !== "missing") return false;
+      NodeFS.renameSync(temporary, managedDb);
+    }
+    return managedFileState(managedDb) === "safe";
+  } finally {
+    try {
+      publicationLock.exec("COMMIT");
+    } catch {
+      try {
+        publicationLock.exec("ROLLBACK");
+      } catch {
+        // Preserve the publication result or failure.
+      }
+    } finally {
+      publicationLock.close();
+    }
+  }
+}
+
+function pruneManagedDatabaseSessions(dbPath: string): void {
+  const db = new NodeSqlite.DatabaseSync(dbPath);
+  try {
+    const existingTables = new Set(
+      (
+        db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
+          readonly name: string;
+        }>
+      ).map((row) => row.name),
+    );
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const table of OPENCODE2_SESSION_TABLES) {
+        if (!existingTables.has(table)) continue;
+        db.exec(`DELETE FROM ${table}`);
+      }
+      for (const table of OPENCODE2_SESSION_TABLES) {
+        if (!existingTables.has(table)) continue;
+        const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as
+          | { readonly count: number | bigint }
+          | undefined;
+        if (Number(row?.count ?? -1) !== 0) {
+          throw new Error(`OpenCode 2 session table was not fully pruned: ${table}`);
+        }
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original pruning failure.
+      }
+      throw error;
+    }
+    db.exec("VACUUM");
+  } finally {
+    db.close();
+  }
+  try {
+    NodeFS.chmodSync(dbPath, 0o600);
+  } catch {
+    // Best-effort privacy mode.
+  }
+}
+
 /**
  * Copy host auth files and seed a private DB copy that retains credentials but
  * drops host sessions. Safe to call repeatedly: existing managed DB is kept.
@@ -216,6 +443,7 @@ export function seedOpenCode2ManagedDataHome(
   if (!ensureManagedDirectory(managedDataHome) || !ensureManagedDirectory(managedOpenCode)) {
     return;
   }
+  cleanupStaleManagedDatabaseTemps(managedOpenCode);
 
   for (const name of OPENCODE2_AUTH_FILES) {
     const source = NodePath.join(hostOpenCode, name);
@@ -246,32 +474,29 @@ export function seedOpenCode2ManagedDataHome(
 
   try {
     if (managedState === "missing") {
-      // First managed spawn: take a transactionally consistent host snapshot
-      // (VACUUM INTO, not a live main-db file copy without WAL companions),
-      // then prune sessions so we keep credentials without replaying host chats.
-      const hostSnapshot = new NodeSqlite.DatabaseSync(hostDb, { readOnly: true });
+      // First managed spawn: build, prune, and chmod a unique sibling temporary
+      // DB, then atomically publish it. An interrupted process must never leave
+      // an unpruned host chat snapshot at the final path.
+      const temporary = `${managedDb}.${process.pid}.${NodeCrypto.randomBytes(8).toString("hex")}.tmp`;
       try {
-        hostSnapshot.exec(`VACUUM INTO ${sqlQuoteLiteral(managedDb)}`);
-      } finally {
-        hostSnapshot.close();
-      }
-      managedFileState(managedDb);
-      const db = new NodeSqlite.DatabaseSync(managedDb);
-      try {
-        for (const table of OPENCODE2_SESSION_TABLES) {
-          try {
-            db.exec(`DELETE FROM ${table}`);
-          } catch {
-            // Table may not exist on older schemas.
-          }
-        }
+        const hostSnapshot = new NodeSqlite.DatabaseSync(hostDb, { readOnly: true });
         try {
-          db.exec("VACUUM");
-        } catch {
-          // Optional.
+          hostSnapshot.exec(`VACUUM INTO ${sqlQuoteLiteral(temporary)}`);
+        } finally {
+          hostSnapshot.close();
         }
+        if (managedFileState(temporary) !== "safe") {
+          unlinkQuietly(temporary);
+          return;
+        }
+        pruneManagedDatabaseSessions(temporary);
+        if (managedFileState(temporary) !== "safe") {
+          unlinkQuietly(temporary);
+          return;
+        }
+        publishManagedDatabase(temporary, managedDb);
       } finally {
-        db.close();
+        cleanupManagedDatabaseTemp(temporary);
       }
       return;
     }
@@ -320,14 +545,20 @@ export function seedOpenCode2ManagedDataHome(
 export function applyOpenCode2ProviderEnvironment(
   settings: Pick<OpenCode2Settings, "backgroundSubagents" | "serverUrl">,
   environment: NodeJS.ProcessEnv,
+  instanceId?: string,
+  environmentIdentity?: string,
 ): NodeJS.ProcessEnv {
   if (settings.serverUrl.trim().length > 0) {
     return environment;
   }
 
   const hostDataHome = openCode2HostDataHome(environment);
-  const preferredStateRoot = openCode2ManagedStateRoot(environment);
-  migrateLegacyManagedStateRoot(preferredStateRoot, environment);
+  const preferredStateRoot = openCode2ManagedStateRoot(
+    environment,
+    instanceId,
+    environmentIdentity,
+  );
+  migrateManagedStateRoot(preferredStateRoot, environment, instanceId, environmentIdentity);
   const preferredHomes = prepareManagedStateRoot(preferredStateRoot);
   const stateRoot =
     preferredHomes === undefined
