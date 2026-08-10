@@ -4,12 +4,14 @@ import type {
   OrchestrationV2ProjectedTurnItem,
   OrchestrationV2ProviderSession,
   OrchestrationV2Run,
+  OrchestrationV2RunAttempt,
   OrchestrationV2ShellThreadStatus,
   OrchestrationV2Subagent,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadShell,
   OrchestrationV2ThreadShellSnapshot,
   OrchestrationV2TurnItem,
+  OrchestrationV2UserMessageInputIntent,
   ProviderSessionId,
 } from "@t3tools/contracts";
 import {
@@ -704,6 +706,87 @@ function inheritedVisibleTurnItemsFromLocalItems(
   }));
 }
 
+type ForkPrefixTurnItem = Pick<OrchestrationV2TurnItem, "type" | "runId" | "nodeId"> & {
+  readonly inputIntent?: OrchestrationV2UserMessageInputIntent;
+};
+
+export function isTurnItemVisibleInForkPrefix(input: {
+  readonly item: ForkPrefixTurnItem;
+  readonly runs: ReadonlyArray<Pick<OrchestrationV2Run, "id" | "status">>;
+  readonly attempts: ReadonlyArray<
+    Pick<OrchestrationV2RunAttempt, "runId" | "rootNodeId" | "status">
+  >;
+  readonly items: ReadonlyArray<ForkPrefixTurnItem>;
+}): boolean {
+  const { item } = input;
+  if (
+    item.type === "user_message" &&
+    item.inputIntent === "queued_turn" &&
+    item.runId !== null &&
+    input.runs.some((run) => run.id === item.runId && run.status === "cancelled")
+  ) {
+    return false;
+  }
+
+  return !isOrchestrationV2SupersededInterrupt(input);
+}
+
+/**
+ * Memory equivalent of the SQL thread-scoped retained-session filter.
+ * Matches current bindings plus historical provider-thread ownership through the
+ * app thread, owner-node, or subagent provider-thread relation.
+ */
+export function isRetainedProviderSessionRelatedToThread(input: {
+  readonly replayState: ProjectionReplayState;
+  readonly threadId: ThreadId;
+  readonly providerSessionId: ProviderSessionId;
+}): boolean {
+  const { replayState, threadId, providerSessionId } = input;
+  const boundThreadIds = replayState.providerSessionThreadIds.get(providerSessionId);
+  if (boundThreadIds?.has(threadId) === true) {
+    return true;
+  }
+
+  const projection = replayState.projections.get(threadId);
+  if (projection === undefined) {
+    return false;
+  }
+
+  if (
+    projection.providerThreads.some(
+      (providerThread) => providerThread.providerSessionId === providerSessionId,
+    )
+  ) {
+    return true;
+  }
+
+  const nodeIds = new Set(projection.nodes.map((node) => node.id));
+  const subagentProviderThreadIds = new Set(
+    projection.subagents.flatMap((subagent) =>
+      subagent.providerThreadId === null ? [] : [subagent.providerThreadId],
+    ),
+  );
+
+  for (const candidate of replayState.projections.values()) {
+    for (const providerThread of candidate.providerThreads) {
+      if (providerThread.providerSessionId !== providerSessionId) {
+        continue;
+      }
+      if (providerThread.appThreadId === threadId) {
+        return true;
+      }
+      if (providerThread.ownerNodeId !== null && nodeIds.has(providerThread.ownerNodeId)) {
+        return true;
+      }
+      if (subagentProviderThreadIds.has(providerThread.id)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function withLocalVisibleTurnItems(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadProjection {
@@ -781,8 +864,9 @@ function visibleTurnItemsThroughRun(input: {
   const localPrefix = inheritedVisibleTurnItemsFromLocalItems(
     input.sourceProjection.turnItems.filter((item) => {
       if (
-        isOrchestrationV2SupersededInterrupt({
+        !isTurnItemVisibleInForkPrefix({
           item,
+          runs: input.sourceProjection.runs,
           attempts: input.sourceProjection.attempts,
           items: input.sourceProjection.turnItems,
         })
@@ -2816,10 +2900,37 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           return [];
         }
         const rows = yield* sql<PayloadRow>`
-          SELECT payload_json
-          FROM orchestration_v2_projection_provider_sessions
-          WHERE provider_session_id IN ${sql.in(providerSessionIds)}
-          ORDER BY updated_at ASC, provider_session_id ASC
+          SELECT sessions.payload_json
+          FROM orchestration_v2_projection_provider_sessions sessions
+          WHERE sessions.provider_session_id IN ${sql.in(providerSessionIds)}
+            AND (
+              EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_session_bindings binding
+                WHERE binding.provider_session_id = sessions.provider_session_id
+                  AND binding.thread_id = ${threadId}
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_threads provider_thread
+                WHERE provider_thread.provider_session_id = sessions.provider_session_id
+                  AND (
+                    provider_thread.thread_id = ${threadId}
+                    OR provider_thread.owner_node_id IN (
+                      SELECT node_id
+                      FROM orchestration_v2_projection_nodes
+                      WHERE thread_id = ${threadId}
+                    )
+                    OR provider_thread.provider_thread_id IN (
+                      SELECT provider_thread_id
+                      FROM orchestration_v2_projection_subagents
+                      WHERE thread_id = ${threadId}
+                        AND provider_thread_id IS NOT NULL
+                    )
+                  )
+              )
+            )
+          ORDER BY sessions.updated_at ASC, sessions.provider_session_id ASC
         `;
         const sessions: Array<OrchestrationV2ProviderSession> = [];
         for (const row of rows) {
@@ -2847,131 +2958,160 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
   }),
 );
 
-export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
-  ProjectionStoreV2,
-  Effect.gen(function* () {
-    const replayState = yield* Ref.make(makeProjectionReplayState());
-    const sequence = yield* Ref.make(0);
+function readProjectionFromReplayState(
+  replayState: ProjectionReplayState,
+  threadId: ThreadId,
+): OrchestrationV2ThreadProjection | null {
+  const readProjection = (
+    targetThreadId: ThreadId,
+    seenThreadIds: ReadonlySet<ThreadId>,
+  ): OrchestrationV2ThreadProjection | null => {
+    const projection = replayState.projections.get(targetThreadId);
+    if (!projection) {
+      return null;
+    }
+    const forkedFrom = projection.thread.forkedFrom;
+    if (forkedFrom?.type !== "run" || seenThreadIds.has(forkedFrom.threadId)) {
+      return withLocalVisibleTurnItems(projection);
+    }
+    const sourceProjection = readProjection(
+      forkedFrom.threadId,
+      new Set([...seenThreadIds, targetThreadId]),
+    );
+    return {
+      ...projection,
+      visibleTurnItems: buildVisibleTurnItems({
+        projection,
+        sourceProjection,
+      }),
+    };
+  };
 
-    const service: ProjectionStoreV2Shape = {
-      apply: (event) =>
-        Effect.gen(function* () {
-          const result = yield* Ref.modify(replayState, (existing) => {
-            const next: ProjectionReplayState = {
-              projections: new Map(existing.projections),
-              providerSessionThreadIds: new Map(existing.providerSessionThreadIds),
-              retainedProviderSessions: new Map(existing.retainedProviderSessions),
-            };
-            if (!applyToProjectionReplayState(next, event)) {
-              return [
-                new ProjectionStoreThreadNotFoundError({ threadId: event.threadId }),
-                existing,
-              ] as const;
+  return readProjection(threadId, new Set());
+}
+
+export interface ProjectionStoreMemoryLayerOptions {
+  /** Test hook that parks a snapshot after its atomically versioned state read. */
+  readonly afterSnapshotStateRead?: Effect.Effect<void>;
+}
+
+export const layerMemoryWithOptions = (
+  options: ProjectionStoreMemoryLayerOptions = {},
+): Layer.Layer<ProjectionStoreV2> =>
+  Layer.effect(
+    ProjectionStoreV2,
+    Effect.gen(function* () {
+      const state = yield* Ref.make({ replayState: makeProjectionReplayState(), sequence: 0 });
+      const readSnapshotState = Ref.get(state).pipe(
+        Effect.tap(() => options.afterSnapshotStateRead ?? Effect.void),
+      );
+
+      const service: ProjectionStoreV2Shape = {
+        apply: (event) =>
+          Effect.gen(function* () {
+            const result = yield* Ref.modify(state, (existing) => {
+              const replayState = existing.replayState;
+              const next: ProjectionReplayState = {
+                projections: new Map(replayState.projections),
+                providerSessionThreadIds: new Map(replayState.providerSessionThreadIds),
+                retainedProviderSessions: new Map(replayState.retainedProviderSessions),
+              };
+              if (!applyToProjectionReplayState(next, event)) {
+                return [
+                  new ProjectionStoreThreadNotFoundError({ threadId: event.threadId }),
+                  existing,
+                ] as const;
+              }
+              return [undefined, { replayState: next, sequence: existing.sequence + 1 }] as const;
+            });
+
+            if (result) {
+              return yield* result;
             }
-            return [undefined, next] as const;
-          });
-
-          if (result) {
-            return yield* result;
-          }
-          yield* Ref.update(sequence, (current) => current + 1);
-        }),
-      getShellSnapshot: (options) =>
-        Effect.gen(function* () {
-          const existing = (yield* Ref.get(replayState)).projections;
-          const selectedThreadIds = [...existing.entries()]
-            .filter(([, projection]) => {
-              if (options?.location === "active") return projection.thread.archivedAt === null;
-              if (options?.location === "archive") return projection.thread.archivedAt !== null;
-              return true;
-            })
-            .map(([threadId]) => threadId);
-          const shells = yield* Effect.forEach(
-            selectedThreadIds.toSorted((left, right) => String(left).localeCompare(String(right))),
-            (threadId) =>
-              service.getThreadProjection(threadId).pipe(Effect.map(threadShellFromProjection)),
-          );
-          const visible = shells.filter((thread) => thread.deletedAt === null);
-          return {
-            schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
-            snapshotSequence: yield* Ref.get(sequence),
-            threads: visible.filter((thread) => thread.archivedAt === null),
-            archivedThreads: visible.filter((thread) => thread.archivedAt !== null),
-          };
-        }),
-      getThreadShell: (threadId) =>
-        Effect.gen(function* () {
-          const existing = (yield* Ref.get(replayState)).projections;
-          if (!existing.has(threadId)) {
-            return null;
-          }
-          const shell = yield* service
-            .getThreadProjection(threadId)
-            .pipe(Effect.map(threadShellFromProjection));
-          return shell.deletedAt === null ? shell : null;
-        }),
-      getThreadProjection: (threadId) =>
-        Effect.gen(function* () {
-          const existing = (yield* Ref.get(replayState)).projections;
-          const readProjection = (
-            targetThreadId: ThreadId,
-            seenThreadIds: ReadonlySet<ThreadId>,
-          ): OrchestrationV2ThreadProjection | null => {
-            const projection = existing.get(targetThreadId);
-            if (!projection) {
+          }),
+        getShellSnapshot: (options) =>
+          Effect.gen(function* () {
+            const existing = yield* readSnapshotState;
+            const shells = [...existing.replayState.projections.entries()]
+              .filter(([, projection]) => {
+                if (options?.location === "active") return projection.thread.archivedAt === null;
+                if (options?.location === "archive") return projection.thread.archivedAt !== null;
+                return true;
+              })
+              .map(([threadId]) => threadId)
+              .toSorted((left, right) => String(left).localeCompare(String(right)))
+              .flatMap((threadId) => {
+                const projection = readProjectionFromReplayState(existing.replayState, threadId);
+                return projection === null ? [] : [threadShellFromProjection(projection)];
+              });
+            const visible = shells.filter((thread) => thread.deletedAt === null);
+            return {
+              schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
+              snapshotSequence: existing.sequence,
+              threads: visible.filter((thread) => thread.archivedAt === null),
+              archivedThreads: visible.filter((thread) => thread.archivedAt !== null),
+            };
+          }),
+        getThreadShell: (threadId) =>
+          Effect.gen(function* () {
+            const existing = (yield* Ref.get(state)).replayState;
+            const projection = readProjectionFromReplayState(existing, threadId);
+            if (projection === null) {
               return null;
             }
-            const forkedFrom = projection.thread.forkedFrom;
-            if (forkedFrom?.type !== "run" || seenThreadIds.has(forkedFrom.threadId)) {
-              return withLocalVisibleTurnItems(projection);
+            const shell = threadShellFromProjection(projection);
+            return shell.deletedAt === null ? shell : null;
+          }),
+        getThreadProjection: (threadId) =>
+          Effect.gen(function* () {
+            const existing = (yield* Ref.get(state)).replayState;
+            const projection = readProjectionFromReplayState(existing, threadId);
+            if (!projection) {
+              return yield* new ProjectionStoreThreadNotFoundError({ threadId });
             }
-            const sourceProjection = readProjection(
-              forkedFrom.threadId,
-              new Set([...seenThreadIds, targetThreadId]),
-            );
+            return projection;
+          }),
+        getThreadSnapshot: (threadId) =>
+          Effect.gen(function* () {
+            const existing = yield* readSnapshotState;
+            const projection = readProjectionFromReplayState(existing.replayState, threadId);
+            if (!projection) {
+              return yield* new ProjectionStoreThreadNotFoundError({ threadId });
+            }
             return {
-              ...projection,
-              visibleTurnItems: buildVisibleTurnItems({
-                projection,
-                sourceProjection,
-              }),
+              schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
+              snapshotSequence: existing.sequence,
+              projection,
             };
-          };
-          const projection = readProjection(threadId, new Set());
-          if (!projection) {
-            return yield* new ProjectionStoreThreadNotFoundError({ threadId });
-          }
-          return projection;
-        }),
-      getThreadSnapshot: (threadId) =>
-        service.getThreadProjection(threadId).pipe(
-          Effect.flatMap((projection) =>
-            Ref.get(sequence).pipe(
-              Effect.map((snapshotSequence) => ({
-                schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
-                snapshotSequence,
-                projection,
-              })),
-            ),
-          ),
-        ),
-      getProviderSessionsByIds: (_threadId, providerSessionIds) =>
-        Effect.gen(function* () {
-          if (providerSessionIds.length === 0) {
-            return [];
-          }
-          const retained = (yield* Ref.get(replayState)).retainedProviderSessions;
-          const wanted = new Set(providerSessionIds);
-          return [...retained.values()]
-            .filter((session) => wanted.has(session.id))
-            .toSorted(
-              (left, right) =>
-                DateTime.toEpochMillis(left.updatedAt) - DateTime.toEpochMillis(right.updatedAt) ||
-                String(left.id).localeCompare(String(right.id)),
-            );
-        }),
-    };
+          }),
+        getProviderSessionsByIds: (threadId, providerSessionIds) =>
+          Effect.gen(function* () {
+            if (providerSessionIds.length === 0) {
+              return [];
+            }
+            const replayState = (yield* Ref.get(state)).replayState;
+            const wanted = new Set(providerSessionIds);
+            return [...replayState.retainedProviderSessions.values()]
+              .filter(
+                (session) =>
+                  wanted.has(session.id) &&
+                  isRetainedProviderSessionRelatedToThread({
+                    replayState,
+                    threadId,
+                    providerSessionId: session.id,
+                  }),
+              )
+              .toSorted(
+                (left, right) =>
+                  DateTime.toEpochMillis(left.updatedAt) -
+                    DateTime.toEpochMillis(right.updatedAt) ||
+                  String(left.id).localeCompare(String(right.id)),
+              );
+          }),
+      };
 
-    return service;
-  }),
-);
+      return service;
+    }),
+  );
+
+export const layerMemory: Layer.Layer<ProjectionStoreV2> = layerMemoryWithOptions();

@@ -511,6 +511,10 @@ function makeTestLayer(input: {
     runtime: ProviderAdapterV2SessionRuntime,
   ) => Effect.Effect<void>;
   readonly beforeRuntimeOperationIdleRearm?: Effect.Effect<void>;
+  readonly afterIdleScheduleReservation?: (input: {
+    readonly providerSessionId: ProviderSessionId;
+    readonly generation: number;
+  }) => Effect.Effect<void>;
   readonly beforeStaleArchiveRestore?: Effect.Effect<void>;
   readonly afterEntryCommit?: Effect.Effect<void>;
   readonly beforeReuseActivity?: Effect.Effect<void>;
@@ -633,6 +637,9 @@ function makeTestLayer(input: {
       ...(input.beforeRuntimeOperationIdleRearm === undefined
         ? {}
         : { beforeRuntimeOperationIdleRearm: input.beforeRuntimeOperationIdleRearm }),
+      ...(input.afterIdleScheduleReservation === undefined
+        ? {}
+        : { afterIdleScheduleReservation: input.afterIdleScheduleReservation }),
       ...(input.beforeStaleArchiveRestore === undefined
         ? {}
         : { beforeStaleArchiveRestore: input.beforeStaleArchiveRestore }),
@@ -1331,6 +1338,72 @@ it.effect("ProviderSessionManagerV2 preserves a reused MCP credential when reatt
             threadId,
             capturedConfig: failedAttachConfig,
             enabled: failNextAttach,
+          },
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 does not call the provider when thread attachment fails", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const failedAttachConfig = yield* Ref.make<
+      McpProviderSession.McpProviderSessionConfig | undefined
+    >(undefined);
+    const nativeEnsureCalled = yield* Ref.make(false);
+    const ensuredProviderThread = yield* Deferred.make<OrchestrationV2ProviderThread>();
+    const firstThreadId = ThreadId.make("thread-provider-session-manager-required-attach-owner");
+    const secondThreadId = ThreadId.make("thread-provider-session-manager-required-attach-fail");
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSinkV2;
+      const idAllocator = yield* IdAllocatorV2;
+      const manager = yield* ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: firstThreadId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator,
+        threadId: secondThreadId,
+        providerSessionId,
+        now,
+      });
+      yield* Deferred.succeed(ensuredProviderThread, providerThread);
+
+      yield* eventSink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: firstThreadId, now }),
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: secondThreadId, now }),
+        ],
+      });
+      const runtime = yield* manager.open({
+        threadId: firstThreadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+
+      const error = yield* runtime
+        .ensureThread({ threadId: secondThreadId, modelSelection, runtimePolicy })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ProviderAdapterProtocolError");
+      assert.isFalse(yield* Ref.get(nativeEnsureCalled));
+      assert.isUndefined(McpProviderSession.readMcpProviderSession(secondThreadId));
+      assert.deepEqual(yield* manager.listAttached(secondThreadId), []);
+    });
+
+    yield* effect.pipe(
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 60_000,
+          ensuredProviderThread: Deferred.await(ensuredProviderThread),
+          beforeEnsureThread: Ref.set(nativeEnsureCalled, true),
+          failAttachedThread: {
+            threadId: secondThreadId,
+            capturedConfig: failedAttachConfig,
           },
         }),
       ),
@@ -3830,6 +3903,109 @@ it.effect(
         ),
       );
     }),
+);
+
+it.effect("ProviderSessionManagerV2 cannot install an older overlapping idle schedule", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const raceArmed = yield* Ref.make(false);
+    const parkFirstReservation = yield* Ref.make(true);
+    const firstReservation = yield* Deferred.make<void>();
+    const continueFirstReservation = yield* Deferred.make<void>();
+    const generations = yield* Ref.make<ReadonlyArray<number>>([]);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSinkV2;
+      const idAllocator = yield* IdAllocatorV2;
+      const manager = yield* ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "provider-session-manager-overlapping-idle-schedule",
+        projectId: yield* idAllocator.allocate.project({
+          fixtureName: "provider-session-manager-overlapping-idle-schedule",
+        }),
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+      const steerInput = {
+        threadId,
+        runId,
+        providerThread,
+        providerTurnId: ProviderTurnId.make("provider-turn:overlapping-idle-schedule"),
+        message: {
+          createdBy: "user" as const,
+          creationSource: "web" as const,
+          messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+          text: "continue",
+          attachments: [],
+        },
+      };
+
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* Ref.set(raceArmed, true);
+
+      const firstSteer = yield* runtime.steerTurn(steerInput).pipe(Effect.forkScoped);
+      yield* Deferred.await(firstReservation);
+      yield* TestClock.adjust("900 millis");
+      yield* runtime.steerTurn(steerInput);
+      yield* Deferred.succeed(continueFirstReservation, undefined);
+      yield* Fiber.join(firstSteer);
+
+      const reserved = yield* Ref.get(generations);
+      assert.isAtLeast(reserved.length, 3);
+      assert.deepEqual(
+        reserved,
+        reserved.toSorted((left, right) => left - right),
+      );
+      assert.equal(new Set(reserved).size, reserved.length);
+
+      yield* TestClock.adjust("100 millis");
+      yield* Effect.yieldNow;
+      assert.lengthOf(yield* manager.listAttached(threadId), 1);
+      assert.equal((yield* Ref.get(state)).closeCount, 0);
+
+      yield* TestClock.adjust("900 millis");
+      yield* Effect.yieldNow;
+      assert.lengthOf(yield* manager.listAttached(threadId), 0);
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+    });
+
+    yield* effect.pipe(
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 1000,
+          afterIdleScheduleReservation: ({ generation }) =>
+            Effect.gen(function* () {
+              if (!(yield* Ref.get(raceArmed))) {
+                return;
+              }
+              yield* Ref.update(generations, (current) => [...current, generation]);
+              if (yield* Ref.getAndSet(parkFirstReservation, false)) {
+                yield* Deferred.succeed(firstReservation, undefined);
+                yield* Deferred.await(continueFirstReservation);
+              }
+            }),
+        }),
+      ),
+    );
+  }),
 );
 
 it.effect("ProviderSessionManagerV2 releases the runtime on unobserved start interruption", () =>

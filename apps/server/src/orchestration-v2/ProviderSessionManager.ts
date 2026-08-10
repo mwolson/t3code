@@ -266,6 +266,11 @@ export interface ProviderSessionManagerV2LayerOptions {
   ) => Effect.Effect<void>;
   /** Test hook that parks operation completion before its idle generation is rearmed. */
   readonly beforeRuntimeOperationIdleRearm?: Effect.Effect<void>;
+  /** Test hook that parks an idle schedule after its generation is reserved. */
+  readonly afterIdleScheduleReservation?: (input: {
+    readonly providerSessionId: ProviderSessionId;
+    readonly generation: number;
+  }) => Effect.Effect<void>;
 }
 
 function releaseStatusFor(
@@ -1005,44 +1010,75 @@ export const layerWithOptions = (
         providerSessionId: ProviderSessionId,
         expectedRuntime?: ProviderAdapterV2SessionRuntime,
       ) =>
-        Effect.gen(function* () {
-          const key = sessionKey(providerSessionId);
-          const current = yield* Ref.get(sessions);
-          const entry = current.get(key);
-          if (
-            entry === undefined ||
-            entry.busyCount > 0 ||
-            (expectedRuntime !== undefined && entry.runtime !== expectedRuntime)
-          ) {
-            return;
-          }
-
-          yield* cancelIdleFiber(entry.idleFiber);
-          const generation = entry.idleGeneration + 1;
-          const idleFiber = yield* Effect.sleep(Duration.millis(idleTimeoutMs)).pipe(
-            Effect.andThen(releaseIfStillIdle({ providerSessionId, generation })),
-            Effect.forkIn(layerScope),
-          );
-          const lastActivityAtMs = yield* Clock.currentTimeMillis;
-          yield* Ref.update(sessions, (latest) => {
-            const latestEntry = latest.get(key);
-            if (
-              latestEntry === undefined ||
-              latestEntry.busyCount > 0 ||
-              (expectedRuntime !== undefined && latestEntry.runtime !== expectedRuntime)
-            ) {
-              return latest;
-            }
-            const updated = new Map(latest);
-            updated.set(key, {
-              ...latestEntry,
-              idleGeneration: generation,
-              idleFiber,
-              lastActivityAtMs,
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const key = sessionKey(providerSessionId);
+            const lastActivityAtMs = yield* Clock.currentTimeMillis;
+            const reservation = yield* Ref.modify(sessions, (current) => {
+              const entry = current.get(key);
+              if (
+                entry === undefined ||
+                entry.busyCount > 0 ||
+                (expectedRuntime !== undefined && entry.runtime !== expectedRuntime)
+              ) {
+                return [undefined, current] as const;
+              }
+              const generation = entry.idleGeneration + 1;
+              const updated = new Map(current);
+              updated.set(key, {
+                ...entry,
+                idleGeneration: generation,
+                idleFiber: null,
+                lastActivityAtMs,
+              });
+              return [
+                {
+                  generation,
+                  previousIdleFiber: entry.idleFiber,
+                  runtime: entry.runtime,
+                },
+                updated,
+              ] as const;
             });
-            return updated;
-          });
-        });
+            if (reservation === undefined) {
+              return;
+            }
+
+            yield* cancelIdleFiber(reservation.previousIdleFiber);
+            if (options.afterIdleScheduleReservation !== undefined) {
+              yield* options.afterIdleScheduleReservation({
+                providerSessionId,
+                generation: reservation.generation,
+              });
+            }
+            const idleFiber = yield* Effect.sleep(Duration.millis(idleTimeoutMs)).pipe(
+              Effect.andThen(
+                releaseIfStillIdle({
+                  providerSessionId,
+                  generation: reservation.generation,
+                }),
+              ),
+              Effect.forkIn(layerScope),
+            );
+            const installed = yield* Ref.modify(sessions, (latest) => {
+              const latestEntry = latest.get(key);
+              if (
+                latestEntry === undefined ||
+                latestEntry.busyCount > 0 ||
+                latestEntry.runtime !== reservation.runtime ||
+                latestEntry.idleGeneration !== reservation.generation
+              ) {
+                return [false, latest] as const;
+              }
+              const updated = new Map(latest);
+              updated.set(key, { ...latestEntry, idleFiber });
+              return [true, updated] as const;
+            });
+            if (!installed) {
+              yield* cancelIdleFiber(idleFiber);
+            }
+          }),
+        );
 
       const scheduleIdleRelease = (
         providerSessionId: ProviderSessionId,
@@ -1517,6 +1553,21 @@ export const layerWithOptions = (
       ): ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
         const subscribeEvents = makeEventSubscription(eventSubscribers);
+        const ensureThreadAttachment = (threadId: ThreadId) =>
+          ensureThreadAttached({
+            providerSessionId,
+            threadId,
+            providerInstanceId: runtime.instanceId,
+            runtime,
+          }).pipe(
+            Effect.mapError(
+              () =>
+                new ProviderAdapterProtocolError({
+                  driver: runtime.driver,
+                  detail: `Provider session ${providerSessionId} could not attach its application thread`,
+                }),
+            ),
+          );
         const ensureRuntimeStillActive = <A>(value: A) =>
           Ref.get(sessions).pipe(
             Effect.flatMap((current) =>
@@ -1569,15 +1620,7 @@ export const layerWithOptions = (
           ),
           ensureThread: (input) =>
             runOperation(
-              observeActivity(
-                providerSessionId,
-                ensureThreadAttached({
-                  providerSessionId,
-                  threadId: input.threadId,
-                  providerInstanceId: runtime.instanceId,
-                  runtime,
-                }),
-              ).pipe(
+              ensureThreadAttachment(input.threadId).pipe(
                 Effect.andThen(runtime.ensureThread(input)),
                 Effect.tap((providerThread) =>
                   markProviderThreadLoaded({
@@ -1607,15 +1650,7 @@ export const layerWithOptions = (
               ...(input.runtimePolicy === undefined ? {} : { runtimePolicy: input.runtimePolicy }),
             });
             return runOperation(
-              observeActivity(
-                providerSessionId,
-                ensureThreadAttached({
-                  providerSessionId,
-                  threadId,
-                  providerInstanceId: runtime.instanceId,
-                  runtime,
-                }),
-              ).pipe(
+              ensureThreadAttachment(threadId).pipe(
                 Effect.andThen(
                   isProviderThreadLoaded({
                     providerSessionId,
@@ -1651,15 +1686,7 @@ export const layerWithOptions = (
           },
           forkThread: (input) =>
             runOperation(
-              observeActivity(
-                providerSessionId,
-                ensureThreadAttached({
-                  providerSessionId,
-                  threadId: input.targetThreadId,
-                  providerInstanceId: runtime.instanceId,
-                  runtime,
-                }),
-              ).pipe(
+              ensureThreadAttachment(input.targetThreadId).pipe(
                 Effect.andThen(runtime.forkThread(input)),
                 Effect.tap((providerThread) =>
                   markProviderThreadLoaded({
@@ -1690,15 +1717,7 @@ export const layerWithOptions = (
                   updated.set(attemptKey, observed);
                   return updated;
                 });
-                return yield* observeActivity(
-                  providerSessionId,
-                  ensureThreadAttached({
-                    providerSessionId,
-                    threadId: input.threadId,
-                    providerInstanceId: runtime.instanceId,
-                    runtime,
-                  }),
-                ).pipe(
+                return yield* ensureThreadAttachment(input.threadId).pipe(
                   Effect.andThen(
                     Ref.update(busyStartAttempts, (current) => {
                       const updated = new Map(current);
