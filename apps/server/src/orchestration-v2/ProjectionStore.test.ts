@@ -24,7 +24,9 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import {
+  applyToProjectionReplayState,
   isTurnItemAtOrBeforeRun,
+  makeProjectionReplayState,
   ProjectionStoreV2,
   layer as projectionStoreLayer,
 } from "./ProjectionStore.ts";
@@ -88,6 +90,111 @@ it("includes imported runless history when selecting fork context through a run"
     }),
   );
 });
+
+it.effect("replay suppresses provider-session attachments to archived threads", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:projection-archived-session-attachment");
+    const projectId = ProjectId.make("project:projection-archived-session-attachment");
+    const providerSessionId = ProviderSessionId.make(
+      "provider-session:projection-archived-session-attachment",
+    );
+    const thread = {
+      createdBy: "user" as const,
+      creationSource: "web" as const,
+      id: threadId,
+      projectId,
+      title: "Archived session attachment",
+      providerInstanceId,
+      modelSelection,
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: {
+        parentThreadId: null,
+        relationshipToParent: null,
+        rootThreadId: threadId,
+      },
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      lastVisitedAt: null,
+      deletedAt: null,
+    };
+    const state = makeProjectionReplayState();
+    const providerSession = {
+      id: providerSessionId,
+      driver,
+      providerInstanceId,
+      status: "ready" as const,
+      cwd: "/workspace",
+      model: modelSelection.model,
+      capabilities: CodexProviderCapabilitiesV2,
+      createdAt: now,
+      updatedAt: now,
+      lastError: null,
+    };
+    assert.isTrue(
+      applyToProjectionReplayState(state, {
+        id: EventId.make("event:projection-archived-session-attachment:created"),
+        type: "thread.created",
+        threadId,
+        occurredAt: now,
+        payload: thread,
+      }),
+    );
+    assert.isTrue(
+      applyToProjectionReplayState(state, {
+        id: EventId.make("event:projection-archived-session-attachment:initial-attach"),
+        type: "provider-session.attached",
+        threadId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: providerSession,
+      }),
+    );
+    assert.isTrue(
+      applyToProjectionReplayState(state, {
+        id: EventId.make("event:projection-archived-session-attachment:archived"),
+        type: "thread.archived",
+        threadId,
+        occurredAt: now,
+        payload: { ...thread, archivedAt: now },
+      }),
+    );
+    assert.isTrue(
+      applyToProjectionReplayState(state, {
+        id: EventId.make("event:projection-archived-session-attachment:detached"),
+        type: "provider-session.detached",
+        threadId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: { providerSessionId, detachedAt: now },
+      }),
+    );
+    assert.isTrue(
+      applyToProjectionReplayState(state, {
+        id: EventId.make("event:projection-archived-session-attachment:attached"),
+        type: "provider-session.attached",
+        threadId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: { ...providerSession, status: "error", lastError: "stale" },
+      }),
+    );
+    assert.lengthOf(state.projections.get(threadId)?.providerSessions ?? [], 0);
+    assert.isUndefined(state.providerSessionThreadIds.get(providerSessionId));
+    assert.equal(state.retainedProviderSessions.get(providerSessionId)?.status, "ready");
+  }),
+);
 
 it.layer(TestLayer)("ProjectionStoreV2", (it) => {
   it.effect("preserves stored provider usage when a terminal update omits it", () =>
@@ -1298,6 +1405,31 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
       assert.lengthOf(
         (yield* projectionStore.getThreadProjection(secondThreadId)).providerSessions,
         1,
+      );
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-shared-provider-session:first-archived"),
+        type: "thread.archived",
+        threadId: firstThreadId,
+        occurredAt: now,
+        payload: { ...makeThread(firstThreadId), archivedAt: now },
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-shared-provider-session:first-stale-attach"),
+        type: "provider-session.attached",
+        threadId: firstThreadId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: { ...session, status: "ready", lastError: null },
+      });
+      assert.lengthOf(
+        (yield* projectionStore.getThreadProjection(firstThreadId)).providerSessions,
+        0,
+      );
+      assert.equal(
+        (yield* projectionStore.getThreadProjection(secondThreadId)).providerSessions[0]?.status,
+        "error",
       );
     }),
   );
