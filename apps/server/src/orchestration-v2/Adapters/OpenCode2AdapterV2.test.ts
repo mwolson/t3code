@@ -25,6 +25,7 @@ import { describe } from "vite-plus/test";
 import {
   openCode2AutoPermissionReply,
   openCode2ChildTurnItemOrdinals,
+  openCode2CleanEofResubscribeDelayMs,
   openCode2EnvironmentWithPermission,
   openCode2EnvironmentWithT3Mcp,
   openCode2EventEndsExecution,
@@ -51,6 +52,8 @@ import {
   openCode2ToolNeedsTerminalOverride,
   normalizeOpenCode2PermissionEvent,
   OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+  OPENCODE2_EVENT_PENDING_RESUBSCRIBE_DELAY_MS,
+  OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS,
   OPENCODE2_EVENT_STALL_MS,
   OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
   OPENCODE2_PROMOTED_INPUT_ID_LIMIT,
@@ -1100,7 +1103,7 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
     );
   });
 
-  it("quarantines a session only when the interrupt or shell removal is unconfirmed", () => {
+  it("quarantines an ambiguous interrupt or any force-finalized execution", () => {
     // Confirmed interrupt request and shells stopped: reusable.
     assert.isFalse(
       openCode2ShouldQuarantineInterruptedSession({
@@ -1131,6 +1134,15 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
         shellRemovalConfirmed: false,
       }),
     );
+    // Request acknowledgements are not an execution terminal. If the terminal
+    // never arrives before local force-finalization, the session is ambiguous.
+    assert.isTrue(
+      openCode2ShouldQuarantineInterruptedSession({
+        interruptRequestConfirmed: true,
+        shellRemovalConfirmed: true,
+        forceFinalizedWithoutTerminal: true,
+      }),
+    );
   });
 
   it("fails active turns only after the clean-EOF budget with no idle penalty", () => {
@@ -1138,6 +1150,8 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
       openCode2ShouldFailActiveTurnsAfterCleanEof({
         consecutiveCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES - 1,
         maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        cleanEofWindowAgeMs: OPENCODE2_EVENT_STALL_MS,
+        minimumWindowMs: OPENCODE2_EVENT_STALL_MS,
         hasActiveTurn: true,
       }),
     );
@@ -1145,6 +1159,17 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
       openCode2ShouldFailActiveTurnsAfterCleanEof({
         consecutiveCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
         maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        cleanEofWindowAgeMs: OPENCODE2_EVENT_STALL_MS,
+        minimumWindowMs: OPENCODE2_EVENT_STALL_MS,
+        hasActiveTurn: true,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldFailActiveTurnsAfterCleanEof({
+        consecutiveCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        cleanEofWindowAgeMs: OPENCODE2_EVENT_STALL_MS - 1,
+        minimumWindowMs: OPENCODE2_EVENT_STALL_MS,
         hasActiveTurn: true,
       }),
     );
@@ -1154,8 +1179,22 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
       openCode2ShouldFailActiveTurnsAfterCleanEof({
         consecutiveCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES * 10,
         maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        cleanEofWindowAgeMs: OPENCODE2_EVENT_STALL_MS * 10,
+        minimumWindowMs: OPENCODE2_EVENT_STALL_MS,
         hasActiveTurn: false,
       }),
+    );
+  });
+
+  it("backs off clean-EOF reconnects while a runtime request is pending", () => {
+    assert.equal(openCode2CleanEofResubscribeDelayMs(1, true), 250);
+    assert.equal(
+      openCode2CleanEofResubscribeDelayMs(100, true),
+      OPENCODE2_EVENT_PENDING_RESUBSCRIBE_DELAY_MS,
+    );
+    assert.equal(
+      openCode2CleanEofResubscribeDelayMs(100, false),
+      OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS,
     );
   });
 

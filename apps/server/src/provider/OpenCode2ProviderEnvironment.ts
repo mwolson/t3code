@@ -9,6 +9,7 @@ import * as NodeSqlite from "node:sqlite";
 export const OPENCODE2_BACKGROUND_SUBAGENTS_ENV = "OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS";
 
 const OPENCODE2_AUTH_FILES = ["account.json", "auth-v2.json", "auth.json"] as const;
+const fallbackStateRoots = new Map<string, string>();
 
 /**
  * Session/runtime tables pruned from a seeded host DB so we keep credentials
@@ -44,6 +45,10 @@ export function openCode2ManagedStateRoot(environment: NodeJS.ProcessEnv = proce
     environment.TMPDIR?.trim() || NodeOS.tmpdir(),
     `t3-opencode2-state-${userKey}`,
   );
+}
+
+function legacyOpenCode2ManagedStateRoot(environment: NodeJS.ProcessEnv = process.env): string {
+  return NodePath.join(environment.TMPDIR?.trim() || NodeOS.tmpdir(), "t3-opencode2-state");
 }
 
 export function openCode2HostDataHome(environment: NodeJS.ProcessEnv = process.env): string {
@@ -97,6 +102,66 @@ function ensureManagedDirectory(path: string): boolean {
   }
 }
 
+function migrateLegacyManagedStateRoot(stateRoot: string, environment: NodeJS.ProcessEnv): void {
+  if (managedFileState(stateRoot) !== "missing") return;
+  const legacyRoot = legacyOpenCode2ManagedStateRoot(environment);
+  if (legacyRoot === stateRoot) return;
+  let legacy: NodeFS.Stats;
+  try {
+    legacy = NodeFS.lstatSync(legacyRoot);
+  } catch {
+    return;
+  }
+  if (!isOwnedDirectory(legacy)) return;
+  try {
+    NodeFS.chmodSync(legacyRoot, 0o700);
+    NodeFS.renameSync(legacyRoot, stateRoot);
+  } catch {
+    // Another provider startup may have adopted or created the target first.
+  }
+}
+
+function prepareManagedStateRoot(stateRoot: string):
+  | {
+      readonly dataHome: string;
+      readonly stateHome: string;
+    }
+  | undefined {
+  if (!ensureManagedDirectory(stateRoot)) return undefined;
+  const stateHome = NodePath.join(stateRoot, "state");
+  const dataHome = NodePath.join(stateRoot, "data");
+  if (!ensureManagedDirectory(stateHome) || !ensureManagedDirectory(dataHome)) return undefined;
+  return { dataHome, stateHome };
+}
+
+function fallbackManagedStateRoot(
+  stateRoot: string,
+  environment: NodeJS.ProcessEnv,
+): string | undefined {
+  const existing = fallbackStateRoots.get(stateRoot);
+  if (existing !== undefined && prepareManagedStateRoot(existing) !== undefined) return existing;
+  const temporaryRoot = environment.TMPDIR?.trim() || NodeOS.tmpdir();
+  const fallbackKey = NodeCrypto.createHash("sha256").update(stateRoot).digest("hex").slice(0, 12);
+  const persistentFallback = NodePath.join(
+    temporaryRoot,
+    `t3-opencode2-state-fallback-${fallbackKey}`,
+  );
+  if (prepareManagedStateRoot(persistentFallback) !== undefined) {
+    fallbackStateRoots.set(stateRoot, persistentFallback);
+    return persistentFallback;
+  }
+  try {
+    const fallback = NodeFS.mkdtempSync(
+      NodePath.join(temporaryRoot, "t3-opencode2-state-fallback-random-"),
+    );
+    if (prepareManagedStateRoot(fallback) === undefined) return undefined;
+    fallbackStateRoots.set(stateRoot, fallback);
+    return fallback;
+  } catch {
+    return undefined;
+  }
+}
+
 type ManagedFileState = "missing" | "safe" | "unsafe";
 
 function managedFileState(path: string): ManagedFileState {
@@ -134,33 +199,11 @@ function copyManagedFile(source: string, target: string): void {
   }
 }
 
-function revokeManagedCredentials(managedDb: string): void {
-  if (managedFileState(managedDb) !== "safe") return;
-  const managed = new NodeSqlite.DatabaseSync(managedDb);
-  try {
-    managed.exec("BEGIN IMMEDIATE");
-    try {
-      managed.exec("DELETE FROM credential");
-      managed.exec("COMMIT");
-    } catch (error) {
-      try {
-        managed.exec("ROLLBACK");
-      } catch {
-        // Connection may already be aborted.
-      }
-      throw error;
-    }
-  } finally {
-    managed.close();
-    managedFileState(managedDb);
-  }
-}
-
 /**
  * Copy host auth files and seed a private DB copy that retains credentials but
  * drops host sessions. Safe to call repeatedly: existing managed DB is kept.
- * Auth files and credential rows that disappear on the host are removed from
- * the managed tree so logout revokes authority for the isolated instance too.
+ * Auth files that disappear and an existing host DB's empty credential table
+ * revoke authority for the isolated instance too.
  *
  * @internal exported for tests
  */
@@ -196,16 +239,10 @@ export function seedOpenCode2ManagedDataHome(
   const managedDb = NodePath.join(managedOpenCode, "opencode.db");
   const managedState = managedFileState(managedDb);
   if (managedState === "unsafe") return;
-  if (!NodeFS.existsSync(hostDb)) {
-    if (managedState === "safe") {
-      try {
-        revokeManagedCredentials(managedDb);
-      } catch {
-        // A locked managed DB is retried on the next provider startup.
-      }
-    }
-    return;
-  }
+  // A missing host database can be transient during an upgrade or migration.
+  // Preserve the last known credential snapshot; an existing, readable host DB
+  // with an empty credential table remains the authoritative logout signal.
+  if (!NodeFS.existsSync(hostDb)) return;
 
   try {
     if (managedState === "missing") {
@@ -289,22 +326,29 @@ export function applyOpenCode2ProviderEnvironment(
   }
 
   const hostDataHome = openCode2HostDataHome(environment);
-  const stateRoot = openCode2ManagedStateRoot(environment);
-  const xdgStateHome = NodePath.join(stateRoot, "state");
-  const xdgDataHome = NodePath.join(stateRoot, "data");
-  for (const dir of [xdgStateHome, xdgDataHome]) {
-    if (!ensureManagedDirectory(stateRoot) || !ensureManagedDirectory(dir)) {
-      return environment;
-    }
+  const preferredStateRoot = openCode2ManagedStateRoot(environment);
+  migrateLegacyManagedStateRoot(preferredStateRoot, environment);
+  const preferredHomes = prepareManagedStateRoot(preferredStateRoot);
+  const stateRoot =
+    preferredHomes === undefined
+      ? fallbackManagedStateRoot(preferredStateRoot, environment)
+      : preferredStateRoot;
+  if (stateRoot === undefined) {
+    throw new Error("Unable to create a private OpenCode 2 managed-state root.");
   }
-  seedOpenCode2ManagedDataHome(xdgDataHome, hostDataHome);
+  const managedHomes =
+    stateRoot === preferredStateRoot ? preferredHomes : prepareManagedStateRoot(stateRoot);
+  if (managedHomes === undefined) {
+    throw new Error("Unable to secure the private OpenCode 2 managed-state directories.");
+  }
+  seedOpenCode2ManagedDataHome(managedHomes.dataHome, hostDataHome);
 
   // Keep the host XDG_CONFIG_HOME so user provider config (e.g. llama.cpp)
   // still applies. Isolate only state (server password) and data (db/auth).
   return {
     ...environment,
     [OPENCODE2_BACKGROUND_SUBAGENTS_ENV]: settings.backgroundSubagents ? "true" : "false",
-    XDG_DATA_HOME: xdgDataHome,
-    XDG_STATE_HOME: xdgStateHome,
+    XDG_DATA_HOME: managedHomes.dataHome,
+    XDG_STATE_HOME: managedHomes.stateHome,
   };
 }
