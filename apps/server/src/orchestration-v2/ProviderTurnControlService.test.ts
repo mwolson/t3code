@@ -230,6 +230,7 @@ it.effect(
             Effect.succeed(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),
             ),
+          listAttached: () => Effect.succeed([]),
           close: () => Effect.void,
           release: () => Effect.void,
           detach: () => Effect.void,

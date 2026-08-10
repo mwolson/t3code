@@ -382,7 +382,13 @@ export function applyToProjectionReplayState(
     return false;
   }
 
+  const suppressTerminalThreadAttachment =
+    event.type === "provider-session.attached" &&
+    (current.thread.archivedAt !== null || current.thread.deletedAt !== null);
   let next = applyToProjection(current, event);
+  if (suppressTerminalThreadAttachment) {
+    next = { ...next, providerSessions: current.providerSessions };
+  }
   if (event.type === "provider-session.updated") {
     const boundThreadIds = state.providerSessionThreadIds.get(event.payload.id);
     if (boundThreadIds?.has(event.threadId) !== true) {
@@ -395,6 +401,12 @@ export function applyToProjectionReplayState(
 
   switch (event.type) {
     case "provider-session.attached": {
+      if (suppressTerminalThreadAttachment) {
+        if (!state.retainedProviderSessions.has(event.payload.id)) {
+          state.retainedProviderSessions.set(event.payload.id, event.payload);
+        }
+        break;
+      }
       state.retainedProviderSessions.set(event.payload.id, event.payload);
       const boundThreadIds = new Set(state.providerSessionThreadIds.get(event.payload.id) ?? []);
       boundThreadIds.add(event.threadId);
@@ -1437,6 +1449,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           case "provider-session.updated": {
             const payloadJson = yield* encodeProviderSessionPayload(event.payload);
             const payload = parseEncodedPayload(payloadJson);
+            const conflictUpdateGuard =
+              event.type === "provider-session.attached"
+                ? sql`WHERE EXISTS (
+                    SELECT 1
+                    FROM orchestration_v2_projection_threads
+                    WHERE thread_id = ${event.threadId}
+                      AND archived_at IS NULL
+                      AND deleted_at IS NULL
+                  )`
+                : sql``;
             yield* sql`
               INSERT INTO orchestration_v2_projection_provider_sessions (
                 provider_session_id,
@@ -1470,6 +1492,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 model = excluded.model,
                 updated_at = excluded.updated_at,
                 payload_json = excluded.payload_json
+              ${conflictUpdateGuard}
             `;
             if (event.type === "provider-session.attached") {
               yield* sql`
@@ -1477,7 +1500,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   provider_session_id,
                   thread_id
                 )
-                VALUES (${event.payload.id}, ${event.threadId})
+                SELECT ${event.payload.id}, ${event.threadId}
+                WHERE EXISTS (
+                  SELECT 1
+                  FROM orchestration_v2_projection_threads
+                  WHERE thread_id = ${event.threadId}
+                    AND archived_at IS NULL
+                    AND deleted_at IS NULL
+                )
               `;
             }
             break;

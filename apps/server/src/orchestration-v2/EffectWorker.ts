@@ -104,6 +104,9 @@ export const executorLayer: Layer.Layer<
                 threadId: effect.threadId,
                 requireExpectedRuntime: true,
                 ...(effect.request.detail === undefined ? {} : { detail: effect.request.detail }),
+                ...(effect.request.expectedArchivedAt === undefined
+                  ? {}
+                  : { expectedArchivedAt: effect.request.expectedArchivedAt }),
                 ...(effect.request.revokeMcpCredential === undefined
                   ? {}
                   : { revokeMcpCredential: effect.request.revokeMcpCredential }),
