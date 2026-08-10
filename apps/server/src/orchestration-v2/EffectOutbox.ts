@@ -31,6 +31,8 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     type: Schema.Literal("provider-session.detach"),
     providerSessionId: ProviderSessionId,
     detail: Schema.optional(Schema.String),
+    /** Archive generation that must still be current before terminal detach mutates a runtime. */
+    expectedArchivedAt: Schema.optional(Schema.String),
     /** Set on terminal detaches (thread archive/delete): revoke the thread's MCP credentials. */
     revokeMcpCredential: Schema.optional(Schema.Boolean),
     /** Set only on thread deletion: remove the provider-native thread before detaching. */

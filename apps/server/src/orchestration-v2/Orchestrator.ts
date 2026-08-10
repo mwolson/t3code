@@ -1846,9 +1846,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
-    // Terminal delete must also cover sessions that archive (or an earlier
-    // detach) already removed from the live providerSessions projection. Those
-    // rows stay retained in storage and are still referenced by providerThreads.
+    // Terminal commands must also cover sessions that an earlier detach
+    // removed from the projection while their managed runtime is still bound.
+    // Native thread rows retain older sessions for permanent deletion.
+    const managedProviderSessions =
+      command.type === "thread.archive" || command.type === "thread.delete"
+        ? yield* providerSessions.listAttached(command.threadId)
+        : [];
     const historicalProviderSessions =
       command.type === "thread.delete"
         ? yield* Effect.gen(function* () {
@@ -1877,11 +1881,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           })
         : [];
     const providerSessionsForDetach =
-      command.type === "thread.delete"
+      command.type === "thread.archive" || command.type === "thread.delete"
         ? (() => {
             const byId = new Map(
               projection.providerSessions.map((session) => [session.id, session] as const),
             );
+            for (const session of managedProviderSessions) {
+              // The manager owns the current incarnation. A projection row can
+              // still describe the predecessor that a delayed detach removed.
+              byId.set(session.id, session);
+            }
             for (const session of historicalProviderSessions) {
               if (!byId.has(session.id)) {
                 byId.set(session.id, session);
@@ -1907,13 +1916,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 .map((session) => session.id)
             : (providerSwitchPlan?.releaseProviderSessionIds ?? []),
     );
+    const sessionsToDetach = providerSessionsForDetach.filter(
+      (session) =>
+        detachSessionIds.has(session.id) &&
+        (command.type === "thread.delete" ||
+          (session.status !== "stopped" && session.status !== "error")),
+    );
     if (detachSessionIds.size > 0) {
-      const sessionsToDetach = providerSessionsForDetach.filter(
-        (session) =>
-          detachSessionIds.has(session.id) &&
-          (command.type === "thread.delete" ||
-            (session.status !== "stopped" && session.status !== "error")),
-      );
       yield* Effect.forEach(
         sessionsToDetach,
         (session) =>
@@ -1980,6 +1989,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                           : command.type === "thread.runtime-mode.set"
                             ? "Runtime mode changed."
                             : "Provider or model selection changed.",
+                ...(command.type === "thread.archive"
+                  ? { expectedArchivedAt: DateTime.formatIso(now) }
+                  : {}),
                 // Terminal detaches revoke the thread's MCP credentials; other
                 // detach reasons keep them so a re-attaching provider process
                 // stays authorized.
@@ -1996,6 +2008,84 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               },
             } satisfies PendingOrchestrationEffectV2;
             yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);
+          }),
+        { concurrency: 1, discard: true },
+      );
+    }
+
+    if (command.type === "thread.archive" || command.type === "thread.delete") {
+      const scheduledSessionIds = new Set(sessionsToDetach.map((session) => session.id));
+      const unresolvedBySessionId = new Map<
+        ProviderSessionId,
+        {
+          readonly driver: OrchestrationV2ProviderThread["driver"];
+          readonly providerInstanceId: ProviderInstanceId;
+          readonly providerThreads: Array<OrchestrationV2ProviderThread>;
+        }
+      >();
+      for (const providerThread of projection.providerThreads) {
+        const providerSessionId = providerThread.providerSessionId;
+        if (providerSessionId === null || scheduledSessionIds.has(providerSessionId)) {
+          continue;
+        }
+        const target = unresolvedBySessionId.get(providerSessionId) ?? {
+          driver: providerThread.driver,
+          providerInstanceId: providerThread.providerInstanceId,
+          providerThreads: [],
+        };
+        if (
+          providerThread.nativeThreadRef !== null &&
+          !target.providerThreads.some(
+            (existing) =>
+              existing.nativeThreadRef?.driver === providerThread.nativeThreadRef?.driver &&
+              existing.nativeThreadRef?.nativeId === providerThread.nativeThreadRef?.nativeId,
+          )
+        ) {
+          target.providerThreads.push(providerThread);
+        }
+        unresolvedBySessionId.set(providerSessionId, target);
+      }
+      yield* Effect.forEach(
+        unresolvedBySessionId,
+        ([providerSessionId, target]) =>
+          Effect.gen(function* () {
+            yield* emit(
+              events,
+              command,
+            )({
+              type: "provider-session.detached",
+              threadId: command.threadId,
+              driver: target.driver,
+              providerInstanceId: target.providerInstanceId,
+              occurredAt: now,
+              payload: {
+                providerSessionId,
+                detachedAt: now,
+                reason: command.type === "thread.archive" ? "Thread archived." : "Thread deleted.",
+              },
+            });
+            yield* Ref.update(effects, (existing) => [
+              ...existing,
+              {
+                id: `effect:${command.commandId}:provider-session.detach:${providerSessionId}`,
+                commandId: command.commandId,
+                threadId: command.threadId,
+                request: {
+                  type: "provider-session.detach",
+                  providerSessionId,
+                  detail:
+                    command.type === "thread.archive" ? "Thread archived." : "Thread deleted.",
+                  revokeMcpCredential: true,
+                  ...(command.type === "thread.archive"
+                    ? { expectedArchivedAt: DateTime.formatIso(now) }
+                    : {
+                        deleteProviderThread: true,
+                        providerInstanceId: target.providerInstanceId,
+                        providerThreads: target.providerThreads,
+                      }),
+                },
+              } satisfies PendingOrchestrationEffectV2,
+            ]);
           }),
         { concurrency: 1, discard: true },
       );
