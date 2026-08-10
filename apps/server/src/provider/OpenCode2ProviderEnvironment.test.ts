@@ -34,10 +34,62 @@ describe("applyOpenCode2ProviderEnvironment", () => {
     NodeFS.symlinkSync(target, stateRoot, "dir");
     const environment = { TMPDIR: tmp, HOME: "/home/test-user" };
 
-    expect(
-      applyOpenCode2ProviderEnvironment({ backgroundSubagents: true, serverUrl: "" }, environment),
-    ).toBe(environment);
+    const applied = applyOpenCode2ProviderEnvironment(
+      { backgroundSubagents: true, serverUrl: "" },
+      environment,
+    );
+
+    expect(applied).not.toBe(environment);
+    expect(applied.XDG_DATA_HOME).not.toContain(stateRoot);
+    expect(applied.XDG_STATE_HOME).not.toContain(stateRoot);
     expect(NodeFS.readdirSync(target)).toEqual([]);
+  });
+
+  it("falls back when a managed-state child is a symlink", () => {
+    if (isWindows) return;
+    const tmp = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "opencode2-child-link-"));
+    const environment = { TMPDIR: tmp, HOME: "/home/test-user" };
+    const stateRoot = openCode2ManagedStateRoot(environment);
+    const target = NodePath.join(tmp, "outside");
+    NodeFS.mkdirSync(stateRoot, { recursive: true });
+    NodeFS.mkdirSync(target);
+    NodeFS.symlinkSync(target, NodePath.join(stateRoot, "state"), "dir");
+
+    const first = applyOpenCode2ProviderEnvironment(
+      { backgroundSubagents: true, serverUrl: "" },
+      environment,
+    );
+    const second = applyOpenCode2ProviderEnvironment(
+      { backgroundSubagents: true, serverUrl: "" },
+      environment,
+    );
+
+    expect(first.XDG_STATE_HOME).not.toContain(stateRoot);
+    expect(first.XDG_STATE_HOME).toBe(second.XDG_STATE_HOME);
+    expect(first.XDG_STATE_HOME).toContain(tmp);
+    expect(NodeFS.readdirSync(target)).toEqual([]);
+  });
+
+  it("adopts the legacy managed state root without losing native sessions", () => {
+    if (isWindows) return;
+    const tmp = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "opencode2-state-migrate-"));
+    const environment = { TMPDIR: tmp, HOME: "/home/test-user" };
+    const legacyRoot = NodePath.join(tmp, "t3-opencode2-state");
+    const marker = NodePath.join(legacyRoot, "state", "resume-marker");
+    NodeFS.mkdirSync(NodePath.dirname(marker), { recursive: true });
+    NodeFS.writeFileSync(marker, "existing-session");
+
+    const applied = applyOpenCode2ProviderEnvironment(
+      { backgroundSubagents: true, serverUrl: "" },
+      environment,
+    );
+    const stateRoot = openCode2ManagedStateRoot(environment);
+
+    expect(applied.XDG_STATE_HOME).toBe(NodePath.join(stateRoot, "state"));
+    expect(NodeFS.existsSync(legacyRoot)).toBe(false);
+    expect(NodeFS.readFileSync(NodePath.join(stateRoot, "state", "resume-marker"), "utf8")).toBe(
+      "existing-session",
+    );
   });
 
   it("explicitly enables background subagents for a managed server", () => {
@@ -253,7 +305,7 @@ describe("seedOpenCode2ManagedDataHome", () => {
     }
   });
 
-  it("clears managed credentials when the host database disappears", () => {
+  it("preserves managed credentials when the host database temporarily disappears", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "opencode2-seed-missing-db-"));
     const host = NodePath.join(root, "host");
     const managed = NodePath.join(root, "managed");
@@ -276,7 +328,7 @@ describe("seedOpenCode2ManagedDataHome", () => {
       NodePath.join(managed, "opencode", "opencode.db"),
     );
     try {
-      expect(managedDb.prepare("SELECT COUNT(*) AS n FROM credential").get()).toEqual({ n: 0 });
+      expect(managedDb.prepare("SELECT COUNT(*) AS n FROM credential").get()).toEqual({ n: 1 });
     } finally {
       managedDb.close();
     }

@@ -128,10 +128,20 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const effectiveConfig = { ...config, enabled } satisfies OpenCode2Settings;
-      const processEnv = applyOpenCode2ProviderEnvironment(
-        effectiveConfig,
-        mergeProviderInstanceEnvironment(environment),
-      );
+      const processEnv = yield* Effect.try({
+        try: () =>
+          applyOpenCode2ProviderEnvironment(
+            effectiveConfig,
+            mergeProviderInstanceEnvironment(environment),
+          ),
+        catch: (cause) =>
+          new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail: "Failed to prepare private OpenCode 2 provider state.",
+            cause,
+          }),
+      });
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
