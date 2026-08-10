@@ -133,6 +133,8 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
           applyOpenCode2ProviderEnvironment(
             effectiveConfig,
             mergeProviderInstanceEnvironment(environment),
+            instanceId,
+            serverConfig.stateDir,
           ),
         catch: (cause) =>
           new ProviderDriverError({
