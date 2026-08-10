@@ -871,6 +871,12 @@ function buildVisibleTurnItems(input: {
 export function threadShellFromProjection(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadShell {
+  const rolledBackRunIds = new Set(
+    projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
+  );
+  const visibleMessages = projection.messages.filter(
+    (message) => message.runId === null || !rolledBackRunIds.has(message.runId),
+  );
   const latestRun = projection.runs.at(-1) ?? null;
   const activeRun =
     projection.runs
@@ -887,8 +893,9 @@ export function threadShellFromProjection(
         (left, right) =>
           DateTime.toEpochMillis(right.createdAt) - DateTime.toEpochMillis(left.createdAt),
       )[0] ?? null;
+
   const latestUserMessage =
-    projection.messages
+    visibleMessages
       .filter((message) => message.role === "user")
       .toSorted(
         (left, right) =>
@@ -2759,6 +2766,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const selectShellThreadRows = (threadId?: ThreadId, location?: "active" | "archive") =>
       sql<ShellThreadRow>`
+            WITH RECURSIVE shell_thread_ids(thread_id) AS (
+              SELECT thread_id
+              FROM orchestration_v2_projection_threads
+              WHERE deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND thread_id = ${threadId}`}
+
+              UNION
+
+              SELECT json_extract(current.payload_json, '$.forkedFrom.threadId')
+              FROM orchestration_v2_projection_threads current
+              INNER JOIN shell_thread_ids included
+                ON included.thread_id = current.thread_id
+              WHERE json_extract(current.payload_json, '$.forkedFrom.type') = 'run'
+            )
             SELECT
               t.thread_id,
               t.payload_json,
@@ -2837,10 +2857,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 LIMIT 1
               ) AS pending_request_payload_json,
               (
+
                 SELECT message.updated_at
                 FROM orchestration_v2_projection_messages message
+                LEFT JOIN orchestration_v2_projection_runs message_run
+                  ON message_run.run_id = message.run_id
                 WHERE message.thread_id = t.thread_id
                   AND message.role = 'user'
+                  AND (message_run.run_id IS NULL OR message_run.status <> 'rolled_back')
                 ORDER BY message.updated_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS latest_user_message_at,
@@ -3213,23 +3237,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       sql
         .withTransaction(
           Effect.gen(function* () {
-            const rowsByThreadId = new Map<ThreadId, ShellThreadRow>();
-            const pending: Array<ThreadId> = [threadId];
-            while (pending.length > 0) {
-              const nextId = pending.pop();
-              if (nextId === undefined || rowsByThreadId.has(nextId)) {
-                continue;
-              }
-              const rows = yield* selectShellThreadRows(nextId);
-              const row = rows[0];
-              if (row === undefined) {
-                continue;
-              }
-              rowsByThreadId.set(nextId, row);
-              if (row.forked_from_run_source_thread_id !== null) {
-                pending.push(ThreadId.make(row.forked_from_run_source_thread_id));
-              }
-            }
+            const rows = yield* selectShellThreadRows(threadId);
+            const rowsByThreadId = new Map(
+              rows.map((row) => [ThreadId.make(row.thread_id), row] as const),
+            );
             if (!rowsByThreadId.has(threadId)) {
               return null;
             }

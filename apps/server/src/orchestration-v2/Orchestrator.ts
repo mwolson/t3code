@@ -7350,8 +7350,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     } satisfies OrchestratorV2DispatchResult;
   });
 
-  const dispatchWithReceipt = (command: OrchestrationV2Command) =>
-    threadDispatch.withLock(commandThreadId(command), dispatchWithReceiptEffect(command));
+  const dispatchWithReceipt = (command: OrchestrationV2Command) => {
+    const targetThreadId = commandThreadId(command);
+    if (
+      command.type !== "message.dispatch" ||
+      command.sourcePlanRef === undefined ||
+      command.sourcePlanRef.threadId === targetThreadId
+    ) {
+      return threadDispatch.withLock(targetThreadId, dispatchWithReceiptEffect(command));
+    }
+
+    const sourceThreadId = command.sourcePlanRef.threadId;
+    const sourcePrecedesTarget = String(sourceThreadId) < String(targetThreadId);
+    const firstThreadId = sourcePrecedesTarget ? sourceThreadId : targetThreadId;
+    const secondThreadId = sourcePrecedesTarget ? targetThreadId : sourceThreadId;
+    return threadDispatch.withLock(
+      firstThreadId,
+      threadDispatch.withLock(secondThreadId, dispatchWithReceiptEffect(command)),
+    );
+  };
 
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
