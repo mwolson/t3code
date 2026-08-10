@@ -545,6 +545,7 @@ export type OrchestrationV2CheckpointScope = typeof OrchestrationV2CheckpointSco
 
 export const OrchestrationV2ProviderSession = Schema.Struct({
   id: ProviderSessionId,
+  incarnationId: Schema.optional(TrimmedNonEmptyString),
   driver: ProviderDriverKind,
   providerInstanceId: ProviderInstanceId,
   status: Schema.Literals(["starting", "ready", "running", "waiting", "stopped", "error"]),

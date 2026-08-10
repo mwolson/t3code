@@ -6055,6 +6055,8 @@ export const OpenCode2AdapterV2Driver: ProviderAdapterDriver<
           applyOpenCode2ProviderEnvironment(
             input.config,
             mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+            input.instanceId,
+            serverConfig.stateDir,
           ),
         catch: (cause) =>
           new ProviderAdapterDriverCreateError({
