@@ -11,6 +11,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderSessionId,
+  ProviderTurnId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -289,6 +290,7 @@ function makeProviderAdapter(
     readonly beforeDeleteThread?: Effect.Effect<void>;
     /** Parks or observes native turn start during a manager-owned operation. */
     readonly beforeStartTurn?: Effect.Effect<void>;
+    readonly emitSessionUpdateBeforeTurn?: boolean;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hangSessionScopeClose?: boolean;
     readonly onHangingSessionScopeClose?: Effect.Effect<void>;
@@ -393,11 +395,35 @@ function makeProviderAdapter(
                 return yield* unimplemented("native deletion failed");
               }
             }),
-          startTurn: () =>
+          startTurn: (input) =>
             Effect.gen(function* () {
               if (options.beforeStartTurn !== undefined) {
                 yield* options.beforeStartTurn;
               }
+              if (options.emitSessionUpdateBeforeTurn === true) {
+                yield* Queue.offer(events, {
+                  type: "provider_session.updated",
+                  driver: CODEX_DRIVER,
+                  providerSession: session,
+                });
+              }
+              const startedAt = yield* DateTime.now;
+              yield* Queue.offer(events, {
+                type: "provider_turn.updated",
+                driver: CODEX_DRIVER,
+                threadId: input.threadId,
+                providerTurn: {
+                  id: ProviderTurnId.make(`provider-turn:${input.attemptId}`),
+                  providerThreadId: input.providerThread.id,
+                  nodeId: input.rootNodeId,
+                  runAttemptId: input.attemptId,
+                  nativeTurnRef: null,
+                  ordinal: input.providerTurnOrdinal,
+                  status: "running",
+                  startedAt,
+                  completedAt: null,
+                },
+              });
               yield* Ref.update(state, (current) => ({
                 ...current,
                 startCount: current.startCount + 1,
@@ -435,6 +461,7 @@ function makeTestLayer(input: {
   }) => Effect.Effect<void>;
   readonly beforeDeleteThread?: Effect.Effect<void>;
   readonly beforeStartTurn?: Effect.Effect<void>;
+  readonly emitSessionUpdateBeforeTurn?: boolean;
   readonly afterEntryCommit?: Effect.Effect<void>;
   readonly beforeReuseActivity?: Effect.Effect<void>;
   readonly beforeEventSinkWrite?: (
@@ -489,6 +516,9 @@ function makeTestLayer(input: {
         ? {}
         : { beforeDeleteThread: input.beforeDeleteThread }),
       ...(input.beforeStartTurn === undefined ? {} : { beforeStartTurn: input.beforeStartTurn }),
+      ...(input.emitSessionUpdateBeforeTurn === undefined
+        ? {}
+        : { emitSessionUpdateBeforeTurn: input.emitSessionUpdateBeforeTurn }),
       ...(input.hasPendingBackgroundWork === undefined
         ? {}
         : { hasPendingBackgroundWork: input.hasPendingBackgroundWork }),
@@ -1368,6 +1398,143 @@ it.effect("ProviderSessionManagerV2 serializes native deletion before replacemen
       ),
     );
   }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 observes a started turn behind queued persistence during detach drain",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const startEntered = yield* Deferred.make<void>();
+      const releaseStart = yield* Deferred.make<void>();
+
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSinkV2;
+        const idAllocator = yield* IdAllocatorV2;
+        const manager = yield* ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const projectId = yield* idAllocator.allocate.project({
+          fixtureName: "provider-session-manager-detach-late-turn",
+        });
+        const threadId = yield* idAllocator.allocate.thread({
+          fixtureName: "provider-session-manager-detach-late-turn",
+          projectId,
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+        const attemptId = idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
+        const rootNodeId = idAllocator.derive.rootNode({ runId });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId, now }),
+            {
+              id: yield* idAllocator.allocate.event({ threadId }),
+              type: "provider-thread.updated" as const,
+              threadId,
+              driver: CODEX_DRIVER,
+              occurredAt: now,
+              payload: providerThread,
+            },
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const appThread = (yield* projectionStore.getThreadProjection(threadId)).thread;
+
+        // Admit startTurn into the runtime operation gate, then park before it
+        // emits a running turn. Detach must drain this admitted work first.
+        const startFiber = yield* runtime
+          .startTurn({
+            appThread,
+            threadId,
+            runId,
+            runOrdinal: 1,
+            providerTurnOrdinal: 1,
+            attemptId,
+            rootNodeId,
+            providerThread,
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+              text: "hello",
+              attachments: [],
+            },
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(startEntered);
+
+        const detachFiber = yield* manager
+          .detach({
+            providerSessionId,
+            threadId,
+            deleteProviderThread: true,
+            providerInstanceId: modelSelection.instanceId,
+            providerSession: runtime.providerSession,
+            providerThreads: [providerThread],
+          })
+          .pipe(Effect.forkScoped);
+
+        // Detach has begun draining; the late turn is neither emitted nor projected yet.
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.equal((yield* Ref.get(state)).interruptCount, 0);
+        assert.equal(
+          (yield* projectionStore.getThreadProjection(threadId)).providerTurns.filter(
+            (turn) => turn.status === "running",
+          ).length,
+          0,
+        );
+
+        yield* Deferred.succeed(releaseStart, undefined);
+        yield* Fiber.join(startFiber);
+        yield* Fiber.join(detachFiber);
+
+        assert.equal((yield* Ref.get(state)).startCount, 1);
+        assert.equal(
+          (yield* Ref.get(state)).interruptCount,
+          1,
+          "detach must interrupt the turn observed from the drained startTurn",
+        );
+        assert.equal((yield* Ref.get(state)).deleteCount, 1);
+        assert.equal(
+          (yield* projectionStore.getThreadProjection(threadId)).providerTurns.length,
+          0,
+          "the test must leave persistence delayed beyond the manager event-pump observation",
+        );
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          makeTestLayer({
+            state,
+            idleTimeoutMs: 60_000,
+            capabilities: ExclusiveCapabilities,
+            emitSessionUpdateBeforeTurn: true,
+            beforeStartTurn: Effect.gen(function* () {
+              yield* Deferred.succeed(startEntered, undefined);
+              yield* Deferred.await(releaseStart);
+            }),
+          }),
+        ),
+      );
+    }),
 );
 
 it.effect("ProviderSessionManagerV2 falls back to detached deletion when release wins", () =>
@@ -3116,8 +3283,12 @@ it.effect("ProviderSessionManagerV2 releases sessions when provider event stream
         modelSelection,
         runtimePolicy,
       });
-      yield* runtime.events.pipe(Stream.runDrain, Effect.ignore, Effect.forkScoped);
-      yield* Effect.yieldNow;
+      const eventFiber = yield* runtime.events.pipe(
+        Stream.runDrain,
+        Effect.ignore,
+        Effect.forkScoped,
+      );
+      yield* Fiber.join(eventFiber);
 
       const liveSession = yield* manager.get(providerSessionId);
       const runtimeState = yield* Ref.get(state);

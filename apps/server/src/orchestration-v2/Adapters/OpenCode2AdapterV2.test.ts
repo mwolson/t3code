@@ -18,8 +18,12 @@ type ShellInfoV2 = {
 };
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import { describe } from "vite-plus/test";
 
 import {
@@ -31,6 +35,7 @@ import {
   openCode2EventEndsExecution,
   openCode2FormAnswer,
   openCode2FormQuestions,
+  openCode2ForkEventPumpInScope,
   openCode2ForkParameters,
   openCode2InterruptedThreadDisposition,
   openCode2IsCancelledPostSettleWake,
@@ -1064,6 +1069,31 @@ describe("OpenCode 2 session errors", () => {
 });
 
 describe("openCode2 interrupt and event-stream recovery helpers", () => {
+  it.effect("registers event-pump abort before startup interruption can close the scope", () =>
+    Effect.gen(function* () {
+      const scope = yield* Scope.make();
+      const forked = yield* Deferred.make<void>();
+      const releaseRegistration = yield* Deferred.make<void>();
+      const finalizerOrder: Array<"abort" | "pump"> = [];
+      const startup = yield* openCode2ForkEventPumpInScope({
+        scope,
+        abort: Effect.sync(() => finalizerOrder.push("abort")),
+        pump: Effect.never.pipe(Effect.ensuring(Effect.sync(() => finalizerOrder.push("pump")))),
+        afterFork: Deferred.succeed(forked, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseRegistration)),
+        ),
+      }).pipe(Effect.forkScoped);
+
+      yield* Deferred.await(forked);
+      const interruption = yield* Fiber.interrupt(startup).pipe(Effect.forkScoped);
+      yield* Deferred.succeed(releaseRegistration, undefined);
+      yield* Fiber.join(interruption);
+      yield* Scope.close(scope, Exit.void);
+
+      assert.deepStrictEqual(finalizerOrder, ["abort", "pump"]);
+    }),
+  );
+
   it("force-finalizes only after an interrupted turn outlives the settle wait", () => {
     assert.isFalse(
       openCode2ShouldForceInterruptFinalize({

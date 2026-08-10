@@ -532,6 +532,135 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect("retains detached provider sessions for historical id lookup", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const projectId = ProjectId.make("project:projection-historical-provider-session");
+      const threadId = ThreadId.make("thread:projection-historical-provider-session");
+      const providerSessionId = ProviderSessionId.make(
+        "provider-session:projection-historical-provider-session",
+      );
+      const providerThreadId = ProviderThreadId.make(
+        "provider-thread:projection-historical-provider-session",
+      );
+      const session = {
+        id: providerSessionId,
+        driver,
+        providerInstanceId,
+        status: "ready" as const,
+        cwd: "/workspace",
+        model: modelSelection.model,
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      };
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-historical-provider-session:thread"),
+        type: "thread.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user" as const,
+          creationSource: "web" as const,
+          id: threadId,
+          projectId,
+          title: "Historical provider session",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: providerThreadId,
+          lineage: {
+            parentThreadId: null,
+            relationshipToParent: null,
+            rootThreadId: threadId,
+          },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-historical-provider-session:attached"),
+        type: "provider-session.attached",
+        threadId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: session,
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-historical-provider-session:thread-row"),
+        type: "provider-thread.updated",
+        threadId,
+        driver,
+        occurredAt: now,
+        payload: {
+          id: providerThreadId,
+          driver,
+          providerInstanceId,
+          providerSessionId,
+          appThreadId: threadId,
+          ownerNodeId: null,
+          nativeThreadRef: {
+            driver,
+            nativeId: "native-historical-session",
+            strength: "strong" as const,
+          },
+          nativeConversationHeadRef: null,
+          status: "idle" as const,
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      assert.deepEqual(
+        (yield* projectionStore.getThreadProjection(threadId)).providerSessions.map(
+          (value) => value.id,
+        ),
+        [providerSessionId],
+      );
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-historical-provider-session:detached"),
+        type: "provider-session.detached",
+        threadId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: { providerSessionId, detachedAt: now },
+      });
+
+      const live = yield* projectionStore.getThreadProjection(threadId);
+      assert.lengthOf(live.providerSessions, 0);
+      assert.equal(live.providerThreads[0]?.providerSessionId, providerSessionId);
+
+      const historical = yield* projectionStore.getProviderSessionsByIds(threadId, [
+        providerSessionId,
+      ]);
+      assert.deepEqual(
+        historical.map((value) => value.id),
+        [providerSessionId],
+      );
+      assert.equal(historical[0]?.status, "ready");
+      assert.equal(historical[0]?.cwd, "/workspace");
+    }),
+  );
+
   it.effect("builds shell snapshots without decoding full turn item payloads", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStoreV2;

@@ -1846,18 +1846,55 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
 
-    // Settle joins archive/delete here: all three mean "done with this
-    // thread", so a live provider session must not keep running background
-    // work (PR monitors, dev servers, subagent fleets) after any of them
-    // lands. The settle guard above already rejects active or blocked runs,
-    // so for settle this only ever stops an idle session; commands are
-    // decided serially against the projection, so a turn start that
-    // re-engages the thread cannot race this detach.
+    // Terminal delete must also cover sessions that archive (or an earlier
+    // detach) already removed from the live providerSessions projection. Those
+    // rows stay retained in storage and are still referenced by providerThreads.
+    const historicalProviderSessions =
+      command.type === "thread.delete"
+        ? yield* Effect.gen(function* () {
+            const liveIds = new Set(projection.providerSessions.map((session) => session.id));
+            const referencedIds = [
+              ...new Set(
+                projection.providerThreads.flatMap((providerThread) => {
+                  const providerSessionId = providerThread.providerSessionId;
+                  if (providerSessionId === null || liveIds.has(providerSessionId)) {
+                    return [];
+                  }
+                  return [providerSessionId];
+                }),
+              ),
+            ];
+            if (referencedIds.length === 0) {
+              return [] as const;
+            }
+            return yield* projectionStore
+              .getProviderSessionsByIds(command.threadId, referencedIds)
+              .pipe(
+                Effect.mapError(
+                  (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+                ),
+              );
+          })
+        : [];
+    const providerSessionsForDetach =
+      command.type === "thread.delete"
+        ? (() => {
+            const byId = new Map(
+              projection.providerSessions.map((session) => [session.id, session] as const),
+            );
+            for (const session of historicalProviderSessions) {
+              if (!byId.has(session.id)) {
+                byId.set(session.id, session);
+              }
+            }
+            return [...byId.values()];
+          })()
+        : projection.providerSessions;
     const detachSessionIds = new Set(
       command.type === "thread.archive" ||
         command.type === "thread.delete" ||
         command.type === "thread.settle"
-        ? projection.providerSessions.map((session) => session.id)
+        ? providerSessionsForDetach.map((session) => session.id)
         : command.type === "thread.metadata.update" &&
             command.worktreePath !== undefined &&
             command.worktreePath !== thread.worktreePath
@@ -1871,7 +1908,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             : (providerSwitchPlan?.releaseProviderSessionIds ?? []),
     );
     if (detachSessionIds.size > 0) {
-      const sessionsToDetach = projection.providerSessions.filter(
+      const sessionsToDetach = providerSessionsForDetach.filter(
         (session) =>
           detachSessionIds.has(session.id) &&
           (command.type === "thread.delete" ||
