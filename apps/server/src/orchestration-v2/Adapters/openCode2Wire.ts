@@ -25,6 +25,7 @@ export type OpenCode2CanonicalEventType =
   | "session.compaction.started"
   | "session.compaction.delta"
   | "session.compaction.ended"
+  | "session.compaction.failed"
   | "session.tool.input.started"
   | "session.tool.input.delta"
   | "session.tool.input.ended"
@@ -80,8 +81,11 @@ const WIRE_TYPE_ALIASES: Readonly<Record<string, OpenCode2CanonicalEventType>> =
   "session.next.reasoning.delta": "session.reasoning.delta",
   "session.next.reasoning.ended": "session.reasoning.ended",
   "session.next.compaction.started": "session.compaction.started",
+  "session.next.compaction.admitted": "session.compaction.started",
   "session.next.compaction.delta": "session.compaction.delta",
   "session.next.compaction.ended": "session.compaction.ended",
+  "session.next.compaction.failed": "session.compaction.failed",
+  "session.compaction.admitted": "session.compaction.started",
   "session.next.tool.input.started": "session.tool.input.started",
   "session.next.tool.input.delta": "session.tool.input.delta",
   "session.next.tool.input.ended": "session.tool.input.ended",
@@ -117,6 +121,7 @@ const PASSTHROUGH_TYPES = new Set<string>([
   "session.compaction.started",
   "session.compaction.delta",
   "session.compaction.ended",
+  "session.compaction.failed",
   "session.tool.input.started",
   "session.tool.input.delta",
   "session.tool.input.ended",

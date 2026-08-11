@@ -1239,6 +1239,101 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Context compacted");
   });
 
+  it("renders durable compaction threshold diagnostics without provider summary text", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "compaction",
+            kind: "event",
+            createdAt: MESSAGE_CREATED_AT,
+            projectedItem: {
+              position: 0,
+              visibility: "local",
+              sourceThreadId: "thread-1",
+              sourceItemId: "compaction",
+              item: {
+                id: "compaction",
+                threadId: "thread-1",
+                runId: "run-1",
+                nodeId: null,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 0,
+                status: "completed",
+                title: null,
+                startedAt: null,
+                completedAt: null,
+                updatedAt: {},
+                type: "compaction",
+                driver: "opencode2",
+                summary: "sensitive provider summary",
+                usedTokenCount: 902_000,
+                inputTokenCount: 272_000,
+                contextLimit: 1_050_000,
+                outputReserve: 32_000,
+                triggerThreshold: 902_000,
+                triggerReason: "auto",
+              },
+            } as never,
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("902,000 used / 902,000 trigger");
+    expect(markup).toContain("272,000 input");
+    expect(markup).toContain("1,050,000 context");
+    expect(markup).not.toContain("sensitive provider summary");
+  });
+
+  it("renders failed compaction entries with a danger tone", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "failed-compaction",
+            kind: "event",
+            createdAt: MESSAGE_CREATED_AT,
+            projectedItem: {
+              position: 0,
+              visibility: "local",
+              sourceThreadId: "thread-1",
+              sourceItemId: "failed-compaction",
+              item: {
+                id: "failed-compaction",
+                threadId: "thread-1",
+                runId: "run-1",
+                nodeId: null,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 0,
+                status: "failed",
+                title: null,
+                startedAt: null,
+                completedAt: null,
+                updatedAt: {},
+                type: "compaction",
+                driver: "opencode2",
+                triggerReason: "auto",
+              },
+            } as never,
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("text-destructive");
+  });
+
   it("does not render the transient V2 interruption request", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(

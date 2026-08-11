@@ -1665,12 +1665,14 @@ function v2EventPresentation(item: OrchestrationV2TurnItem): {
       };
     case "compaction": {
       const tokenSummary =
-        item.beforeTokenCount === undefined && item.afterTokenCount === undefined
-          ? null
-          : `${item.beforeTokenCount ?? "?"} → ${item.afterTokenCount ?? "?"} tokens`;
+        item.usedTokenCount !== undefined
+          ? `${item.usedTokenCount.toLocaleString("en-US")} used / ${item.triggerThreshold?.toLocaleString("en-US") ?? "?"} trigger; ${item.inputTokenCount?.toLocaleString("en-US") ?? "?"} input; ${item.contextLimit?.toLocaleString("en-US") ?? "?"} context; ${item.outputReserve?.toLocaleString("en-US") ?? "?"} output reserve; ${item.triggerReason ?? "unknown"}`
+          : item.beforeTokenCount === undefined && item.afterTokenCount === undefined
+            ? null
+            : `${item.beforeTokenCount ?? "?"} → ${item.afterTokenCount ?? "?"} tokens`;
       return {
         label: "Context compacted",
-        detail: item.summary ?? tokenSummary,
+        detail: tokenSummary ?? item.summary ?? null,
         tone: item.status === "failed" ? "danger" : "muted",
         icon: MinusIcon,
       };

@@ -40,12 +40,24 @@ export function assertOpenCode2CompactionOutput(
   const completed = compactions.find((compaction) => compaction.status === "completed");
   assert.isDefined(completed);
   assert.equal(completed.driver, "opencode2");
-  assert.equal(completed.summary, "Summary from compaction.");
+  assert.isUndefined(completed.summary);
+  assert.equal(completed.usedTokenCount, 902_000);
+  assert.equal(completed.inputTokenCount, 272_000);
+  assert.equal(completed.contextLimit, 1_050_000);
+  assert.equal(completed.outputReserve, 32_000);
+  assert.equal(completed.triggerThreshold, 902_000);
+  assert.equal(completed.triggerReason, "auto");
 
   const interrupted = compactions.find((compaction) => compaction.status === "cancelled");
   assert.isDefined(interrupted);
   assert.equal(interrupted.driver, "opencode2");
-  assert.equal(interrupted.summary, "Partial summary");
+  assert.isUndefined(interrupted.summary);
+  assert.equal(interrupted.usedTokenCount, 902_000);
+  assert.equal(interrupted.inputTokenCount, 272_000);
+  assert.equal(interrupted.contextLimit, 1_050_000);
+  assert.equal(interrupted.outputReserve, 32_000);
+  assert.equal(interrupted.triggerThreshold, 902_000);
+  assert.equal(interrupted.triggerReason, "auto");
 
   for (const compaction of compactions) {
     const node = projection.nodes.find((candidate) => candidate.id === compaction.nodeId);
