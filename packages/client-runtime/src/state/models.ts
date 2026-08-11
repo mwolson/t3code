@@ -97,6 +97,7 @@ export interface EnvironmentThreadShell {
   readonly updatedAt: string;
   readonly archivedAt: string | null;
   readonly settledOverride: "settled" | "active" | null;
+  readonly settledOverrideAt: string | null;
   readonly settledAt: string | null;
   readonly snoozedUntil: string | null;
   readonly snoozedAt: string | null;
@@ -219,6 +220,7 @@ export function presentThreadShell(
     updatedAt,
     archivedAt: nullableIso(thread.archivedAt),
     settledOverride: thread.settledOverride,
+    settledOverrideAt: nullableIso(thread.settledOverrideAt),
     settledAt: nullableIso(thread.settledAt),
     snoozedUntil: nullableIso(thread.snoozedUntil ?? null),
     snoozedAt: nullableIso(thread.snoozedAt ?? null),
