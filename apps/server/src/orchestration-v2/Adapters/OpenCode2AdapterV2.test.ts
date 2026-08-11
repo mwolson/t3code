@@ -27,7 +27,9 @@ import * as Scope from "effect/Scope";
 import { describe } from "vite-plus/test";
 
 import {
+  openCode2AllActiveTurnsAwaitRuntimeRequest,
   openCode2AutoPermissionReply,
+  openCode2CanAdoptMissingExecutionStart,
   openCode2ChildTurnItemOrdinals,
   openCode2CleanEofResubscribeDelayMs,
   openCode2CompactionDiagnostics,
@@ -53,7 +55,7 @@ import {
   openCode2SessionErrorMessage,
   openCode2SessionErrorStatus,
   openCode2SessionErrorTargetSessionIds,
-  openCode2CanAdoptMissingExecutionStart,
+  openCode2ShellRemovalSucceeded,
   openCode2ShouldChargeStallBudget,
   openCode2ShouldChargeStreamFailure,
   openCode2ShouldFailActiveTurnsAfterCleanEof,
@@ -560,6 +562,29 @@ describe("removeOpenCode2Session", () => {
       assert.notInclude(failure.message, "InternalServerError");
     }),
   );
+});
+
+describe("OpenCode 2 shell removal", () => {
+  it("rejects resolved HTTP failures while accepting removed or already-missing shells", () => {
+    assert.isTrue(openCode2ShellRemovalSucceeded({ data: true }));
+    assert.isTrue(
+      openCode2ShellRemovalSucceeded({
+        error: { name: "ShellNotFoundError" },
+        response: { status: 404 },
+      }),
+    );
+    assert.isFalse(
+      openCode2ShellRemovalSucceeded({
+        error: { name: "InternalServerError" },
+        response: { status: 500 },
+      }),
+    );
+    assert.isFalse(
+      openCode2ShellRemovalSucceeded({
+        error: { name: "UnknownError" },
+      }),
+    );
+  });
 });
 
 describe("openCode2QuestionId", () => {
@@ -1233,6 +1258,27 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
     assert.equal(
       openCode2CleanEofResubscribeDelayMs(100, false),
       OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS,
+    );
+  });
+
+  it("matches projected child runtime requests to the parent turn and child session", () => {
+    assert.isTrue(
+      openCode2AllActiveTurnsAwaitRuntimeRequest({
+        activeTurns: [
+          { nativeSessionId: "ses_parent", providerTurnId: "turn_parent" },
+          { nativeSessionId: "ses_child", providerTurnId: "turn_child" },
+        ],
+        pendingRequests: [{ nativeSessionId: "ses_child", providerTurnId: "turn_parent" }],
+      }),
+    );
+    assert.isFalse(
+      openCode2AllActiveTurnsAwaitRuntimeRequest({
+        activeTurns: [
+          { nativeSessionId: "ses_parent", providerTurnId: "turn_parent" },
+          { nativeSessionId: "ses_child", providerTurnId: "turn_child" },
+        ],
+        pendingRequests: [{ nativeSessionId: "ses_parent", providerTurnId: "turn_parent" }],
+      }),
     );
   });
 
