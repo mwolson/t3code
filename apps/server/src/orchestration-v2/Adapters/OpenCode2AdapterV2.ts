@@ -757,6 +757,25 @@ export function openCode2ShouldChargeStallBudget(input: {
   return !input.hasPendingRuntimeRequest && !input.hasInFlightPendingWork;
 }
 
+export function openCode2AllActiveTurnsAwaitRuntimeRequest(input: {
+  readonly activeTurns: ReadonlyArray<{
+    readonly nativeSessionId: string;
+    readonly providerTurnId: string;
+  }>;
+  readonly pendingRequests: ReadonlyArray<{
+    readonly nativeSessionId: string;
+    readonly providerTurnId: string;
+  }>;
+}): boolean {
+  return input.activeTurns.every((active) =>
+    input.pendingRequests.some(
+      (pending) =>
+        pending.providerTurnId === active.providerTurnId ||
+        pending.nativeSessionId === active.nativeSessionId,
+    ),
+  );
+}
+
 export function openCode2ShouldChargeStreamFailure(watchdogResubscribe: boolean): boolean {
   return !watchdogResubscribe;
 }
@@ -1469,6 +1488,13 @@ export function removeOpenCode2Session(
       );
     }),
   );
+}
+
+/** @internal exported for tests */
+export function openCode2ShellRemovalSucceeded(response: unknown): boolean {
+  const error = recordValue(response, "error");
+  const status = recordNumber(recordValue(response, "response"), "status");
+  return error === undefined || status === 404;
 }
 
 /**
@@ -3761,7 +3787,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 location: projection.location,
               }),
             ).pipe(
-              Effect.as(true),
+              Effect.map(openCode2ShellRemovalSucceeded),
               Effect.catchCause((cause) =>
                 Effect.logWarning("Failed to stop an interrupted OpenCode 2 shell.", {
                   errorTag: causeErrorTag(cause),
@@ -3817,11 +3843,22 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         });
 
         const allActiveTurnsAwaitRuntimeRequest = (): boolean =>
-          Array.from(threads.values()).every((threadState) => {
-            if (threadState.activeTurn === null) return true;
-            return Array.from(pendingRequests.values()).some(
-              (pending) => pending.turn === threadState.activeTurn,
-            );
+          openCode2AllActiveTurnsAwaitRuntimeRequest({
+            activeTurns: Array.from(threads.values()).flatMap((threadState) => {
+              const turn = threadState.activeTurn;
+              return turn === null
+                ? []
+                : [
+                    {
+                      nativeSessionId: threadState.nativeSessionId,
+                      providerTurnId: String(turn.providerTurnId),
+                    },
+                  ];
+            }),
+            pendingRequests: Array.from(pendingRequests.values()).map((pending) => ({
+              nativeSessionId: pending.nativeSessionId,
+              providerTurnId: String(pending.turn.providerTurnId),
+            })),
           });
 
         const allActiveTurnsHaveInFlightPendingWork = (nowMs: number): boolean =>
