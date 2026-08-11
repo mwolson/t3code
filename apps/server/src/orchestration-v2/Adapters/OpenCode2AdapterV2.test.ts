@@ -30,6 +30,7 @@ import {
   openCode2AutoPermissionReply,
   openCode2ChildTurnItemOrdinals,
   openCode2CleanEofResubscribeDelayMs,
+  openCode2CompactionDiagnostics,
   openCode2EnvironmentWithPermission,
   openCode2EnvironmentWithT3Mcp,
   openCode2EventEndsExecution,
@@ -38,23 +39,30 @@ import {
   openCode2ForkEventPumpInScope,
   openCode2ForkParameters,
   openCode2InterruptedThreadDisposition,
+  openCode2HasInFlightPendingWork,
   openCode2IsCancelledPostSettleWake,
   openCode2IsPostSettleWakeAdmission,
   openCode2PendingWorkForSession,
   openCode2PermissionAutoReply,
   openCode2PermissionAutoReplyForSession,
+  openCode2ProviderErrorStatus,
+  openCode2ProviderFailure,
+  openCode2ProviderRetryIsScheduled,
   openCode2QuestionId,
   openCode2SessionSelectionParameters,
   openCode2SessionErrorMessage,
   openCode2SessionErrorStatus,
   openCode2SessionErrorTargetSessionIds,
   openCode2CanAdoptMissingExecutionStart,
+  openCode2ShouldChargeStallBudget,
+  openCode2ShouldChargeStreamFailure,
   openCode2ShouldFailActiveTurnsAfterCleanEof,
   openCode2ShouldForceInterruptFinalize,
   openCode2ShouldQuarantineInterruptedSession,
   openCode2ShouldResubscribeStalledStream,
   openCode2ShouldSettleTurn,
   openCode2ToolNeedsTerminalOverride,
+  openCode2TokenUsage,
   normalizeOpenCode2PermissionEvent,
   OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
   OPENCODE2_EVENT_PENDING_RESUBSCRIBE_DELAY_MS,
@@ -69,7 +77,7 @@ import {
   removeOpenCode2Session,
   unwrapOpenCode2Data,
 } from "./OpenCode2AdapterV2.ts";
-import { openCode2WireInputID } from "./openCode2Wire.ts";
+import { normalizeOpenCode2WireType, openCode2WireInputID } from "./openCode2Wire.ts";
 
 const v2Event = (event: unknown) => event as V2Event;
 
@@ -1261,15 +1269,179 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
         stallMs: OPENCODE2_EVENT_STALL_MS,
       }),
     );
-    // Quiet stream while waiting for Input is not a dead transport.
-    assert.isFalse(
+    // Explained quiet still reconnects so a dead stream cannot hide the event
+    // that clears the local pending marker.
+    assert.isTrue(
       openCode2ShouldResubscribeStalledStream({
         sessionAborted: false,
         hasActiveTurn: true,
-        hasPendingRuntimeRequest: true,
-        lastEventAgeMs: OPENCODE2_EVENT_STALL_MS * 3,
+        lastEventAgeMs: OPENCODE2_EVENT_STALL_MS * 10,
         stallMs: OPENCODE2_EVENT_STALL_MS,
       }),
+    );
+    assert.isFalse(
+      openCode2ShouldChargeStallBudget({
+        hasPendingRuntimeRequest: true,
+        hasInFlightPendingWork: false,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldChargeStallBudget({
+        hasPendingRuntimeRequest: false,
+        hasInFlightPendingWork: true,
+      }),
+    );
+    assert.isTrue(
+      openCode2ShouldChargeStallBudget({
+        hasPendingRuntimeRequest: false,
+        hasInFlightPendingWork: false,
+      }),
+    );
+    assert.isFalse(openCode2ShouldChargeStreamFailure(true));
+    assert.isTrue(openCode2ShouldChargeStreamFailure(false));
+  });
+
+  it("expires provider retry deadlines independently of durable retry presentation", () => {
+    const providerRetry = { scheduledUntilAtMs: 1_000 };
+    assert.isTrue(openCode2ProviderRetryIsScheduled(providerRetry, 1_000));
+    assert.isFalse(openCode2ProviderRetryIsScheduled(providerRetry, 1_001));
+    assert.isFalse(openCode2ProviderRetryIsScheduled(null, 0));
+  });
+
+  it("recognizes local work that legitimately keeps an active turn quiet", () => {
+    const base = {
+      toolStatuses: [],
+      shellStatuses: [],
+      hasProviderRetry: false,
+      compactionStatus: null,
+      subagentStatuses: [],
+    } as const;
+    assert.isFalse(openCode2HasInFlightPendingWork(base));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, toolStatuses: ["running"] }));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, toolStatuses: ["pending"] }));
+    assert.isFalse(openCode2HasInFlightPendingWork({ ...base, toolStatuses: ["completed"] }));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, shellStatuses: ["running"] }));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, hasProviderRetry: true }));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, compactionStatus: "running" }));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, subagentStatuses: ["running"] }));
+    assert.isFalse(openCode2HasInFlightPendingWork({ ...base, subagentStatuses: ["completed"] }));
+  });
+
+  it("computes compaction diagnostics from model limits rather than pricing tiers", () => {
+    const usage = openCode2TokenUsage({
+      tokens: {
+        total: 0,
+        input: 272_000,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 630_000, write: 0 },
+      },
+    });
+    assert.deepStrictEqual(
+      openCode2CompactionDiagnostics({
+        usage,
+        limits: { context: 1_050_000, input: 922_000, output: 128_000 },
+        reason: "auto",
+      }),
+      {
+        usedTokenCount: 902_000,
+        inputTokenCount: 272_000,
+        contextLimit: 1_050_000,
+        outputReserve: 32_000,
+        triggerThreshold: 902_000,
+        triggerReason: "auto",
+      },
+    );
+    const reportedTotal = openCode2TokenUsage({
+      tokens: {
+        total: 910_000,
+        input: 272_000,
+        output: 1_000,
+        reasoning: 500_000,
+        cache: { read: 630_000, write: 0 },
+      },
+    });
+    assert.equal(
+      openCode2CompactionDiagnostics({
+        usage: reportedTotal,
+        limits: { context: 1_050_000, input: 922_000, output: 128_000 },
+        reason: "manual",
+      })?.usedTokenCount,
+      910_000,
+    );
+    assert.equal(
+      openCode2CompactionDiagnostics({
+        usage,
+        limits: { context: 1_050_000, input: 922_000, output: 3_000 },
+        reason: "auto",
+      })?.triggerThreshold,
+      919_000,
+    );
+    assert.equal(
+      openCode2CompactionDiagnostics({
+        usage,
+        limits: { context: 1_050_000, output: 128_000 },
+        reason: "auto",
+      })?.triggerThreshold,
+      1_018_000,
+    );
+  });
+
+  it("classifies provider failures without persisting raw provider payloads", () => {
+    const secret = "gho_abcdefghijklmnopqrstuvwxyz123456";
+    const context = openCode2ProviderFailure({
+      message: `maximum context length; token=${secret}`,
+      code: "ContextLengthExceeded",
+    });
+    assert.equal(context.code, "provider.context-limit");
+    assert.notInclude(context.message, secret);
+
+    const rateLimit = openCode2ProviderFailure({ message: "HTTP 429", code: null });
+    assert.equal(rateLimit.code, "provider.rate-limit");
+    assert.isTrue(rateLimit.retryable);
+
+    const unknown = openCode2ProviderFailure({
+      message: `raw payload token=${secret}`,
+      code: "RawProviderFailure",
+    });
+    assert.equal(unknown.code, "provider.error");
+    assert.notInclude(unknown.message, secret);
+    assert.notInclude(unknown.message, "raw payload");
+
+    assert.equal(
+      openCode2ProviderFailure({
+        message: "invalid key",
+        code: "ProviderAuthError",
+      }).code,
+      "Integration.Authorization",
+    );
+    assert.equal(
+      openCode2ProviderFailure({
+        message: "request rejected",
+        code: "APIError",
+        statusCode: openCode2ProviderErrorStatus({
+          error: { name: "APIError", data: { message: "secret payload", statusCode: 429 } },
+        }),
+      }).code,
+      "provider.rate-limit",
+    );
+    assert.equal(
+      openCode2ProviderFailure({
+        message: "request rejected",
+        code: "ContextOverflowError",
+      }).code,
+      "provider.context-limit",
+    );
+  });
+
+  it("normalizes current compaction admission and failure events", () => {
+    assert.equal(
+      normalizeOpenCode2WireType("session.compaction.admitted"),
+      "session.compaction.started",
+    );
+    assert.equal(
+      normalizeOpenCode2WireType("session.compaction.failed"),
+      "session.compaction.failed",
     );
   });
 

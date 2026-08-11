@@ -237,6 +237,8 @@ export const OPENCODE2_EVENT_STALL_CHECK_MS = 5_000;
 export const OPENCODE2_EVENT_STREAM_MAX_FAILURES = 5;
 /** Cap stall-driven resubscribes so a stuck turn cannot thrash subscribe forever. */
 export const OPENCODE2_EVENT_STALL_MAX_RESUBSCRIBES = 2;
+export const OPENCODE2_COMPACTION_BUFFER_TOKENS = 20_000;
+export const OPENCODE2_COMPACTION_MAX_OUTPUT_RESERVE = 32_000;
 export const OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS = 250;
 export const OPENCODE2_EVENT_PENDING_RESUBSCRIBE_DELAY_MS = 5_000;
 const OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT = 512;
@@ -413,6 +415,26 @@ interface OpenCode2Compaction {
   summary: string;
   status: "running" | "completed" | "failed" | "cancelled";
   completedAt: DateTime.Utc | null;
+  triggerReason: "auto" | "manual" | "unknown";
+  diagnostics: OpenCode2CompactionDiagnostics | null;
+}
+
+interface OpenCode2TokenUsage {
+  readonly total: number;
+  readonly input: number;
+  readonly output: number;
+  readonly reasoning: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
+}
+
+interface OpenCode2CompactionDiagnostics {
+  readonly usedTokenCount: number;
+  readonly inputTokenCount: number;
+  readonly contextLimit: number;
+  readonly outputReserve: number;
+  readonly triggerThreshold: number;
+  readonly triggerReason: "auto" | "manual" | "unknown";
 }
 
 type OpenCode2Part = OpenCode2TextPart | OpenCode2ToolPart;
@@ -465,6 +487,7 @@ interface OpenCode2ProviderRetry {
   readonly retry: OrchestrationV2ProviderRetry;
   readonly failure: OrchestrationV2ProviderFailure;
   readonly startedAt: DateTime.Utc;
+  readonly scheduledUntilAtMs: number;
 }
 
 type OpenCode2PostSettleWakeDisposition = "replay" | "suppress";
@@ -540,6 +563,7 @@ interface OpenCode2ThreadState {
   activeExecution: OpenCode2ExecutionOwnership | null;
   parentSubagent: OpenCode2SubagentContext | null;
   nextChildTurnOrdinal: number;
+  latestTokenUsage: OpenCode2TokenUsage | null;
 }
 
 interface PendingOpenCode2Request {
@@ -718,16 +742,109 @@ export function openCode2ShouldForceInterruptFinalize(input: {
 export function openCode2ShouldResubscribeStalledStream(input: {
   readonly sessionAborted: boolean;
   readonly hasActiveTurn: boolean;
-  /** Pending permission/question UI holds the turn while the stream is quiet. */
-  readonly hasPendingRuntimeRequest?: boolean;
   readonly lastEventAgeMs: number;
   readonly stallMs: number;
 }): boolean {
   if (input.sessionAborted || !input.hasActiveTurn) return false;
-  // Waiting for user Input is not a dead stream; fail-closed stall recovery
-  // would otherwise mark the turn Failed after ~90s with no UI.
-  if (input.hasPendingRuntimeRequest === true) return false;
   return input.lastEventAgeMs >= input.stallMs;
+}
+
+export function openCode2ShouldChargeStallBudget(input: {
+  readonly hasPendingRuntimeRequest: boolean;
+  readonly hasInFlightPendingWork: boolean;
+}): boolean {
+  return !input.hasPendingRuntimeRequest && !input.hasInFlightPendingWork;
+}
+
+export function openCode2ShouldChargeStreamFailure(watchdogResubscribe: boolean): boolean {
+  return !watchdogResubscribe;
+}
+
+export function openCode2ProviderRetryIsScheduled(
+  providerRetry: Pick<OpenCode2ProviderRetry, "scheduledUntilAtMs"> | null,
+  nowMs: number,
+): boolean {
+  return providerRetry !== null && nowMs <= providerRetry.scheduledUntilAtMs;
+}
+
+export function openCode2HasInFlightPendingWork(input: {
+  readonly toolStatuses: ReadonlyArray<OpenCode2ToolStatus>;
+  readonly shellStatuses: ReadonlyArray<string>;
+  readonly hasProviderRetry: boolean;
+  readonly compactionStatus: OpenCode2Compaction["status"] | null;
+  readonly subagentStatuses: ReadonlyArray<OrchestrationV2Subagent["status"]>;
+}): boolean {
+  return (
+    input.toolStatuses.some((status) => status === "pending" || status === "running") ||
+    input.shellStatuses.some((status) => status === "running") ||
+    input.hasProviderRetry ||
+    input.compactionStatus === "running" ||
+    input.subagentStatuses.some(
+      (status) =>
+        status !== "completed" &&
+        status !== "failed" &&
+        status !== "cancelled" &&
+        status !== "interrupted",
+    )
+  );
+}
+
+function nonNegativeInteger(value: number | undefined): number {
+  return value === undefined ? 0 : Math.max(0, Math.floor(value));
+}
+
+export function openCode2TokenUsage(input: unknown): OpenCode2TokenUsage | null {
+  const tokens = recordValue(input, "tokens");
+  if (tokens === undefined) return null;
+  const cache = recordValue(tokens, "cache");
+  const usage = {
+    total: nonNegativeInteger(recordNumber(tokens, "total")),
+    input: nonNegativeInteger(recordNumber(tokens, "input")),
+    output: nonNegativeInteger(recordNumber(tokens, "output")),
+    reasoning: nonNegativeInteger(recordNumber(tokens, "reasoning")),
+    cacheRead: nonNegativeInteger(recordNumber(cache, "read")),
+    cacheWrite: nonNegativeInteger(recordNumber(cache, "write")),
+  };
+  return Object.values(usage).some((value) => value > 0) ? usage : null;
+}
+
+export function openCode2CompactionDiagnostics(input: {
+  readonly usage: OpenCode2TokenUsage | null;
+  readonly limits: Pick<ModelInfo["limit"], "context" | "input" | "output"> | null;
+  readonly reason: unknown;
+}): OpenCode2CompactionDiagnostics | null {
+  if (input.usage === null || input.limits === null) return null;
+  const contextLimit = nonNegativeInteger(input.limits.context);
+  const outputReserve = Math.min(
+    nonNegativeInteger(input.limits.output),
+    OPENCODE2_COMPACTION_MAX_OUTPUT_RESERVE,
+  );
+  const inputLimit = input.limits.input;
+  const triggerThreshold =
+    inputLimit === undefined
+      ? Math.max(0, contextLimit - outputReserve)
+      : Math.max(
+          0,
+          nonNegativeInteger(inputLimit) -
+            Math.min(OPENCODE2_COMPACTION_BUFFER_TOKENS, outputReserve),
+        );
+  const usedTokenCount =
+    input.usage.total > 0
+      ? input.usage.total
+      : input.usage.input + input.usage.output + input.usage.cacheRead + input.usage.cacheWrite;
+  return {
+    usedTokenCount,
+    inputTokenCount: input.usage.input,
+    contextLimit,
+    outputReserve,
+    triggerThreshold,
+    triggerReason: input.reason === "auto" || input.reason === "manual" ? input.reason : "unknown",
+  };
+}
+
+function openCode2CompactionReason(input: unknown): "auto" | "manual" | "unknown" {
+  const reason = recordString(input, "reason");
+  return reason === "auto" || reason === "manual" ? reason : "unknown";
 }
 
 export const openCode2PendingWorkForSession = Effect.fnUntraced(function* (input: {
@@ -759,7 +876,7 @@ export function openCode2ToolNeedsTerminalOverride(
 
 type OpenCode2SessionErrorData = {
   sessionID?: string;
-  error?: { name?: string; message?: string; type?: string; data?: { message?: string } };
+  error?: { name?: string; message?: string; type?: string; data?: unknown };
 };
 
 export function openCode2SessionErrorMessage(data: OpenCode2SessionErrorData): string {
@@ -773,11 +890,85 @@ export function openCode2SessionErrorMessage(data: OpenCode2SessionErrorData): s
   );
 }
 
+export function openCode2ProviderErrorStatus(input: unknown): number | null {
+  const error = recordValue(input, "error") ?? input;
+  const data = recordValue(error, "data");
+  return (
+    recordNumber(error, "statusCode", "status") ??
+    recordNumber(data, "statusCode", "status") ??
+    null
+  );
+}
+
 export function openCode2SessionErrorStatus(
   data: OpenCode2SessionErrorData,
   interrupted: boolean,
 ): TerminalTurnStatus {
   return interrupted || data.error?.name === "MessageAbortedError" ? "interrupted" : "failed";
+}
+
+export function openCode2ProviderFailure(input: {
+  readonly message: string;
+  readonly code: string | null;
+  readonly statusCode?: number | null;
+  readonly hasProviderRetry?: boolean;
+}): OrchestrationV2ProviderFailure {
+  const evidence = `${input.code ?? ""} ${input.statusCode ?? ""} ${input.message}`;
+  if (
+    input.code === "Integration.Authorization" ||
+    input.code === "ProviderAuthError" ||
+    input.statusCode === 401
+  ) {
+    const status = /\b401\b/.test(evidence) ? " (HTTP 401)" : "";
+    return makeProviderFailure({
+      message: `OpenCode 2 provider authorization failed${status}. Reconnect the provider in OpenCode, then retry.`,
+      code: "Integration.Authorization",
+      class: "provider_error",
+      retryable: false,
+    });
+  }
+  if (
+    input.code === "provider.rate-limit" ||
+    input.statusCode === 429 ||
+    /\b429\b|rate.?limit/i.test(evidence)
+  ) {
+    const status = /\b429\b/.test(evidence) ? " (HTTP 429)" : "";
+    return makeProviderFailure({
+      message: `OpenCode 2 hit a provider rate limit${status}. Wait, then retry the turn.`,
+      code: "provider.rate-limit",
+      class: "provider_error",
+      retryable: true,
+    });
+  }
+  if (
+    input.code === "ContextOverflowError" ||
+    /context (?:length|window|limit)|maximum context|prompt is too long|token limit|too many tokens/i.test(
+      evidence,
+    )
+  ) {
+    return makeProviderFailure({
+      message:
+        "OpenCode 2 reached the model context limit. Compact or start a new thread, then retry.",
+      code: "provider.context-limit",
+      class: "provider_error",
+      retryable: false,
+    });
+  }
+  if (/\b(?:HTTP\s*)?401\b/i.test(evidence)) {
+    const status = /\b401\b/.test(evidence) ? " (HTTP 401)" : "";
+    return makeProviderFailure({
+      message: `OpenCode 2 provider authorization failed${status}. Reconnect the provider in OpenCode, then retry.`,
+      code: "Integration.Authorization",
+      class: "provider_error",
+      retryable: false,
+    });
+  }
+  return makeProviderFailure({
+    message: "OpenCode 2 provider failed. Check OpenCode logs for details, then retry the turn.",
+    code: "provider.error",
+    class: "provider_error",
+    retryable: input.hasProviderRetry === true ? true : null,
+  });
 }
 
 export function openCode2SessionErrorTargetSessionIds(
@@ -1922,6 +2113,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const deferredChildEventOverflows = new Set<string>();
         const pendingDeferredChildEvents: Array<unknown> = [];
         const sessionPermissions: OpenCode2SessionPermissionStore = new Map();
+        const modelLimits = new Map<string, ModelInfo["limit"]>();
         const abortController = new AbortController();
         // Liveness marker for SSE pull. OpenCode 2 fails a slow event consumer;
         // if pull stalls while a turn is active we resubscribe.
@@ -1987,6 +2179,53 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               }).pipe(Effect.as(Option.none<A>())),
             ),
           );
+
+        /** Model inventory is cached per spawned server and also supplies safe compaction limits. */
+        let variantCatalog: ReadonlyMap<string, ReadonlySet<string>> | null = null;
+        const readVariantCatalog = sdkCall("model.list", {}, () =>
+          client.v2.model.list({ location: { directory: cwd } }),
+        ).pipe(
+          Effect.flatMap((response) =>
+            unwrapOpenCode2Data<ReadonlyArray<ModelInfo>>("model.list", response).pipe(
+              Effect.map((models) => {
+                const catalog = new Map<string, ReadonlySet<string>>();
+                for (const model of models) {
+                  const slug = `${model.providerID}/${model.id}`;
+                  catalog.set(slug, new Set(model.variants.map((entry) => entry.id)));
+                  modelLimits.set(slug, model.limit);
+                }
+                return catalog as ReadonlyMap<string, ReadonlySet<string>>;
+              }),
+            ),
+          ),
+          Effect.catchCause((cause) =>
+            Cause.hasInterrupts(cause)
+              ? Effect.interrupt
+              : Effect.logWarning("Failed to load the OpenCode 2 variant catalog.", {
+                  errorTag: causeErrorTag(cause),
+                  provider: OPENCODE2_PROVIDER,
+                }).pipe(Effect.as(null)),
+          ),
+        );
+        const knownVariantsForModel = Effect.fnUntraced(function* (modelSlug: string) {
+          if (variantCatalog !== null) return variantCatalog.get(modelSlug) ?? null;
+          const fetched = yield* retryEmptyOpenCode2VariantCatalog(readVariantCatalog);
+          if (fetched !== null && fetched.size > 0 && variantCatalog === null) {
+            variantCatalog = fetched;
+          }
+          return fetched?.get(modelSlug) ?? null;
+        });
+
+        const compactionDiagnosticsFor = (
+          state: OpenCode2ThreadState,
+          turn: ActiveOpenCode2Turn,
+          reason: unknown,
+        ) =>
+          openCode2CompactionDiagnostics({
+            usage: state.latestTokenUsage,
+            limits: modelLimits.get(turn.modelSelection.model) ?? null,
+            reason,
+          });
 
         const updateProviderSession = (
           status: OrchestrationV2ProviderSession["status"],
@@ -2257,6 +2496,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             activeExecution: null,
             parentSubagent: context,
             nextChildTurnOrdinal: 1,
+            latestTokenUsage: null,
           });
           const bufferedEvents = deferredChildEvents.get(childSessionId);
           if (bufferedEvents !== undefined) {
@@ -2659,8 +2899,36 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               type: "compaction",
               driver: OPENCODE2_PROVIDER,
               ...(compaction.summary.length === 0 ? {} : { summary: compaction.summary }),
+              ...(compaction.triggerReason === "unknown"
+                ? {}
+                : { triggerReason: compaction.triggerReason }),
+              ...compaction.diagnostics,
             },
           });
+        });
+
+        const compactionDiagnosticsLoads = new Set<string>();
+        const refreshCompactionDiagnostics = Effect.fnUntraced(function* (
+          state: OpenCode2ThreadState,
+          turn: ActiveOpenCode2Turn,
+          compaction: OpenCode2Compaction,
+        ) {
+          const key = `${turn.providerTurnId}:${compaction.id}`;
+          if (compactionDiagnosticsLoads.has(key)) return;
+          compactionDiagnosticsLoads.add(key);
+          yield* Effect.gen(function* () {
+            if (!modelLimits.has(turn.modelSelection.model)) {
+              const fetched = yield* retryEmptyOpenCode2VariantCatalog(readVariantCatalog);
+              if (fetched !== null && fetched.size > 0 && variantCatalog === null) {
+                variantCatalog = fetched;
+              }
+            }
+            const diagnostics = compactionDiagnosticsFor(state, turn, compaction.triggerReason);
+            if (diagnostics === null) return;
+            if (turn.activeCompaction !== compaction) return;
+            compaction.diagnostics = diagnostics;
+            yield* emitCompaction(state, turn, compaction);
+          }).pipe(Effect.ensuring(Effect.sync(() => compactionDiagnosticsLoads.delete(key))));
         });
 
         const runningShellForPart = (
@@ -3527,12 +3795,19 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const failActiveTurns = Effect.fnUntraced(function* (
           detail: string,
           failureClass: "transport_error" | "provider_error",
+          code: string | null = null,
+          retryable: boolean | null = null,
         ) {
           yield* updateProviderSession("error", detail);
           for (const state of threads.values()) {
             if (state.activeTurn !== null) {
               yield* finalizeTurn(state, state.activeTurn, "failed", {
-                failure: makeProviderFailure({ message: detail, class: failureClass }),
+                failure: makeProviderFailure({
+                  message: detail,
+                  code,
+                  class: failureClass,
+                  retryable,
+                }),
                 threadDisposition: "broken",
               });
             }
@@ -3545,6 +3820,29 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             return Array.from(pendingRequests.values()).some(
               (pending) => pending.turn === threadState.activeTurn,
             );
+          });
+
+        const allActiveTurnsHaveInFlightPendingWork = (nowMs: number): boolean =>
+          Array.from(threads.values()).every((threadState) => {
+            const turn = threadState.activeTurn;
+            if (turn === null) return true;
+            const retryRemainsScheduled = openCode2ProviderRetryIsScheduled(
+              turn.providerRetry,
+              nowMs,
+            );
+            return openCode2HasInFlightPendingWork({
+              toolStatuses: Array.from(turn.parts.values())
+                .filter((part): part is OpenCode2ToolPart => part.kind === "tool")
+                .map((part) => part.status),
+              shellStatuses: Array.from(shellProjections.values())
+                .filter((projection) => projection.turn === turn)
+                .map((projection) => projection.status),
+              hasProviderRetry: retryRemainsScheduled,
+              compactionStatus: turn.activeCompaction?.status ?? null,
+              subagentStatuses: Array.from(subagentsByNativeItemId.values())
+                .filter((subagent) => subagent.parentTurn === turn)
+                .map((subagent) => subagent.status),
+            });
           });
 
         const offerPostSettleWake = Effect.fnUntraced(function* (
@@ -4123,6 +4421,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
               const now = yield* DateTime.now;
+              const triggerReason = openCode2CompactionReason(event.data);
+              const diagnostics = compactionDiagnosticsFor(
+                active.state,
+                active.turn,
+                triggerReason,
+              );
               const nativeItemId = String(openCode2WireInputID(wire) ?? event.id ?? "");
               if (nativeItemId.length === 0) return;
               const current = active.turn.activeCompaction;
@@ -4140,11 +4444,20 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                       summary: "",
                       status: "running",
                       completedAt: null,
+                      triggerReason,
+                      diagnostics,
                     };
               compaction.status = "running";
               compaction.completedAt = null;
+              if (triggerReason !== "unknown") compaction.triggerReason = triggerReason;
+              compaction.diagnostics = diagnostics ?? compaction.diagnostics;
               active.turn.activeCompaction = compaction;
               yield* emitCompaction(active.state, active.turn, compaction);
+              if (compaction.diagnostics === null && compaction.triggerReason !== "unknown") {
+                yield* refreshCompactionDiagnostics(active.state, active.turn, compaction).pipe(
+                  Effect.forkIn(scope),
+                );
+              }
               return;
             }
             case "session.compaction.delta": {
@@ -4159,17 +4472,23 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   summary: "",
                   status: "running",
                   completedAt: null,
+                  triggerReason: "unknown",
+                  diagnostics: null,
                 } satisfies OpenCode2Compaction);
-              compaction.summary += event.data.text;
               if (compaction !== null)
                 active.turn.activeCompaction = compaction as OpenCode2Compaction;
-              yield* emitCompaction(active.state, active.turn, compaction as OpenCode2Compaction);
               return;
             }
             case "session.compaction.ended": {
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
               const now = yield* DateTime.now;
+              const triggerReason = openCode2CompactionReason(event.data);
+              const diagnostics = compactionDiagnosticsFor(
+                active.state,
+                active.turn,
+                triggerReason,
+              );
               const compaction =
                 active.turn.activeCompaction ??
                 ({
@@ -4178,13 +4497,55 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   summary: "",
                   status: "running",
                   completedAt: null,
+                  triggerReason,
+                  diagnostics,
                 } satisfies OpenCode2Compaction);
-              compaction.summary = event.data.text;
+              if (triggerReason !== "unknown") compaction.triggerReason = triggerReason;
+              compaction.diagnostics = diagnostics ?? compaction.diagnostics;
               compaction.status = "completed";
               compaction.completedAt = dateTimeFromEpoch(openCode2WireCreatedMs(wire), now);
               if (compaction !== null)
                 active.turn.activeCompaction = compaction as OpenCode2Compaction;
               yield* emitCompaction(active.state, active.turn, compaction as OpenCode2Compaction);
+              if (compaction.diagnostics === null && compaction.triggerReason !== "unknown") {
+                yield* refreshCompactionDiagnostics(active.state, active.turn, compaction).pipe(
+                  Effect.forkIn(scope),
+                );
+              }
+              return;
+            }
+            case "session.compaction.failed": {
+              const active = activeFor(event.data.sessionID);
+              if (active === null) return;
+              const now = yield* DateTime.now;
+              const triggerReason = openCode2CompactionReason(event.data);
+              const diagnostics = compactionDiagnosticsFor(
+                active.state,
+                active.turn,
+                triggerReason,
+              );
+              const compaction =
+                active.turn.activeCompaction ??
+                ({
+                  id: String(openCode2WireInputID(wire) ?? event.id),
+                  startedAt: dateTimeFromEpoch(openCode2WireCreatedMs(wire), now),
+                  summary: "",
+                  status: "running",
+                  completedAt: null,
+                  triggerReason,
+                  diagnostics,
+                } satisfies OpenCode2Compaction);
+              if (triggerReason !== "unknown") compaction.triggerReason = triggerReason;
+              compaction.diagnostics = diagnostics ?? compaction.diagnostics;
+              compaction.status = "failed";
+              compaction.completedAt = dateTimeFromEpoch(openCode2WireCreatedMs(wire), now);
+              active.turn.activeCompaction = compaction;
+              yield* emitCompaction(active.state, active.turn, compaction);
+              if (compaction.diagnostics === null && compaction.triggerReason !== "unknown") {
+                yield* refreshCompactionDiagnostics(active.state, active.turn, compaction).pipe(
+                  Effect.forkIn(scope),
+                );
+              }
               return;
             }
             case "session.tool.input.started": {
@@ -4267,24 +4628,21 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const active = activeFor(event.data.sessionID);
               if (active === null) return;
               const now = yield* DateTime.now;
+              const nowMs = DateTime.toEpochMillis(now);
+              const retryAtMs =
+                typeof event.data.at === "number"
+                  ? event.data.at
+                  : (openCode2WireCreatedMs(wire) ?? nowMs);
               const retry: OrchestrationV2ProviderRetry = {
                 attempt: Math.max(1, Math.floor(event.data.attempt)),
                 maxAttempts: null,
-                retryDelayMs: Math.max(
-                  0,
-                  Math.floor(
-                    (typeof event.data.at === "number"
-                      ? event.data.at
-                      : (openCode2WireCreatedMs(wire) ?? DateTime.toEpochMillis(now))) -
-                      DateTime.toEpochMillis(now),
-                  ),
-                ),
+                retryDelayMs: Math.max(0, Math.floor(retryAtMs - nowMs)),
               };
-              const failure = makeProviderFailure({
+              const failure = openCode2ProviderFailure({
                 message: event.data.error.message,
                 code: event.data.error.type,
-                class: "provider_error",
-                retryable: true,
+                statusCode: openCode2ProviderErrorStatus(event.data.error),
+                hasProviderRetry: true,
               });
               active.turn.providerRetry = {
                 retry,
@@ -4292,6 +4650,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 startedAt:
                   active.turn.providerRetry?.startedAt ??
                   dateTimeFromEpoch(openCode2WireCreatedMs(wire), now),
+                scheduledUntilAtMs: retryAtMs,
               };
               const context = active.state.parentSubagent;
               if (context !== null) {
@@ -4480,6 +4839,20 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               ) {
                 return;
               }
+              active.state.latestTokenUsage =
+                openCode2TokenUsage(openCode2WireData(wire)) ?? active.state.latestTokenUsage;
+              const compaction = active.turn.activeCompaction;
+              if (compaction !== null && compaction.diagnostics === null) {
+                const diagnostics = compactionDiagnosticsFor(
+                  active.state,
+                  active.turn,
+                  compaction.triggerReason,
+                );
+                if (diagnostics !== null) {
+                  compaction.diagnostics = diagnostics;
+                  yield* emitCompaction(active.state, active.turn, compaction);
+                }
+              }
               if (
                 !active.turn.executionStarted &&
                 openCode2CanAdoptMissingExecutionStart({
@@ -4546,29 +4919,19 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 if (!isReplay) active.state.activeExecution = null;
                 return;
               }
-              const providerMessage = openCode2WireErrorMessage(wire);
-              const code = openCode2WireErrorCode(wire);
-              const isAuthorizationFailure =
-                code === "Integration.Authorization" ||
-                (code === null &&
-                  /\b(?:HTTP\s*)?401\b|\bIntegration\.Authorization\b/i.test(providerMessage));
-              const message = isAuthorizationFailure
-                ? /\b401\b/.test(providerMessage)
-                  ? "OpenCode 2 provider authorization failed (HTTP 401). Reconnect the provider in OpenCode, then retry."
-                  : "OpenCode 2 provider authorization failed. Reconnect the provider in OpenCode, then retry."
-                : providerMessage;
-              if (active.turn.isRoot) yield* updateProviderSession("error", message);
+              const nowMs = yield* Clock.currentTimeMillis;
+              const failure = openCode2ProviderFailure({
+                message: openCode2WireErrorMessage(wire),
+                code: openCode2WireErrorCode(wire),
+                statusCode: openCode2ProviderErrorStatus(openCode2WireData(wire)),
+                hasProviderRetry: openCode2ProviderRetryIsScheduled(
+                  active.turn.providerRetry,
+                  nowMs,
+                ),
+              });
+              if (active.turn.isRoot) yield* updateProviderSession("error", failure.message);
               yield* finalizeTurn(active.state, active.turn, "failed", {
-                failure: makeProviderFailure({
-                  message,
-                  code,
-                  class: "provider_error",
-                  retryable: isAuthorizationFailure
-                    ? false
-                    : active.turn.providerRetry === null
-                      ? null
-                      : true,
-                }),
+                failure,
               });
               active.state.quarantined = false;
               if (!isReplay) active.state.activeExecution = null;
@@ -4645,14 +5008,26 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 event.data.sessionID,
                 activeSessionIDs,
               );
-              const message = openCode2SessionErrorMessage(event.data);
+              const rawMessage = openCode2SessionErrorMessage(event.data);
               const isAbort = event.data.error?.name === "MessageAbortedError";
+              const failure = isAbort
+                ? makeProviderFailure({
+                    message: "OpenCode 2 turn was aborted.",
+                    code: "MessageAbortedError",
+                    class: "provider_error",
+                    retryable: true,
+                  })
+                : openCode2ProviderFailure({
+                    message: rawMessage,
+                    code: event.data.error?.name ?? null,
+                    statusCode: openCode2ProviderErrorStatus(event.data),
+                  });
               const targetsRoot =
                 event.data.sessionID === undefined ||
                 targetSessionIDs.some(
                   (sessionID) => threads.get(sessionID)?.parentSubagent === null,
                 );
-              if (!isAbort && targetsRoot) yield* updateProviderSession("error", message);
+              if (!isAbort && targetsRoot) yield* updateProviderSession("error", failure.message);
               for (const sessionID of targetSessionIDs) {
                 const active = activeFor(sessionID);
                 if (active === null) continue;
@@ -4661,11 +5036,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   active.turn,
                   openCode2SessionErrorStatus(event.data, active.turn.interrupted),
                   {
-                    failure: makeProviderFailure({
-                      message,
-                      code: event.data.error?.name ?? null,
-                      class: "provider_error",
-                    }),
+                    failure,
                     threadDisposition: event.data.sessionID === undefined ? "broken" : "reusable",
                   },
                 );
@@ -4674,7 +5045,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               // shared provider session as running. Restore the unscoped
               // provider failure after every affected turn has closed.
               if (!isAbort && targetsRoot && targetSessionIDs.length > 1) {
-                yield* updateProviderSession("error", message);
+                yield* updateProviderSession("error", failure.message);
               }
               return;
             }
@@ -4752,6 +5123,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           let onSessionAbort = onFirstSessionAbort;
 
           while (!abortController.signal.aborted) {
+            let watchdogResubscribe = false;
             if (pendingStream === null) {
               streamController = new AbortController();
               onSessionAbort = () => streamController.abort();
@@ -4768,24 +5140,30 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 const hasActiveTurn = Array.from(threads.values()).some(
                   (threadState) => threadState.activeTurn !== null,
                 );
-                // Suppress stall recovery only when every active turn is blocked
-                // on a pending Input/permission. A quiet wait on one thread must
-                // not freeze dead-SSE recovery for an unrelated active turn.
-                const hasPendingRuntimeRequest = allActiveTurnsAwaitRuntimeRequest();
+                // Explained quiet still reconnects so stale pending markers can
+                // be cleared, but only unexplained quiet spends the fail budget.
                 const now = yield* Clock.currentTimeMillis;
+                const hasPendingRuntimeRequest = allActiveTurnsAwaitRuntimeRequest();
+                const hasInFlightPendingWork = allActiveTurnsHaveInFlightPendingWork(now);
                 const lastEventAgeMs = now - lastEventAtMs;
                 if (
                   !openCode2ShouldResubscribeStalledStream({
                     sessionAborted: abortController.signal.aborted,
                     hasActiveTurn,
-                    hasPendingRuntimeRequest,
                     lastEventAgeMs,
                     stallMs: OPENCODE2_EVENT_STALL_MS,
                   })
                 ) {
                   continue;
                 }
-                if (consecutiveStallResubscribes >= OPENCODE2_EVENT_STALL_MAX_RESUBSCRIBES) {
+                const chargeStallBudget = openCode2ShouldChargeStallBudget({
+                  hasPendingRuntimeRequest,
+                  hasInFlightPendingWork,
+                });
+                if (
+                  chargeStallBudget &&
+                  consecutiveStallResubscribes >= OPENCODE2_EVENT_STALL_MAX_RESUBSCRIBES
+                ) {
                   yield* Effect.logError(
                     "OpenCode 2 event stream stall budget exhausted; failing active turns.",
                     {
@@ -4795,21 +5173,25 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                     },
                   );
                   yield* failActiveTurns(
-                    "OpenCode 2 event stream stalled and did not recover.",
+                    `OpenCode 2 event stream went quiet for ${OPENCODE2_EVENT_STALL_MS / 1_000}s after ${consecutiveStallResubscribes} reconnect attempts and did not recover. Retry the turn, or Stop if OpenCode is hung.`,
                     "transport_error",
+                    "event.stream.stall",
+                    true,
                   );
                   streamController.abort();
                   return;
                 }
-                consecutiveStallResubscribes += 1;
+                if (chargeStallBudget) consecutiveStallResubscribes += 1;
                 yield* Effect.logWarning(
                   "OpenCode 2 event stream stalled while a turn is active; resubscribing.",
                   {
                     provider: OPENCODE2_PROVIDER,
                     stallMs: lastEventAgeMs,
                     consecutiveStallResubscribes,
+                    explainedQuiet: !chargeStallBudget,
                   },
                 );
+                watchdogResubscribe = true;
                 streamController.abort();
                 return;
               }
@@ -4851,21 +5233,28 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             let resubscribeDelayMs = OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS;
 
             if (Exit.isFailure(exit)) {
-              consecutiveStreamFailures += 1;
-              const failure = Cause.squash(exit.cause);
+              const chargeStreamFailure = openCode2ShouldChargeStreamFailure(watchdogResubscribe);
+              if (chargeStreamFailure) consecutiveStreamFailures += 1;
               yield* Effect.logWarning(
                 "OpenCode 2 event subscription ended; will resubscribe when possible.",
                 {
                   errorTag: causeErrorTag(exit.cause),
                   provider: OPENCODE2_PROVIDER,
                   consecutiveStreamFailures,
+                  watchdogResubscribe,
                 },
               );
               if (
+                chargeStreamFailure &&
                 consecutiveStreamFailures >= OPENCODE2_EVENT_STREAM_MAX_FAILURES &&
                 hasActiveTurn
               ) {
-                yield* failActiveTurns(openCodeRuntimeErrorDetail(failure), "transport_error");
+                yield* failActiveTurns(
+                  `OpenCode 2 event subscription failed ${consecutiveStreamFailures} times. Retry the turn.`,
+                  "transport_error",
+                  "event.stream.subscribe",
+                  true,
+                );
                 consecutiveStreamFailures = 0;
               }
             } else if (hasActiveTurn && allActiveTurnsAwaitRuntimeRequest()) {
@@ -4920,8 +5309,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   },
                 );
                 yield* failActiveTurns(
-                  "OpenCode 2 event stream ended repeatedly while a turn was active.",
+                  `OpenCode 2 event stream closed cleanly ${consecutiveCleanEofResubscribes} times while a turn was active. Retry the turn.`,
                   "transport_error",
+                  "event.stream.clean_eof",
+                  true,
                 );
                 consecutiveCleanEofResubscribes = 0;
                 cleanEofWindowStartedAtMs = null;
@@ -4956,12 +5347,14 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
 
         if (!connection.external && connection.exitCode !== null) {
           yield* connection.exitCode.pipe(
-            Effect.flatMap((code) =>
+            Effect.flatMap(() =>
               abortController.signal.aborted
                 ? Effect.void
                 : failActiveTurns(
-                    `OpenCode 2 server exited unexpectedly (${code}).`,
+                    "OpenCode 2 server exited unexpectedly. Restart OpenCode, then retry the turn.",
                     "transport_error",
+                    "server.exited",
+                    true,
                   ),
             ),
             Effect.forkIn(scope),
@@ -4976,6 +5369,8 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           if (existing !== undefined) {
             existing.location = nativeSession.location;
             existing.providerThread = providerThread;
+            existing.latestTokenUsage =
+              openCode2TokenUsage(nativeSession) ?? existing.latestTokenUsage;
             if (nativeSession.model !== undefined) {
               existing.boundModel = `${nativeSession.model.providerID}/${nativeSession.model.id}`;
               existing.boundVariant =
@@ -5008,55 +5403,11 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             activeExecution: null,
             parentSubagent: subagentsByChildSessionId.get(nativeSession.id) ?? null,
             nextChildTurnOrdinal: 1,
+            latestTokenUsage: openCode2TokenUsage(nativeSession),
           };
           threads.set(nativeSession.id, state);
           return state;
         };
-
-        /**
-         * Catalog for `clampOpenCode2Variant`. Cached per provider session: it
-         * only changes when the spawned server restarts. A fresh 2.x server
-         * reports an empty catalog until bootstrap finishes, so an empty
-         * result is used for the current call but never cached, and a failed
-         * fetch is not cached either, so later turns retry. Only successful
-         * non-empty fetches are stored, which also keeps a losing concurrent
-         * fetch from clobbering a good cache.
-         */
-        let variantCatalog: ReadonlyMap<string, ReadonlySet<string>> | null = null;
-        const readVariantCatalog = sdkCall("model.list", {}, () =>
-          client.v2.model.list({ location: { directory: cwd } }),
-        ).pipe(
-          Effect.flatMap((response) =>
-            unwrapOpenCode2Data<ReadonlyArray<ModelInfo>>("model.list", response).pipe(
-              Effect.map((models) => {
-                const catalog = new Map<string, ReadonlySet<string>>();
-                for (const model of models) {
-                  catalog.set(
-                    `${model.providerID}/${model.id}`,
-                    new Set(model.variants.map((entry) => entry.id)),
-                  );
-                }
-                return catalog as ReadonlyMap<string, ReadonlySet<string>>;
-              }),
-            ),
-          ),
-          Effect.catchCause((cause) =>
-            Cause.hasInterrupts(cause)
-              ? Effect.interrupt
-              : Effect.logWarning("Failed to load the OpenCode 2 variant catalog.", {
-                  errorTag: causeErrorTag(cause),
-                  provider: OPENCODE2_PROVIDER,
-                }).pipe(Effect.as(null)),
-          ),
-        );
-        const knownVariantsForModel = Effect.fnUntraced(function* (modelSlug: string) {
-          if (variantCatalog !== null) return variantCatalog.get(modelSlug) ?? null;
-          const fetched = yield* retryEmptyOpenCode2VariantCatalog(readVariantCatalog);
-          if (fetched !== null && fetched.size > 0 && variantCatalog === null) {
-            variantCatalog = fetched;
-          }
-          return fetched?.get(modelSlug) ?? null;
-        });
 
         let agentCatalog: ReadonlySet<string> | null = null;
         const knownAgentIDs = Effect.fnUntraced(function* () {

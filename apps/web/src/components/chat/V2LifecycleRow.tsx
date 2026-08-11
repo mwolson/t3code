@@ -105,14 +105,17 @@ export function V2LifecycleRow(props: {
   }
   if (item.type === "compaction") {
     const tokenDetail =
-      item.beforeTokenCount === undefined && item.afterTokenCount === undefined
-        ? null
-        : `${item.beforeTokenCount ?? "?"} → ${item.afterTokenCount ?? "?"} tokens`;
+      item.usedTokenCount !== undefined
+        ? `${item.usedTokenCount.toLocaleString("en-US")} used / ${item.triggerThreshold?.toLocaleString("en-US") ?? "?"} trigger; ${item.inputTokenCount?.toLocaleString("en-US") ?? "?"} input; ${item.contextLimit?.toLocaleString("en-US") ?? "?"} context; ${item.outputReserve?.toLocaleString("en-US") ?? "?"} output reserve; ${item.triggerReason ?? "unknown"}`
+        : item.beforeTokenCount === undefined && item.afterTokenCount === undefined
+          ? null
+          : `${item.beforeTokenCount ?? "?"} → ${item.afterTokenCount ?? "?"} tokens`;
     return (
       <TimelineSystemDivider
         label="Context compacted"
-        detail={item.summary ?? tokenDetail}
+        detail={tokenDetail ?? item.summary}
         icon={MinusIcon}
+        tone={item.status === "failed" ? "danger" : "neutral"}
       />
     );
   }
