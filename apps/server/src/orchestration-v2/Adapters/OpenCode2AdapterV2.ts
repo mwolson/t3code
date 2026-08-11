@@ -43,9 +43,13 @@ import {
   openCode2WireCallID,
   openCode2WireCreatedMs,
   openCode2WireData,
+  openCode2WireErrorCode,
   openCode2WireErrorMessage,
   openCode2WireInputID,
+  openCode2WireSession,
   openCode2WireSessionID,
+  type OpenCode2WireSession as OpenCode2NativeSession,
+  openCode2WireToolMetadata,
   openCode2WireToolName,
   unwrapOpenCode2Payload,
 } from "./openCode2Wire.ts";
@@ -1911,10 +1915,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const pendingRequestsByNativeId = new Map<string, PendingOpenCode2Request>();
         const subagentsByNativeItemId = new Map<string, OpenCode2SubagentContext>();
         const subagentsByChildSessionId = new Map<string, OpenCode2SubagentContext>();
-        const nativeChildSessions = new Map<
-          string,
-          Extract<V2Event, { type: "session.created" }>["data"]["info"]
-        >();
+        const nativeChildSessions = new Map<string, OpenCode2NativeSession>();
         const sessionPermissions: OpenCode2SessionPermissionStore = new Map();
         const abortController = new AbortController();
         // Liveness marker for SSE pull. OpenCode 2 fails a slow event consumer;
@@ -2162,7 +2163,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
 
         const bindSubagentChild = Effect.fnUntraced(function* (
           context: OpenCode2SubagentContext,
-          nativeSession: Extract<V2Event, { type: "session.created" }>["data"]["info"],
+          nativeSession: OpenCode2NativeSession,
         ) {
           if (context.childSessionId !== null) return;
           const now = yield* DateTime.now;
@@ -3872,7 +3873,8 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           }
           switch (eventType) {
             case "session.created": {
-              const nativeSession = event.data.info;
+              const nativeSession = openCode2WireSession(wire);
+              if (nativeSession === undefined) return;
               nativeChildSessions.set(nativeSession.id, nativeSession);
               if (nativeSession.parentID === undefined) return;
               const parentState = threads.get(nativeSession.parentID);
@@ -4189,9 +4191,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const callID = openCode2WireCallID(wire);
               if (callID === undefined) return;
               const output = toolContentText(event.data?.content);
+              const structured = openCode2WireToolMetadata(wire);
               yield* upsertToolPart(active.state, active.turn, callID, {
                 ...(output === undefined ? {} : { output }),
-                structured: event.data?.structured,
+                ...(structured === undefined ? {} : { structured }),
                 status: "running",
               });
               return;
@@ -4202,9 +4205,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const callID = openCode2WireCallID(wire);
               if (callID === undefined) return;
               const output = toolContentText(event.data?.content);
+              const structured = openCode2WireToolMetadata(wire);
               yield* upsertToolPart(active.state, active.turn, callID, {
                 ...(output === undefined ? {} : { output }),
-                structured: event.data?.structured,
+                ...(structured === undefined ? {} : { structured }),
                 status: "completed",
               });
               return;
@@ -4508,14 +4512,28 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 if (!isReplay) active.state.activeExecution = null;
                 return;
               }
-              const message = event.data.error.message;
+              const providerMessage = openCode2WireErrorMessage(wire);
+              const code = openCode2WireErrorCode(wire);
+              const isAuthorizationFailure =
+                code === "Integration.Authorization" ||
+                (code === null &&
+                  /\b(?:HTTP\s*)?401\b|\bIntegration\.Authorization\b/i.test(providerMessage));
+              const message = isAuthorizationFailure
+                ? /\b401\b/.test(providerMessage)
+                  ? "OpenCode 2 provider authorization failed (HTTP 401). Reconnect the provider in OpenCode, then retry."
+                  : "OpenCode 2 provider authorization failed. Reconnect the provider in OpenCode, then retry."
+                : providerMessage;
               if (active.turn.isRoot) yield* updateProviderSession("error", message);
               yield* finalizeTurn(active.state, active.turn, "failed", {
                 failure: makeProviderFailure({
                   message,
-                  code: event.data.error.type,
+                  code,
                   class: "provider_error",
-                  retryable: active.turn.providerRetry === null ? null : true,
+                  retryable: isAuthorizationFailure
+                    ? false
+                    : active.turn.providerRetry === null
+                      ? null
+                      : true,
                 }),
               });
               active.state.quarantined = false;
