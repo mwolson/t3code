@@ -39,6 +39,26 @@ export function isV2LifecycleItem(item: OrchestrationV2TurnItem): boolean {
   return LIFECYCLE_TYPES.has(item.type);
 }
 
+export function formatCompactionTokenDetail(
+  item: Extract<OrchestrationV2TurnItem, { type: "compaction" }>,
+): string | null {
+  if (item.usedTokenCount === undefined) {
+    if (item.beforeTokenCount === undefined && item.afterTokenCount === undefined) return null;
+    return `${item.beforeTokenCount ?? "?"} → ${item.afterTokenCount ?? "?"} tokens`;
+  }
+
+  const details = [
+    `${item.usedTokenCount.toLocaleString("en-US")} used / ${item.triggerThreshold?.toLocaleString("en-US") ?? "?"} trigger`,
+  ];
+  if (item.inputLimit !== undefined) {
+    details.push(`${item.inputLimit.toLocaleString("en-US")} input limit`);
+  }
+  if (item.contextLimit !== undefined && item.contextLimit !== item.inputLimit) {
+    details.push(`${item.contextLimit.toLocaleString("en-US")} context`);
+  }
+  return details.join(" · ");
+}
+
 // Aborted subagents (cancelled/interrupted) keep whatever result text had
 // streamed before the abort, so only completed/failed results are final.
 const FINAL_RESULT_SUBAGENT_STATUSES = new Set<OrchestrationV2TurnItem["status"]>([
@@ -104,12 +124,7 @@ export function V2LifecycleRow(props: {
     );
   }
   if (item.type === "compaction") {
-    const tokenDetail =
-      item.usedTokenCount !== undefined
-        ? `${item.usedTokenCount.toLocaleString("en-US")} used / ${item.triggerThreshold?.toLocaleString("en-US") ?? "?"} trigger; ${item.inputTokenCount?.toLocaleString("en-US") ?? "?"} input; ${item.contextLimit?.toLocaleString("en-US") ?? "?"} context; ${item.outputReserve?.toLocaleString("en-US") ?? "?"} output reserve; ${item.triggerReason ?? "unknown"}`
-        : item.beforeTokenCount === undefined && item.afterTokenCount === undefined
-          ? null
-          : `${item.beforeTokenCount ?? "?"} → ${item.afterTokenCount ?? "?"} tokens`;
+    const tokenDetail = formatCompactionTokenDetail(item);
     return (
       <TimelineSystemDivider
         label="Context compacted"

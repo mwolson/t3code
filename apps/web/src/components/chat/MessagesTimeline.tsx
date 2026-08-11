@@ -136,7 +136,12 @@ import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
 import { V2ItemInspector } from "./V2ItemInspector";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
-import { isV2LifecycleItem, V2LifecycleRow, type HandoffTimelineRun } from "./V2LifecycleRow";
+import {
+  formatCompactionTokenDetail,
+  isV2LifecycleItem,
+  V2LifecycleRow,
+  type HandoffTimelineRun,
+} from "./V2LifecycleRow";
 import { TimelineSystemDivider } from "./TimelineSystemDivider";
 
 import {
@@ -1664,12 +1669,7 @@ function v2EventPresentation(item: OrchestrationV2TurnItem): {
         icon: GitForkIcon,
       };
     case "compaction": {
-      const tokenSummary =
-        item.usedTokenCount !== undefined
-          ? `${item.usedTokenCount.toLocaleString("en-US")} used / ${item.triggerThreshold?.toLocaleString("en-US") ?? "?"} trigger; ${item.inputTokenCount?.toLocaleString("en-US") ?? "?"} input; ${item.contextLimit?.toLocaleString("en-US") ?? "?"} context; ${item.outputReserve?.toLocaleString("en-US") ?? "?"} output reserve; ${item.triggerReason ?? "unknown"}`
-          : item.beforeTokenCount === undefined && item.afterTokenCount === undefined
-            ? null
-            : `${item.beforeTokenCount ?? "?"} → ${item.afterTokenCount ?? "?"} tokens`;
+      const tokenSummary = formatCompactionTokenDetail(item);
       return {
         label: "Context compacted",
         detail: tokenSummary ?? item.summary ?? null,

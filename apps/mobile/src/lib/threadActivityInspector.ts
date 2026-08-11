@@ -270,6 +270,9 @@ export function buildThreadActivityInspector(
       if (item.inputTokenCount !== undefined) {
         fields.push({ label: "Input tokens", value: String(item.inputTokenCount) });
       }
+      if (item.inputLimit !== undefined) {
+        fields.push({ label: "Input limit", value: String(item.inputLimit) });
+      }
       if (item.contextLimit !== undefined) {
         fields.push({ label: "Context limit", value: String(item.contextLimit) });
       }
