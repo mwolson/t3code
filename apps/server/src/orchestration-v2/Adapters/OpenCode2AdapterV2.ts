@@ -2945,7 +2945,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             yield* emitCompaction(state, turn, turn.activeCompaction);
           }
           for (const pending of Array.from(pendingRequests.values())) {
-            if (pending.turn.providerTurnId === turn.providerTurnId) {
+            if (
+              pending.turn.providerTurnId === turn.providerTurnId ||
+              pending.nativeSessionId === state.nativeSessionId
+            ) {
               yield* resolveRuntimeRequest(pending.nativeRequestId, "cancelled");
             }
           }
@@ -4133,7 +4136,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   ? current
                   : {
                       id: nativeItemId,
-                      startedAt: dateTimeFromEpoch(openCode2WireCreatedMs(wire) ?? 0, now),
+                      startedAt: dateTimeFromEpoch(openCode2WireCreatedMs(wire), now),
                       summary: "",
                       status: "running",
                       completedAt: null,
@@ -4152,7 +4155,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 active.turn.activeCompaction ??
                 ({
                   id: event.id,
-                  startedAt: dateTimeFromEpoch(openCode2WireCreatedMs(wire) ?? 0, now),
+                  startedAt: dateTimeFromEpoch(openCode2WireCreatedMs(wire), now),
                   summary: "",
                   status: "running",
                   completedAt: null,
@@ -4171,14 +4174,14 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 active.turn.activeCompaction ??
                 ({
                   id: event.id,
-                  startedAt: dateTimeFromEpoch(openCode2WireCreatedMs(wire) ?? 0, now),
+                  startedAt: dateTimeFromEpoch(openCode2WireCreatedMs(wire), now),
                   summary: "",
                   status: "running",
                   completedAt: null,
                 } satisfies OpenCode2Compaction);
               compaction.summary = event.data.text;
               compaction.status = "completed";
-              compaction.completedAt = dateTimeFromEpoch(openCode2WireCreatedMs(wire) ?? 0, now);
+              compaction.completedAt = dateTimeFromEpoch(openCode2WireCreatedMs(wire), now);
               if (compaction !== null)
                 active.turn.activeCompaction = compaction as OpenCode2Compaction;
               yield* emitCompaction(active.state, active.turn, compaction as OpenCode2Compaction);
@@ -4288,7 +4291,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 failure,
                 startedAt:
                   active.turn.providerRetry?.startedAt ??
-                  dateTimeFromEpoch(openCode2WireCreatedMs(wire) ?? 0, now),
+                  dateTimeFromEpoch(openCode2WireCreatedMs(wire), now),
               };
               const context = active.state.parentSubagent;
               if (context !== null) {
