@@ -440,10 +440,60 @@ describe("OpenCode2Runtime startup cleanup", () => {
     Effect.gen(function* () {
       const stateHome = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "opencode2-grace-file-"));
       NodeFS.mkdirSync(NodePath.join(stateHome, "opencode"), { recursive: true });
-      NodeFS.writeFileSync(
-        NodePath.join(stateHome, "opencode", "password"),
-        "state-dir-password\n",
+      const spawner = ChildProcessSpawner.make(() => {
+        NodeFS.writeFileSync(
+          NodePath.join(stateHome, "opencode", "password"),
+          "state-dir-password\n",
+        );
+        return Effect.succeed(
+          ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(42),
+            exitCode: Effect.never,
+            isRunning: Effect.succeed(true),
+            kill: () => Effect.void,
+            unref: Effect.succeed(Effect.void),
+            stdin: Sink.drain,
+            stdout: Stream.encodeText(Stream.make("server listening on http://127.0.0.1:4711\n")),
+            stderr: Stream.never,
+            all: Stream.never,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.never,
+          }),
+        );
+      });
+
+      const startup = Effect.scoped(
+        Effect.gen(function* () {
+          const runtime = yield* OpenCode2Runtime;
+          return yield* runtime.startOpenCode2ServerProcess({
+            binaryPath: "opencode2",
+            port: 4_711,
+            environment: { XDG_STATE_HOME: stateHome },
+          });
+        }),
+      ).pipe(
+        Effect.provide(layer),
+        Effect.provideService(SpawnedProcessReaper, {
+          track: () => Effect.void,
+          untrack: () => Effect.void,
+        }),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(HostProcessPlatform, "win32"),
       );
+      const startupFiber = yield* startup.pipe(Effect.forkChild);
+      yield* TestClock.adjust("150 millis");
+      const credentials = yield* Fiber.join(startupFiber);
+
+      assert.strictEqual(credentials.url, "http://127.0.0.1:4711");
+      assert.strictEqual(credentials.password, "state-dir-password");
+    }),
+  );
+
+  it.effect("ignores a stale state-dir password left by the previous server", () =>
+    Effect.gen(function* () {
+      const stateHome = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "opencode2-stale-file-"));
+      NodeFS.mkdirSync(NodePath.join(stateHome, "opencode"), { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(stateHome, "opencode", "password"), "stale-password\n");
       const spawner = ChildProcessSpawner.make(() =>
         Effect.succeed(
           ChildProcessSpawner.makeHandle({
@@ -484,8 +534,7 @@ describe("OpenCode2Runtime startup cleanup", () => {
       yield* TestClock.adjust("150 millis");
       const credentials = yield* Fiber.join(startupFiber);
 
-      assert.strictEqual(credentials.url, "http://127.0.0.1:4711");
-      assert.strictEqual(credentials.password, "state-dir-password");
+      assert.strictEqual(credentials.password, "");
     }),
   );
 

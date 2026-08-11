@@ -382,6 +382,8 @@ export const make = Effect.gen(function* () {
         ));
       const timeoutMs = input.timeoutMs ?? DEFAULT_OPENCODE2_SERVER_TIMEOUT_MS;
       const args = ["serve", `--hostname=${hostname}`, `--port=${port}`];
+      const environment = input.environment ?? process.env;
+      const passwordBeforeSpawn = readOpenCode2StatePassword(environment);
       const spawnCommand = yield* resolveCommand(input.binaryPath, args, input.environment);
 
       const spawnOpenCode2Server = spawner
@@ -533,12 +535,12 @@ export const make = Effect.gen(function* () {
           if (state.url !== null) break;
           yield* Effect.sleep("20 millis");
         }
-        const env = input.environment ?? process.env;
         let filePassword: string | null = null;
         for (let attempt = 0; attempt < OPENCODE2_PASSWORD_POLL_ATTEMPTS; attempt++) {
           const state = yield* Ref.get(startupOutputRef);
           if (state.output === null || state.password !== null) return;
-          filePassword = readOpenCode2StatePassword(env);
+          const candidate = readOpenCode2StatePassword(environment);
+          filePassword = candidate === passwordBeforeSpawn ? null : candidate;
           if (filePassword !== null) break;
           yield* Effect.sleep(OPENCODE2_PASSWORD_POLL_INTERVAL);
         }
@@ -546,7 +548,9 @@ export const make = Effect.gen(function* () {
           if (state.output === null || state.url === null || state.password !== null) {
             return [null, state] as const;
           }
-          const password = filePassword ?? readOpenCode2StatePassword(env) ?? "";
+          const latestPassword = readOpenCode2StatePassword(environment);
+          const password =
+            filePassword ?? (latestPassword === passwordBeforeSpawn ? null : latestPassword) ?? "";
           const credentials = { url: state.url, password };
           return [
             credentials,
