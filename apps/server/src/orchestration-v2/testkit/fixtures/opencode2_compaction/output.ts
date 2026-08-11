@@ -40,7 +40,7 @@ export function assertOpenCode2CompactionOutput(
   const completed = compactions.find((compaction) => compaction.status === "completed");
   assert.isDefined(completed);
   assert.equal(completed.driver, "opencode2");
-  assert.isUndefined(completed.summary);
+  assert.equal(completed.summary, "Summary from compaction.");
   assert.equal(completed.usedTokenCount, 902_000);
   assert.equal(completed.inputTokenCount, 272_000);
   assert.equal(completed.inputLimit, 922_000);
@@ -52,7 +52,7 @@ export function assertOpenCode2CompactionOutput(
   const interrupted = compactions.find((compaction) => compaction.status === "cancelled");
   assert.isDefined(interrupted);
   assert.equal(interrupted.driver, "opencode2");
-  assert.isUndefined(interrupted.summary);
+  assert.equal(interrupted.summary, "Partial summary");
   assert.equal(interrupted.usedTokenCount, 902_000);
   assert.equal(interrupted.inputTokenCount, 272_000);
   assert.equal(interrupted.inputLimit, 922_000);
