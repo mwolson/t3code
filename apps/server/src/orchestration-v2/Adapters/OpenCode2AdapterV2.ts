@@ -48,6 +48,7 @@ import {
   openCode2WireInputID,
   openCode2WireSession,
   openCode2WireSessionID,
+  openCode2WireTextDelta,
   type OpenCode2WireSession as OpenCode2NativeSession,
   openCode2WireToolMetadata,
   openCode2WireToolName,
@@ -5088,8 +5089,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   triggerReason: "unknown",
                   diagnostics: null,
                 } satisfies OpenCode2Compaction);
-              if (compaction !== null)
-                active.turn.activeCompaction = compaction as OpenCode2Compaction;
+              const summaryDelta = openCode2WireTextDelta(wire);
+              if (summaryDelta !== undefined) compaction.summary += summaryDelta;
+              active.turn.activeCompaction = compaction;
+              yield* emitCompaction(active.state, active.turn, compaction);
               return;
             }
             case "session.compaction.ended": {
@@ -5113,13 +5116,14 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   triggerReason,
                   diagnostics,
                 } satisfies OpenCode2Compaction);
+              const finalSummary = openCode2WireTextDelta(wire);
+              if (finalSummary !== undefined) compaction.summary = finalSummary;
               if (triggerReason !== "unknown") compaction.triggerReason = triggerReason;
               compaction.diagnostics = diagnostics ?? compaction.diagnostics;
               compaction.status = "completed";
               compaction.completedAt = dateTimeFromEpoch(openCode2WireCreatedMs(wire), now);
-              if (compaction !== null)
-                active.turn.activeCompaction = compaction as OpenCode2Compaction;
-              yield* emitCompaction(active.state, active.turn, compaction as OpenCode2Compaction);
+              active.turn.activeCompaction = compaction;
+              yield* emitCompaction(active.state, active.turn, compaction);
               if (compaction.diagnostics === null && compaction.triggerReason !== "unknown") {
                 yield* refreshCompactionDiagnostics(active.state, active.turn, compaction).pipe(
                   Effect.forkIn(scope),
