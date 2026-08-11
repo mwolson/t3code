@@ -193,6 +193,7 @@ export interface EffectOutboxV2Shape {
     readonly threadId: ThreadId;
     readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
     readonly reason: string;
+    readonly updatedBefore?: DateTime.Utc;
   }) => Effect.Effect<ReadonlyArray<string>, EffectOutboxError>;
   readonly signalCancellations: (effectIds: ReadonlyArray<string>) => Effect.Effect<void>;
   readonly awaitCancellation: (effectId: string) => Effect.Effect<void>;
@@ -201,6 +202,9 @@ export interface EffectOutboxV2Shape {
     { readonly requeued: number; readonly cancelled: number },
     EffectOutboxError
   >;
+  readonly reconcileAfterProcessLossBefore: (
+    createdBefore: DateTime.Utc,
+  ) => Effect.Effect<{ readonly requeued: number; readonly cancelled: number }, EffectOutboxError>;
   readonly claimNext: (input: {
     readonly workerId: string;
     readonly leaseDurationMs: number;
@@ -326,6 +330,47 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         Effect.mapError((cause) => new EffectOutboxError({ operation, cause })),
       );
 
+    const reconcileAfterProcessLoss = (updatedBefore?: DateTime.Utc) =>
+      Effect.gen(function* () {
+        const now = DateTime.formatIso(yield* DateTime.now);
+        const updatedBeforeIso =
+          updatedBefore === undefined ? null : DateTime.formatIso(updatedBefore);
+        const cancelledRows = yield* sql<{ readonly effect_id: string }>`
+          UPDATE orchestration_v2_effect_outbox
+          SET
+            status = 'cancelled',
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            completed_at = ${now},
+            updated_at = ${now},
+            last_error = 'Cancelled because the server process ended before the effect completed.'
+          WHERE status IN ('pending', 'running')
+            AND effect_type IN ${sql.in(PROCESS_BOUND_EFFECT_TYPES)}
+            AND (${updatedBeforeIso} IS NULL OR updated_at < ${updatedBeforeIso})
+          RETURNING effect_id
+        `;
+        const requeuedRows = yield* sql<{ readonly effect_id: string }>`
+          UPDATE orchestration_v2_effect_outbox
+          SET
+            status = 'pending',
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            available_at = ${now},
+            updated_at = ${now},
+            last_error = 'Requeued after the previous server process ended.'
+          WHERE status = 'running'
+            AND effect_type IN ${sql.in(REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS)}
+            AND (${updatedBeforeIso} IS NULL OR updated_at < ${updatedBeforeIso})
+          RETURNING effect_id
+        `;
+        if (requeuedRows.length > 0) yield* notifyAvailable(requeuedRows.length);
+        return { requeued: requeuedRows.length, cancelled: cancelledRows.length };
+      }).pipe(
+        Effect.mapError(
+          (cause) => new EffectOutboxError({ operation: "reconcile-process-loss", cause }),
+        ),
+      );
+
     const service: EffectOutboxV2Shape = {
       enqueue: (effects) =>
         Effect.gen(function* () {
@@ -397,10 +442,12 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               : new EffectOutboxError({ operation: "list", cause }),
           ),
         ),
-      cancelUnsettled: ({ threadId, effectTypes, reason }) =>
+      cancelUnsettled: ({ threadId, effectTypes, reason, updatedBefore }) =>
         Effect.gen(function* () {
           if (effectTypes.length === 0) return [];
           const now = DateTime.formatIso(yield* DateTime.now);
+          const updatedBeforeIso =
+            updatedBefore === undefined ? null : DateTime.formatIso(updatedBefore);
           const rows = yield* sql<{ readonly effect_id: string }>`
             UPDATE orchestration_v2_effect_outbox
             SET
@@ -413,6 +460,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             WHERE thread_id = ${threadId}
               AND status IN ('pending', 'running')
               AND effect_type IN ${sql.in(effectTypes)}
+              AND (${updatedBeforeIso} IS NULL OR updated_at < ${updatedBeforeIso})
             RETURNING effect_id
           `;
           return rows.map(({ effect_id }) => effect_id);
@@ -441,41 +489,8 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         Effect.sync(() => {
           cancellationSignals.delete(effectId);
         }),
-      reconcileAfterProcessLoss: Effect.gen(function* () {
-        const now = DateTime.formatIso(yield* DateTime.now);
-        const cancelledRows = yield* sql<{ readonly effect_id: string }>`
-          UPDATE orchestration_v2_effect_outbox
-          SET
-            status = 'cancelled',
-            lease_owner = NULL,
-            lease_expires_at = NULL,
-            completed_at = ${now},
-            updated_at = ${now},
-            last_error = 'Cancelled because the server process ended before the effect completed.'
-          WHERE status IN ('pending', 'running')
-            AND effect_type IN ${sql.in(PROCESS_BOUND_EFFECT_TYPES)}
-          RETURNING effect_id
-        `;
-        const requeuedRows = yield* sql<{ readonly effect_id: string }>`
-          UPDATE orchestration_v2_effect_outbox
-          SET
-            status = 'pending',
-            lease_owner = NULL,
-            lease_expires_at = NULL,
-            available_at = ${now},
-            updated_at = ${now},
-            last_error = 'Requeued after the previous server process ended.'
-          WHERE status = 'running'
-            AND effect_type IN ${sql.in(REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS)}
-          RETURNING effect_id
-        `;
-        if (requeuedRows.length > 0) yield* notifyAvailable(requeuedRows.length);
-        return { requeued: requeuedRows.length, cancelled: cancelledRows.length };
-      }).pipe(
-        Effect.mapError(
-          (cause) => new EffectOutboxError({ operation: "reconcile-process-loss", cause }),
-        ),
-      ),
+      reconcileAfterProcessLoss: reconcileAfterProcessLoss(),
+      reconcileAfterProcessLossBefore: reconcileAfterProcessLoss,
       claimNext: ({ workerId, leaseDurationMs }) =>
         Effect.gen(function* () {
           const now = yield* DateTime.now;
