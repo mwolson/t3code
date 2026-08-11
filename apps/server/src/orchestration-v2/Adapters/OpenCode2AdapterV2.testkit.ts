@@ -452,6 +452,13 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
         $body_boundary: body?.boundary,
       });
     }
+    if (input.url === "/api/session/{sessionID}/form/{formID}/reply") {
+      return request("session.form.reply", {
+        sessionID: path?.sessionID,
+        formID: path?.formID,
+        answer: body?.answer,
+      });
+    }
     throw new Error(`Unsupported replay POST route: ${String(input.url)}`);
   };
   /**

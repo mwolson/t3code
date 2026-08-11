@@ -27,6 +27,7 @@ import * as Scope from "effect/Scope";
 import { describe } from "vite-plus/test";
 
 import {
+  forgetOpenCode2SessionPermission,
   openCode2AllActiveTurnsAwaitRuntimeRequest,
   openCode2AutoPermissionReply,
   openCode2CanAdoptMissingExecutionStart,
@@ -50,7 +51,11 @@ import {
   openCode2ProviderErrorStatus,
   openCode2ProviderFailure,
   openCode2ProviderRetryIsScheduled,
+  openCode2PermissionReplyStatus,
   openCode2QuestionId,
+  openCode2RuntimeRequestEventId,
+  openCode2RuntimeRequestNativeKey,
+  openCode2RuntimeRequestResponseSettlement,
   openCode2SessionSelectionParameters,
   openCode2SessionErrorMessage,
   openCode2SessionErrorStatus,
@@ -905,6 +910,51 @@ describe("normalizeOpenCode2PermissionEvent", () => {
 });
 
 describe("OpenCode 2 remembered session permissions", () => {
+  it("reads every supported runtime request event id alias", () => {
+    assert.equal(openCode2RuntimeRequestEventId({ requestID: "request-1" }), "request-1");
+    assert.equal(openCode2RuntimeRequestEventId({ formID: "form-1" }), "form-1");
+    assert.equal(openCode2RuntimeRequestEventId({ id: "legacy-1" }), "legacy-1");
+  });
+
+  it("scopes native request ids to their native session", () => {
+    assert.notEqual(
+      openCode2RuntimeRequestNativeKey("session-a", "request-1"),
+      openCode2RuntimeRequestNativeKey("session-b", "request-1"),
+    );
+    assert.equal(
+      openCode2RuntimeRequestNativeKey("session-a", "request-1"),
+      openCode2RuntimeRequestNativeKey("session-a", "request-1"),
+    );
+  });
+
+  it("maps provider permission rejections to cancellation", () => {
+    assert.equal(openCode2PermissionReplyStatus("once"), "resolved");
+    assert.equal(openCode2PermissionReplyStatus("reject"), "cancelled");
+  });
+
+  it("resolves answered requests while cancelling rejected request items", () => {
+    assert.deepStrictEqual(openCode2RuntimeRequestResponseSettlement("accept"), {
+      requestStatus: "resolved",
+      itemStatus: "completed",
+      rememberPermissionForSession: false,
+    });
+    assert.deepStrictEqual(openCode2RuntimeRequestResponseSettlement("decline"), {
+      requestStatus: "resolved",
+      itemStatus: "cancelled",
+      rememberPermissionForSession: false,
+    });
+    assert.deepStrictEqual(openCode2RuntimeRequestResponseSettlement("cancel"), {
+      requestStatus: "resolved",
+      itemStatus: "cancelled",
+      rememberPermissionForSession: false,
+    });
+    assert.deepStrictEqual(openCode2RuntimeRequestResponseSettlement("acceptForSession"), {
+      requestStatus: "resolved",
+      itemStatus: "completed",
+      rememberPermissionForSession: true,
+    });
+  });
+
   const runtimePolicy = {
     cwd: "/tmp",
     interactionMode: "default",
@@ -926,6 +976,34 @@ describe("OpenCode 2 remembered session permissions", () => {
     );
     assert.isNull(
       openCode2PermissionAutoReplyForSession(runtimePolicy, permissions, "ses_sibling", request),
+    );
+  });
+
+  it("retains a duplicate grant until every owner revokes it", () => {
+    const permissions = new Map();
+    const permission = {
+      action: "bash",
+      resources: ["/workspace/*"],
+      save: [],
+    };
+    const remembered = rememberOpenCode2SessionPermission(permissions, "ses_root", permission);
+    const duplicate = rememberOpenCode2SessionPermission(permissions, "ses_root", permission);
+    const request = { action: "bash", resources: ["/workspace/file.txt"] };
+
+    assert.isNotNull(remembered);
+    assert.strictEqual(duplicate, remembered);
+    assert.strictEqual(
+      openCode2PermissionAutoReplyForSession(runtimePolicy, permissions, "ses_root", request),
+      "once",
+    );
+    forgetOpenCode2SessionPermission(permissions, "ses_root", remembered!);
+    assert.strictEqual(
+      openCode2PermissionAutoReplyForSession(runtimePolicy, permissions, "ses_root", request),
+      "once",
+    );
+    forgetOpenCode2SessionPermission(permissions, "ses_root", duplicate!);
+    assert.isNull(
+      openCode2PermissionAutoReplyForSession(runtimePolicy, permissions, "ses_root", request),
     );
   });
 
@@ -1268,6 +1346,8 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
           { nativeSessionId: "ses_parent", providerTurnId: "turn_parent" },
           { nativeSessionId: "ses_child", providerTurnId: "turn_child" },
         ],
+        // Production stores the projected parent turn plus the native child
+        // session, so both active turns are legitimately waiting on one prompt.
         pendingRequests: [{ nativeSessionId: "ses_child", providerTurnId: "turn_parent" }],
       }),
     );
