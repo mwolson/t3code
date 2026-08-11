@@ -239,6 +239,7 @@ export const OPENCODE2_EVENT_STREAM_MAX_FAILURES = 5;
 export const OPENCODE2_EVENT_STALL_MAX_RESUBSCRIBES = 2;
 export const OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS = 250;
 export const OPENCODE2_EVENT_PENDING_RESUBSCRIBE_DELAY_MS = 5_000;
+const OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT = 512;
 /**
  * Require this many consecutive clean SSE EOFs while a turn is active, plus a
  * full stall window, before failing it. The elapsed guard keeps short proxy
@@ -475,6 +476,7 @@ interface OpenCode2ExecutionOwnership {
 }
 
 interface OpenCode2EventHandlingContext {
+  readonly deferredChildReplay?: boolean;
   readonly replayWakeInputId?: string;
 }
 
@@ -1916,6 +1918,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const subagentsByNativeItemId = new Map<string, OpenCode2SubagentContext>();
         const subagentsByChildSessionId = new Map<string, OpenCode2SubagentContext>();
         const nativeChildSessions = new Map<string, OpenCode2NativeSession>();
+        const deferredChildEvents = new Map<string, Array<unknown>>();
+        const deferredChildEventOverflows = new Set<string>();
+        const pendingDeferredChildEvents: Array<unknown> = [];
         const sessionPermissions: OpenCode2SessionPermissionStore = new Map();
         const abortController = new AbortController();
         // Liveness marker for SSE pull. OpenCode 2 fails a slow event consumer;
@@ -2253,6 +2258,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             parentSubagent: context,
             nextChildTurnOrdinal: 1,
           });
+          const bufferedEvents = deferredChildEvents.get(childSessionId);
+          if (bufferedEvents !== undefined) {
+            deferredChildEvents.delete(childSessionId);
+            deferredChildEventOverflows.delete(childSessionId);
+            pendingDeferredChildEvents.push(...bufferedEvents);
+          }
           yield* emitProviderEvent({
             type: "app_thread.created",
             driver: OPENCODE2_PROVIDER,
@@ -2414,28 +2425,22 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           if (context.childSessionId === null) {
             // Prefer an explicit child session id from tool metadata when the
             // provider reports it (background launch structured.sessionID).
-            // Title match is only a fallback and can misbind parallel children
-            // that share a title or both lack one.
+            // Provisional title matching happens only on session.created when
+            // it has one unambiguous open context. Tool metadata must identify
+            // the child session explicitly.
             const structuredSessionId = recordString(part.structured, "sessionID", "sessionId");
-            const matchingChild =
-              structuredSessionId !== undefined
-                ? (() => {
-                    const byId = nativeChildSessions.get(structuredSessionId);
-                    if (
-                      byId !== undefined &&
-                      byId.parentID === state.nativeSessionId &&
-                      !subagentsByChildSessionId.has(byId.id)
-                    ) {
-                      return byId;
-                    }
-                    return undefined;
-                  })()
-                : Array.from(nativeChildSessions.values()).find(
-                    (candidate) =>
-                      candidate.parentID === state.nativeSessionId &&
-                      !subagentsByChildSessionId.has(candidate.id) &&
-                      (context.title === null || candidate.title === context.title),
-                  );
+            const matchingChild = (() => {
+              if (structuredSessionId === undefined) return undefined;
+              const byId = nativeChildSessions.get(structuredSessionId);
+              if (
+                byId !== undefined &&
+                byId.parentID === state.nativeSessionId &&
+                !subagentsByChildSessionId.has(byId.id)
+              ) {
+                return byId;
+              }
+              return undefined;
+            })();
             if (matchingChild !== undefined) yield* bindSubagentChild(context, matchingChild);
           }
           yield* emitSubagentContext(context);
@@ -3812,12 +3817,38 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           const wire = event as WireEvent;
           const eventType = normalizeOpenCode2WireType(String(wire.type ?? event?.type ?? ""));
           const isReplay = context.replayWakeInputId !== undefined;
-          yield* logProtocolEvent({
-            direction: "incoming",
-            messageKind: "notification",
-            method: wire.type,
-            payload: event,
-          });
+          const isDeferredChildReplay = context.deferredChildReplay === true;
+          const eventSessionId =
+            openCode2WireSessionID(wire) ?? recordString(event.data, "sessionID");
+          if (!isDeferredChildReplay) {
+            yield* logProtocolEvent({
+              direction: "incoming",
+              messageKind: "notification",
+              method: wire.type,
+              payload: event,
+            });
+          }
+          if (
+            !isReplay &&
+            !isDeferredChildReplay &&
+            eventType !== "session.created" &&
+            eventSessionId !== undefined &&
+            !threads.has(eventSessionId) &&
+            nativeChildSessions.has(eventSessionId)
+          ) {
+            const buffered = deferredChildEvents.get(eventSessionId) ?? [];
+            if (buffered.length < OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT) {
+              buffered.push(event);
+              deferredChildEvents.set(eventSessionId, buffered);
+            } else if (!deferredChildEventOverflows.has(eventSessionId)) {
+              deferredChildEventOverflows.add(eventSessionId);
+              yield* Effect.logWarning(
+                "OpenCode 2 deferred child event buffer reached its limit; preserving earliest lifecycle events.",
+                { sessionID: eventSessionId, limit: OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT },
+              );
+            }
+            return;
+          }
           const isCancelledPostSettleWake = openCode2IsCancelledPostSettleWake(event);
           const admittedState =
             eventType === "session.input.admitted"
@@ -3833,8 +3864,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             yield* offerPostSettleWake(admittedState, event, isCancelledPostSettleWake);
             return;
           }
-          const eventSessionId =
-            openCode2WireSessionID(wire) ?? recordString(event.data, "sessionID");
           const eventState =
             admittedState ??
             (eventSessionId === undefined ? undefined : threads.get(eventSessionId));
@@ -3883,13 +3912,15 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 (context) =>
                   context.parentState === parentState &&
                   context.childSessionId === null &&
+                  (context.status === "pending" ||
+                    context.status === "running" ||
+                    context.status === "waiting") &&
                   !subagentsByChildSessionId.has(nativeSession.id),
               );
-              const context =
-                candidates.find(
-                  (candidate) =>
-                    candidate.title !== null && candidate.title === nativeSession.title,
-                ) ?? candidates[0];
+              const titleMatches = candidates.filter(
+                (candidate) => candidate.title !== null && candidate.title === nativeSession.title,
+              );
+              const context = titleMatches.length === 1 ? titleMatches[0] : undefined;
               if (context === undefined) return;
               yield* bindSubagentChild(context, nativeSession);
               yield* emitSubagentContext(context);
@@ -4649,6 +4680,19 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           }
         });
 
+        const processEventAndDrain = Effect.fnUntraced(function* (
+          event: unknown,
+          context: OpenCode2EventHandlingContext = {},
+        ) {
+          yield* handleEvent(event, context);
+          while (pendingDeferredChildEvents.length > 0) {
+            const deferred = pendingDeferredChildEvents.shift();
+            if (deferred !== undefined) {
+              yield* handleEvent(deferred, { deferredChildReplay: true });
+            }
+          }
+        });
+
         yield* Scope.addFinalizer(
           scope,
           Effect.sync(() => abortController.abort()),
@@ -4693,7 +4737,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 }),
               ),
             ),
-            Stream.runForEach(handleEvent),
+            Stream.runForEach(processEventAndDrain),
             Effect.exit,
           );
 
@@ -5607,7 +5651,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   return;
                 }
                 for (const event of wake.events) {
-                  yield* handleEvent(event, { replayWakeInputId: wake.inputId });
+                  yield* processEventAndDrain(event, { replayWakeInputId: wake.inputId });
                 }
                 return;
               }
