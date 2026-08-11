@@ -32,6 +32,7 @@ import {
   reconcileRetainedMountedThreadIds,
   resolveDraftPromotionNavigationTarget,
   resolveEffectiveInteractionMode,
+  resolveThreadErrorBannerMessage,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   startNewThreadForProject,
@@ -39,6 +40,7 @@ import {
   shouldShowComposerContextStrip,
   shouldShowPlanFollowUpPrompt,
   shouldWriteThreadErrorToCurrentServerThread,
+  threadRuntimeErrorDismissalKey,
 } from "./ChatView.logic";
 
 describe("loadVideoPreviewUrl", () => {
@@ -224,6 +226,60 @@ describe("resolveThreadMetadataUpdateForNextTurn", () => {
         nextModelSelection: modelSelection,
         currentBranch: "feature/current",
         nextBranch: "feature/current",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("resolveThreadErrorBannerMessage", () => {
+  it("keeps the exact dismissed runtime failure occurrence hidden", () => {
+    expect(
+      resolveThreadErrorBannerMessage({
+        localError: null,
+        runtimeError: "event stream stalled",
+        runtimeErrorKey: '["2026-08-11T12:00:00Z","event stream stalled"]',
+        dismissedRuntimeErrorKey: '["2026-08-11T12:00:00Z","event stream stalled"]',
+      }),
+    ).toBeNull();
+  });
+
+  it("shows local errors and a later occurrence with the same message", () => {
+    expect(
+      resolveThreadErrorBannerMessage({
+        localError: "send failed",
+        runtimeError: "event stream stalled",
+        runtimeErrorKey: '["2026-08-11T12:00:00Z","event stream stalled"]',
+        dismissedRuntimeErrorKey: '["2026-08-11T12:00:00Z","event stream stalled"]',
+      }),
+    ).toBe("send failed");
+    expect(
+      resolveThreadErrorBannerMessage({
+        localError: null,
+        runtimeError: "event stream stalled",
+        runtimeErrorKey: '["2026-08-11T12:05:00Z","event stream stalled"]',
+        dismissedRuntimeErrorKey: '["2026-08-11T12:00:00Z","event stream stalled"]',
+      }),
+    ).toBe("event stream stalled");
+  });
+});
+
+describe("threadRuntimeErrorDismissalKey", () => {
+  it("identifies the visible runtime failure by its revision", () => {
+    expect(
+      threadRuntimeErrorDismissalKey({
+        localError: null,
+        runtimeError: "event stream stalled",
+        runtimeErrorAt: "2026-08-11T12:00:00Z",
+      }),
+    ).toBe('["2026-08-11T12:00:00Z","event stream stalled"]');
+  });
+
+  it("does not dismiss a runtime failure hidden beneath a local error", () => {
+    expect(
+      threadRuntimeErrorDismissalKey({
+        localError: "send failed",
+        runtimeError: "event stream stalled",
+        runtimeErrorAt: "2026-08-11T12:00:00Z",
       }),
     ).toBeNull();
   });
