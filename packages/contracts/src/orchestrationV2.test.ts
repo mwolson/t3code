@@ -803,10 +803,11 @@ describe("orchestration V2 contracts", () => {
       archivedAt: null,
       settledOverride: null,
       settledAt: null,
-      settledOverrideAt: null,
+      settledOverrideAt: now,
       deletedAt: null,
     });
 
     expect(shell.pendingBackgroundTasks).toEqual([]);
+    expect(shell.settledOverrideAt).toEqual(now);
   });
 });

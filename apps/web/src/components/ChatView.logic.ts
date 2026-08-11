@@ -118,6 +118,7 @@ export function buildLocalDraftThread(
     updatedAt: timestamp,
     archivedAt: null,
     settledOverride: null,
+    settledOverrideAt: null,
     settledAt: null,
     deletedAt: null,
   });
