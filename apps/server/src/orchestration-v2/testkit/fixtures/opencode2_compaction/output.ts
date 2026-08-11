@@ -43,6 +43,7 @@ export function assertOpenCode2CompactionOutput(
   assert.isUndefined(completed.summary);
   assert.equal(completed.usedTokenCount, 902_000);
   assert.equal(completed.inputTokenCount, 272_000);
+  assert.equal(completed.inputLimit, 922_000);
   assert.equal(completed.contextLimit, 1_050_000);
   assert.equal(completed.outputReserve, 32_000);
   assert.equal(completed.triggerThreshold, 902_000);
@@ -54,6 +55,7 @@ export function assertOpenCode2CompactionOutput(
   assert.isUndefined(interrupted.summary);
   assert.equal(interrupted.usedTokenCount, 902_000);
   assert.equal(interrupted.inputTokenCount, 272_000);
+  assert.equal(interrupted.inputLimit, 922_000);
   assert.equal(interrupted.contextLimit, 1_050_000);
   assert.equal(interrupted.outputReserve, 32_000);
   assert.equal(interrupted.triggerThreshold, 902_000);

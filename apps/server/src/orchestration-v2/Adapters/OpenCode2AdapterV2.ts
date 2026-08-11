@@ -431,6 +431,7 @@ interface OpenCode2TokenUsage {
 interface OpenCode2CompactionDiagnostics {
   readonly usedTokenCount: number;
   readonly inputTokenCount: number;
+  readonly inputLimit?: number;
   readonly contextLimit: number;
   readonly outputReserve: number;
   readonly triggerThreshold: number;
@@ -835,6 +836,7 @@ export function openCode2CompactionDiagnostics(input: {
   return {
     usedTokenCount,
     inputTokenCount: input.usage.input,
+    ...(inputLimit === undefined ? {} : { inputLimit: nonNegativeInteger(inputLimit) }),
     contextLimit,
     outputReserve,
     triggerThreshold,
