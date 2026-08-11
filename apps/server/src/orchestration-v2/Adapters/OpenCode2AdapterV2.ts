@@ -244,7 +244,7 @@ export const OPENCODE2_COMPACTION_BUFFER_TOKENS = 20_000;
 export const OPENCODE2_COMPACTION_MAX_OUTPUT_RESERVE = 32_000;
 export const OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS = 250;
 export const OPENCODE2_EVENT_PENDING_RESUBSCRIBE_DELAY_MS = 5_000;
-const OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT = 512;
+export const OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT = 512;
 /**
  * Require this many consecutive clean SSE EOFs while a turn is active, plus a
  * full stall window, before failing it. The elapsed guard keeps short proxy
@@ -776,6 +776,75 @@ export function openCode2EventEndsExecution(event: {
   // session.step.ended / session.next.step.ended alias to succeeded. Intermediate
   // tool-call steps must not clear activeExecution or settle wakes.
   return openCode2StepFinishSettlesTurn(openCode2WireData(event).finish);
+}
+
+interface OpenCode2DeferredChildEventBuffer {
+  readonly events: Array<unknown>;
+  overflowed: boolean;
+  terminalFallback: unknown | null;
+}
+
+/** @internal exported for tests */
+export function makeOpenCode2DeferredChildEventBuffer(): OpenCode2DeferredChildEventBuffer {
+  return { events: [], overflowed: false, terminalFallback: null };
+}
+
+function openCode2IsAuthoritativeExecutionTerminal(event: unknown): boolean {
+  if (event === null || typeof event !== "object" || !("type" in event)) return false;
+  const wire = event as WireEvent;
+  const type = normalizeOpenCode2WireType(String(wire.type));
+  if (type === "session.execution.interrupted") return true;
+  return type !== "session.idle" && openCode2EventEndsExecution(wire);
+}
+
+function openCode2DeferredChildOverflowTerminal(sessionID: string): WireEvent {
+  return {
+    type: "session.execution.failed",
+    data: {
+      sessionID,
+      error: {
+        name: "DeferredChildEventOverflow",
+        message: "OpenCode 2 deferred child events overflowed before the child was bound.",
+      },
+    },
+  };
+}
+
+/**
+ * Retain the earliest child lifecycle and one terminal fallback. Once the
+ * prefix overflows, a synthetic failure guarantees bounded settlement; a
+ * later authoritative execution terminal replaces it before replay.
+ *
+ * @internal exported for tests
+ */
+export function bufferOpenCode2DeferredChildEvent(
+  buffer: OpenCode2DeferredChildEventBuffer,
+  event: unknown,
+  sessionID: string,
+  limit = OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT,
+): boolean {
+  if (buffer.events.length < limit) {
+    buffer.events.push(event);
+    return false;
+  }
+
+  const newlyOverflowed = !buffer.overflowed;
+  buffer.overflowed = true;
+  if (openCode2IsAuthoritativeExecutionTerminal(event)) {
+    buffer.terminalFallback = event;
+  } else if (buffer.terminalFallback === null) {
+    buffer.terminalFallback = openCode2DeferredChildOverflowTerminal(sessionID);
+  }
+  return newlyOverflowed;
+}
+
+/** @internal exported for tests */
+export function drainOpenCode2DeferredChildEvents(
+  buffer: OpenCode2DeferredChildEventBuffer,
+): ReadonlyArray<unknown> {
+  return buffer.terminalFallback === null
+    ? buffer.events
+    : [...buffer.events, buffer.terminalFallback];
 }
 
 /**
@@ -2255,8 +2324,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const subagentsByNativeItemId = new Map<string, OpenCode2SubagentContext>();
         const subagentsByChildSessionId = new Map<string, OpenCode2SubagentContext>();
         const nativeChildSessions = new Map<string, OpenCode2NativeSession>();
-        const deferredChildEvents = new Map<string, Array<unknown>>();
-        const deferredChildEventOverflows = new Set<string>();
+        const deferredChildEvents = new Map<string, OpenCode2DeferredChildEventBuffer>();
         const pendingDeferredChildEvents: Array<unknown> = [];
         const sessionPermissions: OpenCode2SessionPermissionStore = new Map();
         const modelLimits = new Map<string, ModelInfo["limit"]>();
@@ -2647,8 +2715,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           const bufferedEvents = deferredChildEvents.get(childSessionId);
           if (bufferedEvents !== undefined) {
             deferredChildEvents.delete(childSessionId);
-            deferredChildEventOverflows.delete(childSessionId);
-            pendingDeferredChildEvents.push(...bufferedEvents);
+            pendingDeferredChildEvents.push(...drainOpenCode2DeferredChildEvents(bufferedEvents));
           }
           yield* emitProviderEvent({
             type: "app_thread.created",
@@ -4751,14 +4818,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             !threads.has(eventSessionId) &&
             nativeChildSessions.has(eventSessionId)
           ) {
-            const buffered = deferredChildEvents.get(eventSessionId) ?? [];
-            if (buffered.length < OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT) {
-              buffered.push(event);
-              deferredChildEvents.set(eventSessionId, buffered);
-            } else if (!deferredChildEventOverflows.has(eventSessionId)) {
-              deferredChildEventOverflows.add(eventSessionId);
+            const buffered =
+              deferredChildEvents.get(eventSessionId) ?? makeOpenCode2DeferredChildEventBuffer();
+            deferredChildEvents.set(eventSessionId, buffered);
+            if (bufferOpenCode2DeferredChildEvent(buffered, event, eventSessionId)) {
               yield* Effect.logWarning(
-                "OpenCode 2 deferred child event buffer reached its limit; preserving earliest lifecycle events.",
+                "OpenCode 2 deferred child event buffer reached its limit; preserving earliest lifecycle events and a terminal fallback.",
                 { sessionID: eventSessionId, limit: OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT },
               );
             }
