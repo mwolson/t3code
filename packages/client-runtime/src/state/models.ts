@@ -51,6 +51,7 @@ export interface ThreadRuntimeSummary {
   readonly providerInstanceId: ProviderInstanceId;
   readonly providerName: string | null;
   readonly lastError: string | null;
+  readonly lastErrorAt?: string | null;
   readonly updatedAt: string;
 }
 
@@ -157,6 +158,7 @@ function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary 
     providerInstanceId: thread.providerInstanceId,
     providerName: null,
     lastError: thread.lastError ?? null,
+    lastErrorAt: null,
     updatedAt: iso(thread.updatedAt),
   };
 }

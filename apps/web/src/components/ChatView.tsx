@@ -135,6 +135,7 @@ import {
 } from "../pendingUserInput";
 import { useUiStateStore } from "../uiStateStore";
 import { useWorkspaceMutationRefresh } from "../hooks/useWorkspaceMutationRefresh";
+import { useThreadErrorBannerStore } from "../threadErrorBannerStore";
 import {
   buildPlanImplementationThreadTitle,
   buildPlanImplementationPrompt,
@@ -360,6 +361,7 @@ import {
   isVideoPreviewRequestCurrent,
   reconcileMountedTerminalThreadIds,
   resolveEffectiveInteractionMode,
+  resolveThreadErrorBannerMessage,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
@@ -367,6 +369,8 @@ import {
   shouldShowComposerContextStrip,
   startNewThreadForProject,
   codexArtifactTemplatePromptToAppend,
+  threadHasStarted,
+  threadRuntimeErrorDismissalKey,
   waitForStartedServerThread,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
@@ -1546,6 +1550,10 @@ function ChatViewContent(props: ChatViewProps) {
   const [localServerErrorsByThreadKey, setLocalServerErrorsByThreadKey] = useState<
     Record<string, LocalThreadErrorEntry>
   >({});
+  const dismissedRuntimeErrorKey = useThreadErrorBannerStore(
+    (state) => state.dismissedRuntimeErrorKeysByThreadKey[routeThreadKey] ?? null,
+  );
+  const dismissRuntimeError = useThreadErrorBannerStore((state) => state.dismissRuntimeError);
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
@@ -1764,8 +1772,19 @@ function ChatViewContent(props: ChatViewProps) {
           },
     [parentSubagentThread?.title, parentSubagentThreadRef],
   );
+  const runtimeError = serverRuntime?.lastError ?? null;
+  const runtimeErrorKey = threadRuntimeErrorDismissalKey({
+    localError: localServerError,
+    runtimeError,
+    runtimeErrorAt: serverRuntime?.lastErrorAt ?? serverRuntime?.updatedAt ?? null,
+  });
   const threadError = isServerThread
-    ? (localServerError ?? serverRuntime?.lastError ?? null)
+    ? resolveThreadErrorBannerMessage({
+        localError: localServerError,
+        runtimeError,
+        runtimeErrorKey,
+        dismissedRuntimeErrorKey,
+      })
     : localDraftError;
   // Dismissals can only mask the shown error, never clear it: a server thread
   // keeps its error in session.lastError, so clearing the local shadow would
@@ -3230,6 +3249,12 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [draftId, routeThreadKey, routeThreadRef, serverThread],
   );
+
+  const dismissThreadError = useCallback(() => {
+    setThreadError(activeThreadId, null);
+    if (runtimeErrorKey === null) return;
+    dismissRuntimeError(routeThreadKey, runtimeErrorKey);
+  }, [activeThreadId, dismissRuntimeError, routeThreadKey, runtimeErrorKey, setThreadError]);
 
   const focusComposer = useCallback(() => {
     composerRef.current?.focusAtEnd();
@@ -7347,7 +7372,7 @@ function ChatViewContent(props: ChatViewProps) {
         <ThreadErrorBanner
           error={visibleThreadError}
           onDismiss={() => {
-            setThreadError(activeThread.id, null);
+            dismissThreadError();
             dismissThreadErrorBannerForSession(threadErrorBannerKey);
             setThreadErrorBannerDismissTick((tick) => tick + 1);
           }}
