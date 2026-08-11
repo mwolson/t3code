@@ -27,6 +27,8 @@ import * as Scope from "effect/Scope";
 import { describe } from "vite-plus/test";
 
 import {
+  bufferOpenCode2DeferredChildEvent,
+  drainOpenCode2DeferredChildEvents,
   forgetOpenCode2SessionPermission,
   openCode2AllActiveTurnsAwaitRuntimeRequest,
   openCode2AutoPermissionReply,
@@ -70,8 +72,10 @@ import {
   openCode2ShouldSettleTurn,
   openCode2ToolNeedsTerminalOverride,
   openCode2TokenUsage,
+  makeOpenCode2DeferredChildEventBuffer,
   normalizeOpenCode2PermissionEvent,
   OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+  OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT,
   OPENCODE2_EVENT_PENDING_RESUBSCRIBE_DELAY_MS,
   OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS,
   OPENCODE2_EVENT_STALL_MS,
@@ -491,6 +495,67 @@ describe("OpenCode 2 post-settle wake classification", () => {
 });
 
 describe("OpenCode 2 wake evidence bounds", () => {
+  it("keeps a terminal fallback after an unbound child overflows its event prefix", () => {
+    const sessionID = "ses_deferred_child";
+    const buffer = makeOpenCode2DeferredChildEventBuffer();
+    const admitted = {
+      type: "session.next.prompt.admitted",
+      data: { sessionID, inputID: "input_deferred_child" },
+    };
+    const started = {
+      type: "session.execution.started",
+      data: { sessionID },
+    };
+    bufferOpenCode2DeferredChildEvent(buffer, admitted, sessionID);
+    bufferOpenCode2DeferredChildEvent(buffer, started, sessionID);
+    for (let index = 2; index < OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT; index += 1) {
+      bufferOpenCode2DeferredChildEvent(
+        buffer,
+        {
+          type: "session.next.reasoning.delta",
+          data: { sessionID, delta: String(index) },
+        },
+        sessionID,
+      );
+    }
+
+    assert.isTrue(
+      bufferOpenCode2DeferredChildEvent(
+        buffer,
+        { type: "session.next.reasoning.delta", data: { sessionID, delta: "overflow" } },
+        sessionID,
+      ),
+    );
+    const terminal = {
+      type: "session.next.step.ended",
+      data: { sessionID, finish: "stop" },
+    };
+    assert.isFalse(bufferOpenCode2DeferredChildEvent(buffer, terminal, sessionID));
+
+    const drained = drainOpenCode2DeferredChildEvents(buffer);
+    assert.lengthOf(drained, OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT + 1);
+    assert.strictEqual(drained[0], admitted);
+    assert.strictEqual(drained[1], started);
+    assert.strictEqual(drained.at(-1), terminal);
+    assert.isTrue(openCode2EventEndsExecution(drained.at(-1) as V2Event));
+  });
+
+  it("synthesizes a failed terminal at the deferred child overflow boundary", () => {
+    const sessionID = "ses_deferred_child_without_terminal";
+    const buffer = makeOpenCode2DeferredChildEventBuffer();
+    for (let index = 0; index <= OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT; index += 1) {
+      bufferOpenCode2DeferredChildEvent(
+        buffer,
+        { type: "session.next.reasoning.delta", data: { sessionID, delta: String(index) } },
+        sessionID,
+      );
+    }
+
+    const terminal = drainOpenCode2DeferredChildEvents(buffer).at(-1) as V2Event;
+    assert.strictEqual(terminal.type, "session.execution.failed");
+    assert.isTrue(openCode2EventEndsExecution(terminal));
+  });
+
   it("evicts the oldest retired suppression evidence in insertion order", () => {
     const wakes = new Map<string, unknown>();
     for (let index = 0; index < OPENCODE2_RETIRED_SUPPRESS_WAKE_LIMIT + 2; index += 1) {
