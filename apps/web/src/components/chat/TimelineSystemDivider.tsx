@@ -19,7 +19,10 @@ export function TimelineSystemDivider(props: {
       {Icon ? <Icon className="size-3 shrink-0" /> : null}
       <span className="font-medium">{props.label}</span>
       {props.detail ? (
-        <span className="inline-flex min-w-0 max-w-80 items-center truncate opacity-70">
+        <span
+          className="inline-flex min-w-0 max-w-80 items-center truncate opacity-70"
+          title={typeof props.detail === "string" ? props.detail : undefined}
+        >
           {props.showDetailSeparator === false ? null : "·\u00a0"}
           {props.detail}
         </span>

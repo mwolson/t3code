@@ -1346,6 +1346,7 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
       {
         usedTokenCount: 902_000,
         inputTokenCount: 272_000,
+        inputLimit: 922_000,
         contextLimit: 1_050_000,
         outputReserve: 32_000,
         triggerThreshold: 902_000,
@@ -1377,13 +1378,36 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
       })?.triggerThreshold,
       919_000,
     );
-    assert.equal(
+    assert.deepStrictEqual(
       openCode2CompactionDiagnostics({
         usage,
         limits: { context: 1_050_000, output: 128_000 },
         reason: "auto",
-      })?.triggerThreshold,
-      1_018_000,
+      }),
+      {
+        usedTokenCount: 902_000,
+        inputTokenCount: 272_000,
+        contextLimit: 1_050_000,
+        outputReserve: 32_000,
+        triggerThreshold: 1_018_000,
+        triggerReason: "auto",
+      },
+    );
+    assert.deepStrictEqual(
+      openCode2CompactionDiagnostics({
+        usage,
+        limits: { context: 272_000, input: 272_000, output: 128_000 },
+        reason: "auto",
+      }),
+      {
+        usedTokenCount: 902_000,
+        inputTokenCount: 272_000,
+        inputLimit: 272_000,
+        contextLimit: 272_000,
+        outputReserve: 32_000,
+        triggerThreshold: 252_000,
+        triggerReason: "auto",
+      },
     );
   });
 
