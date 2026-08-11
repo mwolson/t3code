@@ -87,6 +87,10 @@ export function deriveThreadRuntime(
     providerInstanceId: projection.thread.providerInstanceId,
     providerName: providerSession?.driver ?? null,
     lastError: providerSession?.lastError ?? null,
+    lastErrorAt:
+      providerSession?.lastErrorAt === null || providerSession?.lastErrorAt === undefined
+        ? null
+        : DateTime.formatIso(providerSession.lastErrorAt),
     updatedAt: DateTime.formatIso(projection.updatedAt),
   };
 }
