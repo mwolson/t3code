@@ -989,6 +989,7 @@ describe("MessagesTimeline", () => {
 
   it("renders durable compaction threshold diagnostics without provider summary text", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
+    const { formatCompactionTokenDetail } = await import("./V2LifecycleRow");
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
@@ -1022,6 +1023,7 @@ describe("MessagesTimeline", () => {
                 summary: "sensitive provider summary",
                 usedTokenCount: 902_000,
                 inputTokenCount: 272_000,
+                inputLimit: 922_000,
                 contextLimit: 1_050_000,
                 outputReserve: 32_000,
                 triggerThreshold: 902_000,
@@ -1033,10 +1035,30 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("902,000 used / 902,000 trigger");
-    expect(markup).toContain("272,000 input");
-    expect(markup).toContain("1,050,000 context");
+    expect(markup).toContain(
+      "902,000 used / 902,000 trigger · 922,000 input limit · 1,050,000 context",
+    );
+    expect(markup).toContain(
+      'title="902,000 used / 902,000 trigger · 922,000 input limit · 1,050,000 context"',
+    );
     expect(markup).not.toContain("sensitive provider summary");
+    expect(
+      formatCompactionTokenDetail({
+        type: "compaction",
+        usedTokenCount: 243_437,
+        triggerThreshold: 252_000,
+        inputLimit: 272_000,
+        contextLimit: 272_000,
+      } as never),
+    ).toBe("243,437 used / 252,000 trigger · 272,000 input limit");
+    expect(
+      formatCompactionTokenDetail({
+        type: "compaction",
+        usedTokenCount: 243_437,
+        triggerThreshold: 240_000,
+        contextLimit: 272_000,
+      } as never),
+    ).toBe("243,437 used / 240,000 trigger · 272,000 context");
   });
 
   it("renders failed compaction entries with a danger tone", async () => {
