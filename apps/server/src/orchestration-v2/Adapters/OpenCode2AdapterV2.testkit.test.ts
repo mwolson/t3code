@@ -279,6 +279,57 @@ describe("OpenCode2AdapterV2 replay testkit", () => {
     }),
   );
 
+  it.effect("waits for a delayed event before deciding whether a catalog call is recorded", () =>
+    Effect.gen(function* () {
+      const event = {
+        type: "session.created",
+        data: { id: "ses_before_catalog" },
+      };
+      const catalogInput = { location: { directory: "/workspace" } };
+      const recordedCatalog = [{ id: "recorded-agent" }];
+      const controller = new OpenCode2ReplayController(
+        transcript([
+          {
+            type: "emit_inbound",
+            frame: { type: "sdk.event", event },
+            afterMs: 20,
+          },
+          {
+            type: "expect_outbound",
+            frame: { type: "agent.list", input: catalogInput },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              type: "sdk.response",
+              operation: "agent.list",
+              data: recordedCatalog,
+            },
+          },
+          { type: "runtime_exit", status: "success" },
+        ]),
+      );
+      const iterator = controller.events()[Symbol.asyncIterator]();
+      const inbound = iterator.next();
+      const client = makeReplayClient(controller) as unknown as {
+        readonly v2: {
+          readonly agent: {
+            readonly list: (input: unknown) => Promise<{ data: { data: unknown } }>;
+          };
+        };
+      };
+      const catalog = client.v2.agent.list(catalogInput);
+
+      const [eventValue, catalogValue] = yield* Effect.promise(() =>
+        Promise.all([inbound, catalog]),
+      );
+
+      assert.deepStrictEqual(eventValue.value, event);
+      assert.deepStrictEqual(catalogValue.data.data, recordedCatalog);
+      controller.assertComplete();
+    }),
+  );
+
   it.effect("does not consume a delayed event after subscriber abort", () =>
     Effect.gen(function* () {
       const event = {

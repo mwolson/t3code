@@ -184,6 +184,16 @@ export class OpenCode2ReplayController {
     );
   }
 
+  /** Wait until a delayed replay consumer releases the cursor, then inspect it. */
+  async expectsOptionalOutbound(operation: string): Promise<boolean> {
+    this.throwFailure();
+    while (this.claimedEventCursor === this.cursor || this.claimedResponseCursor === this.cursor) {
+      await this.changed();
+      this.throwFailure();
+    }
+    return this.expectsOutbound(operation);
+  }
+
   async expectOutbound(actual: unknown): Promise<void> {
     try {
       this.throwFailure();
@@ -471,7 +481,7 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
     input: unknown,
     canned: unknown,
   ) => {
-    if (!controller.expectsOutbound(operation)) {
+    if (!(await controller.expectsOptionalOutbound(operation))) {
       return { data: { data: canned } };
     }
     return request(operation, input);
