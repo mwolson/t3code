@@ -90,6 +90,7 @@ const WIRE_TYPE_ALIASES: Readonly<Record<string, OpenCode2CanonicalEventType>> =
   "session.next.tool.success": "session.tool.success",
   "session.next.tool.failed": "session.tool.failed",
   "session.next.retried": "session.retry.scheduled",
+  "session.input.promoted": "session.input.admitted",
   "session.prompt.admitted": "session.input.admitted",
   "session.prompted": "session.input.admitted",
   "session.step.started": "session.execution.started",
@@ -100,8 +101,12 @@ const WIRE_TYPE_ALIASES: Readonly<Record<string, OpenCode2CanonicalEventType>> =
 
 const PASSTHROUGH_TYPES = new Set<string>([
   "session.created",
+  "session.execution.failed",
   "session.execution.interrupted",
+  "session.execution.started",
+  "session.execution.succeeded",
   "session.idle",
+  "session.input.admitted",
   "session.error",
   "session.text.started",
   "session.text.delta",
@@ -174,6 +179,69 @@ export function openCode2WireSessionID(event: { readonly data?: unknown }): stri
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+export type OpenCode2WireSession = {
+  readonly id: string;
+  readonly agent?: string;
+  readonly parentID?: string;
+  readonly title: string;
+  readonly model?: {
+    readonly id: string;
+    readonly providerID: string;
+    readonly variant?: string;
+  };
+  readonly time: {
+    readonly created?: number;
+    readonly updated?: number;
+  };
+};
+
+/** Accept the legacy nested session info and next-16916's flattened event. */
+export function openCode2WireSession(event: {
+  readonly created?: number;
+  readonly data?: unknown;
+}): OpenCode2WireSession | undefined {
+  const data = openCode2WireData(event);
+  const nestedInfo = isRecord(data.info) ? data.info : {};
+  const info = { ...data, ...nestedInfo };
+  const id =
+    (typeof info.id === "string" && info.id.length > 0 ? info.id : undefined) ??
+    openCode2WireSessionID(event);
+  if (id === undefined) return undefined;
+
+  const parentID = info.parentID ?? info.parentId;
+  const time = isRecord(info.time) ? info.time : {};
+  const modelValue = info.model;
+  const model =
+    isRecord(modelValue) &&
+    typeof modelValue.id === "string" &&
+    typeof modelValue.providerID === "string"
+      ? {
+          id: modelValue.id,
+          providerID: modelValue.providerID,
+          ...(typeof modelValue.variant === "string" ? { variant: modelValue.variant } : {}),
+        }
+      : undefined;
+  const created =
+    typeof time.created === "number"
+      ? time.created
+      : typeof event.created === "number"
+        ? event.created
+        : undefined;
+  const updated = typeof time.updated === "number" ? time.updated : created;
+
+  return {
+    id,
+    ...(typeof info.agent === "string" && info.agent.length > 0 ? { agent: info.agent } : {}),
+    ...(typeof parentID === "string" && parentID.length > 0 ? { parentID } : {}),
+    title: typeof info.title === "string" && info.title.length > 0 ? info.title : id,
+    ...(model === undefined ? {} : { model }),
+    time: {
+      ...(created === undefined ? {} : { created }),
+      ...(updated === undefined ? {} : { updated }),
+    },
+  };
+}
+
 export function openCode2WireCallID(event: { readonly data?: unknown }): string | undefined {
   const data = openCode2WireData(event);
   // next-16916 tool events key the call with `id` (and put the tool name on
@@ -189,6 +257,18 @@ export function openCode2WireToolName(event: { readonly data?: unknown }): strin
     if (typeof value === "string" && value.length > 0) return value;
   }
   return undefined;
+}
+
+/** Normalize tool result metadata across the beta and next-16916 wire shapes. */
+export function openCode2WireToolMetadata(event: {
+  readonly data?: unknown;
+}): Record<string, unknown> | undefined {
+  const data = openCode2WireData(event);
+  const structured = isRecord(data.structured) ? data.structured : {};
+  const metadata = isRecord(data.metadata) ? data.metadata : {};
+  const nestedMetadata = isRecord(metadata.metadata) ? metadata.metadata : {};
+  const result = { ...metadata, ...nestedMetadata, ...structured };
+  return Object.keys(result).length === 0 ? undefined : result;
 }
 
 export function openCode2WireTextDelta(event: { readonly data?: unknown }): string | undefined {
@@ -209,6 +289,14 @@ export function openCode2WireErrorMessage(event: { readonly data?: unknown }): s
   if (isRecord(error) && typeof error.message === "string" && error.message.length > 0) {
     return error.message;
   }
+  if (
+    isRecord(error) &&
+    isRecord(error.data) &&
+    typeof error.data.message === "string" &&
+    error.data.message.length > 0
+  ) {
+    return error.data.message;
+  }
   if (typeof error === "string" && error.length > 0) return error;
   return "OpenCode 2 provider error";
 }
@@ -217,7 +305,7 @@ export function openCode2WireErrorCode(event: { readonly data?: unknown }): stri
   const data = openCode2WireData(event);
   const error = data.error;
   if (!isRecord(error)) return null;
-  const type = error.type ?? error.name;
+  const type = error.type ?? error.name ?? error._tag;
   return typeof type === "string" && type.length > 0 ? type : null;
 }
 
