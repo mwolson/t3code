@@ -131,6 +131,7 @@ import {
   ProviderDriverKind,
   type ProviderInstanceId,
   type ProviderInteractionMode,
+  type ProviderApprovalDecision,
   type ProviderRequestKind,
   type ProviderSessionId,
   type RuntimeRequestId,
@@ -139,6 +140,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -258,6 +260,8 @@ export const OPENCODE2_INTERRUPT_REQUEST_TIMEOUT_MS = 5_000;
  */
 export const OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS = 5_000;
 export const OPENCODE2_INTERRUPT_SETTLE_POLL_MS = 100;
+export const OPENCODE2_RUNTIME_REQUEST_SETTLE_TIMEOUT_MS = 5_000;
+export const OPENCODE2_RUNTIME_REQUEST_DEDUPE_PER_SESSION_LIMIT = 1_024;
 const DEFAULT_OPENCODE2_SETTINGS = Schema.decodeSync(OpenCode2SettingsSchema)({});
 const OPENCODE2_T3_MCP_NAME = "t3-code";
 const OPENCODE2_T3_INSTRUCTION_KEY = "t3-code.orchestration";
@@ -462,6 +466,7 @@ interface ActiveOpenCode2Turn {
   executionStarted: boolean;
   interrupted: boolean;
   finalized: boolean;
+  terminalStatus: TerminalTurnStatus | null;
   providerRetry: OpenCode2ProviderRetry | null;
 }
 
@@ -567,22 +572,38 @@ interface OpenCode2ThreadState {
   latestTokenUsage: OpenCode2TokenUsage | null;
 }
 
-interface PendingOpenCode2Request {
+type OpenCode2RuntimeRequestSettlement = {
+  readonly requestStatus: "resolved" | "cancelled";
+  readonly itemStatus: "completed" | "cancelled";
+  readonly rememberPermissionForSession: boolean;
+};
+
+interface OpenCode2RuntimeRequestProjection {
   readonly requestId: RuntimeRequestId;
   readonly nativeRequestId: string;
   readonly nativeSessionId: string;
-  readonly turn: ActiveOpenCode2Turn;
   readonly state: OpenCode2ThreadState;
+  readonly threadId: ThreadId;
+  readonly runId: OrchestrationV2ExecutionNode["runId"];
+  readonly rootNodeId: OrchestrationV2ExecutionNode["rootNodeId"];
+  readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
   readonly nodeId: OrchestrationV2ExecutionNode["id"];
   readonly turnItemId: OrchestrationV2TurnItem["id"];
   readonly requestKind: OrchestrationV2RuntimeRequest["kind"];
   readonly createdAt: DateTime.Utc;
+  readonly ordinal: number;
   readonly permission?: {
     readonly action: string;
     readonly resources: ReadonlyArray<string>;
     readonly save: ReadonlyArray<string>;
   };
   readonly questions?: ReadonlyArray<QuestionV2Info>;
+}
+
+interface PendingOpenCode2Request extends OpenCode2RuntimeRequestProjection {
+  authoritativeCancellation: boolean;
+  readonly sourceTurn: ActiveOpenCode2Turn;
+  readonly turn: ActiveOpenCode2Turn;
   /**
    * Present when the questions came from a form (`form.created`); index-aligned
    * with `questions`, and the reply must go through `session.form.reply`.
@@ -590,6 +611,48 @@ interface PendingOpenCode2Request {
   readonly formFieldKeys?: ReadonlyArray<string>;
   /** Index-aligned label-to-value maps for translating UI answers. */
   readonly formOptionValues?: ReadonlyArray<Readonly<Record<string, string>>>;
+  responseSettlement: OpenCode2RuntimeRequestSettlement | null;
+  responseSettlementConfirmed: boolean;
+  readonly responseSettlementOutcome: Deferred.Deferred<void>;
+  rememberedPermission: OpenCode2SessionPermission | null;
+}
+
+interface SettledOpenCode2RequestProjection extends OpenCode2RuntimeRequestProjection {
+  authoritativeCancellation: boolean;
+  readonly sourceProviderTurnId: OrchestrationV2ProviderTurn["id"];
+  responseSettlement: OpenCode2RuntimeRequestSettlement | null;
+  responseSettlementConfirmed: boolean;
+  rememberedPermission: OpenCode2SessionPermission | null;
+}
+
+interface SettledOpenCode2Request {
+  readonly pending: SettledOpenCode2RequestProjection;
+  settlement: OpenCode2RuntimeRequestSettlement;
+}
+
+export function openCode2RuntimeRequestResponseSettlement(
+  decision: ProviderApprovalDecision | undefined,
+): OpenCode2RuntimeRequestSettlement {
+  return {
+    requestStatus: "resolved",
+    itemStatus: decision === "decline" || decision === "cancel" ? "cancelled" : "completed",
+    rememberPermissionForSession: decision === "acceptForSession",
+  };
+}
+
+export function openCode2PermissionReplyStatus(reply: unknown): "resolved" | "cancelled" {
+  return reply === "reject" ? "cancelled" : "resolved";
+}
+
+export function openCode2RuntimeRequestNativeKey(
+  nativeSessionId: string,
+  nativeRequestId: string,
+): string {
+  return `${nativeSessionId}\0${nativeRequestId}`;
+}
+
+export function openCode2RuntimeRequestEventId(data: unknown): string | undefined {
+  return recordString(data, "requestID", "formID", "id");
 }
 
 export interface OpenCode2SessionPermission {
@@ -598,6 +661,8 @@ export interface OpenCode2SessionPermission {
 }
 
 export type OpenCode2SessionPermissionStore = Map<string, Array<OpenCode2SessionPermission>>;
+
+const openCode2SessionPermissionOwnership = new WeakMap<OpenCode2SessionPermission, number>();
 
 export interface OpenCode2AdapterV2Options {
   readonly instanceId: ProviderInstanceId;
@@ -1782,26 +1847,51 @@ export function rememberOpenCode2SessionPermission(
   permissionsBySession: OpenCode2SessionPermissionStore,
   nativeSessionId: string,
   permission: PendingOpenCode2Request["permission"],
-): void {
-  if (permission === undefined) return;
+): OpenCode2SessionPermission | null {
+  if (permission === undefined) return null;
   const permissions = permissionsBySession.get(nativeSessionId) ?? [];
   const savedResources = permission.save.length === 0 ? permission.resources : permission.save;
   const remembered = {
     action: permission.action,
     resources: savedResources.length === 0 ? ["*"] : savedResources,
   };
-  if (
-    permissions.some(
-      (existing) =>
-        existing.action === remembered.action &&
-        existing.resources.length === remembered.resources.length &&
-        existing.resources.every((resource, index) => resource === remembered.resources[index]),
-    )
-  ) {
-    return;
+  const existing = permissions.find(
+    (candidate) =>
+      candidate.action === remembered.action &&
+      candidate.resources.length === remembered.resources.length &&
+      candidate.resources.every((resource, index) => resource === remembered.resources[index]),
+  );
+  if (existing !== undefined) {
+    openCode2SessionPermissionOwnership.set(
+      existing,
+      (openCode2SessionPermissionOwnership.get(existing) ?? 1) + 1,
+    );
+    return existing;
   }
   permissions.push(remembered);
+  openCode2SessionPermissionOwnership.set(remembered, 1);
   permissionsBySession.set(nativeSessionId, permissions);
+  return remembered;
+}
+
+/** @internal exported for tests */
+export function forgetOpenCode2SessionPermission(
+  permissionsBySession: OpenCode2SessionPermissionStore,
+  nativeSessionId: string,
+  permission: OpenCode2SessionPermission,
+): void {
+  const permissions = permissionsBySession.get(nativeSessionId);
+  if (permissions === undefined) return;
+  const ownershipCount = openCode2SessionPermissionOwnership.get(permission) ?? 1;
+  if (ownershipCount > 1) {
+    openCode2SessionPermissionOwnership.set(permission, ownershipCount - 1);
+    return;
+  }
+  const index = permissions.indexOf(permission);
+  if (index === -1) return;
+  permissions.splice(index, 1);
+  openCode2SessionPermissionOwnership.delete(permission);
+  if (permissions.length === 0) permissionsBySession.delete(nativeSessionId);
 }
 
 /** @internal exported for tests */
@@ -2134,6 +2224,33 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const shellSessionIds = new Map<string, string>();
         const pendingRequests = new Map<string, PendingOpenCode2Request>();
         const pendingRequestsByNativeId = new Map<string, PendingOpenCode2Request>();
+        const settledRequestsByNativeId = new Map<string, SettledOpenCode2Request>();
+        const autoReplyPermissionsByNativeKey = new Map<
+          string,
+          { confirmed: boolean; reply: unknown }
+        >();
+        const seenRuntimeRequestKeysBySessionId = new Map<string, Map<string, void>>();
+
+        const hasSeenRuntimeRequestKey = (
+          nativeSessionId: string,
+          nativeRequestKey: string,
+        ): boolean =>
+          seenRuntimeRequestKeysBySessionId.get(nativeSessionId)?.has(nativeRequestKey) === true;
+
+        const rememberRuntimeRequestKey = (
+          nativeSessionId: string,
+          nativeRequestKey: string,
+        ): void => {
+          const seen = seenRuntimeRequestKeysBySessionId.get(nativeSessionId) ?? new Map();
+          seenRuntimeRequestKeysBySessionId.set(nativeSessionId, seen);
+          seen.delete(nativeRequestKey);
+          seen.set(nativeRequestKey, undefined);
+          while (seen.size > OPENCODE2_RUNTIME_REQUEST_DEDUPE_PER_SESSION_LIMIT) {
+            const oldest = seen.keys().next().value;
+            if (oldest === undefined) break;
+            seen.delete(oldest);
+          }
+        };
         const subagentsByNativeItemId = new Map<string, OpenCode2SubagentContext>();
         const subagentsByChildSessionId = new Map<string, OpenCode2SubagentContext>();
         const nativeChildSessions = new Map<string, OpenCode2NativeSession>();
@@ -2968,21 +3085,21 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           );
 
         const runtimeRequestTurnItem = (
-          pending: PendingOpenCode2Request,
+          pending: OpenCode2RuntimeRequestProjection,
           status: OrchestrationV2TurnItem["status"],
           completedAt: DateTime.Utc | null,
           updatedAt: DateTime.Utc,
         ): OrchestrationV2TurnItem => {
           const base = {
             id: pending.turnItemId,
-            threadId: pending.turn.threadId,
-            runId: pending.turn.runId,
+            threadId: pending.threadId,
+            runId: pending.runId,
             nodeId: pending.nodeId,
             providerThreadId: pending.state.providerThread.id,
-            providerTurnId: pending.turn.providerTurnId,
+            providerTurnId: pending.providerTurnId,
             nativeItemRef: providerRef(pending.nativeRequestId),
             parentItemId: null,
-            ordinal: itemOrdinal(pending.turn, pending.nativeRequestId),
+            ordinal: pending.ordinal,
             status,
             startedAt: pending.createdAt,
             completedAt,
@@ -3030,6 +3147,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const emitRuntimeRequest = Effect.fnUntraced(function* (
           state: OpenCode2ThreadState,
           turn: ActiveOpenCode2Turn,
+          sourceTurn: ActiveOpenCode2Turn,
           nativeSessionId: string,
           nativeRequestId: string,
           request:
@@ -3045,8 +3163,16 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 readonly formFieldKeys?: ReadonlyArray<string>;
                 readonly formOptionValues?: ReadonlyArray<Readonly<Record<string, string>>>;
               },
+          allowSeen = false,
         ) {
-          if (pendingRequestsByNativeId.has(nativeRequestId)) return;
+          const nativeRequestKey = openCode2RuntimeRequestNativeKey(
+            nativeSessionId,
+            nativeRequestId,
+          );
+          if (!allowSeen && hasSeenRuntimeRequestKey(nativeSessionId, nativeRequestKey)) return;
+          if (pendingRequestsByNativeId.has(nativeRequestKey)) return;
+          if (settledRequestsByNativeId.has(nativeRequestKey)) return;
+          rememberRuntimeRequestKey(nativeSessionId, nativeRequestKey);
           const createdAt = yield* DateTime.now;
           const requestId = yield* idAllocator.allocate.runtimeRequest({
             driver: OPENCODE2_PROVIDER,
@@ -3059,7 +3185,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             request.type === "permission"
               ? openCode2PermissionRequestKind(request.action)
               : "user_input";
+          const responseSettlementOutcome = yield* Deferred.make<void>();
           const pendingBase = {
+            authoritativeCancellation: false,
             requestId,
             nativeRequestId,
             nativeSessionId,
@@ -3069,6 +3197,16 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             turnItemId,
             requestKind,
             createdAt,
+            threadId: turn.threadId,
+            runId: turn.runId,
+            rootNodeId: turn.rootNodeId,
+            providerTurnId: turn.providerTurnId,
+            ordinal: itemOrdinal(turn, nativeRequestId),
+            rememberedPermission: null,
+            responseSettlement: null,
+            responseSettlementConfirmed: false,
+            responseSettlementOutcome,
+            sourceTurn,
           };
           let pending: PendingOpenCode2Request;
           if (request.type === "permission") {
@@ -3093,7 +3231,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             };
           }
           pendingRequests.set(String(requestId), pending);
-          pendingRequestsByNativeId.set(nativeRequestId, pending);
+          pendingRequestsByNativeId.set(nativeRequestKey, pending);
           const runtimeRequest: OrchestrationV2RuntimeRequest = {
             id: requestId,
             nodeId,
@@ -3123,7 +3261,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               countsForRun: false,
               providerThreadId: state.providerThread.id,
               providerTurnId: turn.providerTurnId,
-              nativeItemRef: providerRef(nativeRequestId),
+              nativeItemRef: providerRef(pending.nativeRequestId),
               runtimeRequestId: requestId,
               checkpointScopeId: null,
               startedAt: createdAt,
@@ -3144,21 +3282,24 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           yield* updateProviderSession("waiting", null);
         });
 
-        const resolveRuntimeRequest = Effect.fnUntraced(function* (
-          nativeRequestId: string,
-          status: "resolved" | "cancelled",
+        const applyRuntimeRequestSettlement = Effect.fnUntraced(function* (
+          pending: OpenCode2RuntimeRequestProjection,
+          settlement: OpenCode2RuntimeRequestSettlement,
+          rememberPermissionForSession = true,
         ) {
-          const pending = pendingRequestsByNativeId.get(nativeRequestId);
-          if (pending === undefined) return;
           const resolvedAt = yield* DateTime.now;
           const current = pending.state.runtimeRequests.get(String(pending.requestId));
           if (current !== undefined) {
-            const resolved: OrchestrationV2RuntimeRequest = { ...current, status, resolvedAt };
+            const resolved: OrchestrationV2RuntimeRequest = {
+              ...current,
+              status: settlement.requestStatus,
+              resolvedAt,
+            };
             pending.state.runtimeRequests.set(String(pending.requestId), resolved);
             yield* emitProviderEvent({
               type: "runtime_request.updated",
               driver: OPENCODE2_PROVIDER,
-              threadId: pending.turn.threadId,
+              threadId: pending.threadId,
               runtimeRequest: resolved,
             });
           }
@@ -3167,15 +3308,180 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             driver: OPENCODE2_PROVIDER,
             node: {
               id: pending.nodeId,
-              threadId: pending.turn.threadId,
-              runId: pending.turn.runId,
-              parentNodeId: pending.turn.rootNodeId,
-              rootNodeId: pending.turn.rootNodeId,
+              threadId: pending.threadId,
+              runId: pending.runId,
+              parentNodeId: pending.rootNodeId,
+              rootNodeId: pending.rootNodeId,
               kind: pending.questions === undefined ? "approval_request" : "user_input_request",
-              status: status === "resolved" ? "completed" : "cancelled",
+              status: settlement.itemStatus,
               countsForRun: false,
               providerThreadId: pending.state.providerThread.id,
-              providerTurnId: pending.turn.providerTurnId,
+              providerTurnId: pending.providerTurnId,
+              nativeItemRef: providerRef(pending.nativeRequestId),
+              runtimeRequestId: pending.requestId,
+              checkpointScopeId: null,
+              startedAt: pending.createdAt,
+              completedAt: resolvedAt,
+            },
+          });
+          yield* emitProviderEvent({
+            type: "turn_item.updated",
+            driver: OPENCODE2_PROVIDER,
+            turnItem: runtimeRequestTurnItem(
+              pending,
+              settlement.itemStatus,
+              resolvedAt,
+              resolvedAt,
+            ),
+          });
+          if (
+            rememberPermissionForSession &&
+            settlement.rememberPermissionForSession &&
+            pending.permission !== undefined
+          ) {
+            return rememberOpenCode2SessionPermission(
+              sessionPermissions,
+              pending.nativeSessionId,
+              pending.permission,
+            );
+          }
+          return null;
+        });
+
+        const settledRequestProjection = (
+          pending: PendingOpenCode2Request,
+        ): SettledOpenCode2RequestProjection => ({
+          authoritativeCancellation: pending.authoritativeCancellation,
+          requestId: pending.requestId,
+          nativeRequestId: pending.nativeRequestId,
+          nativeSessionId: pending.nativeSessionId,
+          state: pending.state,
+          threadId: pending.threadId,
+          runId: pending.runId,
+          rootNodeId: pending.rootNodeId,
+          providerTurnId: pending.providerTurnId,
+          nodeId: pending.nodeId,
+          turnItemId: pending.turnItemId,
+          requestKind: pending.requestKind,
+          createdAt: pending.createdAt,
+          ordinal: pending.ordinal,
+          ...(pending.permission === undefined ? {} : { permission: pending.permission }),
+          ...(pending.questions === undefined ? {} : { questions: pending.questions }),
+          sourceProviderTurnId: pending.sourceTurn.providerTurnId,
+          responseSettlement: pending.responseSettlement,
+          responseSettlementConfirmed: pending.responseSettlementConfirmed,
+          rememberedPermission: pending.rememberedPermission,
+        });
+
+        const resolveRuntimeRequestUnlocked = Effect.fnUntraced(function* (
+          nativeSessionId: string,
+          nativeRequestId: string,
+          status: "resolved" | "cancelled",
+          useResponseSettlement = status === "resolved",
+        ) {
+          const nativeRequestKey = openCode2RuntimeRequestNativeKey(
+            nativeSessionId,
+            nativeRequestId,
+          );
+          const existingSettlement = settledRequestsByNativeId.get(nativeRequestKey);
+          if (existingSettlement !== undefined) {
+            let settlementChanged = false;
+            if (status === "cancelled") {
+              existingSettlement.pending.authoritativeCancellation = true;
+              if (existingSettlement.pending.rememberedPermission !== null) {
+                forgetOpenCode2SessionPermission(
+                  sessionPermissions,
+                  existingSettlement.pending.nativeSessionId,
+                  existingSettlement.pending.rememberedPermission,
+                );
+                existingSettlement.pending.rememberedPermission = null;
+              }
+              if (
+                existingSettlement.settlement.requestStatus !== "cancelled" ||
+                existingSettlement.settlement.itemStatus !== "cancelled"
+              ) {
+                existingSettlement.settlement = {
+                  requestStatus: "cancelled",
+                  itemStatus: "cancelled",
+                  rememberPermissionForSession: false,
+                };
+                settlementChanged = true;
+              }
+            }
+            if (!settlementChanged) return;
+            yield* applyRuntimeRequestSettlement(
+              existingSettlement.pending,
+              existingSettlement.settlement,
+              false,
+            );
+            pendingRequests.delete(String(existingSettlement.pending.requestId));
+            pendingRequestsByNativeId.delete(nativeRequestKey);
+            if (
+              existingSettlement.pending.rememberedPermission === null &&
+              existingSettlement.pending.state.providerTurns.get(
+                String(existingSettlement.pending.sourceProviderTurnId),
+              )?.completedAt !== null
+            ) {
+              settledRequestsByNativeId.delete(nativeRequestKey);
+            }
+            return;
+          }
+          const pending = pendingRequestsByNativeId.get(nativeRequestKey);
+          if (pending === undefined) return;
+          if (status === "cancelled") {
+            pending.authoritativeCancellation = true;
+            if (pending.rememberedPermission !== null) {
+              forgetOpenCode2SessionPermission(
+                sessionPermissions,
+                pending.nativeSessionId,
+                pending.rememberedPermission,
+              );
+              pending.rememberedPermission = null;
+            }
+          }
+          const settlement =
+            (useResponseSettlement ? pending.responseSettlement : null) ??
+            (status === "resolved"
+              ? {
+                  requestStatus: "resolved" as const,
+                  itemStatus: "completed" as const,
+                  rememberPermissionForSession: false,
+                }
+              : {
+                  requestStatus: "cancelled" as const,
+                  itemStatus: "cancelled" as const,
+                  rememberPermissionForSession: false,
+                });
+          const resolvedAt = yield* DateTime.now;
+          const current = pending.state.runtimeRequests.get(String(pending.requestId));
+          if (current !== undefined) {
+            const resolved: OrchestrationV2RuntimeRequest = {
+              ...current,
+              status: settlement.requestStatus,
+              resolvedAt,
+            };
+            pending.state.runtimeRequests.set(String(pending.requestId), resolved);
+            yield* emitProviderEvent({
+              type: "runtime_request.updated",
+              driver: OPENCODE2_PROVIDER,
+              threadId: pending.threadId,
+              runtimeRequest: resolved,
+            });
+          }
+          yield* emitProviderEvent({
+            type: "node.updated",
+            driver: OPENCODE2_PROVIDER,
+            node: {
+              id: pending.nodeId,
+              threadId: pending.threadId,
+              runId: pending.runId,
+              parentNodeId: pending.rootNodeId,
+              rootNodeId: pending.rootNodeId,
+              kind: pending.questions === undefined ? "approval_request" : "user_input_request",
+              status: settlement.itemStatus,
+              countsForRun: false,
+              providerThreadId: pending.state.providerThread.id,
+              providerTurnId: pending.providerTurnId,
               nativeItemRef: providerRef(nativeRequestId),
               runtimeRequestId: pending.requestId,
               checkpointScopeId: null,
@@ -3188,17 +3494,158 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             driver: OPENCODE2_PROVIDER,
             turnItem: runtimeRequestTurnItem(
               pending,
-              status === "resolved" ? "completed" : "cancelled",
+              settlement.itemStatus,
               resolvedAt,
               resolvedAt,
             ),
           });
+          if (
+            settlement.rememberPermissionForSession &&
+            !pending.authoritativeCancellation &&
+            pending.permission !== undefined
+          ) {
+            const rememberedPermission = rememberOpenCode2SessionPermission(
+              sessionPermissions,
+              pending.nativeSessionId,
+              pending.permission,
+            );
+            if (rememberedPermission !== null) {
+              pending.rememberedPermission = rememberedPermission;
+            }
+          }
+          let finalSettlement = settlement;
+          if (pending.authoritativeCancellation && settlement.itemStatus !== "cancelled") {
+            if (pending.rememberedPermission !== null) {
+              forgetOpenCode2SessionPermission(
+                sessionPermissions,
+                pending.nativeSessionId,
+                pending.rememberedPermission,
+              );
+              pending.rememberedPermission = null;
+            }
+            finalSettlement = {
+              requestStatus: "cancelled",
+              itemStatus: "cancelled",
+              rememberPermissionForSession: false,
+            };
+            yield* applyRuntimeRequestSettlement(pending, finalSettlement, false);
+          }
+          const settled: SettledOpenCode2Request = {
+            pending: settledRequestProjection(pending),
+            settlement: finalSettlement,
+          };
+          settledRequestsByNativeId.delete(nativeRequestKey);
+          settledRequestsByNativeId.set(nativeRequestKey, settled);
           pendingRequests.delete(String(pending.requestId));
-          pendingRequestsByNativeId.delete(nativeRequestId);
-          if (pendingRequests.size === 0) yield* updateProviderSession("running", null);
+          pendingRequestsByNativeId.delete(nativeRequestKey);
+          yield* Deferred.succeed(pending.responseSettlementOutcome, undefined);
+          yield* refreshProviderSessionAfterRuntimeRequestSettlement(pending);
         });
 
-        const finalizeTurn = Effect.fnUntraced(function* (
+        const resolveRuntimeRequest = resolveRuntimeRequestUnlocked;
+
+        const refreshProviderSessionAfterRuntimeRequestSettlement = Effect.fnUntraced(function* (
+          pending: PendingOpenCode2Request,
+        ) {
+          if (pendingRequests.size > 0) return;
+          if (!pending.sourceTurn.finalized) {
+            yield* updateProviderSession("running", null);
+            return;
+          }
+          if (pending.sourceTurn.terminalStatus !== "completed") return;
+          const anotherTurnIsActive = Array.from(threads.values()).some(
+            (candidate) => candidate.activeTurn !== null && !candidate.activeTurn.finalized,
+          );
+          yield* updateProviderSession(anotherTurnIsActive ? "running" : "ready", null);
+        });
+
+        const confirmRuntimeRequestResponse = (
+          nativeSessionId: string,
+          nativeRequestId: string,
+        ): void => {
+          const pending = pendingRequestsByNativeId.get(
+            openCode2RuntimeRequestNativeKey(nativeSessionId, nativeRequestId),
+          );
+          if (pending?.responseSettlement !== null && pending?.responseSettlement !== undefined) {
+            pending.responseSettlementConfirmed = true;
+          }
+        };
+
+        const resolvePermissionReply = Effect.fnUntraced(function* (
+          nativeSessionId: string,
+          nativeRequestId: string,
+          reply: unknown,
+        ) {
+          const nativeRequestKey = openCode2RuntimeRequestNativeKey(
+            nativeSessionId,
+            nativeRequestId,
+          );
+          const request =
+            pendingRequestsByNativeId.get(nativeRequestKey) ??
+            settledRequestsByNativeId.get(nativeRequestKey)?.pending;
+          const autoReplyState = autoReplyPermissionsByNativeKey.get(nativeRequestKey);
+          if (request === undefined && autoReplyState !== undefined) {
+            autoReplyState.confirmed = true;
+            autoReplyState.reply = reply;
+            return;
+          }
+          if (reply === "reject" && request?.responseSettlement?.itemStatus === "cancelled") {
+            request.responseSettlementConfirmed = true;
+            yield* resolveRuntimeRequest(nativeSessionId, nativeRequestId, "resolved", true);
+            return;
+          }
+          if (reply !== "reject") {
+            confirmRuntimeRequestResponse(nativeSessionId, nativeRequestId);
+          }
+          yield* resolveRuntimeRequest(
+            nativeSessionId,
+            nativeRequestId,
+            openCode2PermissionReplyStatus(reply),
+          );
+        });
+
+        const respondWithRuntimeRequestSettlement = Effect.fnUntraced(function* <A, E, R>(
+          pending: PendingOpenCode2Request,
+          settlement: OpenCode2RuntimeRequestSettlement,
+          response: Effect.Effect<A, E, R>,
+        ) {
+          if (pending.responseSettlement !== null) {
+            return yield* protocolError(
+              `OpenCode 2 request ${pending.requestId} is already being answered`,
+            );
+          }
+          pending.responseSettlement = settlement;
+          const exit = yield* Effect.exit(response);
+          if (Exit.isFailure(exit)) {
+            const nativeRequestKey = openCode2RuntimeRequestNativeKey(
+              pending.nativeSessionId,
+              pending.nativeRequestId,
+            );
+            const settled = settledRequestsByNativeId.get(nativeRequestKey);
+            if (settled?.pending.requestId === pending.requestId) return;
+            if (pendingRequestsByNativeId.get(nativeRequestKey) !== pending) return;
+            if (pending.sourceTurn.finalized) {
+              yield* resolveRuntimeRequest(
+                pending.nativeSessionId,
+                pending.nativeRequestId,
+                "cancelled",
+                false,
+              );
+              return;
+            }
+            pending.responseSettlement = null;
+            return yield* Effect.failCause(exit.cause);
+          }
+          pending.responseSettlementConfirmed = true;
+          yield* resolveRuntimeRequest(
+            pending.nativeSessionId,
+            pending.nativeRequestId,
+            settlement.requestStatus,
+            true,
+          );
+        });
+
+        const finalizeTurnNow = Effect.fnUntraced(function* (
           state: OpenCode2ThreadState,
           turn: ActiveOpenCode2Turn,
           status: TerminalTurnStatus,
@@ -3207,8 +3654,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             readonly threadDisposition?: "reusable" | "broken";
           },
         ) {
-          if (turn.finalized) return;
-          turn.finalized = true;
           const completedAt = yield* DateTime.now;
           for (const part of turn.parts.values()) {
             if (part.kind === "tool") {
@@ -3242,10 +3687,37 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           }
           for (const pending of Array.from(pendingRequests.values())) {
             if (
-              pending.turn.providerTurnId === turn.providerTurnId ||
+              pending.sourceTurn.providerTurnId === turn.providerTurnId ||
               pending.nativeSessionId === state.nativeSessionId
             ) {
-              yield* resolveRuntimeRequest(pending.nativeRequestId, "cancelled");
+              const useResponseSettlement =
+                status === "completed" && pending.responseSettlementConfirmed;
+              yield* resolveRuntimeRequest(
+                pending.nativeSessionId,
+                pending.nativeRequestId,
+                useResponseSettlement ? "resolved" : "cancelled",
+                useResponseSettlement,
+              );
+            }
+          }
+          if (status !== "completed") {
+            for (const settled of Array.from(settledRequestsByNativeId.values())) {
+              if (settled.pending.sourceProviderTurnId === turn.providerTurnId) {
+                yield* resolveRuntimeRequest(
+                  settled.pending.nativeSessionId,
+                  settled.pending.nativeRequestId,
+                  "cancelled",
+                  false,
+                );
+              }
+            }
+          }
+          for (const [nativeRequestKey, settled] of settledRequestsByNativeId) {
+            if (
+              settled.pending.sourceProviderTurnId === turn.providerTurnId &&
+              settled.pending.rememberedPermission === null
+            ) {
+              settledRequestsByNativeId.delete(nativeRequestKey);
             }
           }
           yield* emitProviderTurn(state, turn, status, completedAt);
@@ -3333,13 +3805,21 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               }
               yield* emitSubagentContext(context);
             }
+            if (pendingRequests.size === 0) {
+              const anotherTurnIsActive = Array.from(threads.values()).some(
+                (candidate) => candidate.activeTurn !== null && !candidate.activeTurn.finalized,
+              );
+              yield* updateProviderSession(anotherTurnIsActive ? "running" : "ready", null);
+            }
             return;
           }
           const anotherTurnIsActive = Array.from(threads.values()).some(
-            (candidate) => candidate.activeTurn?.isRoot === true,
+            (candidate) => candidate.activeTurn !== null && !candidate.activeTurn.finalized,
           );
           let providerSessionStatus: OrchestrationV2ProviderSession["status"] = "ready";
-          if (anotherTurnIsActive) {
+          if (pendingRequests.size > 0) {
+            providerSessionStatus = "waiting";
+          } else if (anotherTurnIsActive) {
             providerSessionStatus = "running";
           } else if (status === "failed") {
             providerSessionStatus = "error";
@@ -3386,6 +3866,53 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           });
         });
 
+        const finalizeTurn = Effect.fnUntraced(function* (
+          state: OpenCode2ThreadState,
+          turn: ActiveOpenCode2Turn,
+          status: TerminalTurnStatus,
+          terminal?: {
+            readonly failure?: OrchestrationV2ProviderFailure;
+            readonly threadDisposition?: "reusable" | "broken";
+          },
+        ) {
+          if (turn.finalized) {
+            if (
+              turn.terminalStatus === "completed" &&
+              status !== "completed" &&
+              state.activeTurn === turn
+            ) {
+              turn.terminalStatus = status;
+              yield* finalizeTurnNow(state, turn, status, terminal);
+            }
+            return;
+          }
+          turn.finalized = true;
+          turn.terminalStatus = status;
+          const pendingResponseOutcomes =
+            status === "completed"
+              ? Array.from(pendingRequests.values())
+                  .filter(
+                    (pending) =>
+                      (pending.sourceTurn.providerTurnId === turn.providerTurnId ||
+                        pending.nativeSessionId === state.nativeSessionId) &&
+                      pending.responseSettlement !== null &&
+                      !pending.responseSettlementConfirmed,
+                  )
+                  .map((pending) => Deferred.await(pending.responseSettlementOutcome))
+              : [];
+          if (pendingResponseOutcomes.length === 0) {
+            yield* finalizeTurnNow(state, turn, status, terminal);
+            return;
+          }
+          yield* Effect.gen(function* () {
+            yield* Effect.all(pendingResponseOutcomes, { concurrency: "unbounded" }).pipe(
+              Effect.timeoutOption(`${OPENCODE2_RUNTIME_REQUEST_SETTLE_TIMEOUT_MS} millis`),
+            );
+            if (turn.terminalStatus !== status || state.activeTurn !== turn) return;
+            yield* finalizeTurnNow(state, turn, status, terminal);
+          }).pipe(Effect.forkIn(scope), Effect.asVoid);
+        });
+
         /** Resolve the active turn for a session id, or nothing if it settled. */
         const activeFor = (
           sessionID: string | undefined,
@@ -3396,6 +3923,17 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           if (state === undefined || turn === null || turn === undefined || turn.finalized) {
             return null;
           }
+          return { state, turn };
+        };
+
+        const terminalFor = (
+          sessionID: string | undefined,
+        ): { state: OpenCode2ThreadState; turn: ActiveOpenCode2Turn } | null => {
+          if (sessionID === undefined) return null;
+          const state = threads.get(sessionID);
+          const turn = state?.activeTurn;
+          if (state === undefined || turn === null || turn === undefined) return null;
+          if (turn.finalized && turn.terminalStatus !== "completed") return null;
           return { state, turn };
         };
 
@@ -3456,6 +3994,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             executionStarted: false,
             interrupted: false,
             finalized: false,
+            terminalStatus: null,
             providerRetry: null,
           };
           state.activeTurn = turn;
@@ -3801,22 +4340,44 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           return allRemoved;
         });
 
-        const autoReplyPermission = Effect.fnUntraced(function* (
+        const autoReplyPermission = Effect.fnUntraced(function* <E, R>(
           sessionID: string,
           requestID: string,
           reply: "once" | "reject",
+          fallback: Effect.Effect<void, E, R>,
         ) {
-          return yield* sdkCall("session.permission.reply", { sessionID, requestID, reply }, () =>
-            client.v2.session.permission.reply({ sessionID, requestID, reply }),
-          ).pipe(
-            Effect.as(true),
-            Effect.catch((cause: OpenCode2RuntimeError) =>
-              Effect.logWarning("Failed to answer an OpenCode 2 permission request.", {
-                category: cause.category,
-                operation: cause.operation,
-                provider: OPENCODE2_PROVIDER,
-              }).pipe(Effect.as(false)),
+          const nativeRequestKey = openCode2RuntimeRequestNativeKey(sessionID, requestID);
+          if (hasSeenRuntimeRequestKey(sessionID, nativeRequestKey)) return;
+          rememberRuntimeRequestKey(sessionID, nativeRequestKey);
+          const state = { confirmed: false, reply: undefined as unknown };
+          autoReplyPermissionsByNativeKey.set(nativeRequestKey, state);
+          yield* Effect.gen(function* () {
+            const replied = yield* sdkCall(
+              "session.permission.reply",
+              { sessionID, requestID, reply },
+              () => client.v2.session.permission.reply({ sessionID, requestID, reply }),
+            ).pipe(
+              Effect.as(true),
+              Effect.catch((cause: OpenCode2RuntimeError) =>
+                Effect.logWarning("Failed to answer an OpenCode 2 permission request.", {
+                  category: cause.category,
+                  operation: cause.operation,
+                  provider: OPENCODE2_PROVIDER,
+                }).pipe(Effect.as(false)),
+              ),
+            );
+            if (!replied && !state.confirmed) {
+              yield* fallback;
+              if (state.confirmed) {
+                yield* resolvePermissionReply(sessionID, requestID, state.reply);
+              }
+            }
+          }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => autoReplyPermissionsByNativeKey.delete(nativeRequestKey)),
             ),
+            Effect.forkIn(scope),
+            Effect.asVoid,
           );
         });
 
@@ -3840,6 +4401,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               });
             }
           }
+          yield* updateProviderSession("error", detail);
         });
 
         const allActiveTurnsAwaitRuntimeRequest = (): boolean =>
@@ -3857,7 +4419,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             }),
             pendingRequests: Array.from(pendingRequests.values()).map((pending) => ({
               nativeSessionId: pending.nativeSessionId,
-              providerTurnId: String(pending.turn.providerTurnId),
+              providerTurnId: String(pending.providerTurnId),
             })),
           });
 
@@ -4057,7 +4619,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           }
         };
 
-        const eventSessionId = (event: any): string | undefined => {
+        const correlatedEventSessionId = (event: any): string | undefined => {
           const directSessionId = recordString(event.data, "sessionID");
           if (directSessionId !== undefined) return directSessionId;
 
@@ -4068,16 +4630,25 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           const shellSessionId = recordString(recordValue(info, "metadata"), "sessionID");
           if (shellSessionId !== undefined) return shellSessionId;
 
-          const nativeId = recordString(event.data, "requestID", "id");
+          const nativeId = openCode2RuntimeRequestEventId(event.data);
           if (nativeId === undefined) return undefined;
-          return (
-            shellSessionIds.get(nativeId) ??
-            pendingRequestsByNativeId.get(nativeId)?.nativeSessionId
+          const knownShellSessionId = shellSessionIds.get(nativeId);
+          if (knownShellSessionId !== undefined) return knownShellSessionId;
+          const matchingSessionIds = new Set(
+            [
+              ...Array.from(pendingRequestsByNativeId.values()),
+              ...Array.from(settledRequestsByNativeId.values()).map((settled) => settled.pending),
+            ]
+              .filter((request) => request.nativeRequestId === nativeId)
+              .map((request) => request.nativeSessionId),
           );
+          return matchingSessionIds.size === 1
+            ? matchingSessionIds.values().next().value
+            : undefined;
         };
 
         const bufferPostSettleWakeEvent = (event: any, isReplay: boolean): boolean => {
-          const sessionID = eventSessionId(event);
+          const sessionID = correlatedEventSessionId(event);
           if (sessionID === undefined) return false;
           const state = threads.get(sessionID);
           if (state === undefined) return false;
@@ -4159,7 +4730,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           const isReplay = context.replayWakeInputId !== undefined;
           const isDeferredChildReplay = context.deferredChildReplay === true;
           const eventSessionId =
-            openCode2WireSessionID(wire) ?? recordString(event.data, "sessionID");
+            openCode2WireSessionID(wire) ??
+            recordString(event.data, "sessionID") ??
+            recordString(recordValue(event.data, "form"), "sessionID") ??
+            correlatedEventSessionId(event);
           if (!isDeferredChildReplay) {
             yield* logProtocolEvent({
               direction: "incoming",
@@ -4713,29 +5287,44 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 event.data.sessionID,
                 permission,
               );
+              const projection = runtimeRequestProjectionFor(active);
+              const runtimeRequest = {
+                type: "permission" as const,
+                ...permission,
+              };
               if (autoReply !== null) {
-                const replied = yield* autoReplyPermission(
+                yield* autoReplyPermission(
                   event.data.sessionID,
                   event.data.id,
                   autoReply,
+                  emitRuntimeRequest(
+                    projection.state,
+                    projection.turn,
+                    active.turn,
+                    event.data.sessionID,
+                    event.data.id,
+                    runtimeRequest,
+                    true,
+                  ),
                 );
-                if (replied) return;
+                return;
               }
-              const projection = runtimeRequestProjectionFor(active);
               yield* emitRuntimeRequest(
                 projection.state,
                 projection.turn,
+                active.turn,
                 event.data.sessionID,
                 event.data.id,
-                {
-                  type: "permission",
-                  ...permission,
-                },
+                runtimeRequest,
               );
               return;
             }
             case "permission.v2.replied":
-              yield* resolveRuntimeRequest(event.data.requestID, "resolved");
+              yield* resolvePermissionReply(
+                event.data.sessionID,
+                event.data.requestID,
+                event.data.reply,
+              );
               return;
             case "question.v2.asked": {
               const active = activeFor(event.data.sessionID);
@@ -4744,6 +5333,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               yield* emitRuntimeRequest(
                 projection.state,
                 projection.turn,
+                active.turn,
                 event.data.sessionID,
                 event.data.id,
                 {
@@ -4754,10 +5344,11 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               return;
             }
             case "question.v2.replied":
-              yield* resolveRuntimeRequest(event.data.requestID, "resolved");
+              confirmRuntimeRequestResponse(event.data.sessionID, event.data.requestID);
+              yield* resolveRuntimeRequest(event.data.sessionID, event.data.requestID, "resolved");
               return;
             case "question.v2.rejected":
-              yield* resolveRuntimeRequest(event.data.requestID, "cancelled");
+              yield* resolveRuntimeRequest(event.data.sessionID, event.data.requestID, "cancelled");
               return;
             // Current 2.x builds route the question tool through the form API;
             // question.v2.asked no longer fires for it.
@@ -4774,22 +5365,34 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const { questions, fieldKeys, optionValuesByLabel } = openCode2FormQuestions(form);
               if (questions.length === 0) return;
               const projection = runtimeRequestProjectionFor(active);
-              yield* emitRuntimeRequest(projection.state, projection.turn, sessionID, form.id, {
-                type: "question",
-                questions,
-                formFieldKeys: fieldKeys,
-                formOptionValues: optionValuesByLabel,
-              });
+              yield* emitRuntimeRequest(
+                projection.state,
+                projection.turn,
+                active.turn,
+                sessionID,
+                form.id,
+                {
+                  type: "question",
+                  questions,
+                  formFieldKeys: fieldKeys,
+                  formOptionValues: optionValuesByLabel,
+                },
+              );
               return;
             }
             case "form.replied": {
-              const formId = recordString(event.data, "id", "formID", "requestID");
-              if (formId !== undefined) yield* resolveRuntimeRequest(formId, "resolved");
+              const formId = openCode2RuntimeRequestEventId(event.data);
+              if (formId !== undefined && eventSessionId !== undefined) {
+                confirmRuntimeRequestResponse(eventSessionId, formId);
+                yield* resolveRuntimeRequest(eventSessionId, formId, "resolved");
+              }
               return;
             }
             case "form.cancelled": {
-              const formId = recordString(event.data, "id", "formID", "requestID");
-              if (formId !== undefined) yield* resolveRuntimeRequest(formId, "cancelled");
+              const formId = openCode2RuntimeRequestEventId(event.data);
+              if (formId !== undefined && eventSessionId !== undefined) {
+                yield* resolveRuntimeRequest(eventSessionId, formId, "cancelled");
+              }
               return;
             }
             case "permission.asked": {
@@ -4802,29 +5405,44 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 event.data.sessionID,
                 permission,
               );
+              const projection = runtimeRequestProjectionFor(active);
+              const runtimeRequest = {
+                type: "permission" as const,
+                ...permission,
+              };
               if (autoReply !== null) {
-                const replied = yield* autoReplyPermission(
+                yield* autoReplyPermission(
                   event.data.sessionID,
                   event.data.id,
                   autoReply,
+                  emitRuntimeRequest(
+                    projection.state,
+                    projection.turn,
+                    active.turn,
+                    event.data.sessionID,
+                    event.data.id,
+                    runtimeRequest,
+                    true,
+                  ),
                 );
-                if (replied) return;
+                return;
               }
-              const projection = runtimeRequestProjectionFor(active);
               yield* emitRuntimeRequest(
                 projection.state,
                 projection.turn,
+                active.turn,
                 event.data.sessionID,
                 event.data.id,
-                {
-                  type: "permission",
-                  ...permission,
-                },
+                runtimeRequest,
               );
               return;
             }
             case "permission.replied":
-              yield* resolveRuntimeRequest(event.data.requestID, "resolved");
+              yield* resolvePermissionReply(
+                event.data.sessionID,
+                event.data.requestID,
+                event.data.reply,
+              );
               return;
             case "question.asked": {
               const active = activeFor(event.data.sessionID);
@@ -4833,6 +5451,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               yield* emitRuntimeRequest(
                 projection.state,
                 projection.turn,
+                active.turn,
                 event.data.sessionID,
                 event.data.id,
                 {
@@ -4843,10 +5462,11 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               return;
             }
             case "question.replied":
-              yield* resolveRuntimeRequest(event.data.requestID, "resolved");
+              confirmRuntimeRequestResponse(event.data.sessionID, event.data.requestID);
+              yield* resolveRuntimeRequest(event.data.sessionID, event.data.requestID, "resolved");
               return;
             case "question.rejected":
-              yield* resolveRuntimeRequest(event.data.requestID, "cancelled");
+              yield* resolveRuntimeRequest(event.data.sessionID, event.data.requestID, "cancelled");
               return;
             case "session.execution.started": {
               const active = activeFor(event.data.sessionID);
@@ -4928,7 +5548,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               return;
             }
             case "session.execution.failed": {
-              const active = activeFor(event.data.sessionID);
+              const active = terminalFor(event.data.sessionID);
               if (active === null) return;
               if (
                 !activeTurnOwnsOpenCode2Execution(
@@ -4977,7 +5597,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               return;
             }
             case "session.execution.interrupted": {
-              const active = activeFor(event.data.sessionID);
+              const active = terminalFor(event.data.sessionID);
               if (active === null) return;
               if (
                 !activeTurnOwnsOpenCode2Execution(
@@ -5041,7 +5661,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             }
             case "session.error": {
               const activeSessionIDs = Array.from(threads.values())
-                .filter((state) => state.activeTurn !== null && !state.activeTurn.finalized)
+                .filter(
+                  (state) =>
+                    state.activeTurn !== null &&
+                    (!state.activeTurn.finalized ||
+                      state.activeTurn.terminalStatus === "completed"),
+                )
                 .map((state) => state.nativeSessionId);
               const targetSessionIDs = openCode2SessionErrorTargetSessionIds(
                 event.data.sessionID,
@@ -5068,7 +5693,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 );
               if (!isAbort && targetsRoot) yield* updateProviderSession("error", failure.message);
               for (const sessionID of targetSessionIDs) {
-                const active = activeFor(sessionID);
+                const active = terminalFor(sessionID);
                 if (active === null) continue;
                 yield* finalizeTurn(
                   active.state,
@@ -5083,7 +5708,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               // Finalizing one of several active turns temporarily marks the
               // shared provider session as running. Restore the unscoped
               // provider failure after every affected turn has closed.
-              if (!isAbort && targetsRoot && targetSessionIDs.length > 1) {
+              if (!isAbort && targetsRoot) {
                 yield* updateProviderSession("error", failure.message);
               }
               return;
@@ -5916,6 +6541,17 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               );
               threads.delete(sessionID);
               sessionPermissions.delete(sessionID);
+              seenRuntimeRequestKeysBySessionId.delete(sessionID);
+              for (const requestKey of autoReplyPermissionsByNativeKey.keys()) {
+                if (requestKey.startsWith(`${sessionID}\0`)) {
+                  autoReplyPermissionsByNativeKey.delete(requestKey);
+                }
+              }
+              for (const [requestID, settled] of settledRequestsByNativeId) {
+                if (settled.pending.nativeSessionId === sessionID) {
+                  settledRequestsByNativeId.delete(requestID);
+                }
+              }
             }).pipe(
               Effect.mapError((cause) =>
                 protocolError(`Failed to delete OpenCode 2 session ${providerThread.id}`, cause),
@@ -6022,6 +6658,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 executionStarted: false,
                 interrupted: false,
                 finalized: false,
+                terminalStatus: null,
                 providerRetry: null,
               };
               state.appThread = turnInput.appThread;
@@ -6288,10 +6925,14 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   );
                   // Session3 has no session.form client method; post the form
                   // reply body that current next-line binaries accept.
-                  yield* sdkCall(
-                    "session.form.reply",
-                    { sessionID, formID: requestID, answer },
-                    () =>
+                  yield* respondWithRuntimeRequestSettlement(
+                    pending,
+                    {
+                      requestStatus: "resolved",
+                      itemStatus: "completed",
+                      rememberPermissionForSession: false,
+                    },
+                    sdkCall("session.form.reply", { sessionID, formID: requestID, answer }, () =>
                       rawHttpClient().post({
                         url: "/api/session/{sessionID}/form/{formID}/reply",
                         path: { sessionID, formID: requestID },
@@ -6299,15 +6940,24 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                         headers: { "Content-Type": "application/json" },
                         throwOnError: true,
                       }),
+                    ),
                   );
                   return;
                 }
-                yield* sdkCall("session.question.reply", { sessionID, requestID, answers }, () =>
-                  client.v2.session.question.reply({
-                    sessionID,
-                    requestID,
-                    questionV2Reply: { answers },
-                  }),
+                yield* respondWithRuntimeRequestSettlement(
+                  pending,
+                  {
+                    requestStatus: "resolved",
+                    itemStatus: "completed",
+                    rememberPermissionForSession: false,
+                  },
+                  sdkCall("session.question.reply", { sessionID, requestID, answers }, () =>
+                    client.v2.session.question.reply({
+                      sessionID,
+                      requestID,
+                      questionV2Reply: { answers },
+                    }),
+                  ),
                 );
                 return;
               }
@@ -6320,18 +6970,13 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 requestInput.decision === "accept" || requestInput.decision === "acceptForSession"
                   ? ("once" as const)
                   : ("reject" as const);
-              yield* sdkCall("session.permission.reply", { sessionID, requestID, reply }, () =>
-                client.v2.session.permission.reply({ sessionID, requestID, reply }),
+              yield* respondWithRuntimeRequestSettlement(
+                pending,
+                openCode2RuntimeRequestResponseSettlement(requestInput.decision),
+                sdkCall("session.permission.reply", { sessionID, requestID, reply }, () =>
+                  client.v2.session.permission.reply({ sessionID, requestID, reply }),
+                ),
               );
-              // Remember the session grant only after a successful reply so a
-              // failed provider write does not auto-allow later matching tools.
-              if (requestInput.decision === "acceptForSession") {
-                rememberOpenCode2SessionPermission(
-                  sessionPermissions,
-                  sessionID,
-                  pending.permission,
-                );
-              }
             }).pipe(
               Effect.mapError(
                 (cause) =>

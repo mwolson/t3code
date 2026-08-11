@@ -44,14 +44,30 @@ import { openCode2SharedOrdinaryWakeReplayInput } from "./opencode2_shared_ordin
 import { assertOpenCode2SharedOrdinaryWakeReplayOutput } from "./opencode2_shared_ordinary_wake_replay/output.ts";
 import { openCode2CompactionInput } from "./opencode2_compaction/input.ts";
 import { assertOpenCode2CompactionOutput } from "./opencode2_compaction/output.ts";
+import { openCode2FormReplyWithoutEventInput } from "./opencode2_form_reply_without_event/input.ts";
+import { assertOpenCode2FormReplyWithoutEventOutput } from "./opencode2_form_reply_without_event/output.ts";
+import { openCode2PermissionCancelInput } from "./opencode2_permission_cancel/input.ts";
+import { assertOpenCode2PermissionCancelOutput } from "./opencode2_permission_cancel/output.ts";
+import { openCode2PermissionCompletedThenFailedInput } from "./opencode2_permission_completed_then_failed/input.ts";
+import { assertOpenCode2PermissionCompletedThenFailedOutput } from "./opencode2_permission_completed_then_failed/output.ts";
+import { openCode2PermissionDeclineInput } from "./opencode2_permission_decline/input.ts";
+import { assertOpenCode2PermissionDeclineOutput } from "./opencode2_permission_decline/output.ts";
 import { openCode2PermissionExternalSubagentInput } from "./opencode2_permission_external_subagent/input.ts";
 import { assertOpenCode2PermissionExternalSubagentOutput } from "./opencode2_permission_external_subagent/output.ts";
+import { openCode2PermissionLocalSuccessThenFailureInput } from "./opencode2_permission_local_success_then_failure/input.ts";
+import { assertOpenCode2PermissionLocalSuccessThenFailureOutput } from "./opencode2_permission_local_success_then_failure/output.ts";
+import { openCode2PermissionRejectRaceInput } from "./opencode2_permission_reject_race/input.ts";
+import { assertOpenCode2PermissionRejectRaceOutput } from "./opencode2_permission_reject_race/output.ts";
 import { openCode2PermissionReplyFailureInput } from "./opencode2_permission_reply_failure/input.ts";
 import { assertOpenCode2PermissionReplyFailureOutput } from "./opencode2_permission_reply_failure/output.ts";
+import { openCode2PermissionReplyFailureAfterTerminalInput } from "./opencode2_permission_reply_failure_after_terminal/input.ts";
+import { assertOpenCode2PermissionReplyFailureAfterTerminalOutput } from "./opencode2_permission_reply_failure_after_terminal/output.ts";
 import { openCode2PermissionReplyFailureSubagentInput } from "./opencode2_permission_reply_failure_subagent/input.ts";
 import { assertOpenCode2PermissionReplyFailureSubagentOutput } from "./opencode2_permission_reply_failure_subagent/output.ts";
 import { openCode2PermissionSessionInput } from "./opencode2_permission_session/input.ts";
 import { assertOpenCode2PermissionSessionOutput } from "./opencode2_permission_session/output.ts";
+import { openCode2PermissionTerminalWithoutReplyInput } from "./opencode2_permission_terminal_without_reply/input.ts";
+import { assertOpenCode2PermissionTerminalWithoutReplyOutput } from "./opencode2_permission_terminal_without_reply/output.ts";
 import { openCode2QuestionLegacyInput } from "./opencode2_question_legacy/input.ts";
 import { assertOpenCode2QuestionLegacyOutput } from "./opencode2_question_legacy/output.ts";
 import { openCode2RetryInput } from "./opencode2_retry/input.ts";
@@ -686,6 +702,69 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     ],
   },
   {
+    name: "opencode2_form_reply_without_event",
+    buildInput: openCode2FormReplyWithoutEventInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_form_reply_without_event/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertOpenCode2FormReplyWithoutEventOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_permission_cancel",
+    buildInput: openCode2PermissionCancelInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_permission_cancel/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
+        assertOutput: assertOpenCode2PermissionCancelOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_permission_completed_then_failed",
+    buildInput: openCode2PermissionCompletedThenFailedInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_permission_completed_then_failed/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
+        assertOutput: assertOpenCode2PermissionCompletedThenFailedOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_permission_decline",
+    buildInput: openCode2PermissionDeclineInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_permission_decline/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
+        assertOutput: assertOpenCode2PermissionDeclineOutput,
+      },
+    ],
+  },
+  {
     name: "opencode2_permission_external_subagent",
     buildInput: openCode2PermissionExternalSubagentInput,
     providers: [
@@ -697,6 +776,38 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         modelSelection: OPENCODE2_MODEL_SELECTION,
         assertOutput: assertOpenCode2PermissionExternalSubagentOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_permission_local_success_then_failure",
+    buildInput: openCode2PermissionLocalSuccessThenFailureInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_permission_local_success_then_failure/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
+        assertOutput: assertOpenCode2PermissionLocalSuccessThenFailureOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_permission_reject_race",
+    buildInput: openCode2PermissionRejectRaceInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_permission_reject_race/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
+        assertOutput: assertOpenCode2PermissionRejectRaceOutput,
       },
     ],
   },
@@ -716,6 +827,22 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     ],
   },
   {
+    name: "opencode2_permission_reply_failure_after_terminal",
+    buildInput: openCode2PermissionReplyFailureAfterTerminalInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_permission_reply_failure_after_terminal/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
+        assertOutput: assertOpenCode2PermissionReplyFailureAfterTerminalOutput,
+      },
+    ],
+  },
+  {
     name: "opencode2_permission_session",
     buildInput: openCode2PermissionSessionInput,
     providers: [
@@ -728,6 +855,22 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: OPENCODE2_MODEL_SELECTION,
         runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
         assertOutput: assertOpenCode2PermissionSessionOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_permission_terminal_without_reply",
+    buildInput: openCode2PermissionTerminalWithoutReplyInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_permission_terminal_without_reply/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
+        assertOutput: assertOpenCode2PermissionTerminalWithoutReplyOutput,
       },
     ],
   },
