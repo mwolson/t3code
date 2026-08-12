@@ -671,6 +671,61 @@ describe("AcpSessionRuntime", () => {
     );
   });
 
+  it.effect("refreshes config options and mode state from session updates", () => {
+    const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+      yield* runtime.prompt({
+        prompt: [{ type: "text", text: "refresh configuration" }],
+      });
+
+      const configOptions = yield* runtime.getConfigOptions;
+      expect(configOptions.find((option) => option.category === "mode")).toMatchObject({
+        id: "interaction-mode",
+        currentValue: "code",
+      });
+      expect(yield* runtime.getModeState).toMatchObject({ currentModeId: "code" });
+
+      yield* runtime.setMode("ask");
+
+      const setModeRequest = requestEvents.find(
+        (event) => event.method === "session/set_config_option" && event.status === "started",
+      );
+      expect(setModeRequest?.payload).toMatchObject({
+        configId: "interaction-mode",
+        value: "ask",
+      });
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_CONFIG_OPTION_UPDATE_MODE_ID: "code",
+              T3_ACP_MODE_CONFIG_ID: "interaction-mode",
+            },
+          },
+          cwd: process.cwd(),
+          clientCapabilities: {
+            _meta: {
+              parameterizedModelPicker: true,
+            },
+          },
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+    );
+  });
+
   it.effect("emits low-level ACP protocol logs for raw and decoded messages", () => {
     const protocolEvents: Array<EffectAcpProtocol.AcpProtocolLogEvent> = [];
     return Effect.gen(function* () {

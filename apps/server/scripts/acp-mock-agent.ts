@@ -64,6 +64,8 @@ const emitOverlappingXAiPromptCompleteOutOfOrder =
 const failPrompt = process.env.T3_ACP_FAIL_PROMPT === "1";
 const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
+const configOptionUpdateModeId = process.env.T3_ACP_CONFIG_OPTION_UPDATE_MODE_ID?.trim();
+const modeConfigId = process.env.T3_ACP_MODE_CONFIG_ID?.trim() || "mode";
 const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
 const promptDelayMs = Number(process.env.T3_ACP_PROMPT_DELAY_MS ?? "0");
 const supportsSessionLifecycle = process.env.T3_ACP_SESSION_LIFECYCLE === "1";
@@ -132,7 +134,7 @@ function configOptions(): ReadonlyArray<AcpSchema.SessionConfigOption> {
   if (parameterizedModelPicker) {
     const baseOptions: Array<AcpSchema.SessionConfigOption> = [
       {
-        id: "mode",
+        id: modeConfigId,
         name: "Mode",
         category: "mode",
         type: "select",
@@ -505,7 +507,7 @@ const program = Effect.gen(function* () {
           },
         );
       }
-      if (request.configId === "mode" && typeof request.value === "string") {
+      if (request.configId === modeConfigId && typeof request.value === "string") {
         currentModeId = request.value;
       }
       if (request.configId === "model" && typeof request.value === "string") {
@@ -664,6 +666,17 @@ const program = Effect.gen(function* () {
 
       if (failPrompt) {
         return yield* AcpError.AcpRequestError.internalError("Mock prompt failure");
+      }
+
+      if (configOptionUpdateModeId) {
+        currentModeId = configOptionUpdateModeId;
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "config_option_update",
+            configOptions: configOptions(),
+          },
+        });
       }
 
       if (emitStaleXAiPromptCompleteBeforeSecondHang && promptCount === 1) {
