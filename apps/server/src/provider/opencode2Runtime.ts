@@ -367,6 +367,70 @@ export const make = Effect.gen(function* () {
         runtimeScope,
         Scope.close(processScope, Exit.void).pipe(Effect.ignore),
       );
+      const closeProcessScopeOnFailure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        effect.pipe(
+          Effect.onExit((exit) =>
+            Exit.isFailure(exit)
+              ? Scope.close(processScope, Exit.void).pipe(Effect.ignore)
+              : Effect.void,
+          ),
+        );
+      const environment = input.environment ?? process.env;
+      const bunTempDirectory = yield* Effect.acquireRelease(
+        Effect.try({
+          try: () => {
+            const roots = [
+              environment.BUN_TMPDIR?.trim(),
+              environment.TMPDIR?.trim(),
+              NodeOS.tmpdir(),
+            ].filter(
+              (root, index, all): root is string => Boolean(root) && all.indexOf(root) === index,
+            );
+            let lastCause: unknown;
+            for (const root of roots) {
+              try {
+                return NodeFS.mkdtempSync(NodePath.join(root, "t3-opencode2-bun-"));
+              } catch (cause) {
+                lastCause = cause;
+              }
+            }
+            throw lastCause;
+          },
+          catch: (cause) =>
+            new OpenCode2RuntimeError({
+              operation: "startOpenCode2ServerProcess",
+              category: "server-spawn-failed",
+              cause,
+            }),
+        }),
+        (directory) =>
+          Effect.tryPromise({
+            try: () =>
+              NodeFS.promises.rm(directory, {
+                recursive: true,
+                force: true,
+                maxRetries: 5,
+                retryDelay: 50,
+              }),
+            catch: (cause) =>
+              new OpenCode2RuntimeError({
+                operation: "startOpenCode2ServerProcess",
+                category: "server-spawn-failed",
+                cause,
+              }),
+          }).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("opencode2.bun-temp-cleanup-failed", {
+                detail: openCodeRuntimeErrorDetail(cause),
+                directory,
+              }),
+            ),
+          ),
+      ).pipe(Effect.provideService(Scope.Scope, processScope));
+      const spawnEnvironment = {
+        ...environment,
+        BUN_TMPDIR: bunTempDirectory,
+      };
       const hostname = input.hostname ?? DEFAULT_HOSTNAME;
       const port =
         input.port ??
@@ -379,20 +443,22 @@ export const make = Effect.gen(function* () {
                 cause,
               }),
           ),
+          closeProcessScopeOnFailure,
         ));
       const timeoutMs = input.timeoutMs ?? DEFAULT_OPENCODE2_SERVER_TIMEOUT_MS;
       const args = ["serve", `--hostname=${hostname}`, `--port=${port}`];
-      const environment = input.environment ?? process.env;
       const passwordBeforeSpawn = readOpenCode2StatePassword(environment);
-      const spawnCommand = yield* resolveCommand(input.binaryPath, args, input.environment);
+      const spawnCommand = yield* resolveCommand(input.binaryPath, args, spawnEnvironment).pipe(
+        closeProcessScopeOnFailure,
+      );
 
       const spawnOpenCode2Server = spawner
         .spawn(
           ChildProcess.make(spawnCommand.command, spawnCommand.args, {
             detached: hostPlatform !== "win32",
+            env: spawnEnvironment,
+            extendEnv: false,
             shell: spawnCommand.shell,
-            ...(input.environment === undefined ? {} : { env: input.environment }),
-            extendEnv: input.environment === undefined,
           }),
         )
         .pipe(
@@ -456,12 +522,14 @@ export const make = Effect.gen(function* () {
             ).pipe(Effect.as({ child, processId, isProcessTreeRunning }));
           }),
         ),
-      );
-      yield* reaper.track({
-        pid: processId,
-        pgid: hostPlatform === "win32" ? null : processId,
-        platform: hostPlatform === "win32" ? "win32" : "posix",
-      });
+      ).pipe(closeProcessScopeOnFailure);
+      yield* reaper
+        .track({
+          pid: processId,
+          pgid: hostPlatform === "win32" ? null : processId,
+          platform: hostPlatform === "win32" ? "win32" : "posix",
+        })
+        .pipe(closeProcessScopeOnFailure);
       const startupOutputRef = yield* Ref.make<{
         readonly lastStream: "stdout" | "stderr" | null;
         readonly output: string | null;
