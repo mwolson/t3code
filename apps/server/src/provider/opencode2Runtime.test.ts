@@ -4,12 +4,13 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Sink from "effect/Sink";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
@@ -237,6 +238,132 @@ describe("OpenCode2Runtime errors", () => {
 });
 
 describe("OpenCode2Runtime startup cleanup", () => {
+  it.effect("falls back to a usable root and removes only the private Bun temp directory", () =>
+    Effect.gen(function* () {
+      const encoder = new TextEncoder();
+      const bunTempRoot = NodePath.join(process.cwd(), "tmp");
+      const siblingPath = NodePath.join(bunTempRoot, `.opencode2-runtime-sibling-${process.pid}`);
+      NodeFS.mkdirSync(bunTempRoot, { recursive: true });
+      NodeFS.writeFileSync(siblingPath, "keep");
+      let bunTempDirectory: string | undefined;
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.sync(() => {
+          assert.isTrue(ChildProcess.isStandardCommand(command));
+          if (!ChildProcess.isStandardCommand(command)) {
+            throw new Error("Expected a standard command");
+          }
+          const commandBunTempDirectory = command.options.env?.BUN_TMPDIR;
+          assert.isString(commandBunTempDirectory);
+          if (commandBunTempDirectory === undefined) {
+            throw new Error("Expected BUN_TMPDIR in the spawn environment");
+          }
+          bunTempDirectory = commandBunTempDirectory;
+          assert.strictEqual(command.options.env?.OPENCODE_TEST_MARKER, "preserved");
+          assert.strictEqual(NodePath.dirname(commandBunTempDirectory), bunTempRoot);
+          NodeFS.writeFileSync(
+            NodePath.join(commandBunTempDirectory, ".embedded-native-library.so"),
+            "x",
+          );
+          return ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(42),
+            exitCode: Effect.never,
+            isRunning: Effect.succeed(true),
+            kill: () => Effect.void,
+            unref: Effect.succeed(Effect.void),
+            stdin: Sink.drain,
+            stdout: Stream.make(
+              encoder.encode(
+                "server listening on http://127.0.0.1:4711\nserver password test-password\n",
+              ),
+            ),
+            stderr: Stream.never,
+            all: Stream.never,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.never,
+          });
+        }),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const runtime = yield* OpenCode2Runtime;
+          yield* runtime.startOpenCode2ServerProcess({
+            binaryPath: "opencode2",
+            environment: {
+              ...process.env,
+              BUN_TMPDIR: NodePath.join(bunTempRoot, "missing"),
+              OPENCODE_TEST_MARKER: "preserved",
+              TMPDIR: bunTempRoot,
+            },
+            port: 4_711,
+          });
+          assert.isDefined(bunTempDirectory);
+          assert.isTrue(NodeFS.existsSync(bunTempDirectory));
+        }),
+      ).pipe(
+        Effect.provide(layer),
+        Effect.provideService(SpawnedProcessReaper, {
+          track: () => Effect.void,
+          untrack: () => Effect.void,
+        }),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(HostProcessPlatform, "win32"),
+      );
+
+      assert.isDefined(bunTempDirectory);
+      assert.isFalse(NodeFS.existsSync(bunTempDirectory));
+      assert.isTrue(NodeFS.existsSync(siblingPath));
+      NodeFS.unlinkSync(siblingPath);
+    }),
+  );
+
+  it.effect("removes the private Bun temp directory when spawning fails", () =>
+    Effect.gen(function* () {
+      const bunTempRoot = NodePath.join(process.cwd(), "tmp");
+      NodeFS.mkdirSync(bunTempRoot, { recursive: true });
+      let bunTempDirectory: string | undefined;
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (!ChildProcess.isStandardCommand(command)) {
+          return Effect.die(new Error("Expected a standard command"));
+        }
+        bunTempDirectory = command.options.env?.BUN_TMPDIR;
+        return Effect.fail(
+          PlatformError.systemError({
+            _tag: "NotFound",
+            module: "ChildProcess",
+            method: "spawn",
+            description: "test spawn failure",
+          }),
+        );
+      });
+
+      yield* Effect.gen(function* () {
+        const runtime = yield* OpenCode2Runtime;
+        const parentScope = yield* Scope.make();
+        const exit = yield* runtime
+          .startOpenCode2ServerProcess({
+            binaryPath: "opencode2",
+            environment: { ...process.env, BUN_TMPDIR: bunTempRoot },
+            port: 4_711,
+          })
+          .pipe(Effect.provideService(Scope.Scope, parentScope), Effect.exit);
+
+        assert.isTrue(Exit.isFailure(exit));
+        assert.isDefined(bunTempDirectory);
+        assert.isFalse(NodeFS.existsSync(bunTempDirectory));
+        yield* Scope.close(parentScope, Exit.void);
+      }).pipe(
+        Effect.provide(layer),
+        Effect.provideService(SpawnedProcessReaper, {
+          track: () => Effect.void,
+          untrack: () => Effect.void,
+        }),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(HostProcessPlatform, "win32"),
+      );
+    }),
+  );
+
   it.effect("registers process cleanup before reaper tracking can block", () =>
     Effect.gen(function* () {
       const signals: Array<NodeJS.Signals> = [];

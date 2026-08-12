@@ -14,7 +14,6 @@
  * @module provider/Drivers/OpenCode2Driver
  */
 import { OpenCode2Settings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -61,7 +60,6 @@ import {
 const decodeOpenCode2Settings = Schema.decodeSync(OpenCode2Settings);
 
 const DRIVER_KIND = ProviderDriverKind.make("opencode2");
-const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
 const NPM_DIST_TAG = "next";
 const NPM_PACKAGE_NAME = "@opencode-ai/cli";
 const UPDATE = makePackageManagedProviderMaintenanceResolver({
@@ -206,7 +204,6 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
             Effect.provideService(HttpClient.HttpClient, httpClient),
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
           ),
-        refreshInterval: SNAPSHOT_REFRESH_INTERVAL,
       }).pipe(
         Effect.mapError(
           (cause) =>
