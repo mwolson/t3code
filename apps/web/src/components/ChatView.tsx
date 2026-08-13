@@ -1425,7 +1425,6 @@ function ChatViewContent(props: ChatViewProps) {
   const dismissedRuntimeErrorKey = useThreadErrorBannerStore(
     (state) => state.dismissedRuntimeErrorKeysByThreadKey[routeThreadKey] ?? null,
   );
-  const dismissRuntimeError = useThreadErrorBannerStore((state) => state.dismissRuntimeError);
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
@@ -2932,12 +2931,6 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [draftId, routeThreadKey, routeThreadRef, serverThread],
   );
-
-  const dismissThreadError = useCallback(() => {
-    setThreadError(activeThreadId, null);
-    if (runtimeErrorKey === null) return;
-    dismissRuntimeError(routeThreadKey, runtimeErrorKey);
-  }, [activeThreadId, dismissRuntimeError, routeThreadKey, runtimeErrorKey, setThreadError]);
 
   const focusComposer = useCallback(() => {
     composerRef.current?.focusAtEnd();
