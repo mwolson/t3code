@@ -1,6 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
-  threadRuntimeIsActive,
   type EnvironmentProject,
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
@@ -47,6 +46,7 @@ import { removeThreadOutboxMessage } from "./thread-outbox-removal";
 import {
   isQueuedThreadCreationSendable,
   modelSelectionsEqual,
+  resolveExistingThreadOutboxDispatchMode,
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxDispatchStep,
   resolveThreadOutboxFailureAction,
@@ -815,7 +815,7 @@ export function useThreadOutboxDrain(): void {
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
           createdAt: queuedMessage.createdAt,
-          dispatchMode: "start",
+          dispatchMode: resolveExistingThreadOutboxDispatchMode(thread.runtime?.status),
         },
       });
       const failure = reportFailure(deliveryResult, "start-turn");
@@ -1075,7 +1075,6 @@ export function useThreadOutboxDrain(): void {
         threadExists: thread !== undefined,
         shellStatus,
         environmentConnected: environment?.connectionState === "connected",
-        threadBusy: threadRuntimeIsActive(thread?.runtime),
       });
       // The delivery action resolves first; capability checks apply only to
       // a message that will send. Checking earlier would restore a
@@ -1192,8 +1191,7 @@ export function useThreadOutboxDrain(): void {
           if (liveDeliveryAction !== "send") {
             return true;
           }
-        }
-        return deliveryAction === "remove"
+        }        return deliveryAction === "remove"
           ? creation !== undefined
             ? // A creation entry that survived its delivery cleanup either
               // holds edits (recover them) or the delivered payload (a
