@@ -963,6 +963,17 @@ export function openCode2TokenUsage(input: unknown): OpenCode2TokenUsage | null 
   return Object.values(usage).some((value) => value > 0) ? usage : null;
 }
 
+export function openCode2LastErrorAt(input: {
+  readonly previousError: string | null;
+  readonly previousErrorAt?: DateTime.Utc | null;
+  readonly nextError: string | null;
+  readonly updatedAt: DateTime.Utc;
+}): DateTime.Utc | null {
+  if (input.nextError === null) return null;
+  if (input.nextError !== input.previousError) return input.updatedAt;
+  return input.previousErrorAt ?? input.updatedAt;
+}
+
 export function openCode2CompactionDiagnostics(input: {
   readonly usage: OpenCode2TokenUsage | null;
   readonly limits: Pick<ModelInfo["limit"], "context" | "input" | "output"> | null;
@@ -2447,7 +2458,13 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         ) =>
           Effect.gen(function* () {
             const updatedAt = yield* DateTime.now;
-            sessionEntity = { ...sessionEntity, status, lastError, updatedAt };
+            const lastErrorAt = openCode2LastErrorAt({
+              previousError: sessionEntity.lastError,
+              previousErrorAt: sessionEntity.lastErrorAt ?? null,
+              nextError: lastError,
+              updatedAt,
+            });
+            sessionEntity = { ...sessionEntity, status, lastError, lastErrorAt, updatedAt };
             yield* emitProviderEvent({
               type: "provider_session.updated",
               driver: OPENCODE2_PROVIDER,
