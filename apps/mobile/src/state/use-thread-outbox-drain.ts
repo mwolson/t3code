@@ -1,6 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
-  threadRuntimeIsActive,
   type EnvironmentProject,
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
@@ -31,6 +30,7 @@ import {
 import {
   isQueuedThreadCreationSendable,
   modelSelectionsEqual,
+  resolveExistingThreadOutboxDispatchMode,
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxFailureAction,
   resolveQueuedThreadSettings,
@@ -39,7 +39,7 @@ import {
   type QueuedThreadMessage,
   type ThreadOutboxCommandStage,
 } from "./thread-outbox-model";
-import { environmentThreadShells, threadEnvironment } from "./threads";
+import { threadEnvironment } from "./threads";
 import { useAtomCommand } from "./use-atom-command";
 import {
   editingQueuedMessageIdsAtom,
@@ -239,7 +239,7 @@ export function useThreadOutboxDrain(): void {
           runtimeMode: settings.runtimeMode,
           interactionMode: settings.interactionMode,
           createdAt: queuedMessage.createdAt,
-          dispatchMode: "start",
+          dispatchMode: resolveExistingThreadOutboxDispatchMode(thread.runtime?.status),
         },
       });
       return completeDelivery(deliveryResult);
@@ -322,7 +322,6 @@ export function useThreadOutboxDrain(): void {
         threadExists: thread !== undefined,
         shellStatus,
         environmentConnected: environment?.connectionState === "connected",
-        threadBusy: threadRuntimeIsActive(thread?.runtime),
       });
       if (deliveryAction === "wait") {
         continue;
@@ -370,19 +369,10 @@ export function useThreadOutboxDrain(): void {
           return true;
         }
         // The guards evaluated before the confirmation await are stale by now:
-        // the thread may have gone busy, or the user may have opened this
-        // message in the editor. Re-read both and defer to the next drain pass
-        // (returning true skips the failure/backoff path) rather than sending
-        // a payload the user is editing or racing an active turn.
+        // the user may have opened this message in the editor. Re-read that
+        // guard and defer to the next drain pass (returning true skips the
+        // failure/backoff path) rather than sending a payload being edited.
         if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[nextQueuedMessage.messageId]) {
-          return true;
-        }
-        const freshThread = findThread(
-          appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
-          nextQueuedMessage,
-        );
-        const freshThreadBusy = threadRuntimeIsActive(freshThread?.runtime);
-        if (deliveryAction === "send" && creation === undefined && freshThreadBusy) {
           return true;
         }
         return deliveryAction === "remove"

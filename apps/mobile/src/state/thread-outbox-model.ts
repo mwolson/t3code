@@ -153,7 +153,6 @@ export function resolveThreadOutboxDeliveryAction(input: {
   readonly threadExists: boolean;
   readonly shellStatus: EnvironmentShellStatus;
   readonly environmentConnected: boolean;
-  readonly threadBusy: boolean;
 }): ThreadOutboxDeliveryAction {
   if (input.isCreation) {
     // A pending task creates its thread on delivery. If the thread already
@@ -169,7 +168,21 @@ export function resolveThreadOutboxDeliveryAction(input: {
   if (!input.threadExists) {
     return input.shellStatus === "live" ? "remove" : "wait";
   }
-  return input.environmentConnected && !input.threadBusy ? "send" : "wait";
+  // Connected existing-thread messages send immediately. Do not hold them
+  // in the local outbox. Dispatch mode is chosen separately.
+  return input.environmentConnected ? "send" : "wait";
+}
+
+/**
+ * Match desktop `resolveComposerDispatchMode` for a normal Send: steer only
+ * while a turn is running or waiting. Idle, preparing, starting, and queued
+ * stay `auto` so startTurn starts or queues instead of treating a not-yet-live
+ * run as steerable.
+ */
+export function resolveExistingThreadOutboxDispatchMode(
+  runtimeStatus: string | null | undefined,
+): "auto" | "steer" {
+  return runtimeStatus === "running" || runtimeStatus === "waiting" ? "steer" : "auto";
 }
 
 /**

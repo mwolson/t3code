@@ -15,6 +15,7 @@ import {
   groupQueuedThreadMessages,
   isQueuedThreadCreationSendable,
   modelSelectionsEqual,
+  resolveExistingThreadOutboxDispatchMode,
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxFailureAction,
   resolveQueuedThreadSettings,
@@ -464,7 +465,6 @@ describe("thread outbox", () => {
         threadExists: false,
         shellStatus: "synchronizing",
         environmentConnected: true,
-        threadBusy: false,
       }),
     ).toBe("wait");
     expect(
@@ -473,7 +473,6 @@ describe("thread outbox", () => {
         threadExists: false,
         shellStatus: "live",
         environmentConnected: true,
-        threadBusy: false,
       }),
     ).toBe("remove");
     expect(
@@ -482,9 +481,39 @@ describe("thread outbox", () => {
         threadExists: true,
         shellStatus: "live",
         environmentConnected: true,
-        threadBusy: false,
       }),
     ).toBe("send");
+  });
+
+  it("steers only while a turn is running or waiting, matching desktop Send", () => {
+    expect(resolveExistingThreadOutboxDispatchMode(undefined)).toBe("auto");
+    expect(resolveExistingThreadOutboxDispatchMode(null)).toBe("auto");
+    expect(resolveExistingThreadOutboxDispatchMode("idle")).toBe("auto");
+    expect(resolveExistingThreadOutboxDispatchMode("preparing")).toBe("auto");
+    expect(resolveExistingThreadOutboxDispatchMode("starting")).toBe("auto");
+    expect(resolveExistingThreadOutboxDispatchMode("queued")).toBe("auto");
+    expect(resolveExistingThreadOutboxDispatchMode("completed")).toBe("auto");
+    expect(resolveExistingThreadOutboxDispatchMode("running")).toBe("steer");
+    expect(resolveExistingThreadOutboxDispatchMode("waiting")).toBe("steer");
+  });
+
+  it("sends existing-thread messages whenever connected so the server can steer", () => {
+    expect(
+      resolveThreadOutboxDeliveryAction({
+        isCreation: false,
+        threadExists: true,
+        shellStatus: "live",
+        environmentConnected: true,
+      }),
+    ).toBe("send");
+    expect(
+      resolveThreadOutboxDeliveryAction({
+        isCreation: false,
+        threadExists: true,
+        shellStatus: "live",
+        environmentConnected: false,
+      }),
+    ).toBe("wait");
   });
 
   it("sends queued creations once connected and live, removing already-created ones", () => {
@@ -494,7 +523,6 @@ describe("thread outbox", () => {
         threadExists: false,
         shellStatus: "cached",
         environmentConnected: false,
-        threadBusy: false,
       }),
     ).toBe("wait");
     // Connected but not yet synchronized: a previously delivered creation may
@@ -505,7 +533,6 @@ describe("thread outbox", () => {
         threadExists: false,
         shellStatus: "synchronizing",
         environmentConnected: true,
-        threadBusy: false,
       }),
     ).toBe("wait");
     expect(
@@ -514,7 +541,6 @@ describe("thread outbox", () => {
         threadExists: false,
         shellStatus: "live",
         environmentConnected: true,
-        threadBusy: false,
       }),
     ).toBe("send");
     expect(
@@ -523,7 +549,6 @@ describe("thread outbox", () => {
         threadExists: true,
         shellStatus: "live",
         environmentConnected: true,
-        threadBusy: true,
       }),
     ).toBe("remove");
   });
