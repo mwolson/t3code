@@ -18,6 +18,7 @@ type ShellInfoV2 = {
 };
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -47,6 +48,7 @@ import {
   openCode2HasInFlightPendingWork,
   openCode2IsCancelledPostSettleWake,
   openCode2IsPostSettleWakeAdmission,
+  openCode2LastErrorAt,
   openCode2PendingWorkForSession,
   openCode2PermissionAutoReply,
   openCode2PermissionAutoReplyForSession,
@@ -1245,6 +1247,39 @@ describe("OpenCode 2 session errors", () => {
 });
 
 describe("openCode2 interrupt and event-stream recovery helpers", () => {
+  it("keeps an error occurrence stable until the error clears", () => {
+    const firstErrorAt = DateTime.makeUnsafe("2026-08-11T12:00:00Z");
+    const unrelatedUpdateAt = DateTime.makeUnsafe("2026-08-11T12:01:00Z");
+    const repeatedErrorAt = DateTime.makeUnsafe("2026-08-11T12:02:00Z");
+
+    assert.deepStrictEqual(
+      openCode2LastErrorAt({
+        previousError: "event stream stalled",
+        previousErrorAt: firstErrorAt,
+        nextError: "event stream stalled",
+        updatedAt: unrelatedUpdateAt,
+      }),
+      firstErrorAt,
+    );
+    assert.isNull(
+      openCode2LastErrorAt({
+        previousError: "event stream stalled",
+        previousErrorAt: firstErrorAt,
+        nextError: null,
+        updatedAt: unrelatedUpdateAt,
+      }),
+    );
+    assert.deepStrictEqual(
+      openCode2LastErrorAt({
+        previousError: null,
+        previousErrorAt: null,
+        nextError: "event stream stalled",
+        updatedAt: repeatedErrorAt,
+      }),
+      repeatedErrorAt,
+    );
+  });
+
   it.effect("registers event-pump abort before startup interruption can close the scope", () =>
     Effect.gen(function* () {
       const scope = yield* Scope.make();
