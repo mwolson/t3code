@@ -540,7 +540,7 @@ const singleSelectQuestion = {
   multiSelect: false,
 } as const;
 
-const multiSelectQuestion = {
+const scopeMultiSelectQuestion = {
   id: "scope",
   header: "Scope",
   question: "Which data should be collected?",
@@ -561,9 +561,13 @@ describe("pending user input answers", () => {
       ),
     ).toEqual({ customAnswer: "", selectedOptionLabels: ["Node.js"] });
 
-    const orders = togglePendingUserInputOptionSelection(multiSelectQuestion, undefined, "Orders");
+    const orders = togglePendingUserInputOptionSelection(
+      scopeMultiSelectQuestion,
+      undefined,
+      "Orders",
+    );
     const ordersAndListings = togglePendingUserInputOptionSelection(
-      multiSelectQuestion,
+      scopeMultiSelectQuestion,
       orders,
       "Listings",
     );
@@ -572,23 +576,23 @@ describe("pending user input answers", () => {
       selectedOptionLabels: ["Orders", "Listings"],
     });
     expect(
-      togglePendingUserInputOptionSelection(multiSelectQuestion, ordersAndListings, "Orders"),
+      togglePendingUserInputOptionSelection(scopeMultiSelectQuestion, ordersAndListings, "Orders"),
     ).toEqual({ customAnswer: "", selectedOptionLabels: ["Listings"] });
 
     const paddedOrders = togglePendingUserInputOptionSelection(
-      multiSelectQuestion,
+      scopeMultiSelectQuestion,
       undefined,
       "  Orders  ",
     );
     expect(paddedOrders).toEqual({ customAnswer: "", selectedOptionLabels: ["Orders"] });
     expect(
-      togglePendingUserInputOptionSelection(multiSelectQuestion, paddedOrders, "  Orders  "),
+      togglePendingUserInputOptionSelection(scopeMultiSelectQuestion, paddedOrders, "  Orders  "),
     ).toEqual({ customAnswer: "" });
   });
 
   it("builds array answers for multi-select questions", () => {
     expect(
-      buildPendingUserInputAnswers([singleSelectQuestion, multiSelectQuestion], {
+      buildPendingUserInputAnswers([singleSelectQuestion, scopeMultiSelectQuestion], {
         runtime: { selectedOptionLabels: ["Go"] },
         scope: { selectedOptionLabels: ["Orders", "Listings"] },
       }),

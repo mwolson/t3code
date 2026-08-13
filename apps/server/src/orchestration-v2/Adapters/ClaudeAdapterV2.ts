@@ -2729,8 +2729,11 @@ export function makeClaudeAdapterV2(
           if (opaqueTasks.size > 0) {
             return true;
           }
-          for (const subagent of (yield* Ref.get(sessionSubagentsByTaskId)).values()) {
-            if (subagent.nativeThreadId === nativeThreadId && subagent.task.status === "running") {
+          const nativeThreadState = (yield* Ref.get(sessionSubagents)).byNativeThreadId.get(
+            nativeThreadId,
+          );
+          for (const subagent of nativeThreadState?.subagentsByTaskId.values() ?? []) {
+            if (subagent.task.status === "running") {
               return true;
             }
           }
