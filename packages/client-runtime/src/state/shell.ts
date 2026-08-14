@@ -52,6 +52,17 @@ function shellStatusForSnapshot(
   return Option.isSome(snapshot) ? "cached" : "empty";
 }
 
+function liveIfUsableSnapshot(current: EnvironmentShellState): EnvironmentShellState {
+  if (Option.isNone(current.snapshot) || current.status === "live") {
+    return current;
+  }
+  return {
+    ...current,
+    status: "live" as const,
+    error: Option.none(),
+  };
+}
+
 const SHELL_SYNCHRONIZATION_ERROR_MESSAGE = "Could not synchronize environment data.";
 const WAITING_PROJECTION_RESYNC_INTERVAL = "5 minutes";
 
@@ -144,9 +155,18 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
     status: "synchronizing" as const,
     error: Option.none(),
   }));
+  const setSynchronizingUnlessLive = SubscriptionRef.update(state, (current) =>
+    Option.isSome(current.snapshot)
+      ? liveIfUsableSnapshot(current)
+      : {
+          ...current,
+          status: "synchronizing" as const,
+          error: Option.none(),
+        },
+  );
   const setReady = SubscriptionRef.update(state, (current) =>
-    current.status === "live"
-      ? current
+    Option.isSome(current.snapshot)
+      ? liveIfUsableSnapshot(current)
       : {
           ...current,
           status: "synchronizing" as const,
@@ -243,7 +263,11 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
     Stream.tap(() => Ref.set(forceAuthoritativeRefresh, true)),
   );
 
-  yield* setSynchronizing;
+  if (Option.isSome(cachedSnapshot)) {
+    yield* SubscriptionRef.update(state, liveIfUsableSnapshot);
+  } else {
+    yield* setSynchronizing;
+  }
   yield* Effect.forkScoped(
     subscribeDynamic(
       ORCHESTRATION_V2_WS_METHODS.subscribeShell,
@@ -254,8 +278,14 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
           Effect.map((config) => config.shellResumeCompletionMarker === true),
           Effect.orElseSucceed(() => false),
         );
-        yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
-        yield* setSynchronizing;
+        const currentStatus = yield* SubscriptionRef.get(state);
+        const hasUsableSnapshot = Option.isSome(currentStatus.snapshot);
+        yield* Ref.set(awaitingCompletion, supportsCompletionMarker && !hasUsableSnapshot);
+        if (!hasUsableSnapshot) {
+          yield* setSynchronizing;
+        } else {
+          yield* SubscriptionRef.update(state, liveIfUsableSnapshot);
+        }
 
         // Foreground resubscriptions on the same live session can resume from
         // the in-memory cursor. A new session reloads the authoritative HTTP
@@ -283,6 +313,16 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
           if (Option.isSome(httpSnapshot)) {
             yield* applyItem({ kind: "snapshot", snapshot: httpSnapshot.value });
             yield* Ref.set(forceAuthoritativeRefresh, false);
+            yield* Ref.set(awaitingCompletion, false);
+            yield* SubscriptionRef.update(state, (value) =>
+              Option.isNone(value.snapshot)
+                ? value
+                : {
+                    ...value,
+                    status: "live" as const,
+                    error: Option.none(),
+                  },
+            );
             canResume = true;
             current = yield* SubscriptionRef.get(state);
           }
@@ -318,7 +358,7 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
     Stream.runForEach((connectionState) => {
       switch (connectionProjectionPhase(connectionState)) {
         case "synchronizing":
-          return setSynchronizing;
+          return setSynchronizingUnlessLive;
         case "disconnected":
           return setDisconnected;
         case "ready":
