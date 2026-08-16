@@ -8,6 +8,7 @@ import {
   OpenAI,
   OpenCode2Icon,
   OpenCodeIcon,
+  PiAgentIcon,
 } from "../Icons";
 import { PROVIDER_OPTIONS } from "../../session-logic";
 
@@ -19,6 +20,7 @@ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>
   [ProviderDriverKind.make("opencode2")]: OpenCode2Icon,
   [ProviderDriverKind.make("cursor")]: CursorIcon,
   [ProviderDriverKind.make("grok")]: GrokIcon,
+  [ProviderDriverKind.make("pi")]: PiAgentIcon,
 };
 
 function isAvailableProviderOption(option: (typeof PROVIDER_OPTIONS)[number]): option is {
