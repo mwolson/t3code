@@ -22,6 +22,11 @@ OpenCode also stores persistent approval grants per directory. Automatic full-ac
 `once` so they cannot widen a supervised thread's permissions on a shared external server.
 See the [adapter](../../apps/server/src/orchestration-v2/Adapters/OpenCodeAdapterV2.ts).
 
+The Pi driver speaks Pi's stdio JSONL RPC mode (`pi --mode rpc`) and deliberately spawns the user's
+own `pi` install with no `--no-*` flags, so extensions, skills, context files, custom models, and
+sessions behave exactly as they do in the Pi TUI. Extension UI dialogs surface as orchestration
+runtime requests.
+
 Antigravity separates account profiles per instance while sharing installed executables across the
 environment. It forces file-based credential storage because the native macOS keychain entry would
 otherwise be shared across instances. The launch environment removes ambient Google credentials,
@@ -127,3 +132,66 @@ The logger filters those notifications before traversal when an older provider s
 
 Model classification has its own [manifest constraints](./model-manifest.md). Assistant-reference
 handling is documented under [citations](./assistant-citations.md).
+Updated attachment schemas tolerate unknown attachment members, but old image-only clients still
+cannot decode messages that contain file attachments. Client file-picking rollouts must account for
+this limit.
+
+Do not run an old image-only server against state that contains file attachments. Replay decodes
+each persisted event before projection. A file-bearing event can make `ProjectionPipeline` bootstrap
+and `OrchestrationEngine` startup fail for the entire environment, not only the affected thread.
+
+## How provider work is requested
+
+Clients never call a provider directly. They dispatch orchestration commands over the RPC method
+`orchestration.dispatchCommand`, defined with the rest of the orchestration surface in
+[`orchestration.ts`][contracts]. The client-dispatchable provider-facing commands are
+`thread.turn.start`, `thread.turn.interrupt`, `thread.approval.respond`,
+`thread.user-input.respond`, `thread.checkpoint.revert`, and `thread.session.stop`, plus the mode
+setters `thread.runtime-mode.set` and `thread.interaction-mode.set`.
+
+The engine persists an event for the command, and a server-side reactor performs the provider call.
+Provider output comes back as internal commands such as `thread.message.assistant.delta` and
+`thread.session.set`, which clients observe through `orchestration.subscribeThread`. See
+[overview.md](./overview.md) for the command/event loop.
+
+## Server-side workers
+
+Provider work flows through three queue-backed workers. All three are built with
+`makeDrainableWorker` from [`DrainableWorker.ts`][worker] and expose `drain` for deterministic test
+synchronization.
+
+1. [`ProviderRuntimeIngestion`][ingest] consumes provider runtime streams and emits orchestration
+   commands.
+2. [`ProviderCommandReactor`][cmd] reacts to orchestration intent events and dispatches provider
+   calls.
+3. [`CheckpointReactor`][checkpoint] captures workspace checkpoints on turn start and completion, and
+   performs reverts.
+
+### Buffered assistant delivery
+
+A thread in `buffered` assistant delivery mode accumulates assistant text instead of streaming each
+delta. The buffer is not held until turn completion. In [`ProviderRuntimeIngestion`][ingest],
+`MAX_BUFFERED_ASSISTANT_CHARS` is 24,000: the append that would exceed it invalidates the buffer and
+spills the whole accumulated text as one delta. The buffer also flushes at interaction boundaries,
+when a request opens (approval) or user input is requested, via
+`flushBufferedAssistantMessagesForTurn`.
+
+[drivers]: ../../apps/server/src/provider/builtInDrivers.ts
+[acp-registry]: ../../apps/server/src/provider/Drivers/AcpRegistryDriver.ts
+[codex]: ../../apps/server/src/provider/Drivers/CodexDriver.ts
+[claude]: ../../apps/server/src/provider/Drivers/ClaudeDriver.ts
+[cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts
+[grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
+[opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
+[opencode-server-owner]: ../../apps/server/src/provider/OpenCodeServerOwner.ts
+[opencode2]: ../../apps/server/src/provider/Drivers/OpenCode2Driver.ts
+[pi]: ../../apps/server/src/provider/Drivers/PiDriver.ts
+[adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
+[instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts
+[registry]: ../../apps/server/src/provider/Services/ProviderAdapterRegistry.ts
+[service]: ../../apps/server/src/provider/Layers/ProviderService.ts
+[contracts]: ../../packages/contracts/src/orchestration.ts
+[worker]: ../../packages/shared/src/DrainableWorker.ts
+[ingest]: ../../apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
+[cmd]: ../../apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
+[checkpoint]: ../../apps/server/src/orchestration/Layers/CheckpointReactor.ts
