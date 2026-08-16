@@ -96,7 +96,8 @@ function liveOrKeepCatchingUp(
   }
   // Catch-up and the first-open completion marker must win over the
   // already-live short-circuit, or a supervisor ready/connecting flip after
-  // HTTP seed publishes live before synchronized.
+  // HTTP seed publishes live before synchronized. Long-background reconnect
+  // also arms catch-up on a retained live atom and must show Syncing.
   if (catchingUp && hasUsableThreadData(current)) {
     return {
       ...current,
@@ -308,10 +309,12 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   });
   const offerCatchUpResubscribe = (resumeSequence: number) =>
     Effect.gen(function* () {
-      if (!(yield* Ref.get(awaitingCatchUp))) {
+      const catchingUp = yield* Ref.get(awaitingCatchUp);
+      const offered = yield* Ref.get(lastOfferedResumeSequence);
+      if (!catchingUp) {
         return;
       }
-      if (resumeSequence <= (yield* Ref.get(lastOfferedResumeSequence))) {
+      if (resumeSequence <= offered) {
         return;
       }
       yield* Queue.offer(resubscribeRequested, undefined);
@@ -799,6 +802,18 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     Effect.forkScoped,
   );
 
+  const waitingResubscriptions = Stream.tick(WAITING_PROJECTION_RESYNC_INTERVAL).pipe(
+    // Stream.tick emits immediately. A refresh is periodic recovery, not an
+    // attach-time reload, so wait one full interval before the first attempt.
+    Stream.drop(1),
+    Stream.mapEffect(() => SubscriptionRef.get(state)),
+    Stream.filter(
+      (current) =>
+        Option.isSome(current.data) && threadHasPendingBackgroundWork(current.data.value),
+    ),
+    Stream.tap(() => Ref.set(forceAuthoritativeRefresh, true)),
+  );
+
   const waitForPrepared = SubscriptionRef.get(supervisor.prepared).pipe(
     Effect.flatMap(
       Option.match({
@@ -813,9 +828,6 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       }),
     ),
   );
-  // Cache-backed opens must not wait for HTTP before the socket resume. After a
-  // long lock, prepared/HTTP can hang and would otherwise leave a stale live
-  // cache (including a leftover Working row) with no catch-up.
   const refreshRequested = yield* Queue.sliding<void>(1);
   const refreshInFlight = yield* Ref.make(false);
   yield* Stream.fromQueue(refreshRequested).pipe(
@@ -861,18 +873,6 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     onNone: () => Stream.never,
     onSome: () => Stream.fromQueue(resubscribeRequested),
   });
-  const waitingResubscriptions = Stream.tick(WAITING_PROJECTION_RESYNC_INTERVAL).pipe(
-    // Stream.tick emits immediately. A refresh is periodic recovery, not an
-    // attach-time reload, so wait one full interval before the first attempt.
-    Stream.drop(1),
-    Stream.mapEffect(() => SubscriptionRef.get(state)),
-    Stream.filter(
-      (current) =>
-        Option.isSome(current.data) && threadHasPendingBackgroundWork(current.data.value),
-    ),
-    Stream.tap(() => Ref.set(forceAuthoritativeRefresh, true)),
-  );
-
   if (Option.isSome(wakeups)) {
     yield* wakeups.value.changes.pipe(
       Stream.runForEach((reason) =>
