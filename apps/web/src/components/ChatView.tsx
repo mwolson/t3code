@@ -1566,6 +1566,15 @@ function ChatViewContent(props: ChatViewProps) {
     () => (serverProjection === null ? null : resolveThreadProviderSession(serverProjection)),
     [serverProjection],
   );
+  const activeProviderThread = useMemo(() => {
+    if (serverProjection === null) return null;
+    const activeProviderThreadId = serverProjection.thread.activeProviderThreadId;
+    if (activeProviderThreadId == null) return null;
+    return (
+      serverProjection.providerThreads.find((thread) => thread.id === activeProviderThreadId) ??
+      null
+    );
+  }, [serverProjection]);
   const supportsProviderSwitchingViaHandoff =
     activeProviderSession?.capabilities.sessions.supportsProviderSwitchingViaHandoff === true;
   const activeLatestRun = isServerThread ? serverLatestRun : (activeThread?.latestRun ?? null);
@@ -6654,6 +6663,7 @@ function ChatViewContent(props: ChatViewProps) {
                             }
                             activeThreadModelSelection={activeThread?.modelSelection}
                             activeThreadVisibleTurnItems={serverVisibleTurnItems}
+                            activeProviderThread={activeProviderThread}
                             resolvedTheme={resolvedTheme}
                             settings={settings}
                             keybindings={keybindings}

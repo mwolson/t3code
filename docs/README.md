@@ -15,7 +15,7 @@
 - [Keeping app and server in sync](./user/updating.md)
 - [Source control integrations](./user/source-control.md)
 - [Background service (Linux)](./user/background-service.md)
-- Providers: [Codex](./user/providers-codex.md) · [Claude](./user/providers-claude.md) · [Grok](./user/providers-grok.md)
+- Providers: [Codex](./user/providers-codex.md) · [Claude](./user/providers-claude.md) · [Grok](./user/providers-grok.md) · [Pi](./user/providers-pi.md)
 
 Mobile app: [apps/mobile/README.md](../apps/mobile/README.md)
 

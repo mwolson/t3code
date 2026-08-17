@@ -2,6 +2,7 @@ import type {
   EnvironmentId,
   ModelSelection,
   OrchestrationV2ProjectedTurnItem,
+  OrchestrationV2ProviderThread,
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
   ProviderInteractionMode,
@@ -240,10 +241,7 @@ import type {
   PendingUserInput,
 } from "../../session-logic";
 import { resolveComposerDispatchMode, type ComposerDispatchMode } from "./composerDispatch";
-import {
-  deriveLatestContextWindowSnapshot,
-  formatProviderDisplayName,
-} from "../../lib/contextWindow";
+import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
@@ -588,6 +586,7 @@ export interface ChatComposerProps {
 
   // Context window
   activeThreadVisibleTurnItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem> | undefined;
+  activeProviderThread: OrchestrationV2ProviderThread | null;
 
   // Misc
   resolvedTheme: "light" | "dark";
@@ -682,6 +681,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
     activeThreadVisibleTurnItems,
+    activeProviderThread,
     resolvedTheme,
     settings,
     keybindings,
@@ -1026,8 +1026,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Context window
   // ------------------------------------------------------------------
   const activeContextWindow = useMemo(
-    () => deriveLatestContextWindowSnapshot(activeThreadVisibleTurnItems ?? []),
-    [activeThreadVisibleTurnItems],
+    () =>
+      deriveLatestContextWindowSnapshot(activeThreadVisibleTurnItems ?? [], activeProviderThread),
+    [activeProviderThread, activeThreadVisibleTurnItems],
   );
   const activeThreadModelDisplayName = useMemo(
     () => resolveContextWindowModelDisplayName(activeThreadModelSelection, modelOptionsByInstance),

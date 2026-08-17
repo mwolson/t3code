@@ -91,6 +91,7 @@ to run.
 
 For multi-account setups, see [Codex](./providers-codex.md) and [Claude](./providers-claude.md).
 For Grok reasoning controls, see [Grok Build](./providers-grok.md).
+For Pi, see [Pi](./providers-pi.md).
 
 ## Next Steps
 
