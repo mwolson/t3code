@@ -1,4 +1,5 @@
 import type {
+  OrchestrationV2ProviderThread,
   OrchestrationV2ProviderTurnTokenUsage,
   OrchestrationV2TurnItem,
   ThreadTokenUsageSnapshot,
@@ -46,12 +47,13 @@ export function formatProviderDisplayName(provider: string | null | undefined): 
   }
 }
 
-/** Prefers the provider's live usage report (#8144); falls back to the last compaction item. */
+/** Prefers the provider's live usage report (#8144); then Pi thread usage; then compaction. */
 export function deriveLatestContextWindowSnapshot(
   entries: ReadonlyArray<{
     readonly item: OrchestrationV2TurnItem;
   }>,
   liveUsage?: OrchestrationV2ProviderTurnTokenUsage | null,
+  providerThread?: Pick<OrchestrationV2ProviderThread, "contextUsage" | "updatedAt"> | null,
 ): ContextWindowSnapshot | null {
   if (liveUsage != null) {
     const usedTokens = Math.max(0, liveUsage.usedTokens);
@@ -84,6 +86,44 @@ export function deriveLatestContextWindowSnapshot(
       updatedAt: liveUsage.updatedAt,
     };
   }
+  const providerUsage = providerThread?.contextUsage;
+  const providerUpdatedAt = providerThread?.updatedAt;
+  if (providerUsage !== null && providerUsage !== undefined && providerUpdatedAt !== undefined) {
+    const usedTokens = asFiniteNumber(providerUsage.usedTokens);
+    const maxTokens = asFiniteNumber(providerUsage.maxTokens);
+    if (usedTokens !== null && usedTokens >= 0) {
+      const usedPercentage =
+        maxTokens !== null && maxTokens > 0 ? Math.min(100, (usedTokens / maxTokens) * 100) : null;
+      const remainingTokens =
+        maxTokens !== null ? Math.max(0, Math.round(maxTokens - usedTokens)) : null;
+      const remainingPercentage =
+        usedPercentage === null ? null : Math.max(0, 100 - usedPercentage);
+
+      return {
+        usedTokens,
+        totalProcessedTokens: asFiniteNumber(providerUsage.totalProcessedTokens),
+        maxTokens,
+        remainingTokens,
+        usedPercentage,
+        remainingPercentage,
+        inputTokens: asFiniteNumber(providerUsage.inputTokens),
+        cachedInputTokens: asFiniteNumber(providerUsage.cachedInputTokens),
+        outputTokens: asFiniteNumber(providerUsage.outputTokens),
+        reasoningOutputTokens: asFiniteNumber(providerUsage.reasoningOutputTokens),
+        lastUsedTokens: asFiniteNumber(providerUsage.lastUsedTokens),
+        lastInputTokens: asFiniteNumber(providerUsage.lastInputTokens),
+        lastCachedInputTokens: asFiniteNumber(providerUsage.lastCachedInputTokens),
+        lastOutputTokens: asFiniteNumber(providerUsage.lastOutputTokens),
+        lastReasoningOutputTokens: asFiniteNumber(providerUsage.lastReasoningOutputTokens),
+        toolUses: asFiniteNumber(providerUsage.toolUses),
+        durationMs: asFiniteNumber(providerUsage.durationMs),
+        compactsAutomatically: providerUsage.compactsAutomatically ?? null,
+        autoCompactThreshold: null,
+        updatedAt: DateTime.formatIso(providerUpdatedAt),
+      };
+    }
+  }
+
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (!entry || entry.item.type !== "compaction") {

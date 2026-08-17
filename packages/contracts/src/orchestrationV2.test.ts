@@ -721,7 +721,7 @@ describe("orchestration V2 contracts", () => {
     expect(ContextTransferId.make("context-transfer-1")).toBe("context-transfer-1");
   });
 
-  it("decodes historical provider-thread JSON without pendingBackgroundTasks as empty roster", () => {
+  it("applies defaults when decoding historical provider threads", () => {
     const providerThread = decodeOrchestrationV2ProviderThreadJson({
       id: "provider-thread-1",
       driver: "claude",
@@ -745,6 +745,7 @@ describe("orchestration V2 contracts", () => {
     });
 
     expect(providerThread.pendingBackgroundTasks).toEqual([]);
+    expect(providerThread.contextUsage).toBeNull();
 
     const runtimeThread = decodeOrchestrationV2ProviderThread({
       id: "provider-thread-2",
@@ -764,6 +765,7 @@ describe("orchestration V2 contracts", () => {
       updatedAt: now,
     });
     expect(runtimeThread.pendingBackgroundTasks).toEqual([]);
+    expect(runtimeThread.contextUsage).toBeNull();
   });
 
   it("decodes historical thread shell JSON without pendingBackgroundTasks as empty roster", () => {

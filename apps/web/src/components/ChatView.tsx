@@ -1605,6 +1605,15 @@ function ChatViewContent(props: ChatViewProps) {
     () => (serverProjection === null ? null : resolveThreadProviderSession(serverProjection)),
     [serverProjection],
   );
+  const activeProviderThread = useMemo(() => {
+    if (serverProjection === null) return null;
+    const activeProviderThreadId = serverProjection.thread.activeProviderThreadId;
+    if (activeProviderThreadId == null) return null;
+    return (
+      serverProjection.providerThreads.find((thread) => thread.id === activeProviderThreadId) ??
+      null
+    );
+  }, [serverProjection]);
   const supportsProviderSwitchingViaHandoff =
     activeProviderSession?.capabilities.sessions.supportsProviderSwitchingViaHandoff === true;
   const activeLatestRun = isServerThread ? serverLatestRun : (activeThread?.latestRun ?? null);
@@ -2458,8 +2467,12 @@ function ChatViewContent(props: ChatViewProps) {
   const isWorking = phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint;
   const activeContextWindow = useMemo(
     () =>
-      deriveLatestContextWindowSnapshot(serverVisibleTurnItems ?? [], activeThreadLiveTokenUsage),
-    [activeThreadLiveTokenUsage, serverVisibleTurnItems],
+      deriveLatestContextWindowSnapshot(
+        serverVisibleTurnItems ?? [],
+        activeThreadLiveTokenUsage,
+        activeProviderThread,
+      ),
+    [activeProviderThread, activeThreadLiveTokenUsage, serverVisibleTurnItems],
   );
   // Conservative compact gate until the branch grows main's full compaction
   // preconditions: Claude server threads only, and never mid-turn.
