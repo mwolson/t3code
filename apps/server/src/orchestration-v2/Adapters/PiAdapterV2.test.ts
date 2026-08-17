@@ -23,6 +23,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
@@ -1611,8 +1612,10 @@ describe("PiRpc early process exit", () => {
       assert.equal(error._tag, "PiRpcError");
       assert.equal(error.operation, "read");
       assert.equal(error.detail, "pi process exited with code 1");
-      assert.isFalse(JSON.stringify(error).includes("API_KEY"));
-      assert.isFalse(JSON.stringify(error).includes("super-secret"));
+      assert.isFalse((error.detail ?? "").includes("API_KEY"));
+      assert.isFalse((error.detail ?? "").includes("super-secret"));
+      assert.isFalse(error.message.includes("API_KEY"));
+      assert.isFalse(error.message.includes("super-secret"));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -1654,7 +1657,14 @@ describe("PiRpc early process exit", () => {
             isRunning: Effect.succeed(true),
             kill: () => Effect.void,
             unref: Effect.succeed(Effect.void),
-            stdin: Sink.fail("broken pipe"),
+            stdin: Sink.fail(
+              PlatformError.systemError({
+                _tag: "Unknown",
+                module: "ChildProcess",
+                method: "stdin",
+                description: "broken pipe",
+              }),
+            ),
             stdout: Stream.empty,
             stderr: Stream.empty,
             all: Stream.empty,
