@@ -99,6 +99,21 @@ For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 
 ## Next steps
 
+### Binary discovery
+
+Each provider CLI must be on the server's `PATH`, or have an explicit binary path set in
+Settings, the provider instance, Binary path. Use the explicit path when a version manager or a
+non-standard install location keeps the CLI off the `PATH` of the shell that started T3 Code.
+
+### When auth is needed
+
+Provider auth is required before you start a session with that provider, not before you start
+T3 Code. You can install T3 Code, open it, and add providers afterwards. A provider that is not
+authenticated shows its status in Settings and fails at session start with the login command to
+run.
+
+For Pi, see [Pi](./providers-pi.md).
+
 - [Working with threads](./thread-sidebar.md): start tasks and organize parallel work.
 - [Permission modes](./permission-modes.md): choose when agents ask before acting.
 - [Remote access](./remote-access.md): connect from another device.

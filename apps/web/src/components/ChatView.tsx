@@ -1893,6 +1893,15 @@ export default function ChatView(props: ChatViewProps) {
     () => (serverProjection === null ? null : resolveThreadProviderSession(serverProjection)),
     [serverProjection],
   );
+  const activeProviderThread = useMemo(() => {
+    if (serverProjection === null) return null;
+    const activeProviderThreadId = serverProjection.thread.activeProviderThreadId;
+    if (activeProviderThreadId == null) return null;
+    return (
+      serverProjection.providerThreads.find((thread) => thread.id === activeProviderThreadId) ??
+      null
+    );
+  }, [serverProjection]);
   const supportsProviderSwitchingViaHandoff =
     activeProviderSession?.capabilities.sessions.supportsProviderSwitchingViaHandoff === true;
   const activeLatestRun = isServerThread ? serverLatestRun : (activeThread?.latestRun ?? null);
@@ -3039,8 +3048,12 @@ export default function ChatView(props: ChatViewProps) {
     phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint || isCompacting;
   const activeContextWindow = useMemo(
     () =>
-      deriveLatestContextWindowSnapshot(serverVisibleTurnItems ?? [], activeThreadLiveTokenUsage),
-    [activeThreadLiveTokenUsage, serverVisibleTurnItems],
+      deriveLatestContextWindowSnapshot(
+        serverVisibleTurnItems ?? [],
+        activeThreadLiveTokenUsage,
+        activeProviderThread,
+      ),
+    [activeProviderThread, activeThreadLiveTokenUsage, serverVisibleTurnItems],
   );
   const pendingBackgroundTasks = useMemo(() => {
     if (serverProjection === null || serverProjection === undefined) {

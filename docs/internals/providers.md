@@ -22,10 +22,13 @@ OpenCode also stores persistent approval grants per directory. Automatic full-ac
 `once` so they cannot widen a supervised thread's permissions on a shared external server.
 See the [adapter](../../apps/server/src/orchestration-v2/Adapters/OpenCodeAdapterV2.ts).
 
-The Pi driver speaks Pi's stdio JSONL RPC mode (`pi --mode rpc`) and deliberately spawns the user's
-own `pi` install with no `--no-*` flags, so extensions, skills, context files, custom models, and
-sessions behave exactly as they do in the Pi TUI. Extension UI dialogs surface as orchestration
-runtime requests.
+The Pi driver speaks Pi's stdio JSONL RPC mode (`pi --mode rpc`) and spawns the user's own `pi`
+install, preserving its skills, context files, custom models, auth, and sessions. T3 replaces Pi's
+official `subagent` extension with a session-persisting variant. That launch uses
+`--no-extensions`, then explicitly re-adds the T3 extensions and the user's discovered extensions;
+project-local extensions are only re-added when Pi has standing project trust. Extension UI dialogs
+surface as orchestration runtime requests, and Pi's session statistics feed the shared context
+window meter.
 
 Antigravity separates account profiles per instance while sharing installed executables across the
 environment. It forces file-based credential storage because the native macOS keychain entry would

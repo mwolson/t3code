@@ -46,6 +46,7 @@ import {
   RuntimeMode,
 } from "./providerPolicy.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { ThreadTokenUsageSnapshot } from "./providerRuntime.ts";
 import { OrchestrationProjectShell } from "./orchestrationProject.ts";
 import {
   TurnTokenUsage,
@@ -617,6 +618,11 @@ export const OrchestrationV2ProviderThread = Schema.Struct({
   // Optional Type so adapters can omit empty rosters; historical JSON decodes to [].
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  // Latest provider-reported context window snapshot. Optional on the Type so
+  // adapters without usage telemetry and historical projections can omit it.
+  contextUsage: Schema.optional(Schema.NullOr(ThreadTokenUsageSnapshot)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
