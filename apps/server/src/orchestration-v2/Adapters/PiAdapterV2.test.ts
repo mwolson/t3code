@@ -16,6 +16,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -83,6 +84,8 @@ interface FakePi {
   readonly queueCommands: (data: unknown) => void;
   /** Make the next `get_commands` ack fail. */
   readonly failNextCommands: () => void;
+  /** Close the fake process stdout stream. */
+  readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
     readonly env: NodeJS.ProcessEnv;
@@ -94,7 +97,7 @@ interface FakePi {
  * requests with canned data, and lets tests push protocol events to stdout.
  */
 const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
-  const stdout = yield* Queue.unbounded<Uint8Array>();
+  const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
   const requests = yield* Queue.unbounded<PiRpcRecord>();
   const entriesQueue: Array<unknown> = [];
   const stateQueue: Array<unknown> = [];
@@ -212,6 +215,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     queueStats: (data) => statsQueue.push(data),
     queueCommands: (data) => commandsQueue.push({ success: true, data }),
     failNextCommands: () => commandsQueue.push({ success: false }),
+    closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
   } satisfies FakePi;
 });
@@ -1228,6 +1232,15 @@ describe("PiAdapterV2", () => {
       yield* fake.emit({ type: "agent_settled" });
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+      yield* fake.closeStdout;
+      const stopped = yield* takeEvent(
+        (event) =>
+          event.type === "provider_session.updated" && event.providerSession.status === "stopped",
+      );
+      assert.equal(
+        stopped.type === "provider_session.updated" ? stopped.providerSession.lastError : undefined,
+        null,
+      );
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
