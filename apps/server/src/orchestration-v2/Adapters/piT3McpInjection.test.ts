@@ -106,22 +106,112 @@ describe("pi T3 MCP injection", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("discovers user extensions from the agent dir and skips the subagent", () =>
+  it.effect("discovers user and npm package extensions while skipping subagent overrides", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
       const extensionsDir = `${home}/.pi/agent/extensions`;
+      const lensDir = `${home}/.pi/agent/npm/node_modules/pi-lens`;
+      const authDir = `${home}/.pi/agent/npm/node_modules/@gotgenes/pi-anthropic-auth`;
+      const filteredDir = `${home}/.pi/agent/npm/node_modules/filtered-extension`;
+      const packageSubagentDir = `${home}/.pi/agent/npm/node_modules/pi-subagents`;
       yield* fs.makeDirectory(`${extensionsDir}/todos`, { recursive: true });
       yield* fs.makeDirectory(`${extensionsDir}/subagent`, { recursive: true });
+      yield* fs.makeDirectory(`${lensDir}/src`, { recursive: true });
+      yield* fs.makeDirectory(`${authDir}/src`, { recursive: true });
+      yield* fs.makeDirectory(`${filteredDir}/src`, { recursive: true });
+      yield* fs.makeDirectory(packageSubagentDir, { recursive: true });
       yield* fs.writeFileString(`${extensionsDir}/demo.ts`, "export default () => {}");
       yield* fs.writeFileString(`${extensionsDir}/subagent.ts`, "export default () => {}");
+      yield* fs.writeFileString(`${extensionsDir}/subagent.js`, "export default () => {}");
       yield* fs.writeFileString(`${extensionsDir}/todos/index.ts`, "export default () => {}");
       yield* fs.writeFileString(`${extensionsDir}/subagent/index.ts`, "export default () => {}");
+      yield* fs.writeFileString(`${lensDir}/src/index.ts`, "export default () => {}");
+      yield* fs.writeFileString(`${authDir}/src/index.ts`, "export default () => {}");
+      yield* fs.writeFileString(`${filteredDir}/src/index.ts`, "export default () => {}");
+      yield* fs.writeFileString(`${filteredDir}/src/legacy.ts`, "export default () => {}");
+      yield* fs.writeFileString(`${packageSubagentDir}/index.ts`, "export default () => {}");
+      yield* fs.writeFileString(
+        `${lensDir}/package.json`,
+        '{ "pi": { "extensions": ["./src/index.ts"] } }',
+      );
+      yield* fs.writeFileString(
+        `${authDir}/package.json`,
+        '{ "pi": { "extensions": ["./src/index.ts"] } }',
+      );
+      yield* fs.writeFileString(
+        `${filteredDir}/package.json`,
+        '{ "pi": { "extensions": ["./src/index.ts", "./src/legacy.ts"] } }',
+      );
+      yield* fs.writeFileString(
+        `${packageSubagentDir}/package.json`,
+        '{ "pi": { "extensions": ["./index.ts"] } }',
+      );
+      yield* fs.writeFileString(
+        `${home}/.pi/agent/settings.json`,
+        `{ "packages": [
+          "npm:pi-lens",
+          "npm:@gotgenes/pi-anthropic-auth@1.2.3",
+          { "source": "npm:filtered-extension", "extensions": ["./src/index.ts"] },
+          "npm:pi-subagents",
+          { "source": "npm:disabled-extension", "extensions": [] }
+        ] }`,
+      );
       const found = yield* discoverPiUserExtensions({
         environment: { HOME: home },
         cwd: undefined,
       });
-      assert.deepEqual(found, [`${extensionsDir}/demo.ts`, `${extensionsDir}/todos/index.ts`]);
+      assert.deepEqual(found, [
+        `${extensionsDir}/demo.ts`,
+        `${extensionsDir}/todos/index.ts`,
+        `${lensDir}/src/index.ts`,
+        `${authDir}/src/index.ts`,
+        `${filteredDir}/src/index.ts`,
+      ]);
+      yield* fs.writeFileString(
+        `${home}/.pi/agent/settings.json`,
+        `{ "packages": [
+          { "source": "npm:filtered-extension", "autoload": false, "extensions": ["./src/index.ts"] }
+        ] }`,
+      );
+      const autoloadDisabled = yield* discoverPiUserExtensions({
+        environment: { HOME: home },
+        cwd: undefined,
+      });
+      assert.deepEqual(autoloadDisabled, [
+        `${extensionsDir}/demo.ts`,
+        `${extensionsDir}/todos/index.ts`,
+        `${filteredDir}/src/index.ts`,
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("discovers installed git packages and falls back when a project copy is missing", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
+      const project = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-project-" });
+      const gitDir = `${home}/.pi/agent/git/github.com/mwolson/pi-xai-ws`;
+      yield* fs.makeDirectory(`${gitDir}/src`, { recursive: true });
+      yield* fs.makeDirectory(`${project}/.pi`, { recursive: true });
+      yield* fs.writeFileString(`${gitDir}/src/index.ts`, "export default () => {}");
+      yield* fs.writeFileString(
+        `${gitDir}/package.json`,
+        '{ "pi": { "extensions": ["./src/index.ts"] } }',
+      );
+      yield* fs.writeFileString(
+        `${home}/.pi/agent/settings.json`,
+        '{ "defaultProjectTrust": "always", "packages": ["git:github.com/mwolson/pi-xai-ws"] }',
+      );
+      yield* fs.writeFileString(
+        `${project}/.pi/settings.json`,
+        '{ "packages": ["git:github.com/mwolson/pi-xai-ws"] }',
+      );
+      const found = yield* discoverPiUserExtensions({
+        environment: { HOME: home },
+        cwd: project,
+      });
+      assert.deepEqual(found, [`${gitDir}/src/index.ts`]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -147,131 +237,6 @@ describe("pi T3 MCP injection", () => {
         cwd: project,
       });
       assert.deepEqual(trusted, [`${project}/.pi/extensions/local.ts`]);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("discovers installed npm and git package extensions from settings", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
-      const agentDir = `${home}/.pi/agent`;
-      const npmRoot = `${agentDir}/npm/node_modules/pi-exa`;
-      const gitRoot = `${agentDir}/git/github.com/acme/pi-tools`;
-      yield* fs.makeDirectory(`${npmRoot}/src`, { recursive: true });
-      yield* fs.makeDirectory(gitRoot, { recursive: true });
-      yield* fs.writeFileString(
-        `${agentDir}/settings.json`,
-        '{ "packages": ["npm:pi-exa", "git:github.com/acme/pi-tools@v1"] }',
-      );
-      yield* fs.writeFileString(
-        `${npmRoot}/package.json`,
-        '{ "name": "pi-exa", "pi": { "extensions": ["./src/index.ts"] } }',
-      );
-      yield* fs.writeFileString(`${npmRoot}/src/index.ts`, "export default () => {}");
-      yield* fs.writeFileString(
-        `${gitRoot}/package.json`,
-        '{ "name": "pi-tools", "pi": { "extensions": ["./index.ts"] } }',
-      );
-      yield* fs.writeFileString(`${gitRoot}/index.ts`, "export default () => {}");
-      const found = yield* discoverPiUserExtensions({
-        environment: { HOME: home },
-        cwd: undefined,
-      });
-      assert.deepEqual(found, [`${npmRoot}/src/index.ts`, `${gitRoot}/index.ts`]);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("skips missing packages and empty extension filters", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
-      const agentDir = `${home}/.pi/agent`;
-      yield* fs.makeDirectory(agentDir, { recursive: true });
-      yield* fs.writeFileString(
-        `${agentDir}/settings.json`,
-        '{ "packages": ["npm:not-installed", { "source": "npm:pi-exa", "extensions": [] }, "npm:@acme/tools"] }',
-      );
-      const scopedRoot = `${agentDir}/npm/node_modules/@acme/tools`;
-      yield* fs.makeDirectory(scopedRoot, { recursive: true });
-      yield* fs.writeFileString(`${scopedRoot}/package.json`, '{ "name": "@acme/tools" }');
-      yield* fs.writeFileString(`${scopedRoot}/index.ts`, "export default () => {}");
-      const found = yield* discoverPiUserExtensions({
-        environment: { HOME: home },
-        cwd: undefined,
-      });
-      assert.deepEqual(found, [`${scopedRoot}/index.ts`]);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("loads project packages only under standing project trust", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
-      const project = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-project-" });
-      const agentDir = `${home}/.pi/agent`;
-      const projectPkg = `${project}/.pi/npm/node_modules/local-exa`;
-      yield* fs.makeDirectory(agentDir, { recursive: true });
-      yield* fs.makeDirectory(`${projectPkg}/src`, { recursive: true });
-      yield* fs.writeFileString(`${agentDir}/settings.json`, "{}");
-      yield* fs.writeFileString(
-        `${project}/.pi/settings.json`,
-        '{ "packages": ["npm:local-exa"] }',
-      );
-      yield* fs.writeFileString(
-        `${projectPkg}/package.json`,
-        '{ "name": "local-exa", "pi": { "extensions": ["./src/index.ts"] } }',
-      );
-      yield* fs.writeFileString(`${projectPkg}/src/index.ts`, "export default () => {}");
-      const untrusted = yield* discoverPiUserExtensions({
-        environment: { HOME: home },
-        cwd: project,
-      });
-      assert.deepEqual(untrusted, []);
-      yield* fs.writeFileString(`${agentDir}/settings.json`, '{ "defaultProjectTrust": "always" }');
-      const trusted = yield* discoverPiUserExtensions({
-        environment: { HOME: home },
-        cwd: project,
-      });
-      assert.deepEqual(trusted, [`${projectPkg}/src/index.ts`]);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("falls back to the user install when the project copy is missing", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
-      const project = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-project-" });
-      const agentDir = `${home}/.pi/agent`;
-      const userPkg = `${agentDir}/npm/node_modules/pi-exa`;
-      const projectPkg = `${project}/.pi/npm/node_modules/pi-exa`;
-      yield* fs.makeDirectory(`${userPkg}/src`, { recursive: true });
-      yield* fs.makeDirectory(`${project}/.pi`, { recursive: true });
-      yield* fs.writeFileString(
-        `${agentDir}/settings.json`,
-        '{ "defaultProjectTrust": "always", "packages": ["npm:pi-exa"] }',
-      );
-      yield* fs.writeFileString(`${project}/.pi/settings.json`, '{ "packages": ["npm:pi-exa"] }');
-      yield* fs.writeFileString(
-        `${userPkg}/package.json`,
-        '{ "name": "pi-exa", "pi": { "extensions": ["./src/index.ts"] } }',
-      );
-      yield* fs.writeFileString(`${userPkg}/src/index.ts`, "export default () => {}");
-      const missingProject = yield* discoverPiUserExtensions({
-        environment: { HOME: home },
-        cwd: project,
-      });
-      assert.deepEqual(missingProject, [`${userPkg}/src/index.ts`]);
-      yield* fs.makeDirectory(`${projectPkg}/src`, { recursive: true });
-      yield* fs.writeFileString(
-        `${projectPkg}/package.json`,
-        '{ "name": "pi-exa", "pi": { "extensions": ["./src/index.ts"] } }',
-      );
-      yield* fs.writeFileString(`${projectPkg}/src/index.ts`, "export default () => {}");
-      const both = yield* discoverPiUserExtensions({
-        environment: { HOME: home },
-        cwd: project,
-      });
-      assert.deepEqual(both, [`${projectPkg}/src/index.ts`]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
