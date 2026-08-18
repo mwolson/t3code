@@ -149,4 +149,129 @@ describe("pi T3 MCP injection", () => {
       assert.deepEqual(trusted, [`${project}/.pi/extensions/local.ts`]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it.effect("discovers installed npm and git package extensions from settings", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
+      const agentDir = `${home}/.pi/agent`;
+      const npmRoot = `${agentDir}/npm/node_modules/pi-exa`;
+      const gitRoot = `${agentDir}/git/github.com/acme/pi-tools`;
+      yield* fs.makeDirectory(`${npmRoot}/src`, { recursive: true });
+      yield* fs.makeDirectory(gitRoot, { recursive: true });
+      yield* fs.writeFileString(
+        `${agentDir}/settings.json`,
+        '{ "packages": ["npm:pi-exa", "git:github.com/acme/pi-tools@v1"] }',
+      );
+      yield* fs.writeFileString(
+        `${npmRoot}/package.json`,
+        '{ "name": "pi-exa", "pi": { "extensions": ["./src/index.ts"] } }',
+      );
+      yield* fs.writeFileString(`${npmRoot}/src/index.ts`, "export default () => {}");
+      yield* fs.writeFileString(
+        `${gitRoot}/package.json`,
+        '{ "name": "pi-tools", "pi": { "extensions": ["./index.ts"] } }',
+      );
+      yield* fs.writeFileString(`${gitRoot}/index.ts`, "export default () => {}");
+      const found = yield* discoverPiUserExtensions({
+        environment: { HOME: home },
+        cwd: undefined,
+      });
+      assert.deepEqual(found, [`${npmRoot}/src/index.ts`, `${gitRoot}/index.ts`]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("skips missing packages and empty extension filters", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
+      const agentDir = `${home}/.pi/agent`;
+      yield* fs.makeDirectory(agentDir, { recursive: true });
+      yield* fs.writeFileString(
+        `${agentDir}/settings.json`,
+        '{ "packages": ["npm:not-installed", { "source": "npm:pi-exa", "extensions": [] }, "npm:@acme/tools"] }',
+      );
+      const scopedRoot = `${agentDir}/npm/node_modules/@acme/tools`;
+      yield* fs.makeDirectory(scopedRoot, { recursive: true });
+      yield* fs.writeFileString(`${scopedRoot}/package.json`, '{ "name": "@acme/tools" }');
+      yield* fs.writeFileString(`${scopedRoot}/index.ts`, "export default () => {}");
+      const found = yield* discoverPiUserExtensions({
+        environment: { HOME: home },
+        cwd: undefined,
+      });
+      assert.deepEqual(found, [`${scopedRoot}/index.ts`]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("loads project packages only under standing project trust", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
+      const project = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-project-" });
+      const agentDir = `${home}/.pi/agent`;
+      const projectPkg = `${project}/.pi/npm/node_modules/local-exa`;
+      yield* fs.makeDirectory(agentDir, { recursive: true });
+      yield* fs.makeDirectory(`${projectPkg}/src`, { recursive: true });
+      yield* fs.writeFileString(`${agentDir}/settings.json`, "{}");
+      yield* fs.writeFileString(
+        `${project}/.pi/settings.json`,
+        '{ "packages": ["npm:local-exa"] }',
+      );
+      yield* fs.writeFileString(
+        `${projectPkg}/package.json`,
+        '{ "name": "local-exa", "pi": { "extensions": ["./src/index.ts"] } }',
+      );
+      yield* fs.writeFileString(`${projectPkg}/src/index.ts`, "export default () => {}");
+      const untrusted = yield* discoverPiUserExtensions({
+        environment: { HOME: home },
+        cwd: project,
+      });
+      assert.deepEqual(untrusted, []);
+      yield* fs.writeFileString(`${agentDir}/settings.json`, '{ "defaultProjectTrust": "always" }');
+      const trusted = yield* discoverPiUserExtensions({
+        environment: { HOME: home },
+        cwd: project,
+      });
+      assert.deepEqual(trusted, [`${projectPkg}/src/index.ts`]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("falls back to the user install when the project copy is missing", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
+      const project = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-project-" });
+      const agentDir = `${home}/.pi/agent`;
+      const userPkg = `${agentDir}/npm/node_modules/pi-exa`;
+      const projectPkg = `${project}/.pi/npm/node_modules/pi-exa`;
+      yield* fs.makeDirectory(`${userPkg}/src`, { recursive: true });
+      yield* fs.makeDirectory(`${project}/.pi`, { recursive: true });
+      yield* fs.writeFileString(
+        `${agentDir}/settings.json`,
+        '{ "defaultProjectTrust": "always", "packages": ["npm:pi-exa"] }',
+      );
+      yield* fs.writeFileString(`${project}/.pi/settings.json`, '{ "packages": ["npm:pi-exa"] }');
+      yield* fs.writeFileString(
+        `${userPkg}/package.json`,
+        '{ "name": "pi-exa", "pi": { "extensions": ["./src/index.ts"] } }',
+      );
+      yield* fs.writeFileString(`${userPkg}/src/index.ts`, "export default () => {}");
+      const missingProject = yield* discoverPiUserExtensions({
+        environment: { HOME: home },
+        cwd: project,
+      });
+      assert.deepEqual(missingProject, [`${userPkg}/src/index.ts`]);
+      yield* fs.makeDirectory(`${projectPkg}/src`, { recursive: true });
+      yield* fs.writeFileString(
+        `${projectPkg}/package.json`,
+        '{ "name": "pi-exa", "pi": { "extensions": ["./src/index.ts"] } }',
+      );
+      yield* fs.writeFileString(`${projectPkg}/src/index.ts`, "export default () => {}");
+      const both = yield* discoverPiUserExtensions({
+        environment: { HOME: home },
+        cwd: project,
+      });
+      assert.deepEqual(both, [`${projectPkg}/src/index.ts`]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });
