@@ -34,6 +34,30 @@ function bearerTokenFromAuthorizationHeader(header: string): string {
 
 const decodeJson = Schema.decodeSync(Schema.fromJsonString(Schema.Unknown));
 
+function joinPiPath(...parts: ReadonlyArray<string>): string {
+  const joined = parts
+    .map((part) => normalizePiPath(part))
+    .filter((part) => part.length > 0)
+    .join("/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/\/\.\//g, "/");
+  return normalizePiPath(joined);
+}
+
+function parsePiGitInstallKey(spec: string): string | undefined {
+  const match = spec.match(/^([^/]+)\/([^@]+?)(?:@[^/]+)?$/);
+  if (match?.[1] === undefined || match[2] === undefined) return undefined;
+  const path = match[2].replace(/\/+$/, "");
+  if (path.length === 0 || !path.includes("/")) return undefined;
+  return `${match[1]}/${path}`;
+}
+
+function parsePiNpmPackageName(spec: string): string | undefined {
+  const match = spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@(.+))?$/);
+  const name = match?.[1];
+  return name !== undefined && name.length > 0 ? name : undefined;
+}
+
 function piDefaultProjectTrust(settingsRaw: string): string | undefined {
   try {
     const parsed = decodeJson(settingsRaw);
@@ -45,16 +69,100 @@ function piDefaultProjectTrust(settingsRaw: string): string | undefined {
   }
 }
 
+function piManifestExtensionRels(packageJsonRaw: string): Array<string> | undefined {
+  try {
+    const parsed = decodeJson(packageJsonRaw);
+    if (!Predicate.isObject(parsed)) return undefined;
+    const manifest = parsed["pi"];
+    if (!Predicate.isObject(manifest)) return undefined;
+    const extensions = manifest["extensions"];
+    if (!Array.isArray(extensions) || !extensions.every((entry) => Predicate.isString(entry))) {
+      return undefined;
+    }
+    return extensions;
+  } catch {
+    return undefined;
+  }
+}
+
+function piPackageIdentity(source: string): string {
+  if (source.startsWith("npm:")) {
+    return `npm:${parsePiNpmPackageName(source.slice("npm:".length).trim()) ?? source}`;
+  }
+  if (source.startsWith("git:")) {
+    return `git:${parsePiGitInstallKey(source.slice("git:".length).trim()) ?? source}`;
+  }
+  return `local:${normalizePiPath(source)}`;
+}
+
+function piSettingsPackageSources(settingsRaw: string): Array<string> {
+  try {
+    const parsed = decodeJson(settingsRaw);
+    if (!Predicate.isObject(parsed)) return [];
+    const packages = parsed["packages"];
+    if (!Array.isArray(packages)) return [];
+    const sources: Array<string> = [];
+    for (const entry of packages) {
+      if (Predicate.isString(entry) && entry.length > 0) {
+        sources.push(entry);
+        continue;
+      }
+      if (!Predicate.isObject(entry)) continue;
+      const source = entry["source"];
+      if (!Predicate.isString(source) || source.length === 0) continue;
+      const extensions = entry["extensions"];
+      if (Array.isArray(extensions) && extensions.length === 0) continue;
+      sources.push(source);
+    }
+    return sources;
+  } catch {
+    return [];
+  }
+}
+
+function resolvePiPackageRoot(input: {
+  readonly agentDir: string;
+  readonly cwd: string | undefined;
+  readonly scope: "project" | "user";
+  readonly source: string;
+}): string | undefined {
+  if (input.source.startsWith("npm:")) {
+    const name = parsePiNpmPackageName(input.source.slice("npm:".length).trim());
+    if (name === undefined) return undefined;
+    if (input.scope === "project") {
+      return input.cwd === undefined
+        ? undefined
+        : joinPiPath(input.cwd, ".pi/npm/node_modules", name);
+    }
+    return joinPiPath(input.agentDir, "npm/node_modules", name);
+  }
+  if (input.source.startsWith("git:")) {
+    const key = parsePiGitInstallKey(input.source.slice("git:".length).trim());
+    if (key === undefined) return undefined;
+    if (input.scope === "project") {
+      return input.cwd === undefined ? undefined : joinPiPath(input.cwd, ".pi/git", key);
+    }
+    return joinPiPath(input.agentDir, "git", key);
+  }
+  const normalized = normalizePiPath(input.source);
+  if (normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized)) return normalized;
+  if (input.scope === "project") {
+    return input.cwd === undefined ? undefined : joinPiPath(input.cwd, ".pi", normalized);
+  }
+  return joinPiPath(input.agentDir, normalized);
+}
+
 /**
  * Re-discover the user's pi extensions for a `--no-extensions` spawn: the
  * subagent override forces discovery off (a second `subagent` registration
  * aborts pi), which must not cost the user every other extension they have.
  * Mirrors pi's own discovery roots: `<agent dir>/extensions/*.ts` and
- * `<agent dir>/extensions/<dir>/index.ts`, plus the project-local
- * `.pi/extensions` only when the user's `defaultProjectTrust` is `always` —
- * explicit `--extension` paths bypass pi's trust prompt, so anything short
- * of standing trust must not be silently loaded. Entries named `subagent`
- * are skipped in favor of the T3 override.
+ * `<agent dir>/extensions/<dir>/index.ts`, plus installed `settings.json`
+ * `packages` (npm, git, and local paths). Project-local `.pi/extensions` and
+ * `.pi/settings.json` packages load only when `defaultProjectTrust` is
+ * `always`. Explicit `--extension` paths bypass pi's trust prompt, so anything
+ * short of standing trust must not be silently loaded. Entries named
+ * `subagent` are skipped in favor of the T3 override.
  */
 export const discoverPiUserExtensions = Effect.fn("discoverPiUserExtensions")(function* (input: {
   readonly environment: NodeJS.ProcessEnv;
@@ -65,17 +173,30 @@ export const discoverPiUserExtensions = Effect.fn("discoverPiUserExtensions")(fu
   const agentDir =
     input.environment["PI_CODING_AGENT_DIR"] ??
     (home === undefined ? undefined : `${normalizePiPath(home)}/.pi/agent`);
-  const roots: Array<string> = [];
-  if (agentDir !== undefined) roots.push(`${normalizePiPath(agentDir)}/extensions`);
-  if (agentDir !== undefined && input.cwd !== undefined) {
-    const settingsRaw = yield* fs
-      .readFileString(`${normalizePiPath(agentDir)}/settings.json`)
-      .pipe(Effect.orElseSucceed(() => ""));
-    if (piDefaultProjectTrust(settingsRaw) === "always") {
-      roots.push(`${normalizePiPath(input.cwd)}/.pi/extensions`);
-    }
-  }
+  const normalizedAgentDir = agentDir === undefined ? undefined : normalizePiPath(agentDir);
+  const cwd = input.cwd === undefined ? undefined : normalizePiPath(input.cwd);
+  const settingsRaw =
+    normalizedAgentDir === undefined
+      ? ""
+      : yield* fs
+          .readFileString(`${normalizedAgentDir}/settings.json`)
+          .pipe(Effect.orElseSucceed(() => ""));
+  const projectTrusted = piDefaultProjectTrust(settingsRaw) === "always";
+
   const found: Array<string> = [];
+  const seen = new Set<string>();
+  const addPath = (path: string) => {
+    const normalized = normalizePiPath(path);
+    if (seen.has(normalized) || isConflictingPiSubagentExtensionPath(normalized)) return;
+    seen.add(normalized);
+    found.push(normalized);
+  };
+
+  const roots: Array<string> = [];
+  if (normalizedAgentDir !== undefined) roots.push(`${normalizedAgentDir}/extensions`);
+  if (projectTrusted && cwd !== undefined) {
+    roots.push(`${cwd}/.pi/extensions`);
+  }
   for (const root of roots) {
     const entries = yield* fs
       .readDirectory(root)
@@ -84,14 +205,64 @@ export const discoverPiUserExtensions = Effect.fn("discoverPiUserExtensions")(fu
       if (entry === "subagent" || entry === "subagent.ts") continue;
       const path = `${root}/${entry}`;
       if (entry.endsWith(".ts")) {
-        found.push(path);
+        addPath(path);
         continue;
       }
       const indexPath = `${path}/index.ts`;
       const hasIndex = yield* fs.exists(indexPath).pipe(Effect.orElseSucceed(() => false));
-      if (hasIndex) found.push(indexPath);
+      if (hasIndex) addPath(indexPath);
     }
   }
+
+  if (normalizedAgentDir !== undefined) {
+    const packageSpecs: Array<{ readonly scope: "project" | "user"; readonly source: string }> = [];
+    if (projectTrusted && cwd !== undefined) {
+      const projectSettingsRaw = yield* fs
+        .readFileString(`${cwd}/.pi/settings.json`)
+        .pipe(Effect.orElseSucceed(() => ""));
+      for (const source of piSettingsPackageSources(projectSettingsRaw)) {
+        packageSpecs.push({ scope: "project", source });
+      }
+    }
+    for (const source of piSettingsPackageSources(settingsRaw)) {
+      packageSpecs.push({ scope: "user", source });
+    }
+    const seenPackages = new Set<string>();
+    for (const spec of packageSpecs) {
+      const identity = piPackageIdentity(spec.source);
+      if (seenPackages.has(identity)) continue;
+      const packageRoot = resolvePiPackageRoot({
+        agentDir: normalizedAgentDir,
+        cwd,
+        scope: spec.scope,
+        source: spec.source,
+      });
+      if (packageRoot === undefined) continue;
+      const packageExists = yield* fs.exists(packageRoot).pipe(Effect.orElseSucceed(() => false));
+      if (!packageExists) continue;
+      seenPackages.add(identity);
+      const packageJsonRaw = yield* fs
+        .readFileString(`${packageRoot}/package.json`)
+        .pipe(Effect.orElseSucceed(() => ""));
+      const manifestRels = piManifestExtensionRels(packageJsonRaw);
+      if (manifestRels !== undefined) {
+        for (const rel of manifestRels) {
+          if (rel.includes("*") || rel.startsWith("!")) continue;
+          const path = joinPiPath(packageRoot, rel);
+          if (yield* fs.exists(path).pipe(Effect.orElseSucceed(() => false))) addPath(path);
+        }
+        continue;
+      }
+      for (const name of ["index.ts", "index.js"] as const) {
+        const path = `${packageRoot}/${name}`;
+        if (yield* fs.exists(path).pipe(Effect.orElseSucceed(() => false))) {
+          addPath(path);
+          break;
+        }
+      }
+    }
+  }
+
   return found;
 });
 
