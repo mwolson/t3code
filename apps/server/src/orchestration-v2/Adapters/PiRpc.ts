@@ -16,6 +16,7 @@
  * Used by `PiAdapterV2` for sessions and by `PiTextGeneration` /
  * `PiProvider` for ephemeral one-shot processes.
  */
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -343,6 +344,10 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
               )
             : yield* Deferred.await(exitDeferred).pipe(
                 Effect.timeoutOption(Duration.millis(250)),
+                // Adapter tests run under TestClock. A planned stdout close
+                // without an exit, for example Stop-with-restart, must not wait
+                // on that clock or the transport never fails.
+                Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
                 Effect.orElseSucceed(() => Option.none<number>()),
               );
           return yield* failTransport(
