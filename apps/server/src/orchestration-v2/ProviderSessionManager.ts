@@ -642,6 +642,17 @@ export const layerWithOptions = (
           );
         });
 
+      // Preserve already-published terminal events while ending subscriptions.
+      // Server shutdown intentionally clears them; a provider-announced Stop
+      // must let consumers drain them before the stream completes.
+      const endSubscribers = (entry: LiveSessionEntry) =>
+        Effect.gen(function* () {
+          const subscribers = yield* Ref.getAndSet(entry.eventSubscribers, new Map());
+          yield* Effect.forEach(subscribers.values(), (queue) => Queue.end(queue), {
+            discard: true,
+          });
+        });
+
       const cancelIdleFiber = (fiber: Fiber.Fiber<void, never> | null) =>
         fiber === null ? Effect.void : Fiber.interrupt(fiber).pipe(Effect.ignore);
 
@@ -816,6 +827,7 @@ export const layerWithOptions = (
         readonly onlyIfIdleGeneration?: number;
         /** When set, release only if the map still holds this exact runtime. */
         readonly onlyIfRuntime?: ProviderAdapterV2SessionRuntime;
+        readonly gracefulSubscribers?: boolean;
       }
       interface ReleaseEntryState {
         entry: Option.Option<LiveSessionEntry>;
@@ -849,7 +861,9 @@ export const layerWithOptions = (
               });
               releaseState.entry = entry;
               if (Option.isNone(entry)) return;
-              if (input.reason === "server_shutdown") {
+              if (input.gracefulSubscribers === true) {
+                yield* endSubscribers(entry.value);
+              } else if (input.reason === "server_shutdown") {
                 yield* closeSubscribers(entry.value);
               } else {
                 yield* failSubscribers(
@@ -1966,6 +1980,7 @@ export const layerWithOptions = (
 
       const startEventPump = (entry: LiveSessionEntry) =>
         Effect.gen(function* () {
+          let stoppedByProvider = false;
           const processingQueue = yield* Queue.unbounded<ProviderAdapterV2Event, Cause.Done>();
           const processingFiber = yield* Stream.fromQueue(processingQueue).pipe(
             Stream.runForEach((event) =>
@@ -1981,8 +1996,14 @@ export const layerWithOptions = (
             Effect.forkIn(layerScope),
           );
           const exit = yield* entry.runtime.events.pipe(
-            Stream.runForEach((event) =>
-              observeProviderTurnEvent(entry, event).pipe(
+            Stream.runForEach((event) => {
+              if (
+                event.type === "provider_session.updated" &&
+                event.providerSession.status === "stopped"
+              ) {
+                stoppedByProvider = true;
+              }
+              return observeProviderTurnEvent(entry, event).pipe(
                 Effect.andThen(
                   observeActivity(
                     entry.runtime.providerSessionId,
@@ -1992,8 +2013,8 @@ export const layerWithOptions = (
                   ),
                 ),
                 Effect.andThen(Queue.offer(processingQueue, event)),
-              ),
-            ),
+              );
+            }),
             Effect.exit,
           );
           yield* Queue.end(processingQueue);
@@ -2003,6 +2024,14 @@ export const layerWithOptions = (
               sessionKey(entry.runtime.providerSessionId),
             );
             if (current?.runtime !== entry.runtime) {
+              return;
+            }
+            if (stoppedByProvider && Exit.isSuccess(exit)) {
+              yield* releaseEntry({
+                providerSessionId: entry.runtime.providerSessionId,
+                reason: "manual_shutdown",
+                gracefulSubscribers: true,
+              }).pipe(Effect.ignore);
               return;
             }
             const cause = Exit.isFailure(exit)
