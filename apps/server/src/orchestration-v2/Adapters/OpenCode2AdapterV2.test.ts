@@ -90,7 +90,11 @@ import {
   removeOpenCode2Session,
   unwrapOpenCode2Data,
 } from "./OpenCode2AdapterV2.ts";
-import { normalizeOpenCode2WireType, openCode2WireInputID } from "./openCode2Wire.ts";
+import {
+  normalizeOpenCode2WireType,
+  openCode2WireAdmittedInput,
+  openCode2WireInputID,
+} from "./openCode2Wire.ts";
 
 const v2Event = (event: unknown) => event as V2Event;
 
@@ -108,7 +112,15 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 describe("OpenCode 2 wire input ids", () => {
   it("reads every supported input id alias", () => {
-    for (const key of ["inputID", "inputId", "messageID", "messageId", "id"]) {
+    for (const key of [
+      "inputID",
+      "inputId",
+      "inboxID",
+      "inboxId",
+      "messageID",
+      "messageId",
+      "id",
+    ]) {
       assert.strictEqual(openCode2WireInputID({ data: { [key]: `input:${key}` } }), `input:${key}`);
     }
   });
@@ -1684,6 +1696,50 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
       }).code,
       "provider.context-limit",
     );
+  });
+
+  it("normalizes inbox enqueue and delivery as input admission", () => {
+    assert.strictEqual(
+      normalizeOpenCode2WireType("session.inbox.enqueued"),
+      "session.input.admitted",
+    );
+    assert.strictEqual(
+      normalizeOpenCode2WireType("session.inbox.delivered"),
+      "session.input.admitted",
+    );
+  });
+
+  it("reads 17498 inbox item payloads and treats delivered as promotion", () => {
+    const enqueued = v2Event({
+      type: "session.inbox.enqueued",
+      data: {
+        sessionID: "ses_root",
+        inboxID: "msg_wake",
+        item: {
+          type: "synthetic",
+          payload: { text: '<subagent state="completed">child completed</subagent>' },
+          delivery: "queue",
+        },
+      },
+    });
+    const userEnqueued = v2Event({
+      type: "session.inbox.enqueued",
+      data: {
+        sessionID: "ses_root",
+        inboxID: "msg_user",
+        item: { type: "user", payload: { text: "hello" }, delivery: "steer" },
+      },
+    });
+    const delivered = v2Event({
+      type: "session.inbox.delivered",
+      data: { sessionID: "ses_root", inboxID: "msg_wake" },
+    });
+    assert.strictEqual(openCode2WireInputID(enqueued), "msg_wake");
+    assert.notEqual(openCode2WireAdmittedInput(enqueued), undefined);
+    assert.equal(openCode2WireAdmittedInput(delivered), undefined);
+    assert.isTrue(openCode2IsPostSettleWakeAdmission(enqueued, { isChildSession: false }));
+    assert.isFalse(openCode2IsPostSettleWakeAdmission(userEnqueued, { isChildSession: false }));
+    assert.isFalse(openCode2IsPostSettleWakeAdmission(delivered, { isChildSession: false }));
   });
 
   it("normalizes current compaction admission and failure events", () => {
