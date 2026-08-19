@@ -1018,6 +1018,23 @@ function openCode2CompactionReason(input: unknown): "auto" | "manual" | "unknown
   return reason === "auto" || reason === "manual" ? reason : "unknown";
 }
 
+export function openCode2PendingItemsFromList(input: unknown): ReadonlyArray<SessionPendingInfo> {
+  if (!Array.isArray(input)) return [];
+  const items: SessionPendingInfo[] = [];
+  for (const item of input) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const sessionID = record.sessionID;
+    if (typeof sessionID !== "string" || sessionID.length === 0) continue;
+    items.push({
+      sessionID,
+      ...(typeof record.id === "string" ? { id: record.id } : {}),
+      ...(typeof record.type === "string" ? { type: record.type } : {}),
+    });
+  }
+  return items;
+}
+
 export const openCode2PendingWorkForSession = Effect.fnUntraced(function* (input: {
   readonly sessionID: string;
   readonly pending: Effect.Effect<ReadonlyArray<SessionPendingInfo>, OpenCode2RuntimeError>;
@@ -1743,6 +1760,16 @@ export function openCode2FormAnswer(
     answer[key] = multiselectFields?.[index] === true || values.length > 1 ? values : values[0]!;
   });
   return answer;
+}
+
+export function isOpenCode2McpCatalogUnavailable(detail: string): boolean {
+  const text = detail.toLowerCase();
+  return (
+    text.includes("404") ||
+    text.includes("not found") ||
+    text.includes("text/html") ||
+    text.includes("not supported by this version")
+  );
 }
 
 /**
@@ -6392,21 +6419,38 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             sessionID,
             // Prefer live Session3 when present; replay client still implements
             // these routes so fixtures can assert the post-settle probes.
-            pending: sdkCall("session.pending.list", { sessionID }, () => {
+            pending: (() => {
               const pendingList = (
                 client.v2.session as {
                   pending?: { list: (input: { sessionID: string }) => Promise<unknown> };
                 }
               ).pending?.list;
+              const listInbox = sdkCall("session.inbox.list", { sessionID }, () =>
+                rawHttpClient().get({
+                  url: "/api/session/{sessionID}/inbox",
+                  path: { sessionID },
+                  throwOnError: false,
+                }),
+              ).pipe(
+                Effect.flatMap((response) =>
+                  unwrapOpenCode2Data<unknown>("session.inbox.list", response),
+                ),
+                Effect.map(openCode2PendingItemsFromList),
+              );
               if (pendingList === undefined) {
-                return Promise.resolve({ data: { data: [] as Array<SessionPendingInfo> } });
+                // The pinned SDK has no pending.list. beta-17498 replaced
+                // /pending with /inbox, so speak the live route.
+                return listInbox;
               }
-              return pendingList({ sessionID });
-            }).pipe(
-              Effect.flatMap((response) =>
-                unwrapOpenCode2Data<Array<SessionPendingInfo>>("session.pending.list", response),
-              ),
-            ),
+              return sdkCall("session.pending.list", { sessionID }, () =>
+                pendingList({ sessionID }),
+              ).pipe(
+                Effect.flatMap((response) =>
+                  unwrapOpenCode2Data<unknown>("session.pending.list", response),
+                ),
+                Effect.map(openCode2PendingItemsFromList),
+              );
+            })(),
             shells: sdkCall("shell.list", { location: state.location }, () => {
               const shellList = (
                 client.v2 as {
@@ -6462,9 +6506,8 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             ).pipe(
               Effect.map((response) => ({ available: true as const, response })),
               Effect.catch((error: OpenCode2RuntimeError) => {
-                // Beta lildax has no /mcp routes; do not block session open.
-                const detail = openCodeRuntimeErrorDetail(error.cause).toLowerCase();
-                if (detail.includes("404") || detail.includes("not found")) {
+                // beta-17498 has no /mcp JSON route; the SDK gets HTML.
+                if (isOpenCode2McpCatalogUnavailable(openCodeRuntimeErrorDetail(error.cause))) {
                   return Effect.succeed({ available: false as const, response: null });
                 }
                 return Effect.fail(error);

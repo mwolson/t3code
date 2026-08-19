@@ -45,10 +45,12 @@ import {
   openCode2ForkEventPumpInScope,
   openCode2ForkParameters,
   openCode2InterruptedThreadDisposition,
+  isOpenCode2McpCatalogUnavailable,
   openCode2HasInFlightPendingWork,
   openCode2IsCancelledPostSettleWake,
   openCode2IsPostSettleWakeAdmission,
   openCode2LastErrorAt,
+  openCode2PendingItemsFromList,
   openCode2PendingWorkForSession,
   openCode2PermissionAutoReply,
   openCode2PermissionAutoReplyForSession,
@@ -699,6 +701,18 @@ describe("openCode2ForkParameters", () => {
   });
 });
 
+describe("isOpenCode2McpCatalogUnavailable", () => {
+  it("treats missing and html catalog responses as unavailable", () => {
+    assert.isTrue(isOpenCode2McpCatalogUnavailable("Not Found"));
+    assert.isTrue(
+      isOpenCode2McpCatalogUnavailable(
+        "Request is not supported by this version of OpenCode Server (Server responded with text/html)",
+      ),
+    );
+    assert.isFalse(isOpenCode2McpCatalogUnavailable("timeout"));
+  });
+});
+
 describe("openCode2EnvironmentWithT3Mcp", () => {
   it.effect("merges a per-thread server into process-local inline config", () =>
     Effect.gen(function* () {
@@ -1110,6 +1124,28 @@ describe("OpenCode 2 child item ordinals", () => {
   it("reserves a distinct item block for every child turn", () => {
     assert.deepStrictEqual(openCode2ChildTurnItemOrdinals(1), { user: 100, next: 101 });
     assert.deepStrictEqual(openCode2ChildTurnItemOrdinals(2), { user: 200, next: 201 });
+  });
+});
+
+describe("openCode2PendingItemsFromList", () => {
+  it("keeps pending and inbox items that name a session", () => {
+    assert.deepStrictEqual(
+      openCode2PendingItemsFromList([
+        { sessionID: "ses_a", id: "pending-1", type: "compaction" },
+        { sessionID: "ses_b", id: "msg_1", type: "user", payload: { text: "hi" } },
+        { id: "orphan" },
+        "skip",
+      ]),
+      [
+        { sessionID: "ses_a", id: "pending-1", type: "compaction" },
+        { sessionID: "ses_b", id: "msg_1", type: "user" },
+      ],
+    );
+  });
+
+  it("returns an empty list for a missing payload", () => {
+    assert.deepStrictEqual(openCode2PendingItemsFromList(undefined), []);
+    assert.deepStrictEqual(openCode2PendingItemsFromList({ data: [] }), []);
   });
 });
 
