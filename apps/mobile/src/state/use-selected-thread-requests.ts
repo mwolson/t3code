@@ -104,8 +104,7 @@ export function useSelectedThreadRequests() {
         return;
       }
 
-      const question = activePendingUserInput?.questions.find((item) => item.id === questionId);
-      if (!question || activePendingUserInput.requestId !== requestId) return;
+      if (!activePendingUserInput || activePendingUserInput.requestId !== requestId) return;
       const requestKey = scopedRequestKey(selectedThreadShell.environmentId, requestId);
       setUserInputDraftOption(requestKey, question, label);
     },

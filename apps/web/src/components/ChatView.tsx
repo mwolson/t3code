@@ -6477,7 +6477,6 @@ function ChatViewContent(props: ChatViewProps) {
         <ThreadErrorBanner
           error={visibleThreadError}
           onDismiss={() => {
-            dismissThreadError();
             dismissThreadErrorBannerForSession(threadErrorBannerKey);
             setThreadErrorBannerDismissTick((tick) => tick + 1);
           }}

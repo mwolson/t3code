@@ -47,7 +47,7 @@ import {
   type QueuedThreadMessage,
   type ThreadOutboxCommandStage,
 } from "./thread-outbox-model";
-import { threadEnvironment } from "./threads";
+import { environmentThreadShells, threadEnvironment } from "./threads";
 import { useAtomCommand } from "./use-atom-command";
 import {
   editingQueuedMessageIdsAtom,

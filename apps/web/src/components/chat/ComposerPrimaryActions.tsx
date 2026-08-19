@@ -110,18 +110,24 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
 
   const secondaryStopButton =
     !isRunning && showSecondaryStop ? (
-      <button
-        type="button"
-        className="flex size-8 cursor-pointer items-center justify-center rounded-full border border-destructive/45 text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive sm:h-8 sm:w-8"
-        {...pointerFocusProps}
-        onClick={onInterrupt}
-        aria-label="Stop generation"
-        title="Stop background work"
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-          <rect x="2" y="2" width="8" height="8" rx="1.5" />
-        </svg>
-      </button>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              className="flex size-8 cursor-pointer items-center justify-center rounded-full border border-destructive/45 text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive sm:h-8 sm:w-8"
+              {...pointerFocusProps}
+              onClick={onInterrupt}
+              aria-label="Stop generation"
+            />
+          }
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+            <rect x="2" y="2" width="8" height="8" rx="1.5" />
+          </svg>
+        </TooltipTrigger>
+        <TooltipPopup side="top">Stop background work</TooltipPopup>
+      </Tooltip>
     ) : null;
 
   if (pendingAction) {

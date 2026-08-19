@@ -101,6 +101,7 @@ const t3McpSession = {
   providerInstanceId: ProviderInstanceId.make("opencode2"),
   endpoint: "http://127.0.0.1:43123/mcp",
   authorizationHeader: "Bearer test-token",
+  browserToolsAvailable: true,
 };
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));

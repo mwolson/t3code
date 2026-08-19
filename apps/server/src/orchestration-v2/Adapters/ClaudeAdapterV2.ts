@@ -3221,84 +3221,6 @@ export function makeClaudeAdapterV2(
           const derivedTurnItemOrdinal =
             existingSubagent?.turnItemOrdinal ??
             (yield* resolveItemOrdinal(input.context, `${nativeItemId}:subagent`));
-          // A resumed subagent's previous final answer and progress no longer
-          // represent its outcome; the next task_progress/task_notification
-          // carry the new ones.
-          const priorTask =
-            existingSubagent === undefined
-              ? undefined
-              : isReopen
-                ? (({ progress: _staleProgress, ...rest }) => ({ ...rest, result: null }))(
-                    existingSubagent.task,
-                  )
-                : existingSubagent.task;
-          const task = {
-            ...(priorTask ?? {
-              id: nodeId,
-              threadId: input.context.input.threadId,
-              runId: input.context.input.runId,
-              parentNodeId: input.context.input.rootNodeId,
-              origin: "provider_native" as const,
-              createdBy: "agent" as const,
-              driver: CLAUDE_PROVIDER,
-              providerInstanceId: input.context.input.modelSelection.instanceId,
-              providerThreadId: null,
-              childThreadId,
-              nativeTaskRef: {
-                driver: CLAUDE_PROVIDER,
-                nativeId: input.taskId,
-                strength: "strong" as const,
-              },
-              prompt: input.prompt ?? "",
-              title: input.title ?? null,
-              model: input.context.input.modelSelection.model,
-              result: null,
-              startedAt: now,
-            }),
-            status: input.status,
-            // A reopen replayed under a continuation run re-attributes the
-            // subagent to that run. RunExecutionService routes parent-thread
-            // events by runId, and only the resuming run's ingestion fiber is
-            // guaranteed alive (the launch run's fiber stops once its child
-            // subagents terminalize); attribution also enrolls the subagent
-            // in the resuming run's active-child tracking so its fiber
-            // outlives settle until the resumed task completes.
-            ...(input.reopen === true &&
-            input.status === "running" &&
-            existingSubagent !== undefined
-              ? { runId: input.context.input.runId }
-              : {}),
-            ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
-            ...(input.title === undefined ? {} : { title: input.title }),
-            ...(input.progress === undefined ? {} : { progress: input.progress }),
-            ...(input.result === undefined ? {} : { result: input.result }),
-            completedAt: input.status === "running" ? null : now,
-            updatedAt: now,
-          } satisfies OrchestrationV2Subagent;
-          const subagent = {
-            task,
-            nativeThreadId:
-              existingSubagent?.nativeThreadId ??
-              input.context.input.providerThread.nativeThreadRef?.nativeId ??
-              null,
-            childThreadId,
-            childRootNodeId,
-            turnItemId:
-              existingSubagent?.turnItemId ??
-              idAllocator.derive.turnItemFromProviderItem({
-                driver: CLAUDE_PROVIDER,
-                nativeItemId: `${nativeItemId}:subagent`,
-              }),
-            turnItemOrdinal,
-            nextChildItemOrdinal: existingSubagent?.nextChildItemOrdinal ?? 100,
-            progressItemOrdinal: existingSubagent?.progressItemOrdinal ?? null,
-            progressStartedAt: existingSubagent?.progressStartedAt ?? null,
-            resultItemOrdinal: existingSubagent?.resultItemOrdinal ?? null,
-          } satisfies ActiveClaudeSubagent;
-          input.context.subagentsByTaskId.set(input.taskId, subagent);
-          if (input.toolUseId !== undefined) {
-            input.context.subagentsByToolUseId.set(input.toolUseId, subagent);
-          }
           // The same terminal protection, applied atomically: a concurrent
           // fiber (live stream vs continuation drain) may have terminalized
           // the registry entry after this update's lookup read it. A resume
@@ -4873,23 +4795,6 @@ export function makeClaudeAdapterV2(
             return;
           }
           yield* clearStrandedOutputFallback(nativeThreadId);
-
-          const continuationGeneration = yield* Ref.modify(
-            continuationStateByNativeThread,
-            (current) => {
-              const existing = current.get(nativeThreadId);
-              if (existing?.requested === true) {
-                return [undefined, current] as const;
-              }
-              const generation = (existing?.generation ?? 0) + 1;
-              const updated = new Map(current);
-              updated.set(nativeThreadId, { generation, requested: true });
-              return [generation, updated] as const;
-            },
-          );
-          if (continuationGeneration === undefined) {
-            return;
-          }
           const offeredWakeBuffer = (yield* Ref.get(wakeBuffers)).get(nativeThreadId);
           const offeredMessages = offeredWakeBuffer?.messages ?? [];
           const failedSubagentTaskIds = new Set<string>();
