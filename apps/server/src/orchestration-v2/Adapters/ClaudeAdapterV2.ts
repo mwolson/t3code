@@ -4595,8 +4595,74 @@ export function makeClaudeAdapterV2(
             });
           }
 
-          for (const { toolResult, output } of claudeToolResultEntriesFromMessage(message)) {
-            const subagent = context.subagentsByToolUseId.get(toolResult.tool_use_id);
+          for (const {
+            message: toolResultMessage,
+            toolResult,
+            output,
+          } of claudeToolResultEntriesFromMessage(message)) {
+            const resultTaskId = claudeSubagentTaskIdFromToolOutput(output);
+            const existingToolCall = context.toolCalls.get(toolResult.tool_use_id);
+            let resolvedSubagent = yield* resolveSessionSubagent({
+              nativeThreadId: context.nativeThreadId,
+              toolUseId: toolResult.tool_use_id,
+            });
+            const outputTaskId =
+              existingToolCall?.subagentTaskId === null ? undefined : resultTaskId;
+            const isKnownAgentLaunch = yield* isSessionSubagentLaunchToolUseId({
+              nativeThreadId: context.nativeThreadId,
+              toolUseId: toolResult.tool_use_id,
+            });
+            if (
+              resultTaskId !== undefined &&
+              failedWakeTaskIds?.has(resultTaskId) === true &&
+              (isKnownAgentLaunch || existingToolCall?.subagentTaskId != null)
+            ) {
+              continue;
+            }
+            if (resolvedSubagent === undefined && outputTaskId !== undefined) {
+              const resolvedByTaskId = yield* resolveSessionSubagent({
+                nativeThreadId: context.nativeThreadId,
+                taskId: outputTaskId,
+              });
+              if (resolvedByTaskId !== undefined && isKnownAgentLaunch) {
+                yield* registerSessionSubagentToolUseAlias({
+                  nativeThreadId: context.nativeThreadId,
+                  taskId: outputTaskId,
+                  toolUseId: toolResult.tool_use_id,
+                });
+                resolvedSubagent = yield* resolveSessionSubagent({
+                  nativeThreadId: context.nativeThreadId,
+                  toolUseId: toolResult.tool_use_id,
+                });
+              } else {
+                resolvedSubagent = resolvedByTaskId;
+              }
+            }
+            const isUnresolvedAgentLaunch =
+              resolvedSubagent === undefined && (outputTaskId !== undefined || isKnownAgentLaunch);
+            if (isUnresolvedAgentLaunch) {
+              if (isClaudeSubagentAsyncLaunchAck(output)) {
+                continue;
+              }
+              const buffered = yield* bufferPendingSubagentMessage({
+                nativeThreadId: context.nativeThreadId,
+                parentToolUseId: toolResult.tool_use_id,
+                ...(outputTaskId === undefined ? {} : { taskId: outputTaskId }),
+                message: toolResultMessage,
+              });
+              if (!buffered) {
+                yield* Effect.logWarning(
+                  "orchestration-v2.claude-subagent-launch-result-buffer-full",
+                  {
+                    providerTurnId: context.providerTurnId,
+                    toolUseId: toolResult.tool_use_id,
+                    ...(outputTaskId === undefined ? {} : { taskId: outputTaskId }),
+                  },
+                );
+              }
+              continue;
+            }
+            const subagent = resolvedSubagent?.subagent;
             // A resume task_started reuses the resuming tool call's
             // tool_use_id (e.g. SendMessage), whose tool_result only
             // acknowledges delivery. Only the Agent launch's tool_result may
