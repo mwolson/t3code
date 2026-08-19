@@ -1,4 +1,4 @@
-import { memo, type PointerEventHandler } from "react";
+import { memo, type PointerEventHandler, type ReactNode } from "react";
 import { ChevronDownIcon, ChevronLeftIcon } from "lucide-react";
 import { useEnvironmentIdentificationMode } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
@@ -108,21 +108,37 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     </button>
   );
 
+  const actionGapClassName = compact ? "gap-1.5" : "gap-2";
   const secondaryStopButton =
     !isRunning && showSecondaryStop ? (
-      <button
-        type="button"
-        className="flex size-8 cursor-pointer items-center justify-center rounded-full border border-destructive/45 text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive sm:h-8 sm:w-8"
-        {...pointerFocusProps}
-        onClick={onInterrupt}
-        aria-label="Stop generation"
-        title="Stop background work"
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-          <rect x="2" y="2" width="8" height="8" rx="1.5" />
-        </svg>
-      </button>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-full border border-destructive/45 text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive sm:h-8 sm:w-8"
+              {...pointerFocusProps}
+              onClick={onInterrupt}
+              aria-label="Stop generation"
+            />
+          }
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+            <rect x="2" y="2" width="8" height="8" rx="1.5" />
+          </svg>
+        </TooltipTrigger>
+        <TooltipPopup side="top">Stop background work</TooltipPopup>
+      </Tooltip>
     ) : null;
+  const withSecondaryStop = (action: ReactNode) =>
+    secondaryStopButton === null ? (
+      action
+    ) : (
+      <div className={cn("flex items-center", actionGapClassName)}>
+        {secondaryStopButton}
+        {action}
+      </div>
+    );
 
   if (pendingAction) {
     const pendingActions = (
@@ -174,14 +190,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         </Button>
       </div>
     );
-    return secondaryStopButton === null ? (
-      pendingActions
-    ) : (
-      <div className="flex items-center gap-2">
-        {secondaryStopButton}
-        {pendingActions}
-      </div>
-    );
+    return withSecondaryStop(pendingActions);
   }
 
   if (showPlanFollowUpPrompt && !isRunning) {
@@ -197,14 +206,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           {isConnecting || isSendBusy ? "Sending..." : "Refine"}
         </Button>
       );
-      return secondaryStopButton === null ? (
-        refineButton
-      ) : (
-        <div className="flex items-center gap-2">
-          {secondaryStopButton}
-          {refineButton}
-        </div>
-      );
+      return withSecondaryStop(refineButton);
     }
 
     const implementActions = (
@@ -244,30 +246,11 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         </Menu>
       </div>
     );
-    return secondaryStopButton === null ? (
-      implementActions
-    ) : (
-      <div className="flex items-center gap-2">
-        {secondaryStopButton}
-        {implementActions}
-      </div>
-    );
+    return withSecondaryStop(implementActions);
   }
 
   if (canInterrupt && !hasSendableContent) {
-    return (
-      <button
-        type="button"
-        className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-destructive/90 text-white shadow-xs shadow-destructive/24 inset-shadow-[0_1px_--theme(--color-white/16%)] transition-all duration-150 hover:bg-destructive hover:scale-105 active:inset-shadow-[0_1px_--theme(--color-black/8%)] active:shadow-none sm:h-8 sm:w-8"
-        {...pointerFocusProps}
-        onClick={onInterrupt}
-        aria-label="Stop generation"
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-          <rect x="2" y="2" width="8" height="8" rx="1.5" />
-        </svg>
-      </button>
-    );
+    return renderStopGenerationButton(false);
   }
 
   const sendButton = (
@@ -317,14 +300,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   );
 
   if (!isRunning) {
-    return secondaryStopButton === null ? (
-      sendButton
-    ) : (
-      <div className="flex items-center gap-2">
-        {secondaryStopButton}
-        {sendButton}
-      </div>
-    );
+    return withSecondaryStop(sendButton);
   }
 
   return (
