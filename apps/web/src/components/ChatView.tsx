@@ -1680,7 +1680,8 @@ function ChatViewContent(props: ChatViewProps) {
   const localDraftError = serverThread
     ? null
     : ((draftId ? localDraftErrorsByDraftId[draftId]?.message : null) ?? null);
-  const localServerError = localServerErrorsByThreadKey[routeThreadKey]?.message ?? null;
+  const localServerErrorEntry = localServerErrorsByThreadKey[routeThreadKey];
+  const localServerError = localServerErrorEntry?.message ?? null;
   // Draft errors are keyed by draftId while server errors are keyed by thread
   // key, so a pending draft entry must migrate when the server thread loads or
   // a failed send would silently disappear on promotion. When both keys hold
@@ -1796,6 +1797,7 @@ function ChatViewContent(props: ChatViewProps) {
       runtimeErrorKey,
       threadError,
       localError: localServerError,
+      localErrorAt: localServerErrorEntry?.at ?? null,
     }),
   );
   const visibleThreadError = shouldShowThreadErrorBanner(
