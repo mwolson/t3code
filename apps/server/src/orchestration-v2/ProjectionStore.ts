@@ -264,9 +264,12 @@ export function applyToProjection(
       if (nextThread === projection.thread) {
         return projection;
       }
+      const nextUpdatedAtMs = DateTime.toEpochMillis(nextThread.updatedAt);
+      const eventUpdatedAtMs = DateTime.toEpochMillis(event.occurredAt);
       return {
         ...base,
         thread: nextThread,
+        updatedAt: nextUpdatedAtMs > eventUpdatedAtMs ? nextThread.updatedAt : event.occurredAt,
       };
     }
     case "run.created":
