@@ -2347,7 +2347,16 @@ export function makeClaudeAdapterV2(
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
-        const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
+        // Steers awaiting a handoff result, counted per provider turn: each
+        // accepted steer ends one native turn, so each one swallows exactly one
+        // result before the turn can terminalize again.
+        const steeredTurns = yield* Ref.make(new Map<OrchestrationV2ProviderTurn["id"], number>());
+        // Frames seen per provider turn, so a swallowed handoff can tell "the
+        // steered turn started" from "the CLI went silent".
+        const turnFrameCounts = yield* Ref.make(
+          new Map<OrchestrationV2ProviderTurn["id"], number>(),
+        );
+        const finalizingTurnIds = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         const openedNativeThreads = yield* Ref.make(new Set<string>());
         const itemOrdinals = yield* Ref.make(new Map<string, number>());
@@ -3705,6 +3714,24 @@ export function makeClaudeAdapterV2(
           readonly failure?: OrchestrationV2ProviderFailure;
           readonly threadDisposition?: "reusable" | "broken";
         }) {
+          // Claim the turn before emitting anything. The handoff bound runs on
+          // its own fiber, so without this a frame handler and the bound can
+          // both finalize the same turn and emit two terminals for it.
+          const claimed = yield* Ref.modify(activeTurn, (current) => {
+            if (current?.providerTurnId !== input.context.providerTurnId) {
+              return [false, current] as const;
+            }
+            return [true, null] as const;
+          });
+          if (!claimed) {
+            return;
+          }
+          yield* Ref.update(finalizingTurnIds, (current) => {
+            const next = new Set(current);
+            next.add(input.context.providerTurnId);
+            return next;
+          });
+
           for (const toolCall of input.context.toolCalls.values()) {
             const artifacts = buildToolCallArtifacts({
               context: input.context,
@@ -3902,6 +3929,72 @@ export function makeClaudeAdapterV2(
             next.delete(input.context.providerTurnId);
             return next;
           });
+          yield* Ref.update(steeredTurns, (current) => {
+            const next = new Map(current);
+            next.delete(input.context.providerTurnId);
+            return next;
+          });
+          yield* Ref.update(turnFrameCounts, (current) => {
+            const next = new Map(current);
+            next.delete(input.context.providerTurnId);
+            return next;
+          });
+          yield* Ref.update(finalizingTurnIds, (current) => {
+            const next = new Set(current);
+            next.delete(input.context.providerTurnId);
+            return next;
+          });
+        });
+
+        // A steer handoff keeps the T3 turn alive so the steered work still
+        // attaches to it, which leaves the turn depending on a native turn that
+        // the CLI has not opened yet. Bound that wait: if no further frame
+        // reaches this turn, settle it rather than leaving the run running.
+        const boundSteeringHandoff = Effect.fnUntraced(function* (
+          context: ActiveClaudeTurnContext,
+        ) {
+          const framesAtHandoff =
+            (yield* Ref.get(turnFrameCounts)).get(context.providerTurnId) ?? 0;
+          yield* Effect.gen(function* () {
+            yield* Effect.sleep(CLAUDE_STEERING_HANDOFF_TIMEOUT);
+            const current = yield* Ref.get(activeTurn);
+            if (current?.providerTurnId !== context.providerTurnId) {
+              return;
+            }
+            // Claim the settle in one update, so overlapping bounds from
+            // several steers on the same turn cannot both finalize it.
+            const claimed = yield* Ref.modify(turnFrameCounts, (counts) => {
+              const framesNow = counts.get(context.providerTurnId) ?? 0;
+              if (framesNow !== framesAtHandoff) {
+                return [false, counts] as const;
+              }
+              const next = new Map(counts);
+              next.delete(context.providerTurnId);
+              return [true, next] as const;
+            });
+            if (!claimed) {
+              return;
+            }
+            yield* Effect.logWarning("orchestration-v2.claude-steer-handoff-timeout", {
+              providerSessionId: input.providerSessionId,
+              providerThreadId: context.input.providerThread.id,
+              providerTurnId: context.providerTurnId,
+            });
+            // Settle as a failure, not a quiet completion. The steer was
+            // accepted and never answered, which is the silence this whole
+            // path exists to stop the user from having to guess at.
+            const completedAt = yield* DateTime.now;
+            yield* finalizeActiveTurn({
+              context,
+              status: "failed",
+              completedAt,
+              failure: makeProviderFailure({
+                message: "Claude accepted the steer but never opened a turn to answer it.",
+                code: "steer_handoff_timeout",
+                class: "transport_error",
+              }),
+            });
+          }).pipe(Effect.forkIn(sessionScope));
         });
 
         const emitAssistantTextArtifacts = Effect.fnUntraced(function* (input: {
@@ -4243,6 +4336,14 @@ export function makeClaudeAdapterV2(
               yield* bufferWakeMessage({ nativeThreadId: liveQuery.nativeThreadId, message });
             }
             return;
+          }
+
+          if (message.type === "assistant" || message.type === "result") {
+            yield* Ref.update(turnFrameCounts, (current) => {
+              const updated = new Map(current);
+              updated.set(context.providerTurnId, (updated.get(context.providerTurnId) ?? 0) + 1);
+              return updated;
+            });
           }
 
           if (message.type === "assistant") {
@@ -5051,6 +5152,13 @@ export function makeClaudeAdapterV2(
               return yield* new ProviderAdapterProtocolError({
                 driver: CLAUDE_PROVIDER,
                 detail: `Claude provider turn ${currentTurn.providerTurnId} is still active.`,
+              });
+            }
+            const finalizing = yield* Ref.get(finalizingTurnIds);
+            if (finalizing.size > 0) {
+              return yield* new ProviderAdapterProtocolError({
+                driver: CLAUDE_PROVIDER,
+                detail: "Claude provider turn is still finalizing.",
               });
             }
             yield* Ref.update(lastTurnRouteByNativeThread, (current) => {
