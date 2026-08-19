@@ -38,7 +38,10 @@ export function assertOpenCodeErrorCleanupDrainOutput(
   );
 
   assert.isAtLeast(errorIndex, 0);
-  if (transcript.scenario === "opencode_error_cleanup_no_pre_idle") {
+  if (
+    transcript.scenario === "opencode_error_cleanup_no_pre_idle" ||
+    transcript.scenario === "opencode_error_cleanup_idle_only"
+  ) {
     assert.isAbove(lateToolIndex, errorIndex);
     assert.isAbove(idleIndex, lateToolIndex);
   } else {
