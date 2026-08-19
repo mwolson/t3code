@@ -4370,6 +4370,74 @@ export function makeClaudeAdapterV2(
           readonly message: SDKMessage;
         }) {
           const message = wakeInput.message;
+          const failedWakeTaskIds = (yield* Ref.get(failedWakeDrainByNativeThread)).get(
+            wakeInput.nativeThreadId,
+          );
+          if (failedWakeTaskIds !== undefined) {
+            const messageTaskId =
+              message.type === "system" &&
+              (message.subtype === "task_started" ||
+                message.subtype === "task_progress" ||
+                message.subtype === "task_notification")
+                ? message.task_id
+                : undefined;
+            const attributedParentToolUseId = parentToolUseIdFromSdkMessage(message);
+            const attributedSubagent =
+              attributedParentToolUseId === null
+                ? undefined
+                : yield* resolveSessionSubagent({
+                    nativeThreadId: wakeInput.nativeThreadId,
+                    toolUseId: attributedParentToolUseId,
+                  });
+            const resultTaskId = claudeToolResultEntriesFromMessage(message)
+              .map(({ output }) => claudeSubagentTaskIdFromToolOutput(output))
+              .find((taskId) => taskId !== undefined);
+            const attributedTaskId = messageTaskId ?? attributedSubagent?.taskId ?? resultTaskId;
+            const nativeThreadSubagents = (yield* Ref.get(sessionSubagents)).byNativeThreadId.get(
+              wakeInput.nativeThreadId,
+            );
+            const registered =
+              attributedTaskId === undefined
+                ? undefined
+                : nativeThreadSubagents?.subagentsByTaskId.get(attributedTaskId);
+            const isPendingBackgroundTask =
+              attributedTaskId !== undefined &&
+              (yield* isKnownOpaqueBackgroundTaskOnNativeThread(
+                wakeInput.nativeThreadId,
+                attributedTaskId,
+              ));
+            const isKnownSubagentTask =
+              registered?.task.status === "running" ||
+              (attributedTaskId !== undefined &&
+                nativeThreadSubagents?.pendingResumeTaskIds.has(attributedTaskId) === true) ||
+              (registered !== undefined &&
+                message.type === "system" &&
+                message.subtype === "task_started");
+            const isKnownSuccessorTask =
+              attributedTaskId !== undefined &&
+              !failedWakeTaskIds.has(attributedTaskId) &&
+              (isKnownSubagentTask || isPendingBackgroundTask);
+            const isUnattributedOpaqueWakeFrame =
+              attributedTaskId === undefined &&
+              (message.type === "assistant" || message.type === "user");
+            if (!isKnownSuccessorTask && !isUnattributedOpaqueWakeFrame) {
+              if (
+                attributedTaskId !== undefined &&
+                failedWakeTaskIds.has(attributedTaskId) &&
+                message.type === "system" &&
+                message.subtype === "task_notification"
+              ) {
+                if (registered?.task.status === "running") {
+                  yield* failClaudeSubagentWakeDelivery({
+                    nativeThreadId: wakeInput.nativeThreadId,
+                    taskId: attributedTaskId,
+                  });
+                }
+                yield* clearPendingBackgroundTask(wakeInput.nativeThreadId, attributedTaskId);
+              }
+              return;
+            }
+          }
           const isNotification =
             message.type === "system" && message.subtype === "task_notification";
           // Only notifications for tracked tasks count as wake evidence: a
@@ -4871,10 +4939,19 @@ export function makeClaudeAdapterV2(
               nativeThreadId: context.nativeThreadId,
               toolUseId: toolResult.tool_use_id,
             });
+            const registeredByTaskId =
+              resultTaskId === undefined
+                ? undefined
+                : yield* resolveSessionSubagent({
+                    nativeThreadId: context.nativeThreadId,
+                    taskId: resultTaskId,
+                  });
             if (
               resultTaskId !== undefined &&
               failedWakeTaskIds?.has(resultTaskId) === true &&
-              (isKnownAgentLaunch || existingToolCall?.subagentTaskId != null)
+              (isKnownAgentLaunch ||
+                existingToolCall?.subagentTaskId != null ||
+                registeredByTaskId?.subagent.launchToolUseId === toolResult.tool_use_id)
             ) {
               continue;
             }
