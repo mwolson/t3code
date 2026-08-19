@@ -1019,14 +1019,26 @@ export const openCode2PendingWorkForSession = Effect.fnUntraced(function* (input
   readonly pending: Effect.Effect<ReadonlyArray<SessionPendingInfo>, OpenCode2RuntimeError>;
   readonly shells: Effect.Effect<ReadonlyArray<ShellInfoV2>, OpenCode2RuntimeError>;
 }) {
-  const pending = yield* input.pending;
-  if (pending.some((item) => item.sessionID === input.sessionID)) {
+  const pending = yield* Effect.result(input.pending);
+  const shells = yield* Effect.result(input.shells);
+  if (
+    pending._tag === "Success" &&
+    pending.success.some((item) => item.sessionID === input.sessionID)
+  ) {
     return true;
   }
-  const shells = yield* input.shells;
-  return shells.some(
-    (shell) => shell.status === "running" && shell.metadata.sessionID === input.sessionID,
-  );
+  if (
+    shells._tag === "Success" &&
+    shells.success.some(
+      (shell) => shell.status === "running" && shell.metadata.sessionID === input.sessionID,
+    )
+  ) {
+    return true;
+  }
+  if (pending._tag === "Failure" && shells._tag === "Failure") {
+    return yield* Effect.fail(pending.failure);
+  }
+  return false;
 });
 
 export function openCode2ToolNeedsTerminalOverride(
