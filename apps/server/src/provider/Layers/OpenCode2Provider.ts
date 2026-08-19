@@ -58,12 +58,12 @@ const OPENCODE2_PRESENTATION = {
 } as const;
 
 /**
- * The `next` build this driver's runtime, event mapping, and route usage were
- * verified against. 2.x has no meaningful semver axis yet — every build on the
- * line is `0.0.0-next-<build>` — so the build number is the only ordering that
- * carries information, and it is only compared when the version still carries
- * a `next` tag. A future stable 2.x is accepted as-is rather than rejected by
- * a rule written for the preview line.
+ * The preview build this driver's runtime, event mapping, and route usage were
+ * verified against. 2.x has no meaningful semver axis yet. Preview builds are
+ * `0.0.0-next-<build>` or `0.0.0-beta-<build>`, so the build number is the only
+ * ordering that carries information, and it is only compared when the version
+ * still carries a `next` or `beta` tag. A future stable 2.x is accepted as-is
+ * rather than rejected by a rule written for the preview line.
  */
 const MINIMUM_OPENCODE2_NEXT_BUILD = 16339;
 
@@ -78,13 +78,14 @@ export function parseOpenCode2Version(output: string): string | null {
 }
 
 /**
- * Build number out of a `0.0.0-next-16339` style version, or `null` when the
- * version is not on the `next` line and the build gate does not apply.
+ * Build number out of a `0.0.0-next-16339` or `0.0.0-beta-17498` style version,
+ * or `null` when the version is not on the preview line and the build gate does
+ * not apply.
  *
  * @internal exported for tests
  */
 export function openCode2NextBuild(version: string): number | null {
-  const match = version.match(/-next[.-](\d+)/);
+  const match = version.match(/-(?:next|beta)-(\d+)/);
   if (!match) return null;
   const build = Number(match[1]);
   return Number.isFinite(build) ? build : null;

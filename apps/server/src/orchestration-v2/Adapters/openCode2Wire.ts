@@ -2,7 +2,8 @@
  * OpenCode 2 wire helpers. Maps runtime type strings onto the adapter switch's
  * internal names. next-16916 emits short forms (`session.step.*`,
  * `session.text.*`); earlier beta builds used `session.next.*` for the same
- * lifecycle. Both are accepted.
+ * lifecycle. beta-17498 replaced admitted/pending with `session.inbox.*` and
+ * first-class `session.execution.*`. All of those are accepted.
  */
 
 /** Canonical event type names used by the adapter switch. */
@@ -94,6 +95,8 @@ const WIRE_TYPE_ALIASES: Readonly<Record<string, OpenCode2CanonicalEventType>> =
   "session.next.tool.success": "session.tool.success",
   "session.next.tool.failed": "session.tool.failed",
   "session.next.retried": "session.retry.scheduled",
+  "session.inbox.delivered": "session.input.admitted",
+  "session.inbox.enqueued": "session.input.admitted",
   "session.input.promoted": "session.input.admitted",
   "session.prompt.admitted": "session.input.admitted",
   "session.prompted": "session.input.admitted",
@@ -284,8 +287,21 @@ export function openCode2WireTextDelta(event: { readonly data?: unknown }): stri
 
 export function openCode2WireInputID(event: { readonly data?: unknown }): string | undefined {
   const data = openCode2WireData(event);
-  const value = data.inputID ?? data.inputId ?? data.messageID ?? data.messageId ?? data.id;
+  const value =
+    data.inputID ??
+    data.inputId ??
+    data.inboxID ??
+    data.inboxId ??
+    data.messageID ??
+    data.messageId ??
+    data.id;
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** Admission payload. A later promotion has an input id but no payload. */
+export function openCode2WireAdmittedInput(event: { readonly data?: unknown }): unknown {
+  const data = openCode2WireData(event);
+  return data.input ?? data.prompt ?? data.item;
 }
 
 export function openCode2WireErrorMessage(event: { readonly data?: unknown }): string {
