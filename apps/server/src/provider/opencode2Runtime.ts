@@ -83,6 +83,7 @@ export const OpenCode2RuntimeOperation = Schema.Literals([
   "session.form.reply",
   "session.generate",
   "session.get",
+  "session.inbox.list",
   "session.instructions.entry.put",
   "session.interrupt",
   "session.pending.list",
