@@ -257,6 +257,43 @@ function fallbackManagedStateRoot(
 
 type ManagedFileState = "missing" | "safe" | "unsafe";
 
+function setManagedFileMode(path: string): boolean {
+  const { O_NOFOLLOW, O_RDONLY } = NodeFS.constants;
+  const supportsNoFollowFile =
+    typeof O_NOFOLLOW === "number" &&
+    typeof NodeFS.fchmodSync === "function" &&
+    typeof NodeFS.fstatSync === "function";
+
+  if (!supportsNoFollowFile) {
+    try {
+      NodeFS.chmodSync(path, 0o600);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  let fd: number | undefined;
+  try {
+    fd = NodeFS.openSync(path, O_RDONLY | O_NOFOLLOW);
+    const stat = NodeFS.fstatSync(fd);
+    const uid = currentUserId();
+    if (!stat.isFile() || (uid !== undefined && stat.uid !== uid)) return false;
+    NodeFS.fchmodSync(fd, 0o600);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        NodeFS.closeSync(fd);
+      } catch {
+        // Best-effort close.
+      }
+    }
+  }
+}
+
 function managedFileState(path: string): ManagedFileState {
   let stat: NodeFS.Stats;
   try {
@@ -266,12 +303,7 @@ function managedFileState(path: string): ManagedFileState {
   }
   const uid = currentUserId();
   if (!stat.isFile() || (uid !== undefined && stat.uid !== uid)) return "unsafe";
-  try {
-    NodeFS.chmodSync(path, 0o600);
-  } catch {
-    return "unsafe";
-  }
-  return "safe";
+  return setManagedFileMode(path) ? "safe" : "unsafe";
 }
 
 function copyManagedFile(source: string, target: string): void {
