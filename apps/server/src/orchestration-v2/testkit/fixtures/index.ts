@@ -484,6 +484,21 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     ],
   },
   {
+    name: "opencode_error_cleanup_idle_only",
+    buildInput: openCodeErrorCleanupDrainInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode"),
+        transcriptFile: new URL(
+          "./opencode_error_cleanup_idle_only/opencode_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE_MODEL_SELECTION,
+        assertOutput: assertOpenCodeErrorCleanupDrainOutput,
+      },
+    ],
+  },
+  {
     name: "opencode_error_unscoped",
     buildInput: openCodeErrorCleanupDrainInput,
     providers: [

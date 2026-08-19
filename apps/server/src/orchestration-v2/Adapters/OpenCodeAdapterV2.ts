@@ -2231,7 +2231,24 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
             case "session.idle": {
               const state = threads.get(event.properties.sessionID);
               if (state?.activeTurn !== null && state?.activeTurn !== undefined) {
-                if (state.activeTurn.pendingErrorCleanup !== null) return;
+                const cleanup = state.activeTurn.pendingErrorCleanup;
+                if (cleanup !== null) {
+                  // Scoped publishers may emit only this idle and never a
+                  // completed assistant or a second session.status idle.
+                  // Keep waiting while cleanup tools are still running so the
+                  // ordinary two-pair drain can land late completed parts.
+                  if (nonTerminalToolMessageIds(state.activeTurn).size > 0) {
+                    cleanup.sawPreCleanupIdle = true;
+                    return;
+                  }
+                  yield* finalizeTurn(
+                    state,
+                    state.activeTurn,
+                    state.activeTurn.interrupted ? "interrupted" : "failed",
+                    cleanup.terminal,
+                  );
+                  return;
+                }
                 yield* finalizeTurn(
                   state,
                   state.activeTurn,
