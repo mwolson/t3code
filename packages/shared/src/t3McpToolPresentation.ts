@@ -62,12 +62,19 @@ function normalizeT3McpToolLabel(value: string): string {
  */
 export function extractOpenCode2ExecuteT3McpToolName(code: string): string | null {
   const dot = /tools\s*\[\s*["']t3-code["']\s*\]\s*\.\s*([A-Za-z0-9_]+)\s*\(/.exec(code);
-  if (dot?.[1]) return dot[1];
   const bracket = /tools\s*\[\s*["']t3-code["']\s*\]\s*\[\s*["']([A-Za-z0-9_]+)["']\s*\]\s*\(/.exec(
     code,
   );
-  if (bracket?.[1]) return bracket[1];
-  return null;
+  const candidates = [
+    dot?.[1] === undefined || dot.index === undefined ? null : { index: dot.index, name: dot[1] },
+    bracket?.[1] === undefined || bracket.index === undefined
+      ? null
+      : { index: bracket.index, name: bracket[1] },
+  ].filter((candidate): candidate is { index: number; name: string } => candidate !== null);
+  if (candidates.length === 0) return null;
+  return candidates.reduce((earliest, candidate) =>
+    candidate.index < earliest.index ? candidate : earliest,
+  ).name;
 }
 
 function codeFromToolInput(input: unknown): string | null {

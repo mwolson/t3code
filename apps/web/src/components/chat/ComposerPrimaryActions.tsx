@@ -114,12 +114,14 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       <Tooltip>
         <TooltipTrigger
           render={
-            <button
+            <Button
               type="button"
-              className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-full border border-destructive/45 text-destructive transition-colors hover:bg-destructive/10 hover:text-destructive sm:h-8 sm:w-8"
+              size="icon"
+              variant="destructive-outline"
+              className="rounded-full"
               {...pointerFocusProps}
               onClick={onInterrupt}
-              aria-label="Stop generation"
+              aria-label="Stop background work"
             />
           }
         >
