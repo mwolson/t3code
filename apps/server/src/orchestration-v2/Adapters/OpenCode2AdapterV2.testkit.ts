@@ -135,15 +135,16 @@ async function waitForReplayDelay(afterMs: number, signal?: AbortSignal): Promis
   }
   return new Promise((resolve) => {
     let settled = false;
+    const timer = setTimeout(() => done(true), afterMs);
     const done = (completed: boolean) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       signal.removeEventListener("abort", abort);
       resolve(completed);
     };
     const abort = () => done(false);
     signal.addEventListener("abort", abort, { once: true });
-    void Effect.runPromise(Effect.sleep(Duration.millis(afterMs))).then(() => done(true));
     if (signal.aborted) abort();
   });
 }
