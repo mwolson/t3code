@@ -85,6 +85,11 @@ return JSON.stringify(result);
         `await tools['t3-code']['orchestrator_capabilities']({});`,
       ),
     ).toBe("orchestrator_capabilities");
+    expect(
+      extractOpenCode2ExecuteT3McpToolName(
+        `await tools["t3-code"]["task_cancel"]({}); await tools["t3-code"].task_status({});`,
+      ),
+    ).toBe("task_cancel");
   });
 
   it("keeps unknown MCP tools on the generic renderer path", () => {
