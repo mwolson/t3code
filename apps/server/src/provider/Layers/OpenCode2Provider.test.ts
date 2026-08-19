@@ -152,6 +152,10 @@ describe("parseOpenCode2Version", () => {
     assert.strictEqual(parseOpenCode2Version("opencode2 2.1.4\n"), "2.1.4");
   });
 
+  it("parses a beta CLI banner", () => {
+    assert.strictEqual(parseOpenCode2Version("opencode2 v0.0.0-beta-17498\n"), "0.0.0-beta-17498");
+  });
+
   it("returns null when there is no version at all", () => {
     assert.strictEqual(
       parseOpenCode2Version("Error: @opencode-ai/cli's postinstall script was not run."),
@@ -165,11 +169,17 @@ describe("openCode2NextBuild", () => {
     assert.strictEqual(openCode2NextBuild("0.0.0-next-16339"), 16339);
   });
 
-  // A stable 2.x is not on the preview line, so the build gate must not apply
-  // to it rather than rejecting it for lacking a build number.
-  it("returns null for a version that is not on the next line", () => {
+  it("reads the build number off the beta line", () => {
+    assert.strictEqual(openCode2NextBuild("0.0.0-beta-17498"), 17498);
+  });
+
+  // A stable 2.x or a `dev` snapshot is not on the preview line, so the build
+  // gate must not apply to it rather than rejecting it for lacking a number.
+  it("returns null for a version that is not on the preview line", () => {
     assert.strictEqual(openCode2NextBuild("2.1.4"), null);
     assert.strictEqual(openCode2NextBuild("2.1.4-rc.1"), null);
+    assert.strictEqual(openCode2NextBuild("2.1.4-beta.12"), null);
+    assert.strictEqual(openCode2NextBuild("0.0.0-dev-17604"), null);
   });
 });
 
@@ -184,6 +194,30 @@ describe("checkOpenCode2ProviderStatus", () => {
         Effect.provideService(
           OpenCode2Runtime.OpenCode2Runtime,
           openCode2RuntimeWithHealthVersion("0.0.0-next-10000"),
+        ),
+        Effect.forkChild,
+      );
+
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("500 millis");
+      const provider = yield* Fiber.join(providerFiber);
+
+      assert.strictEqual(provider.status, "error");
+      assert.include(provider.message ?? "", "next-16339");
+      assert.include(provider.message ?? "", "npm install");
+    }),
+  );
+
+  it.effect("rejects local beta builds below the verified floor with install guidance", () =>
+    Effect.gen(function* () {
+      const providerFiber = yield* checkOpenCode2ProviderStatus(
+        OPENCODE2_TEST_SETTINGS,
+        "/workspace",
+        {},
+      ).pipe(
+        Effect.provideService(
+          OpenCode2Runtime.OpenCode2Runtime,
+          openCode2RuntimeWithHealthVersion("0.0.0-beta-10000"),
         ),
         Effect.forkChild,
       );
