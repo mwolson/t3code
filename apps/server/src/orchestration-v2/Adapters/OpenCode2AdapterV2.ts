@@ -767,7 +767,11 @@ export function openCode2EventEndsExecution(event: {
   readonly data?: unknown;
 }): boolean {
   const type = normalizeOpenCode2WireType(event.type);
-  if (type === "session.execution.failed" || type === "session.idle") {
+  if (
+    type === "session.execution.failed" ||
+    type === "session.execution.interrupted" ||
+    type === "session.idle"
+  ) {
     return true;
   }
   if (type !== "session.execution.succeeded") {

@@ -480,6 +480,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
     for (const type of [
       "session.next.step.ended",
       "session.next.step.failed",
+      "session.execution.interrupted",
       "session.idle",
     ] as const) {
       assert.isTrue(

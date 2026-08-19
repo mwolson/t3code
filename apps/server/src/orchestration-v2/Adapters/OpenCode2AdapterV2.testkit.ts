@@ -114,7 +114,10 @@ function replayValueMatches(expected: unknown, actual: unknown): boolean {
   }
   if (P.isObject(expected)) {
     if (!P.isObject(actual)) return false;
-    return Object.entries(expected).every(([key, value]) => replayValueMatches(value, actual[key]));
+    return Object.entries(expected).every(
+      ([key, value]) =>
+        Object.prototype.hasOwnProperty.call(actual, key) && replayValueMatches(value, actual[key]),
+    );
   }
   return Object.is(expected, actual);
 }
@@ -306,8 +309,8 @@ export class OpenCode2ReplayController {
 
   async *events(signal?: AbortSignal): AsyncIterable<V2Event> {
     while (true) {
-      if (isSignalAborted(signal) || this.abortController.signal.aborted) return;
       this.throwFailure();
+      if (isSignalAborted(signal) || this.abortController.signal.aborted) return;
       if (this.successfulRuntimeExit) return;
       if (this.claimedEventCursor === this.cursor || this.claimedResponseCursor === this.cursor) {
         await this.changed(signal);
