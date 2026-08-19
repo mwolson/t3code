@@ -285,9 +285,7 @@ function RelatedThreadCard(props: {
       <div
         data-v2-item-type={props.itemType}
         data-tone={props.tone ?? "neutral"}
-        className={`relative min-w-0 overflow-hidden rounded-lg border ${
-          danger ? "border-destructive/40 bg-destructive/5" : "border-border/60 bg-card/30"
-        }`}
+        className={`relative min-w-0 overflow-hidden rounded-lg border ${containerToneClassName}`}
       >
         <details className="group" data-v2-subagent-result-disclosure="true">
           <summary

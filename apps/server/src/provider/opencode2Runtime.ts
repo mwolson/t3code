@@ -618,14 +618,19 @@ export const make = Effect.gen(function* () {
           }
           const latestPassword = readOpenCode2StatePassword(environment);
           const password =
-            filePassword ?? (latestPassword === passwordBeforeSpawn ? null : latestPassword) ?? "";
+            filePassword ?? (latestPassword === passwordBeforeSpawn ? null : latestPassword);
+          // Keep listening for a late banner password. An empty fallback here
+          // would finalize readiness without Authorization and ignore later output.
+          if (password === null || password.length === 0) {
+            return [null, state] as const;
+          }
           const credentials = { url: state.url, password };
           return [
             credentials,
             {
               ...state,
               output: null,
-              password: password.length > 0 ? password : state.password,
+              password,
             },
           ] as const;
         }).pipe(
