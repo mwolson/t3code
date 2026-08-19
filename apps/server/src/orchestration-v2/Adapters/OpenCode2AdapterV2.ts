@@ -40,6 +40,7 @@ import type {
 import {
   normalizeOpenCode2WireType,
   openCode2StepFinishSettlesTurn,
+  openCode2WireAdmittedInput,
   openCode2WireCallID,
   openCode2WireCreatedMs,
   openCode2WireData,
@@ -710,8 +711,7 @@ export function openCode2IsPostSettleWakeAdmission(
   if (type !== "session.input.admitted" || state.isChildSession) {
     return false;
   }
-  const payload = event?.data ?? {};
-  const input = payload.input ?? payload.prompt;
+  const input = openCode2WireAdmittedInput(event);
   if (input === undefined || input === null) return false;
   if (
     typeof input === "object" &&
@@ -721,7 +721,7 @@ export function openCode2IsPostSettleWakeAdmission(
   ) {
     return false;
   }
-  const data = recordValue(input, "data") ?? input;
+  const data = recordValue(input, "data") ?? recordValue(input, "payload") ?? input;
   const source = recordString(recordValue(data, "metadata"), "source");
   const text = recordString(data, "text") ?? recordString(input, "text");
   return source !== undefined || /^\s*<(?:subagent|shell)\b/i.test(text ?? "");
@@ -736,8 +736,7 @@ export function openCode2IsPostSettleWakeAdmission(
 export function openCode2IsCancelledPostSettleWake(event: any): boolean {
   const type = normalizeOpenCode2WireType(String(event?.type ?? ""));
   if (type !== "session.input.admitted") return false;
-  const payload = event?.data ?? {};
-  const input = payload.input ?? payload.prompt;
+  const input = openCode2WireAdmittedInput(event);
   if (input === undefined || input === null) return false;
   if (
     typeof input === "object" &&
@@ -750,6 +749,7 @@ export function openCode2IsCancelledPostSettleWake(event: any): boolean {
   const text =
     recordString(input, "text") ??
     recordString(recordValue(input, "data"), "text") ??
+    recordString(recordValue(input, "payload"), "text") ??
     (typeof input === "string" ? input : undefined);
   // The completed wrapper shape comes from captured pre-existing OpenCode 2
   // replay data. The cancelled and interrupted values are inferred from
@@ -4569,14 +4569,15 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           ) {
             return;
           }
-          // Admission accepts data.input or legacy data.prompt; detail must
-          // use the same alias or a prompt-only wake throws and drops the offer.
-          const admittedInput = event.data?.input ?? event.data?.prompt;
+          // Admission accepts data.input, legacy data.prompt, or 17498 data.item.
+          const admittedInput = openCode2WireAdmittedInput(event);
           const admittedData =
             admittedInput !== undefined &&
             admittedInput !== null &&
             typeof admittedInput === "object"
-              ? ((admittedInput as { data?: unknown }).data ?? admittedInput)
+              ? (recordValue(admittedInput, "data") ??
+                recordValue(admittedInput, "payload") ??
+                admittedInput)
               : undefined;
           const syntheticDescription =
             admittedInput !== undefined &&
@@ -4882,10 +4883,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             (eventSessionId === undefined ? undefined : threads.get(eventSessionId));
           if (!isReplay && eventType === "session.input.admitted" && eventState !== undefined) {
             const inputId = openCode2WireInputID(wire);
-            const input = recordValue(event.data, "input") ?? recordValue(event.data, "prompt");
+            const input = openCode2WireAdmittedInput(wire);
             // Session3 uses the same admitted event for the initial admission
             // and for the later promotion into an execution. A promotion has
-            // an input id but no input payload. Remember wake ownership before
+            // an input id but no input payload. beta-17498 enqueue carries
+            // `item`; delivered is id-only and is the promotion. Remember wake
+            // ownership before
             // execution.started chooses a session-wide execution owner.
             if (inputId !== undefined && input === undefined) {
               eventState.sawInputPromotion = true;
