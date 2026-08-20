@@ -179,6 +179,7 @@ describe("openCode2NextBuild", () => {
     assert.strictEqual(openCode2NextBuild("2.1.4"), null);
     assert.strictEqual(openCode2NextBuild("2.1.4-rc.1"), null);
     assert.strictEqual(openCode2NextBuild("2.1.4-beta.12"), null);
+    assert.strictEqual(openCode2NextBuild("2.0.0-beta-1"), null);
     assert.strictEqual(openCode2NextBuild("0.0.0-dev-17604"), null);
   });
 });
