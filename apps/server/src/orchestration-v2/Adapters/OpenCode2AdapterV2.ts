@@ -170,10 +170,7 @@ import {
   runOpenCode2Sdk,
   type OpenCode2RuntimeOperation,
 } from "../../provider/opencode2Runtime.ts";
-import {
-  openCodeRuntimeErrorDetail,
-  parseOpenCodeModelSlug,
-} from "../../provider/opencodeRuntime.ts";
+import { parseOpenCodeModelSlug } from "../../provider/opencodeRuntime.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
 import { applyOpenCode2ProviderEnvironment } from "../../provider/OpenCode2ProviderEnvironment.ts";
 import { IdAllocatorV2, type IdAllocatorV2Shape } from "../IdAllocator.ts";
@@ -1051,7 +1048,7 @@ export const openCode2PendingWorkForSession = Effect.fnUntraced(function* (input
   if (
     shells._tag === "Success" &&
     shells.success.some(
-      (shell) => shell.status === "running" && shell.metadata.sessionID === input.sessionID,
+      (shell) => shell.status === "running" && shell.metadata?.sessionID === input.sessionID,
     )
   ) {
     return true;
@@ -1762,14 +1759,32 @@ export function openCode2FormAnswer(
   return answer;
 }
 
-export function isOpenCode2McpCatalogUnavailable(detail: string): boolean {
-  const text = detail.toLowerCase();
-  return (
-    text.includes("404") ||
-    text.includes("not found") ||
-    text.includes("text/html") ||
-    text.includes("not supported by this version")
-  );
+export function openCode2LocationQuery(directory: string): string {
+  return new URLSearchParams({ "location[directory]": directory }).toString();
+}
+
+export function openCode2ShellsFromList(input: unknown): ReadonlyArray<ShellInfoV2> {
+  if (!Array.isArray(input)) return [];
+  const shells: ShellInfoV2[] = [];
+  for (const item of input) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== "string" || record.id.length === 0) continue;
+    const metadata =
+      record.metadata !== null &&
+      typeof record.metadata === "object" &&
+      !Array.isArray(record.metadata)
+        ? (record.metadata as ShellInfoV2["metadata"])
+        : {};
+    shells.push({
+      id: record.id,
+      status: typeof record.status === "string" ? record.status : "unknown",
+      ...(typeof record.command === "string" ? { command: record.command } : {}),
+      ...(typeof record.exit === "number" ? { exit: record.exit } : {}),
+      metadata,
+    });
+  }
+  return shells;
 }
 
 /**
@@ -6463,18 +6478,16 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 return shellList({ location: state.location });
               }
               return rawHttpClient().get({
-                url: "/api/shell",
-                query: { "location[directory]": state.location.directory },
+                url: `/api/shell?${openCode2LocationQuery(state.location.directory)}`,
                 throwOnError: false,
               });
             }).pipe(
-              Effect.flatMap((response) =>
-                unwrapOpenCode2Data<Array<ShellInfoV2>>("shell.list", response),
-              ),
+              Effect.flatMap((response) => unwrapOpenCode2Data<unknown>("shell.list", response)),
+              Effect.map(openCode2ShellsFromList),
               Effect.tap((shells) =>
                 Effect.sync(() => {
                   for (const shell of shells) {
-                    if (shell.metadata.sessionID === sessionID) {
+                    if (shell.metadata?.sessionID === sessionID) {
                       shellSessionIds.set(shell.id, sessionID);
                     }
                   }
@@ -6499,28 +6512,25 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           if (!hasT3Mcp) return;
           let lastStatus = "missing";
           for (let attempt = 0; attempt < 50; attempt++) {
-            const listed = yield* sdkCall("mcp.list", {}, () =>
-              client.mcp.status().then((response) => ({
-                data: {
-                  data: Object.entries(
-                    (response as { data?: Record<string, unknown> }).data ?? {},
-                  ).map(([name, status]) => ({ name, status })),
-                },
-              })),
-            ).pipe(
-              Effect.map((response) => ({ available: true as const, response })),
-              Effect.catch((error: OpenCode2RuntimeError) => {
-                // beta-17498 has no /mcp JSON route; the SDK gets HTML.
-                if (isOpenCode2McpCatalogUnavailable(openCodeRuntimeErrorDetail(error.cause))) {
-                  return Effect.succeed({ available: false as const, response: null });
-                }
-                return Effect.fail(error);
-              }),
-            );
-            if (!listed.available) return;
+            const mcpList = (
+              client.v2 as {
+                mcp?: {
+                  list: (input: { location: { directory: string } }) => Promise<unknown>;
+                };
+              }
+            ).mcp?.list;
+            const listed = yield* sdkCall("mcp.list", { location: { directory: cwd } }, () => {
+              if (mcpList !== undefined) {
+                return mcpList({ location: { directory: cwd } });
+              }
+              return rawHttpClient().get({
+                url: `/api/mcp?${openCode2LocationQuery(cwd)}`,
+                throwOnError: false,
+              });
+            });
             const servers = yield* unwrapOpenCode2Data<ReadonlyArray<McpServer>>(
               "mcp.list",
-              listed.response,
+              listed,
             );
             const server = servers.find((candidate) => candidate.name === OPENCODE2_T3_MCP_NAME);
             lastStatus = server === undefined ? "missing" : mcpServerStatus(server);
