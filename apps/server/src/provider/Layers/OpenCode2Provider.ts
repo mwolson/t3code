@@ -85,7 +85,7 @@ export function parseOpenCode2Version(output: string): string | null {
  * @internal exported for tests
  */
 export function openCode2NextBuild(version: string): number | null {
-  const match = version.match(/-(?:next|beta)-(\d+)/);
+  const match = version.match(/^0\.0\.0-(?:next|beta)-(\d+)$/);
   if (!match) return null;
   const build = Number(match[1]);
   return Number.isFinite(build) ? build : null;
