@@ -464,7 +464,6 @@ type PayloadRow = {
 type ShellThreadRow = {
   readonly thread_id: string;
   readonly payload_json: string;
-  readonly forked_from_run_source_thread_id: string | null;
   readonly latest_run_id: string | null;
   readonly latest_run_status: string | null;
   readonly latest_run_requested_at: string | null;
@@ -2389,7 +2388,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             WITH RECURSIVE shell_thread_ids(thread_id) AS (
               SELECT thread_id
               FROM orchestration_v2_projection_threads
-              WHERE deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND thread_id = ${threadId}`}
+              WHERE deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND thread_id = ${threadId}`}${
+                location === "active"
+                  ? sql` AND json_extract(payload_json, '$.archivedAt') IS NULL`
+                  : location === "archive"
+                    ? sql` AND json_extract(payload_json, '$.archivedAt') IS NOT NULL`
+                    : sql``
+              }
 
               UNION
 
@@ -2402,11 +2407,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             SELECT
               t.thread_id,
               t.payload_json,
-              CASE
-                WHEN json_extract(t.payload_json, '$.forkedFrom.type') = 'run'
-                  THEN json_extract(t.payload_json, '$.forkedFrom.threadId')
-                ELSE NULL
-              END AS forked_from_run_source_thread_id,
               (
                 SELECT r.run_id
                 FROM orchestration_v2_projection_runs r
@@ -2538,13 +2538,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND i.run_id IS NULL
               ) AS runless_item_count
             FROM orchestration_v2_projection_threads t
-            WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
-              location === "active"
-                ? sql` AND json_extract(t.payload_json, '$.archivedAt') IS NULL`
-                : location === "archive"
-                  ? sql` AND json_extract(t.payload_json, '$.archivedAt') IS NOT NULL`
-                  : sql``
-            }
+            WHERE t.thread_id IN (SELECT thread_id FROM shell_thread_ids)
             ORDER BY t.updated_at ASC, t.thread_id ASC
           `;
 
@@ -2761,30 +2755,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       sql
         .withTransaction(
           Effect.gen(function* () {
-            const targetThreadRows = yield* selectShellThreadRows(undefined, options?.location);
-            const targetThreadIds = new Set(
-              targetThreadRows.map((row) => ThreadId.make(row.thread_id)),
-            );
-            const rowsByThreadId = new Map(
-              targetThreadRows.map((row) => [ThreadId.make(row.thread_id), row] as const),
-            );
-            const pendingSourceIds = targetThreadRows.flatMap((row) =>
-              row.forked_from_run_source_thread_id === null
-                ? []
-                : [ThreadId.make(row.forked_from_run_source_thread_id)],
-            );
-            while (pendingSourceIds.length > 0) {
-              const sourceId = pendingSourceIds.pop();
-              if (sourceId === undefined || rowsByThreadId.has(sourceId)) continue;
-              const source = (yield* selectShellThreadRows(sourceId))[0];
-              if (source === undefined) continue;
-              rowsByThreadId.set(sourceId, source);
-              if (source.forked_from_run_source_thread_id !== null) {
-                pendingSourceIds.push(ThreadId.make(source.forked_from_run_source_thread_id));
-              }
-            }
-            const threadRows = [...rowsByThreadId.values()];
-            const threadIds = [...rowsByThreadId.keys()];
+            const threadRows = yield* selectShellThreadRows(undefined, options?.location);
+            const threadIds = threadRows.map((row) => ThreadId.make(row.thread_id));
             const readForThreadIds = <A>(
               read: (ids: ReadonlyArray<ThreadId>) => Effect.Effect<ReadonlyArray<A>, unknown>,
             ) =>
@@ -2821,7 +2793,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             const statesByThreadId = new Map(states.map((state) => [state.thread.id, state]));
 
             const shells = states
-              .filter((state) => targetThreadIds.has(state.thread.id))
+              .filter((state) => {
+                if (state.thread.deletedAt !== null) return false;
+                if (options?.location === "active") return state.thread.archivedAt === null;
+                if (options?.location === "archive") return state.thread.archivedAt !== null;
+                return true;
+              })
               .map((state) =>
                 shellFromState({
                   state,
