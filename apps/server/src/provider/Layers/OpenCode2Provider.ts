@@ -26,6 +26,7 @@ import {
   type ModelCapabilities,
   type OpenCode2Settings,
   type ServerProviderModel,
+  type ServerProviderSkill,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -33,6 +34,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { createModelCapabilities } from "@t3tools/shared/model";
+import { discoverOpenCode2Skills } from "../Drivers/OpenCode2Skills.ts";
 import {
   OPENCODE2_AUTO_AGENT,
   OPENCODE2_DEFAULT_VARIANT,
@@ -534,6 +536,9 @@ export const checkOpenCode2ProviderStatus = Effect.fn("checkOpenCode2ProviderSta
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const customModels = settings.customModels;
   const isExternalServer = settings.serverUrl.trim().length > 0;
+  const skills: ReadonlyArray<ServerProviderSkill> = settings.enabled
+    ? discoverOpenCode2Skills(cwd, resolvedEnvironment)
+    : [];
 
   const draft = (input: {
     readonly installed: boolean;
@@ -552,6 +557,7 @@ export const checkOpenCode2ProviderStatus = Effect.fn("checkOpenCode2ProviderSta
         customModels,
         DEFAULT_OPENCODE2_MODEL_CAPABILITIES,
       ),
+      skills,
       probe: {
         installed: input.installed,
         version: input.version,
