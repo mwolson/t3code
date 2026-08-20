@@ -177,7 +177,8 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           status: "unknown",
           currentVersion: "0.0.0-next-16691",
           latestVersion: null,
-          updateCommand: "npm install -g @example/package-tool@next",
+          updateCommand:
+            "npm install -g --allow-scripts=@example/package-tool @example/package-tool@next",
           canUpdate: true,
           checkedAt: "2026-04-10T00:00:00.000Z",
         });
@@ -245,7 +246,8 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
       status: "behind_latest",
       currentVersion: "0.0.0-next-16691",
       latestVersion: "0.0.0-next-16694",
-      updateCommand: "npm install -g @example/package-tool@next",
+      updateCommand:
+        "npm install -g --allow-scripts=@example/package-tool @example/package-tool@next",
       canUpdate: true,
     });
   });

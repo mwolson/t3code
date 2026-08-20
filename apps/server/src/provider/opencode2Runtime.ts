@@ -203,8 +203,7 @@ export const runOpenCode2Sdk = <A>(
       }),
   }).pipe(Effect.withSpan(`opencode2.${operation}`));
 
-/** Startup facts from the 2.x banner. Password may be empty on beta builds that
- * serve unauthenticated. */
+/** Startup facts from the 2.x banner. */
 export interface OpenCode2ServerCredentials {
   readonly url: string;
   readonly password: string;
@@ -257,22 +256,30 @@ export class OpenCode2Runtime extends Context.Service<
 >()("t3/provider/opencode2Runtime") {}
 
 /**
- * Read the URL and optional password out of accumulated server output.
+ * Read the URL and password out of accumulated server output.
  *
- * Ready once the listen URL is present. Next-line builds still print a
- * password on a later line; beta `lildax` only prints the URL and stores the
- * password under the state dir (see {@link readOpenCode2StatePassword}).
+ * Ready once both banner facts are present. Beta `lildax` only prints the URL
+ * and stores the password under the state dir, so spawned-server startup uses
+ * {@link readOpenCode2StatePassword} as its fallback.
  * Deliberately not anchored to line start — surrounding banner text has
  * changed before.
  *
  * @internal exported for tests
  */
 export function parseOpenCode2Startup(output: string): OpenCode2ServerCredentials | null {
+  const facts = parseOpenCode2StartupFacts(output);
+  if (facts.url === null || facts.password === null) return null;
+  return { url: facts.url, password: facts.password };
+}
+
+function parseOpenCode2StartupFacts(output: string): {
+  readonly url: string | null;
+  readonly password: string | null;
+} {
   // Require a line starting with `server listening` so 1.x's
   // `opencode server listening on ...` does not match.
-  const url = output.match(/(?:^|\n)server listening on\s+(https?:\/\/\S+)/)?.[1];
-  if (url === undefined) return null;
-  const password = output.match(/(?:^|\n)server password\s+(\S+)/)?.[1] ?? "";
+  const url = output.match(/(?:^|\n)server listening on\s+(https?:\/\/\S+)/)?.[1] ?? null;
+  const password = output.match(/(?:^|\n)server password\s+(\S+)/)?.[1] ?? null;
   return { url, password };
 }
 
@@ -550,11 +557,11 @@ export const make = Effect.gen(function* () {
       >();
 
       // Keep a bounded parser buffer until ready. URL and password arrive on
-      // separate lines (and can land in separate chunks); retain each fact on
+      // separate lines and can land in separate chunks, so retain each fact on
       // the ref so a rolling buffer cannot drop them. Ready when both facts are
-      // known. Password may be the empty string after OPENCODE2_PASSWORD_GRACE
-      // when the binary never prints one (beta lildax). stdout and stderr share
-      // the buffer, so a stream switch inserts a newline boundary when the prior
+      // known. Beta lildax may store the password in its state directory
+      // instead of printing it. stdout and stderr share the buffer, so a stream
+      // switch inserts a newline boundary when the prior
       // chunk did not end one; otherwise `(?:^|\n)` misses a mid-chunk banner.
       const absorb = (stream: "stdout" | "stderr") => (chunk: string) =>
         Ref.modify(startupOutputRef, (previous) => {
@@ -565,12 +572,9 @@ export const make = Effect.gen(function* () {
             previous.lastStream !== null &&
             previous.lastStream !== stream;
           const combined = `${previous.output}${needsBoundary ? "\n" : ""}${chunk}`;
-          const url =
-            previous.url ??
-            combined.match(/(?:^|\n)server listening on\s+(https?:\/\/\S+)/)?.[1] ??
-            null;
-          const password =
-            previous.password ?? combined.match(/(?:^|\n)server password\s+(\S+)/)?.[1] ?? null;
+          const parsed = parseOpenCode2StartupFacts(combined);
+          const url = previous.url ?? parsed.url;
+          const password = previous.password ?? parsed.password;
           const ready = url !== null && password !== null ? { url, password } : null;
           const output = combined.slice(-MAX_OPENCODE2_STARTUP_OUTPUT_CHARS);
           const category = openCode2ExecutableErrorCategoryFromText(combined);
@@ -594,8 +598,8 @@ export const make = Effect.gen(function* () {
         );
 
       // When the listen URL is present but no password line arrives, fall back
-      // to the beta state-dir password file (lildax), else empty. Poll during
-      // the grace window so a slightly-late file write still wins. Uses the
+      // to the beta state-dir password file (lildax). Poll during the grace
+      // window so a slightly-late file write still wins. Uses the
       // ambient Clock (wall in production, TestClock in unit tests).
       yield* Effect.gen(function* () {
         while (true) {

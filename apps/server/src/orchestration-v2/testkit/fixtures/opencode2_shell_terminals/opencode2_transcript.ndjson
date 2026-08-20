@@ -20,6 +20,10 @@
 {"type":"emit_inbound","label":"session.pending.list.failure.response","frame":{"type":"sdk.response","operation":"session.pending.list","data":[]}}
 {"type":"expect_outbound","label":"shell.list.failure","frame":{"type":"shell.list","input":{"location":{"directory":"/private/tmp/t3-opencode2-shell-terminals"}}}}
 {"type":"emit_inbound","label":"shell.list.failure.response","frame":{"type":"sdk.response","operation":"shell.list","data":[]}}
+{"type":"expect_outbound","label":"session.pending.list.failure-confirmed","frame":{"type":"session.pending.list","input":{"sessionID":"ses_opencode2_shell_terminals"}}}
+{"type":"emit_inbound","label":"session.pending.list.failure-confirmed.response","frame":{"type":"sdk.response","operation":"session.pending.list","data":[]}}
+{"type":"expect_outbound","label":"shell.list.failure-confirmed","frame":{"type":"shell.list","input":{"location":{"directory":"/private/tmp/t3-opencode2-shell-terminals"}}}}
+{"type":"emit_inbound","label":"shell.list.failure-confirmed.response","frame":{"type":"sdk.response","operation":"shell.list","data":[]}}
 {"type":"expect_outbound","label":"session.prompt.deletion","frame":{"type":"session.prompt","input":{"sessionID":"ses_opencode2_shell_terminals","prompt":{"text":"Run a long shell command, move it to background observation, then respond exactly: shell deletion fixture complete"}}}}
 {"type":"emit_inbound","label":"session.prompt.deletion.response","frame":{"type":"sdk.response","operation":"session.prompt","data":{"id":"input_opencode2_shell_deletion"}}}
 {"type":"emit_inbound","label":"session.input.admitted.deletion","frame":{"type":"sdk.event","event":{"type":"session.next.prompt.admitted","data":{"sessionID":"ses_opencode2_shell_terminals","inputID":"input_opencode2_shell_deletion","input":{"id":"input_opencode2_shell_deletion","type":"user"}}}}}
@@ -36,4 +40,8 @@
 {"type":"emit_inbound","label":"session.pending.list.deletion.response","frame":{"type":"sdk.response","operation":"session.pending.list","data":[]}}
 {"type":"expect_outbound","label":"shell.list.deletion","frame":{"type":"shell.list","input":{"location":{"directory":"/private/tmp/t3-opencode2-shell-terminals"}}}}
 {"type":"emit_inbound","label":"shell.list.deletion.response","frame":{"type":"sdk.response","operation":"shell.list","data":[]}}
+{"type":"expect_outbound","label":"session.pending.list.deletion-confirmed","frame":{"type":"session.pending.list","input":{"sessionID":"ses_opencode2_shell_terminals"}}}
+{"type":"emit_inbound","label":"session.pending.list.deletion-confirmed.response","frame":{"type":"sdk.response","operation":"session.pending.list","data":[]}}
+{"type":"expect_outbound","label":"shell.list.deletion-confirmed","frame":{"type":"shell.list","input":{"location":{"directory":"/private/tmp/t3-opencode2-shell-terminals"}}}}
+{"type":"emit_inbound","label":"shell.list.deletion-confirmed.response","frame":{"type":"sdk.response","operation":"shell.list","data":[]}}
 {"type":"runtime_exit","status":"success"}
