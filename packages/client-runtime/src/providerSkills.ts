@@ -59,6 +59,7 @@ export function resolveProviderSkillSourceKind(
       return "project";
     case "user":
     case "personal":
+    case "global":
       return "personal";
     case "system":
       return "system";
