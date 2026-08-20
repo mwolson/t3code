@@ -6,7 +6,11 @@ import * as NodePath from "node:path";
 import { assert } from "@effect/vitest";
 import { describe, it } from "vite-plus/test";
 
-import { discoverOpenCode2Skills } from "./OpenCode2Skills.ts";
+import {
+  collectOpenCode2SkillHttpCatalogs,
+  discoverOpenCode2Skills,
+  parseOpenCode2HttpCatalogIndex,
+} from "./OpenCode2Skills.ts";
 
 function writeSkill(skillsDir: string, directoryName: string, contents: string): void {
   const skillDir = NodePath.join(skillsDir, directoryName);
@@ -155,5 +159,103 @@ describe("discoverOpenCode2Skills", () => {
 
     const skills = discoverOpenCode2Skills(workspace, { HOME: home });
     assert.deepEqual(skills, []);
+  });
+
+  it("uses the path id and keeps frontmatter name as displayName", () => {
+    const { home, workspace } = makeWorkspace();
+    writeSkill(
+      NodePath.join(home, ".config", "opencode", "skills"),
+      "git-release",
+      ["---", "name: Git Release", "description: Prepare a release.", "---"].join("\n"),
+    );
+
+    const skills = discoverOpenCode2Skills(workspace, { HOME: home });
+    assert.deepEqual(skills, [
+      {
+        name: "git-release",
+        displayName: "Git Release",
+        path: NodePath.join(home, ".config", "opencode", "skills", "git-release", "SKILL.md"),
+        enabled: true,
+        scope: "user",
+        description: "Prepare a release.",
+      },
+    ]);
+  });
+
+  it("discovers nested SKILL.md and root-level markdown files", () => {
+    const { home, workspace } = makeWorkspace();
+    writeSkill(
+      NodePath.join(workspace, ".opencode", "skills", "teams"),
+      "release",
+      ["---", "description: Nested release skill.", "---"].join("\n"),
+    );
+    NodeFS.mkdirSync(NodePath.join(workspace, ".opencode", "skills"), { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(workspace, ".opencode", "skills", "git-release.md"),
+      ["---", "description: Flat release skill.", "---"].join("\n"),
+    );
+
+    const skills = discoverOpenCode2Skills(workspace, { HOME: home });
+    assert.deepEqual(skills.map((skill) => skill.name).toSorted(), ["git-release", "release"]);
+  });
+
+  it("hides skills with slash: false from the picker catalog", () => {
+    const { home, workspace } = makeWorkspace();
+    writeSkill(
+      NodePath.join(home, ".config", "opencode", "skills"),
+      "hidden",
+      ["---", "description: Hidden.", "slash: false", "---"].join("\n"),
+    );
+
+    const skills = discoverOpenCode2Skills(workspace, { HOME: home });
+    assert.deepEqual(skills, []);
+  });
+
+  it("loads extra local directories from the skills config array", () => {
+    const { home, workspace } = makeWorkspace();
+    const extra = NodePath.join(home, "shared-skills");
+    writeSkill(extra, "team-review", ["---", "description: Team review.", "---"].join("\n"));
+    NodeFS.mkdirSync(NodePath.join(home, ".config", "opencode"), { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(home, ".config", "opencode", "opencode.json"),
+      JSON.stringify({ skills: [extra] }),
+    );
+
+    const skills = discoverOpenCode2Skills(workspace, { HOME: home });
+    assert.deepEqual(
+      skills.map((skill) => skill.name),
+      ["team-review"],
+    );
+  });
+
+  it("collects HTTP catalog URLs from config without fetching them", () => {
+    const { home, workspace } = makeWorkspace();
+    NodeFS.mkdirSync(NodePath.join(home, ".config", "opencode"), { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(home, ".config", "opencode", "opencode.json"),
+      JSON.stringify({ skills: ["https://example.com/opencode/skills/"] }),
+    );
+
+    const catalogs = collectOpenCode2SkillHttpCatalogs(workspace, { HOME: home });
+    assert.deepEqual(catalogs, [{ url: "https://example.com/opencode/skills/", scope: "user" }]);
+  });
+
+  it("maps HTTP catalog index entries to picker skills", () => {
+    const skills = parseOpenCode2HttpCatalogIndex(
+      "https://example.com/opencode/skills/",
+      {
+        skills: [{ name: "git-release", description: "Release notes." }],
+      },
+      "user",
+    );
+    assert.deepEqual(skills, [
+      {
+        name: "git-release",
+        path: "https://example.com/opencode/skills/git-release",
+        enabled: true,
+        scope: "user",
+        description: "Release notes.",
+      },
+    ]);
   });
 });

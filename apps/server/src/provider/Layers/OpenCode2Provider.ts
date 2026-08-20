@@ -34,7 +34,11 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { createModelCapabilities } from "@t3tools/shared/model";
-import { discoverOpenCode2Skills } from "../Drivers/OpenCode2Skills.ts";
+import {
+  collectOpenCode2SkillHttpCatalogs,
+  discoverOpenCode2Skills,
+  loadOpenCode2HttpCatalogSkills,
+} from "../Drivers/OpenCode2Skills.ts";
 import {
   OPENCODE2_AUTO_AGENT,
   OPENCODE2_DEFAULT_VARIANT,
@@ -536,9 +540,23 @@ export const checkOpenCode2ProviderStatus = Effect.fn("checkOpenCode2ProviderSta
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const customModels = settings.customModels;
   const isExternalServer = settings.serverUrl.trim().length > 0;
-  const skills: ReadonlyArray<ServerProviderSkill> = settings.enabled
-    ? discoverOpenCode2Skills(cwd, resolvedEnvironment)
-    : [];
+  let skills: ReadonlyArray<ServerProviderSkill> = [];
+  if (settings.enabled) {
+    skills = discoverOpenCode2Skills(cwd, resolvedEnvironment);
+    const catalogs = collectOpenCode2SkillHttpCatalogs(cwd, resolvedEnvironment);
+    if (catalogs.length > 0) {
+      const remote = yield* Effect.tryPromise(() => loadOpenCode2HttpCatalogSkills(catalogs)).pipe(
+        Effect.orElseSucceed((): ReadonlyArray<ServerProviderSkill> => []),
+      );
+      if (remote.length > 0) {
+        const byName = new Map(skills.map((skill) => [skill.name, skill]));
+        for (const skill of remote) {
+          byName.set(skill.name, skill);
+        }
+        skills = [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
+      }
+    }
+  }
 
   const draft = (input: {
     readonly installed: boolean;
