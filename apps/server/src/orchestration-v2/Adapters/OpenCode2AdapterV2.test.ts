@@ -16,7 +16,16 @@ type ShellInfoV2 = {
   time?: { started?: number; completed?: number };
   [key: string]: unknown;
 };
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  ContextHandoffId,
+  EnvironmentId,
+  type OrchestrationV2ProviderThread,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderSessionId,
+  ProviderThreadId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -28,6 +37,7 @@ import * as Scope from "effect/Scope";
 import { describe } from "vite-plus/test";
 
 import {
+  bindOpenCode2CanonicalProviderThread,
   bufferOpenCode2DeferredChildEvent,
   drainOpenCode2DeferredChildEvents,
   forgetOpenCode2SessionPermission,
@@ -170,6 +180,48 @@ describe("unwrapOpenCode2Data", () => {
       assert.strictEqual(error.category, "missing-response-payload");
     }),
   );
+});
+
+describe("bindOpenCode2CanonicalProviderThread", () => {
+  const now = DateTime.makeUnsafe("2026-08-20T19:24:25.000Z");
+  const nativeThread = {
+    id: ProviderThreadId.make("provider-thread:native"),
+    driver: ProviderDriverKind.make("opencode2"),
+    providerInstanceId: ProviderInstanceId.make("opencode2"),
+    providerSessionId: ProviderSessionId.make("provider-session:test"),
+    appThreadId: ThreadId.make("thread:test"),
+    ownerNodeId: null,
+    nativeThreadRef: {
+      driver: ProviderDriverKind.make("opencode2"),
+      nativeId: "ses_native",
+      strength: "strong" as const,
+    },
+    nativeConversationHeadRef: null,
+    status: "active" as const,
+    firstRunOrdinal: 1,
+    lastRunOrdinal: 1,
+    handoffIds: [],
+    forkedFrom: null,
+    pendingBackgroundTasks: [{ taskId: "shell_1", taskType: "shell" }],
+    createdAt: now,
+    updatedAt: now,
+  } satisfies OrchestrationV2ProviderThread;
+  const pendingThread = {
+    ...nativeThread,
+    id: ProviderThreadId.make("provider-thread:pending"),
+    status: "idle" as const,
+    handoffIds: [ContextHandoffId.make("handoff:1")],
+    pendingBackgroundTasks: [],
+  } satisfies OrchestrationV2ProviderThread;
+
+  it("keeps the pending T3 id and the native session ref", () => {
+    const bound = bindOpenCode2CanonicalProviderThread(nativeThread, pendingThread);
+    assert.strictEqual(bound.id, ProviderThreadId.make("provider-thread:pending"));
+    assert.strictEqual(bound.nativeThreadRef?.nativeId, "ses_native");
+    assert.strictEqual(bound.status, "active");
+    assert.deepEqual(bound.handoffIds, [ContextHandoffId.make("handoff:1")]);
+    assert.deepEqual(bound.pendingBackgroundTasks, [{ taskId: "shell_1", taskType: "shell" }]);
+  });
 });
 
 describe("OpenCode 2 post-settle wake classification", () => {

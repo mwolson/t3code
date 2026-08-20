@@ -2211,6 +2211,30 @@ function openCode2PermissionRequestKind(action: string): ProviderRequestKind {
   return openCodePermissionRequestKind(action);
 }
 
+/**
+ * T3 allocates a pending provider-thread id before session.create. The start
+ * service keeps that id and stamps nativeThreadRef onto it. The adapter's
+ * in-memory thread is keyed by the native session id. Rebind so later
+ * provider_thread.updated events, including the background-shell roster, land
+ * on the row Waiting and the context-window meter read.
+ */
+export function bindOpenCode2CanonicalProviderThread(
+  stateThread: OrchestrationV2ProviderThread,
+  canonicalThread: OrchestrationV2ProviderThread,
+): OrchestrationV2ProviderThread {
+  return {
+    ...stateThread,
+    id: canonicalThread.id,
+    appThreadId: canonicalThread.appThreadId ?? stateThread.appThreadId,
+    ownerNodeId: canonicalThread.ownerNodeId,
+    firstRunOrdinal: canonicalThread.firstRunOrdinal ?? stateThread.firstRunOrdinal,
+    lastRunOrdinal: canonicalThread.lastRunOrdinal ?? stateThread.lastRunOrdinal,
+    handoffIds: canonicalThread.handoffIds,
+    forkedFrom: canonicalThread.forkedFrom ?? stateThread.forkedFrom,
+    nativeThreadRef: stateThread.nativeThreadRef ?? canonicalThread.nativeThreadRef,
+  };
+}
+
 function makeProviderThread(input: {
   readonly idAllocator: IdAllocatorV2Shape;
   readonly providerInstanceId: ProviderInstanceId;
@@ -6967,6 +6991,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   `OpenCode 2 session ${sessionID} is quarantined after an unconfirmed interrupt; start a new thread or retry after the session is replaced`,
                 );
               }
+              state.providerThread = bindOpenCode2CanonicalProviderThread(
+                state.providerThread,
+                turnInput.providerThread,
+              );
               if (
                 spawnedWithInjectedAllowPolicy &&
                 !warnedAboutInjectedAllowPolicy &&
