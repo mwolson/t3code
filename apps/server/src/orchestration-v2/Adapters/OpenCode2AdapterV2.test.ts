@@ -1206,7 +1206,7 @@ describe("openCode2PendingWorkForSession", () => {
     time: { started: 1 },
   });
 
-  it.effect("pins the thread for its durable pending input without listing shells", () =>
+  it.effect("pins the thread for its durable pending input while still inspecting shells", () =>
     Effect.gen(function* () {
       let listedShells = false;
       const result = yield* openCode2PendingWorkForSession({
@@ -1219,7 +1219,7 @@ describe("openCode2PendingWorkForSession", () => {
       });
 
       assert.isTrue(result);
-      assert.isFalse(listedShells);
+      assert.isTrue(listedShells);
     }),
   );
 
