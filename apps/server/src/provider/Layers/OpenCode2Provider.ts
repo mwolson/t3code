@@ -615,7 +615,7 @@ export const checkOpenCode2ProviderStatus = Effect.fn("checkOpenCode2ProviderSta
       status: "error",
       message: isExternalServer
         ? `The configured OpenCode 2 server reports ${version}, which is older than the verified build next-${MINIMUM_OPENCODE2_NEXT_BUILD}. Upgrade that server to next-${MINIMUM_OPENCODE2_NEXT_BUILD} or newer.`
-        : `OpenCode 2 ${version} is older than the verified build next-${MINIMUM_OPENCODE2_NEXT_BUILD}. Upgrade with \`npm install -g @opencode-ai/cli@next\`.`,
+        : `OpenCode 2 ${version} is older than the verified build next-${MINIMUM_OPENCODE2_NEXT_BUILD}. Upgrade with \`npm install -g --allow-scripts=@opencode-ai/cli @opencode-ai/cli@next\`.`,
     });
   }
 

@@ -9,9 +9,9 @@ it.each([
   {
     manager: "npm",
     commandPath: "/usr/local/lib/node_modules/@opencode-ai/cli/bin/opencode2.exe",
-    command: "npm install -g @opencode-ai/cli@next",
+    command: "npm install -g --allow-scripts=@opencode-ai/cli @opencode-ai/cli@next",
     executable: "npm",
-    args: ["install", "-g", "@opencode-ai/cli@next"],
+    args: ["install", "-g", "--allow-scripts=@opencode-ai/cli", "@opencode-ai/cli@next"],
     lockKey: "npm-global",
   },
   {

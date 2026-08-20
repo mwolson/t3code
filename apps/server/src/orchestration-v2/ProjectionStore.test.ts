@@ -2269,6 +2269,27 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
       const shellAfterRollback = yield* projectionStore.getThreadShell(targetThreadId);
       assert.equal(shellAfterRollback?.visibleItemCount, 5);
 
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-fork-source-rollback:target-archived"),
+        type: "thread.archived",
+        threadId: targetThreadId,
+        occurredAt: now,
+        payload: {
+          ...targetAfterRollback.thread,
+          archivedAt: now,
+          updatedAt: now,
+        },
+      });
+      const archiveSnapshot = yield* projectionStore.getShellSnapshot({ location: "archive" });
+      assert.isUndefined(
+        archiveSnapshot.archivedThreads.find((thread) => thread.id === sourceThreadId),
+      );
+      assert.equal(
+        archiveSnapshot.archivedThreads.find((thread) => thread.id === targetThreadId)
+          ?.visibleItemCount,
+        5,
+      );
+
       const sourceProjection = yield* projectionStore.getThreadProjection(sourceThreadId);
       yield* projectionStore.apply({
         id: EventId.make("event:projection-fork-source-rollback:source-deleted"),
@@ -2292,7 +2313,7 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
         snapshotAfterSourceDelete.threads.find((thread) => thread.id === sourceThreadId),
       );
       assert.equal(
-        snapshotAfterSourceDelete.threads.find((thread) => thread.id === targetThreadId)
+        snapshotAfterSourceDelete.archivedThreads.find((thread) => thread.id === targetThreadId)
           ?.visibleItemCount,
         5,
       );
