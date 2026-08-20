@@ -1764,7 +1764,10 @@ export function openCode2LocationQuery(directory: string): string {
 }
 
 export function openCode2ShellsFromList(input: unknown): ReadonlyArray<ShellInfoV2> {
-  if (!Array.isArray(input)) return [];
+  if (!Array.isArray(input)) {
+    const nested = recordValue(input, "data");
+    return Array.isArray(nested) ? openCode2ShellsFromList(nested) : [];
+  }
   const shells: ShellInfoV2[] = [];
   for (const item of input) {
     if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
@@ -1785,6 +1788,43 @@ export function openCode2ShellsFromList(input: unknown): ReadonlyArray<ShellInfo
     });
   }
   return shells;
+}
+
+export function openCode2McpServersFromList(input: unknown): ReadonlyArray<McpServer> {
+  if (Array.isArray(input)) {
+    const servers: McpServer[] = [];
+    for (const item of input) {
+      if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+      const record = item as Record<string, unknown>;
+      if (typeof record.name !== "string" || record.name.length === 0) continue;
+      servers.push({
+        name: record.name,
+        status:
+          typeof record.status === "string" ||
+          (record.status !== null && typeof record.status === "object")
+            ? (record.status as McpServer["status"])
+            : "missing",
+      });
+    }
+    return servers;
+  }
+  const nested = recordValue(input, "data");
+  if (Array.isArray(nested) || (nested !== null && typeof nested === "object")) {
+    return openCode2McpServersFromList(nested);
+  }
+  if (input === null || typeof input !== "object") return [];
+  const servers: McpServer[] = [];
+  for (const [name, status] of Object.entries(input as Record<string, unknown>)) {
+    if (name === "location" || name === "data" || name.length === 0) continue;
+    if (typeof status === "string") {
+      servers.push({ name, status });
+      continue;
+    }
+    if (status !== null && typeof status === "object" && !Array.isArray(status)) {
+      servers.push({ name, status: status as McpServer["status"] });
+    }
+  }
+  return servers;
 }
 
 /**
@@ -2361,6 +2401,8 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const threads = new Map<string, OpenCode2ThreadState>();
         const shellProjections = new Map<string, OpenCode2ShellProjection>();
         const shellSessionIds = new Map<string, string>();
+        const runningShellIdsBySession = new Map<string, Set<string>>();
+        const holdPendingWorkAfterClear = new Set<string>();
         const pendingRequests = new Map<string, PendingOpenCode2Request>();
         const pendingRequestsByNativeId = new Map<string, PendingOpenCode2Request>();
         const settledRequestsByNativeId = new Map<string, SettledOpenCode2Request>();
@@ -2543,6 +2585,55 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               providerThread: state.providerThread,
             });
           });
+
+        const runningShellRoster = (sessionID: string) =>
+          [...(runningShellIdsBySession.get(sessionID) ?? [])].map((taskId) => ({
+            taskId,
+            taskType: "shell",
+          }));
+
+        const rememberRunningShell = Effect.fnUntraced(function* (
+          sessionID: string,
+          shellId: string,
+        ) {
+          const owned = runningShellIdsBySession.get(sessionID) ?? new Set<string>();
+          const already = owned.has(shellId);
+          owned.add(shellId);
+          runningShellIdsBySession.set(sessionID, owned);
+          shellSessionIds.set(shellId, sessionID);
+          if (already) return;
+          const state = threads.get(sessionID);
+          if (state !== undefined) {
+            yield* updateProviderThread(state, {
+              pendingBackgroundTasks: runningShellRoster(sessionID),
+            });
+          }
+        });
+
+        const forgetRunningShell = Effect.fnUntraced(function* (shellId: string) {
+          let sessionID = shellSessionIds.get(shellId);
+          if (sessionID === undefined) {
+            for (const [ownedSessionID, owned] of runningShellIdsBySession) {
+              if (owned.has(shellId)) {
+                sessionID = ownedSessionID;
+                break;
+              }
+            }
+          }
+          if (sessionID === undefined) return;
+          const owned = runningShellIdsBySession.get(sessionID);
+          owned?.delete(shellId);
+          if (owned !== undefined && owned.size === 0) {
+            runningShellIdsBySession.delete(sessionID);
+            holdPendingWorkAfterClear.add(sessionID);
+          }
+          const state = threads.get(sessionID);
+          if (state !== undefined) {
+            yield* updateProviderThread(state, {
+              pendingBackgroundTasks: runningShellRoster(sessionID),
+            });
+          }
+        });
 
         const itemOrdinal = (turn: ActiveOpenCode2Turn, nativeItemId: string): number => {
           const existing = turn.itemOrdinals.get(nativeItemId);
@@ -5025,8 +5116,8 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             case "session.shell.started": {
               const state = threads.get(event.data.sessionID);
               if (state === undefined) return;
+              yield* rememberRunningShell(event.data.sessionID, event.data.shell.id);
               yield* registerShellProjection(state, event.data.shell);
-              yield* updateProviderThread(state, {});
               return;
             }
             case "session.shell.ended": {
@@ -5036,46 +5127,54 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 output: event.data.output,
               });
               shellProjections.delete(event.data.shell.id);
+              yield* forgetRunningShell(event.data.shell.id);
               shellSessionIds.delete(event.data.shell.id);
-              const state = threads.get(event.data.sessionID);
-              if (state !== undefined) yield* updateProviderThread(state, {});
               return;
             }
             case "shell.created": {
-              const sessionID = recordString(event.data.info.metadata, "sessionID");
-              if (sessionID === undefined) return;
-              shellSessionIds.set(event.data.info.id, sessionID);
+              const info = recordValue(event.data, "info") ?? event.data;
+              const sessionID =
+                recordString(recordValue(info, "metadata"), "sessionID") ??
+                recordString(event.data, "sessionID");
+              const shellId = recordString(info, "id");
+              if (sessionID === undefined || shellId === undefined) return;
+              yield* rememberRunningShell(sessionID, shellId);
               const state = threads.get(sessionID);
-              if (state !== undefined) {
-                yield* registerShellProjection(state, event.data.info);
-                yield* updateProviderThread(state, {});
+              if (state !== undefined && info !== null && typeof info === "object") {
+                yield* registerShellProjection(state, info as ShellInfoV2);
               }
               return;
             }
             case "shell.exited": {
-              yield* completeShellProjection(event.data.id, {
-                status: event.data.status,
-                ...(event.data.exit === undefined ? {} : { exit: event.data.exit }),
+              const shellId =
+                (typeof event.data === "string" ? event.data : undefined) ??
+                recordString(event.data, "id") ??
+                recordString(recordValue(event.data, "info"), "id") ??
+                recordString(recordValue(event.data, "shell"), "id");
+              if (shellId === undefined) return;
+              yield* completeShellProjection(shellId, {
+                status: recordString(event.data, "status") ?? "exited",
+                ...(typeof event.data.exit === "number" ? { exit: event.data.exit } : {}),
               });
-              const sessionID = shellSessionIds.get(event.data.id);
-              shellProjections.delete(event.data.id);
-              shellSessionIds.delete(event.data.id);
-              if (sessionID === undefined) return;
-              const state = threads.get(sessionID);
-              if (state !== undefined) yield* updateProviderThread(state, {});
+              shellProjections.delete(shellId);
+              yield* forgetRunningShell(shellId);
+              shellSessionIds.delete(shellId);
               return;
             }
             case "shell.deleted": {
-              const sessionID = shellSessionIds.get(event.data.id);
-              if (sessionID === undefined) return;
-              const projection = shellProjections.get(event.data.id);
+              const shellId =
+                (typeof event.data === "string" ? event.data : undefined) ??
+                recordString(event.data, "id") ??
+                recordString(recordValue(event.data, "info"), "id") ??
+                recordString(recordValue(event.data, "shell"), "id");
+              if (shellId === undefined) return;
+              const projection = shellProjections.get(shellId);
               if (projection !== undefined && projection.turn.finalized) {
-                yield* completeShellProjection(event.data.id, { status: "killed" });
+                yield* completeShellProjection(shellId, { status: "killed" });
               }
-              shellProjections.delete(event.data.id);
-              shellSessionIds.delete(event.data.id);
-              const state = threads.get(sessionID);
-              if (state !== undefined) yield* updateProviderThread(state, {});
+              shellProjections.delete(shellId);
+              yield* forgetRunningShell(shellId);
+              shellSessionIds.delete(shellId);
               return;
             }
             case "session.input.admitted": {
@@ -6485,10 +6584,30 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               Effect.flatMap((response) => unwrapOpenCode2Data<unknown>("shell.list", response)),
               Effect.map(openCode2ShellsFromList),
               Effect.tap((shells) =>
-                Effect.sync(() => {
-                  for (const shell of shells) {
-                    if (shell.metadata?.sessionID === sessionID) {
-                      shellSessionIds.set(shell.id, sessionID);
+                Effect.gen(function* () {
+                  const listed = new Set(
+                    shells
+                      .filter((shell) => {
+                        if (shell.status !== "running") return false;
+                        const owner = shell.metadata?.sessionID;
+                        return (
+                          owner === sessionID ||
+                          (owner === undefined &&
+                            (runningShellIdsBySession.get(sessionID)?.has(shell.id) ?? false))
+                        );
+                      })
+                      .map((shell) => shell.id),
+                  );
+                  const stale: string[] = [];
+                  for (const shellId of runningShellIdsBySession.get(sessionID) ?? []) {
+                    if (!listed.has(shellId)) stale.push(shellId);
+                  }
+                  for (const shellId of stale) {
+                    yield* forgetRunningShell(shellId);
+                  }
+                  if (!holdPendingWorkAfterClear.has(sessionID)) {
+                    for (const shellId of listed) {
+                      yield* rememberRunningShell(sessionID, shellId);
                     }
                   }
                 }),
@@ -6497,14 +6616,25 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           });
         });
 
+        const sessionHasPendingBackgroundWork = (
+          sessionID: string,
+          inspected: boolean | undefined,
+        ) =>
+          inspected === true ||
+          (runningShellIdsBySession.get(sessionID)?.size ?? 0) > 0 ||
+          holdPendingWorkAfterClear.has(sessionID);
+
         const hasPendingBackgroundWorkForState = (state: OpenCode2ThreadState) =>
           inspectPendingBackgroundWork(state).pipe(
+            Effect.map((inspected) =>
+              sessionHasPendingBackgroundWork(state.nativeSessionId, inspected),
+            ),
             Effect.catchCause((cause) =>
               Effect.logWarning("Failed to inspect OpenCode 2 pending background work.", {
                 errorTag: causeErrorTag(cause),
                 provider: OPENCODE2_PROVIDER,
                 providerThreadId: state.providerThread.id,
-              }).pipe(Effect.as(false)),
+              }).pipe(Effect.as(sessionHasPendingBackgroundWork(state.nativeSessionId, undefined))),
             ),
           );
 
@@ -6528,9 +6658,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 throwOnError: false,
               });
             });
-            const servers = yield* unwrapOpenCode2Data<ReadonlyArray<McpServer>>(
-              "mcp.list",
-              listed,
+            const servers = yield* unwrapOpenCode2Data<unknown>("mcp.list", listed).pipe(
+              Effect.map(openCode2McpServersFromList),
+              Effect.catchCause(() => Effect.succeed<ReadonlyArray<McpServer>>([])),
             );
             const server = servers.find((candidate) => candidate.name === OPENCODE2_T3_MCP_NAME);
             lastStatus = server === undefined ? "missing" : mcpServerStatus(server);
@@ -6578,18 +6708,26 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const sessionID = nativeThreadId(providerThread);
               const state = threads.get(sessionID);
               if (state === undefined) {
-                return yield* protocolError(
-                  `OpenCode 2 session ${sessionID} is not registered for pending-work inspection`,
-                );
+                return sessionHasPendingBackgroundWork(sessionID, undefined);
               }
-              return yield* inspectPendingBackgroundWork(state);
+              const inspected = yield* inspectPendingBackgroundWork(state).pipe(Effect.option);
+              const hold = holdPendingWorkAfterClear.delete(sessionID);
+              return (
+                (inspected._tag === "Some" && inspected.value) ||
+                (runningShellIdsBySession.get(sessionID)?.size ?? 0) > 0 ||
+                hold
+              );
             }).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("Failed to inspect OpenCode 2 pending background work.", {
                   errorTag: causeErrorTag(cause),
                   provider: OPENCODE2_PROVIDER,
                   providerThreadId: providerThread.id,
-                }).pipe(Effect.as(false)),
+                }).pipe(
+                  Effect.as(
+                    (runningShellIdsBySession.get(nativeThreadId(providerThread))?.size ?? 0) > 0,
+                  ),
+                ),
               ),
             ),
           ensureThread: (threadInput) =>
