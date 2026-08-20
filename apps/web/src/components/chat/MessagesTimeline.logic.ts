@@ -57,6 +57,7 @@ export function workEntryIsVisibleInGroup(
     workEntryShouldRenderInWorkLog(entry)
   );
 }
+export const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
 export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
 export const TIMELINE_MINIMAP_MIN_ITEMS = 2;
 export const TIMELINE_MINIMAP_MAX_HEIGHT_CSS = "calc(100vh - 18rem)";
@@ -687,6 +688,14 @@ function timelineEntryFoldRunId(entry: TimelineEntry): RunId | null {
   return null;
 }
 
+function timelineEntryIsTerminalError(entry: TimelineEntry): boolean {
+  return (
+    entry.kind === "work" &&
+    entry.entry.itemType === "error" &&
+    entry.entry.toolLifecycleStatus === "failed"
+  );
+}
+
 /**
  * Settled turns fold their commentary and tool activity behind a
  * "Worked for ..." row anchored at the turn's first foldable entry; the
@@ -769,7 +778,11 @@ function deriveTurnFolds(input: {
     }
     const hiddenEntryIds = new Set<string>();
     for (const entry of group.entries) {
-      if (entry.id !== group.terminalEntry?.id && !timelineEntryIsPersistentResourceCard(entry)) {
+      if (
+        entry.id !== group.terminalEntry?.id &&
+        !timelineEntryIsPersistentResourceCard(entry) &&
+        !timelineEntryIsTerminalError(entry)
+      ) {
         hiddenEntryIds.add(entry.id);
       }
     }
