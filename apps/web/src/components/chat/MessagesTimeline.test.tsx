@@ -1290,9 +1290,7 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain(
       "902,000 used / 902,000 trigger · 922,000 input limit · 1,050,000 context",
     );
-    expect(markup).toContain(
-      'title="902,000 used / 902,000 trigger · 922,000 input limit · 1,050,000 context"',
-    );
+    expect(markup).toContain('data-base-ui-tooltip-trigger=""');
     expect(markup).not.toContain("sensitive provider summary");
     expect(
       formatCompactionTokenDetail({
