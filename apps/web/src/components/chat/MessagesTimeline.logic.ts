@@ -593,6 +593,14 @@ function timelineEntryFoldRunId(entry: TimelineEntry): RunId | null {
   return null;
 }
 
+function timelineEntryIsTerminalError(entry: TimelineEntry): boolean {
+  return (
+    entry.kind === "work" &&
+    entry.entry.itemType === "error" &&
+    entry.entry.toolLifecycleStatus === "failed"
+  );
+}
+
 /**
  * A promptless provider restart replaces the native turn without adding a
  * user message. Keep every provider turn since the latest user message in one
@@ -715,7 +723,7 @@ function deriveTurnFolds(input: {
       ? group.entries.findIndex((entry) => entry.id === group.terminalEntry?.id)
       : group.entries.length;
     for (const [index, entry] of group.entries.entries()) {
-      if (entry.id === group.terminalEntry?.id) {
+      if (entry.id === group.terminalEntry?.id || timelineEntryIsTerminalError(entry)) {
         continue;
       }
       const isCompaction =
