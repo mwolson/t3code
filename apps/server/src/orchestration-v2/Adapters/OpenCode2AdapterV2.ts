@@ -171,6 +171,7 @@ import {
   type OpenCode2RuntimeOperation,
 } from "../../provider/opencode2Runtime.ts";
 import { parseOpenCodeModelSlug } from "../../provider/opencodeRuntime.ts";
+import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../../provider/T3OrchestrationInstructions.ts";
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
 import { applyOpenCode2ProviderEnvironment } from "../../provider/OpenCode2ProviderEnvironment.ts";
 import { IdAllocatorV2, type IdAllocatorV2Shape } from "../IdAllocator.ts";
@@ -914,6 +915,26 @@ export function openCode2AllActiveTurnsAwaitRuntimeRequest(input: {
 
 export function openCode2ShouldChargeStreamFailure(watchdogResubscribe: boolean): boolean {
   return !watchdogResubscribe;
+}
+
+/**
+ * Whether a clean SSE EOF while a turn is active should spend the fail budget.
+ * Local stall aborts already own {@link OPENCODE2_EVENT_STALL_MAX_RESUBSCRIBES}.
+ * Explained quiet (in-flight shells/tools, pending user input) stays open so a
+ * healthy long turn cannot die on volatile `/api/event` recycles.
+ *
+ * @internal exported for tests
+ */
+export function openCode2ShouldChargeCleanEofBudget(input: {
+  readonly watchdogResubscribe: boolean;
+  readonly hasPendingRuntimeRequest: boolean;
+  readonly hasInFlightPendingWork: boolean;
+}): boolean {
+  if (input.watchdogResubscribe) return false;
+  return openCode2ShouldChargeStallBudget({
+    hasPendingRuntimeRequest: input.hasPendingRuntimeRequest,
+    hasInFlightPendingWork: input.hasInFlightPendingWork,
+  });
 }
 
 export function openCode2ProviderRetryIsScheduled(
@@ -1828,6 +1849,23 @@ export function openCode2McpServersFromList(input: unknown): ReadonlyArray<McpSe
 }
 
 /**
+ * Durable instruction text installed on each OpenCode 2 session that has the
+ * T3 MCP server. Shared orchestration rules plus the OpenCode execute bridge.
+ *
+ * @internal exported for tests
+ */
+export function openCode2T3OrchestrationInstructions(): string {
+  return [
+    T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim(),
+    "",
+    'OpenCode 2 MCP call shape: run t3-code tools through the built-in `execute` tool with JavaScript that calls tools["t3-code"], for example:',
+    'await tools["t3-code"].orchestrator_capabilities({})',
+    'await tools["t3-code"].t3_thread_start({ prompt: "...", title: "..." })',
+    'await tools["t3-code"].delegate_task({ task: "...", mode: "async" })',
+  ].join("\n");
+}
+
+/**
  * Add T3's per-thread MCP server to a spawned OpenCode 2 process without
  * writing the user's global or project configuration.
  *
@@ -2309,6 +2347,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           readonly delete: (options: Record<string, unknown>) => Promise<unknown>;
           readonly get: (options: Record<string, unknown>) => Promise<unknown>;
           readonly post: (options: Record<string, unknown>) => Promise<unknown>;
+          readonly put: (options: Record<string, unknown>) => Promise<unknown>;
         };
         const rawHttpClient = (): OpenCode2RawHttpClient =>
           (client as unknown as { client: OpenCode2RawHttpClient }).client;
@@ -6188,44 +6227,62 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               // terminal and without a dead-stream signal: every cycle resets
               // the stall clock, so a proxy recycle or dead server that closes
               // /api/event right after each reconnect would park the turn
-              // forever. Count event-less clean EOFs and fail active turns
-              // once both the count and elapsed-time budgets are exhausted;
-              // idle reconnects and replay parking stay unbounded below.
+              // forever. Count unexplained event-less clean EOFs and fail once
+              // both the count and elapsed-time budgets are exhausted. Local
+              // stall aborts and explained quiet (in-flight shells/tools) only
+              // resubscribe; idle reconnects and replay parking stay unbounded.
               const now = yield* Clock.currentTimeMillis;
-              cleanEofWindowStartedAtMs ??= now;
-              consecutiveCleanEofResubscribes += 1;
-              yield* Effect.logWarning(
-                "OpenCode 2 event stream ended cleanly while a turn is active; resubscribing.",
-                {
-                  provider: OPENCODE2_PROVIDER,
-                  consecutiveCleanEofResubscribes,
-                },
-              );
-              if (
-                openCode2ShouldFailActiveTurnsAfterCleanEof({
-                  consecutiveCleanEofs: consecutiveCleanEofResubscribes,
-                  maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
-                  cleanEofWindowAgeMs: now - cleanEofWindowStartedAtMs,
-                  minimumWindowMs: OPENCODE2_EVENT_STALL_MS,
-                  hasActiveTurn,
-                })
-              ) {
-                yield* Effect.logError(
-                  "OpenCode 2 event stream clean-EOF budget exhausted; failing active turns.",
+              const chargeCleanEofBudget = openCode2ShouldChargeCleanEofBudget({
+                watchdogResubscribe,
+                hasPendingRuntimeRequest: false,
+                hasInFlightPendingWork: allActiveTurnsHaveInFlightPendingWork(now),
+              });
+              if (!chargeCleanEofBudget) {
+                consecutiveCleanEofResubscribes = 0;
+                cleanEofWindowStartedAtMs = null;
+                yield* Effect.logWarning(
+                  "OpenCode 2 event stream ended cleanly during explained quiet or stall recovery; resubscribing without charging the clean-EOF budget.",
+                  {
+                    provider: OPENCODE2_PROVIDER,
+                    watchdogResubscribe,
+                  },
+                );
+              } else {
+                cleanEofWindowStartedAtMs ??= now;
+                consecutiveCleanEofResubscribes += 1;
+                yield* Effect.logWarning(
+                  "OpenCode 2 event stream ended cleanly while a turn is active; resubscribing.",
                   {
                     provider: OPENCODE2_PROVIDER,
                     consecutiveCleanEofResubscribes,
-                    maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
                   },
                 );
-                yield* failActiveTurns(
-                  `OpenCode 2 event stream closed cleanly ${consecutiveCleanEofResubscribes} times while a turn was active. Retry the turn.`,
-                  "transport_error",
-                  "event.stream.clean_eof",
-                  true,
-                );
-                consecutiveCleanEofResubscribes = 0;
-                cleanEofWindowStartedAtMs = null;
+                if (
+                  openCode2ShouldFailActiveTurnsAfterCleanEof({
+                    consecutiveCleanEofs: consecutiveCleanEofResubscribes,
+                    maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+                    cleanEofWindowAgeMs: now - cleanEofWindowStartedAtMs,
+                    minimumWindowMs: OPENCODE2_EVENT_STALL_MS,
+                    hasActiveTurn,
+                  })
+                ) {
+                  yield* Effect.logError(
+                    "OpenCode 2 event stream clean-EOF budget exhausted; failing active turns.",
+                    {
+                      provider: OPENCODE2_PROVIDER,
+                      consecutiveCleanEofResubscribes,
+                      maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+                    },
+                  );
+                  yield* failActiveTurns(
+                    `OpenCode 2 event stream closed cleanly ${consecutiveCleanEofResubscribes} times while a turn was active. Retry the turn.`,
+                    "transport_error",
+                    "event.stream.clean_eof",
+                    true,
+                  );
+                  consecutiveCleanEofResubscribes = 0;
+                  cleanEofWindowStartedAtMs = null;
+                }
               }
             } else if (!hasActiveTurn) {
               // Replay fixtures end the SSE stream cleanly once the transcript
@@ -6682,11 +6739,42 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
 
         const installT3OrchestrationInstructions = Effect.fnUntraced(function* (sessionID: string) {
           if (!hasT3Mcp) return;
-          yield* sdkCall(
-            "session.instructions.entry.put",
-            { sessionID, key: OPENCODE2_T3_INSTRUCTION_KEY },
-            () => Promise.resolve({ data: { data: true } }),
-          );
+          const value = openCode2T3OrchestrationInstructions();
+          const payload = {
+            sessionID,
+            key: OPENCODE2_T3_INSTRUCTION_KEY,
+            value,
+          } as const;
+          const putViaSdk = (
+            client.v2.session as {
+              instructions?: {
+                entry?: {
+                  put?: (input: {
+                    readonly sessionID: string;
+                    readonly key: string;
+                    readonly value: unknown;
+                  }) => Promise<unknown>;
+                };
+              };
+            }
+          ).instructions?.entry?.put;
+
+          yield* sdkCall("session.instructions.entry.put", payload, () => {
+            if (putViaSdk !== undefined) {
+              return putViaSdk(payload);
+            }
+            // Session3 typed SDK omits this route; the wire still has PUT.
+            return rawHttpClient().put({
+              url: "/api/session/{sessionID}/instructions/entries/{key}",
+              path: {
+                sessionID,
+                key: OPENCODE2_T3_INSTRUCTION_KEY,
+              },
+              body: { value },
+              headers: { "Content-Type": "application/json" },
+              throwOnError: true,
+            });
+          });
         });
 
         yield* waitForT3Mcp();

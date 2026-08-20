@@ -69,6 +69,7 @@ import {
   openCode2SessionErrorStatus,
   openCode2SessionErrorTargetSessionIds,
   openCode2ShellRemovalSucceeded,
+  openCode2ShouldChargeCleanEofBudget,
   openCode2ShouldChargeStallBudget,
   openCode2ShouldChargeStreamFailure,
   openCode2ShouldFailActiveTurnsAfterCleanEof,
@@ -76,6 +77,7 @@ import {
   openCode2ShouldQuarantineInterruptedSession,
   openCode2ShouldResubscribeStalledStream,
   openCode2ShouldSettleTurn,
+  openCode2T3OrchestrationInstructions,
   openCode2ToolNeedsTerminalOverride,
   openCode2TokenUsage,
   makeOpenCode2DeferredChildEventBuffer,
@@ -746,6 +748,17 @@ describe("openCode2McpServersFromList", () => {
     assert.deepStrictEqual(openCode2McpServersFromList({ "t3-code": "connected" }), [
       { name: "t3-code", status: "connected" },
     ]);
+  });
+});
+
+describe("openCode2T3OrchestrationInstructions", () => {
+  it("includes shared orchestration rules and the OpenCode execute bridge", () => {
+    const text = openCode2T3OrchestrationInstructions();
+    assert.include(text, "use `delegate_task`");
+    assert.include(text, 'tools["t3-code"]');
+    assert.include(text, 'await tools["t3-code"].t3_thread_start');
+    assert.include(text, 'await tools["t3-code"].orchestrator_capabilities');
+    assert.isBelow(Buffer.byteLength(JSON.stringify(text), "utf8"), 8 * 1024);
   });
 });
 
@@ -1522,6 +1535,39 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
     assert.equal(
       openCode2CleanEofResubscribeDelayMs(100, false),
       OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS,
+    );
+  });
+
+  it("charges clean-EOF budget only for unexplained peer closes", () => {
+    assert.isTrue(
+      openCode2ShouldChargeCleanEofBudget({
+        watchdogResubscribe: false,
+        hasPendingRuntimeRequest: false,
+        hasInFlightPendingWork: false,
+      }),
+    );
+    // Stall watchdog already owns its own fail budget; local aborts must not
+    // also spend the clean-EOF budget (live: 30s quiet shells then fail).
+    assert.isFalse(
+      openCode2ShouldChargeCleanEofBudget({
+        watchdogResubscribe: true,
+        hasPendingRuntimeRequest: false,
+        hasInFlightPendingWork: false,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldChargeCleanEofBudget({
+        watchdogResubscribe: false,
+        hasPendingRuntimeRequest: false,
+        hasInFlightPendingWork: true,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldChargeCleanEofBudget({
+        watchdogResubscribe: false,
+        hasPendingRuntimeRequest: true,
+        hasInFlightPendingWork: false,
+      }),
     );
   });
 
