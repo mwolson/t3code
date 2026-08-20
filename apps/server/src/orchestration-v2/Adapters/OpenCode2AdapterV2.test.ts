@@ -47,6 +47,7 @@ import {
   openCode2InterruptedThreadDisposition,
   openCode2HasInFlightPendingWork,
   openCode2LocationQuery,
+  openCode2McpServersFromList,
   openCode2ShellsFromList,
   openCode2IsCancelledPostSettleWake,
   openCode2IsPostSettleWakeAdmission,
@@ -723,6 +724,28 @@ describe("openCode2ShellsFromList", () => {
         { id: "sh_2", status: "exited", metadata: {} },
       ],
     );
+  });
+
+  it("peels a location-scoped HTTP envelope", () => {
+    assert.deepStrictEqual(
+      openCode2ShellsFromList({
+        location: { directory: "/tmp/project" },
+        data: [{ id: "sh_1", status: "running", metadata: { sessionID: "ses_a" } }],
+      }),
+      [{ id: "sh_1", status: "running", metadata: { sessionID: "ses_a" } }],
+    );
+  });
+});
+
+describe("openCode2McpServersFromList", () => {
+  it("reads an array catalog and a name-to-status record", () => {
+    assert.deepStrictEqual(
+      openCode2McpServersFromList([{ name: "t3-code", status: "connected" }]),
+      [{ name: "t3-code", status: "connected" }],
+    );
+    assert.deepStrictEqual(openCode2McpServersFromList({ "t3-code": "connected" }), [
+      { name: "t3-code", status: "connected" },
+    ]);
   });
 });
 
