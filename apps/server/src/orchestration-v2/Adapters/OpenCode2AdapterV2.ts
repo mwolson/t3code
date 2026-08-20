@@ -6459,10 +6459,14 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   };
                 }
               ).shell?.list;
-              if (shellList === undefined) {
-                return Promise.resolve({ data: { data: [] as Array<ShellInfoV2> } });
+              if (shellList !== undefined) {
+                return shellList({ location: state.location });
               }
-              return shellList({ location: state.location });
+              return rawHttpClient().get({
+                url: "/api/shell",
+                query: { "location[directory]": state.location.directory },
+                throwOnError: false,
+              });
             }).pipe(
               Effect.flatMap((response) =>
                 unwrapOpenCode2Data<Array<ShellInfoV2>>("shell.list", response),
