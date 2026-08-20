@@ -45,8 +45,9 @@ import {
   openCode2ForkEventPumpInScope,
   openCode2ForkParameters,
   openCode2InterruptedThreadDisposition,
-  isOpenCode2McpCatalogUnavailable,
   openCode2HasInFlightPendingWork,
+  openCode2LocationQuery,
+  openCode2ShellsFromList,
   openCode2IsCancelledPostSettleWake,
   openCode2IsPostSettleWakeAdmission,
   openCode2LastErrorAt,
@@ -700,15 +701,28 @@ describe("openCode2ForkParameters", () => {
   });
 });
 
-describe("isOpenCode2McpCatalogUnavailable", () => {
-  it("treats missing and html catalog responses as unavailable", () => {
-    assert.isTrue(isOpenCode2McpCatalogUnavailable("Not Found"));
-    assert.isTrue(
-      isOpenCode2McpCatalogUnavailable(
-        "Request is not supported by this version of OpenCode Server (Server responded with text/html)",
-      ),
+describe("openCode2LocationQuery", () => {
+  it("scopes list routes to a directory", () => {
+    assert.strictEqual(
+      openCode2LocationQuery("/tmp/project"),
+      "location%5Bdirectory%5D=%2Ftmp%2Fproject",
     );
-    assert.isFalse(isOpenCode2McpCatalogUnavailable("timeout"));
+  });
+});
+
+describe("openCode2ShellsFromList", () => {
+  it("keeps running shells and defaults missing metadata", () => {
+    assert.deepStrictEqual(
+      openCode2ShellsFromList([
+        { id: "sh_1", status: "running", metadata: { sessionID: "ses_a" }, command: "sleep 1" },
+        { id: "sh_2", status: "exited" },
+        { status: "running" },
+      ]),
+      [
+        { id: "sh_1", status: "running", metadata: { sessionID: "ses_a" }, command: "sleep 1" },
+        { id: "sh_2", status: "exited", metadata: {} },
+      ],
+    );
   });
 });
 
