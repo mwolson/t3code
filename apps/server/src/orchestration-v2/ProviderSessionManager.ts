@@ -529,7 +529,7 @@ export const layerWithOptions = (
                   });
                   McpProviderSession.setMcpProviderSession(credential.config);
                   reserveMcpCredential(threadId, credential.config.providerSessionId);
-                  reserved = { credentialId: credential.config.providerSessionId, issued: true };
+                  reserved = { credentialId: credential.config.providerSessionId };
                   // Hand the reservation to the caller; it owns the drop.
                   reserved = undefined;
                   return { mcpCredentialId: credential.config.providerSessionId, issued: true };

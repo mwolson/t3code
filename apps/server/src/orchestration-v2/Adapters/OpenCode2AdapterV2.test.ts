@@ -109,6 +109,7 @@ const t3McpSession = {
   providerInstanceId: ProviderInstanceId.make("opencode2"),
   endpoint: "http://127.0.0.1:43123/mcp",
   authorizationHeader: "Bearer test-token",
+  browserToolsAvailable: true,
 };
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -1205,7 +1206,7 @@ describe("openCode2PendingWorkForSession", () => {
     time: { started: 1 },
   });
 
-  it.effect("pins the thread for its durable pending input without listing shells", () =>
+  it.effect("pins the thread for its durable pending input while still inspecting shells", () =>
     Effect.gen(function* () {
       let listedShells = false;
       const result = yield* openCode2PendingWorkForSession({
@@ -1218,7 +1219,7 @@ describe("openCode2PendingWorkForSession", () => {
       });
 
       assert.isTrue(result);
-      assert.isFalse(listedShells);
+      assert.isTrue(listedShells);
     }),
   );
 
