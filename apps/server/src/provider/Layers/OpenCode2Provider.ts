@@ -611,10 +611,7 @@ export const listOpenCode2SkillsForDirectory = Effect.fn("listOpenCode2SkillsFor
       Effect.timeoutOption(OPENCODE2_SKILL_LIST_TIMEOUT_MS),
       Effect.orElseSucceed(() => Option.none()),
     );
-    if (Option.isSome(listed) && listed.value.length > 0) {
-      return listed.value;
-    }
-    return discoverOpenCode2Skills(cwd, resolvedEnvironment);
+    return Option.getOrElse(listed, () => discoverOpenCode2Skills(cwd, resolvedEnvironment));
   },
 );
 
