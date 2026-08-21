@@ -4,6 +4,7 @@ import { Tool } from "effect/unstable/ai";
 import {
   CreateThreadsTool,
   DelegateTaskTool,
+  OrchestratorCapabilitiesTool,
   ScheduleTaskTool,
   ThreadInterruptTool,
 } from "./tools.ts";
@@ -44,6 +45,18 @@ describe("orchestrator MCP tool guidance", () => {
       .join(" ");
     assert.include(modeText, "Defaults to async");
     assert.include(timeoutText, "does not cancel the child");
+  });
+
+  it("documents slim and paginated capability discovery", () => {
+    const schema = Tool.getJsonSchema(OrchestratorCapabilitiesTool) as {
+      readonly properties?: Readonly<Record<string, { readonly description?: unknown }>>;
+    };
+
+    assert.isString(schema.properties?.providerInstanceId?.description);
+    assert.isString(schema.properties?.model?.description);
+    assert.include(OrchestratorCapabilitiesTool.description ?? "", "no-argument response");
+    assert.include(OrchestratorCapabilitiesTool.description ?? "", "modelCursor=modelsNextCursor");
+    assert.include(OrchestratorCapabilitiesTool.description ?? "", "includeModelOptions=true");
   });
 
   it("publishes an actionable schedule schema and compatibility string branch", () => {

@@ -1,4 +1,5 @@
 import {
+  OrchestratorMcpCapabilitiesInput,
   OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpCreatedThread,
   OrchestratorMcpCreateThreadsInput,
@@ -36,7 +37,8 @@ const dependencies = [McpInvocationContext.McpInvocationContext, OrchestratorMcp
 
 export const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   description:
-    "List the V2 provider instances, models, inherited runtime settings, and app-owned orchestration features available to this T3 thread.",
+    "List V2 provider summaries, inherited runtime settings, and app-owned orchestration features for this T3 thread. The no-argument response omits model catalogs. Pass providerInstanceId to read that provider's paginated models, continue with modelCursor=modelsNextCursor, or add an exact model with includeModelOptions=true to inspect its option descriptors.",
+  parameters: OrchestratorMcpCapabilitiesInput,
   success: OrchestratorMcpCapabilitiesResult,
   failure: OrchestratorMcpFailure,
   failureMode: "return",
