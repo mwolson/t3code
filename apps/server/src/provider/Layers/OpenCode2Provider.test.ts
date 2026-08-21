@@ -16,6 +16,7 @@ import {
   checkOpenCode2ProviderStatus,
   flattenOpenCode2Models,
   isOpenCode2InventorySettlementError,
+  listOpenCode2SkillsForDirectory,
   openCode2NextBuild,
   parseOpenCode2Version,
   settleOpenCode2Inventory,
@@ -661,4 +662,104 @@ describe("flattenOpenCode2Models", () => {
       ],
     });
   });
+});
+
+describe("listOpenCode2SkillsForDirectory", () => {
+  it.effect("maps OpenCode skill.list without sending skill bodies", () =>
+    Effect.gen(function* () {
+      const client = {
+        v2: {
+          skill: {
+            list: async () => ({
+              data: {
+                data: [
+                  {
+                    name: "git-release",
+                    description: "Release notes.",
+                    location: "/cache/opencode/skills/git-release/git-release.md",
+                    content: "# Do not ship this",
+                  },
+                  {
+                    name: "hidden",
+                    slash: false,
+                    location: "/cache/opencode/skills/hidden/SKILL.md",
+                    content: "hidden",
+                  },
+                ],
+              },
+            }),
+          },
+        },
+      };
+      const runtime = OpenCode2Runtime.OpenCode2Runtime.of({
+        startOpenCode2ServerProcess: () => Effect.die("unexpected server process start"),
+        connectToOpenCode2Server: () =>
+          Effect.succeed({
+            exitCode: null,
+            external: false,
+            password: "test-password",
+            url: "http://127.0.0.1:1234",
+          }),
+        createOpenCode2SdkClient: () => client as never,
+      });
+
+      const skills = yield* listOpenCode2SkillsForDirectory(
+        OPENCODE2_TEST_SETTINGS,
+        "/workspace",
+        {},
+      ).pipe(Effect.provideService(OpenCode2Runtime.OpenCode2Runtime, runtime));
+
+      assert.deepEqual(skills, [
+        {
+          name: "git-release",
+          path: "/cache/opencode/skills/git-release/git-release.md",
+          enabled: true,
+          description: "Release notes.",
+        },
+      ]);
+    }),
+  );
+
+  it.effect("accepts a single-wrapped skill.list payload", () =>
+    Effect.gen(function* () {
+      const client = {
+        v2: {
+          skill: {
+            list: async () => ({
+              data: [
+                {
+                  name: "deploy",
+                  description: "Deploy.",
+                  location: "/repo/.opencode/skills/deploy/SKILL.md",
+                  content: "# hidden",
+                },
+              ],
+            }),
+          },
+        },
+      };
+      const runtime = OpenCode2Runtime.OpenCode2Runtime.of({
+        startOpenCode2ServerProcess: () => Effect.die("unexpected server process start"),
+        connectToOpenCode2Server: () =>
+          Effect.succeed({
+            exitCode: null,
+            external: false,
+            password: "test-password",
+            url: "http://127.0.0.1:1234",
+          }),
+        createOpenCode2SdkClient: () => client as never,
+      });
+
+      const skills = yield* listOpenCode2SkillsForDirectory(
+        OPENCODE2_TEST_SETTINGS,
+        "/workspace",
+        {},
+      ).pipe(Effect.provideService(OpenCode2Runtime.OpenCode2Runtime, runtime));
+
+      assert.deepEqual(
+        skills.map((skill) => skill.name),
+        ["deploy"],
+      );
+    }),
+  );
 });
