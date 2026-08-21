@@ -811,6 +811,9 @@ describe("openCode2T3OrchestrationInstructions", () => {
     assert.include(text, 'tools["t3-code"]');
     assert.include(text, 'await tools["t3-code"].t3_thread_start');
     assert.include(text, 'await tools["t3-code"].orchestrator_capabilities');
+    assert.include(text, 'providerInstanceId: "..."');
+    assert.include(text, "modelCursor: 50");
+    assert.include(text, "includeModelOptions: true");
     assert.isBelow(Buffer.byteLength(JSON.stringify(text), "utf8"), 8 * 1024);
   });
 });

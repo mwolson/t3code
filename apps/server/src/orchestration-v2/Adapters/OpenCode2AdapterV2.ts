@@ -1860,6 +1860,9 @@ export function openCode2T3OrchestrationInstructions(): string {
     "",
     'OpenCode 2 MCP call shape: run t3-code tools through the built-in `execute` tool with JavaScript that calls tools["t3-code"], for example:',
     'await tools["t3-code"].orchestrator_capabilities({})',
+    'await tools["t3-code"].orchestrator_capabilities({ providerInstanceId: "..." })',
+    'await tools["t3-code"].orchestrator_capabilities({ providerInstanceId: "...", modelCursor: 50 })',
+    'await tools["t3-code"].orchestrator_capabilities({ providerInstanceId: "...", model: "...", includeModelOptions: true })',
     'await tools["t3-code"].t3_thread_start({ prompt: "...", title: "..." })',
     'await tools["t3-code"].delegate_task({ task: "...", mode: "async" })',
   ].join("\n");
