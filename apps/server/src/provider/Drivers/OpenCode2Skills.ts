@@ -1,11 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off
-// @effect-diagnostics globalFetch:off
 /**
  * OpenCode2Skills — filesystem discovery of OpenCode 2 skills for the `$` picker.
  *
  * OpenCode 2 ids come from the path, not frontmatter `name`. Later sources win.
  * Discovery is plain Node fs so provider status probes can run it under
- * TestClock without providing NodeServices.
+ * TestClock without providing NodeServices. Omit `cwd` for user-scope roots
+ * only. HTTP catalogs are OpenCode's `skill.list`, not this walker.
  *
  * @module provider/Drivers/OpenCode2Skills
  */
@@ -17,11 +17,6 @@ import type { ServerProviderSkill } from "@t3tools/contracts";
 import { parse as parseYamlDocument } from "yaml";
 
 type OpenCode2SkillScope = "user" | "project";
-
-export interface OpenCode2HttpCatalogRef {
-  readonly url: string;
-  readonly scope: OpenCode2SkillScope;
-}
 
 const FRONTMATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const NATIVE_SKILL_FOLDERS = ["skill", "skills"] as const;
@@ -322,14 +317,11 @@ function expandConfiguredSkillSource(
   return { kind: "dir", path: NodePath.resolve(cwd, trimmed) };
 }
 
-function collectConfiguredSkillSources(
+function collectConfiguredSkillDirectories(
   cwd: string | undefined,
   environment: NodeJS.ProcessEnv,
   allowProcessHome: boolean,
-): {
-  readonly directories: ReadonlyArray<{ path: string; scope: OpenCode2SkillScope }>;
-  readonly catalogs: ReadonlyArray<OpenCode2HttpCatalogRef>;
-} {
+): ReadonlyArray<{ path: string; scope: OpenCode2SkillScope }> {
   const home = envHome(environment, allowProcessHome);
   const configDir = resolveOpenCode2ConfigDir(environment, cwd, allowProcessHome);
   const ancestors =
@@ -348,99 +340,22 @@ function collectConfiguredSkillSources(
   }
 
   const directories: Array<{ path: string; scope: OpenCode2SkillScope }> = [];
-  const catalogs: Array<OpenCode2HttpCatalogRef> = [];
   for (const config of configPaths) {
     for (const entry of readConfigSkillsEntries(config.path)) {
       const expanded = expandConfiguredSkillSource(entry, cwd, home);
-      if (expanded === null) {
-        continue;
-      }
-      if (expanded.kind === "url") {
-        catalogs.push({ url: expanded.url, scope: config.scope });
+      if (expanded === null || expanded.kind === "url") {
         continue;
       }
       directories.push({ path: expanded.path, scope: config.scope });
     }
   }
-  return { directories, catalogs };
-}
-
-/**
- * HTTP catalog URLs from OpenCode config files, in config priority order.
- */
-export function collectOpenCode2SkillHttpCatalogs(
-  cwd?: string,
-  environment?: NodeJS.ProcessEnv,
-): ReadonlyArray<OpenCode2HttpCatalogRef> {
-  const resolvedEnvironment = environment ?? process.env;
-  return collectConfiguredSkillSources(cwd, resolvedEnvironment, environment === undefined)
-    .catalogs;
-}
-
-/**
- * Map an OpenCode HTTP catalog `index.json` body to picker skills.
- */
-export async function loadOpenCode2HttpCatalogSkills(
-  catalogs: ReadonlyArray<OpenCode2HttpCatalogRef>,
-): Promise<ReadonlyArray<ServerProviderSkill>> {
-  const skills: Array<ServerProviderSkill> = [];
-  for (const catalog of catalogs) {
-    try {
-      const response = await fetch(catalog.url, { signal: AbortSignal.timeout(2000) });
-      if (!response.ok) {
-        continue;
-      }
-      const payload: unknown = await response.json();
-      skills.push(...parseOpenCode2HttpCatalogIndex(catalog.url, payload, catalog.scope));
-    } catch {
-      continue;
-    }
-  }
-  return skills;
-}
-
-export function parseOpenCode2HttpCatalogIndex(
-  catalogUrl: string,
-  payload: unknown,
-  scope: OpenCode2SkillScope = "user",
-): ReadonlyArray<ServerProviderSkill> {
-  const record =
-    typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : null;
-  const entries = record?.skills;
-  if (!Array.isArray(entries)) {
-    return [];
-  }
-  const skills: Array<ServerProviderSkill> = [];
-  for (const entry of entries) {
-    if (typeof entry !== "object" || entry === null) {
-      continue;
-    }
-    const name =
-      typeof (entry as { name?: unknown }).name === "string"
-        ? (entry as { name: string }).name.trim()
-        : "";
-    if (!name) {
-      continue;
-    }
-    const description =
-      typeof (entry as { description?: unknown }).description === "string"
-        ? (entry as { description: string }).description.trim()
-        : "";
-    const base = catalogUrl.endsWith("/") ? catalogUrl : `${catalogUrl}/`;
-    skills.push({
-      name,
-      path: `${base}${name}`,
-      enabled: true,
-      scope,
-      ...(description ? { description } : {}),
-    });
-  }
-  return skills;
+  return directories;
 }
 
 /**
  * Enumerate OpenCode 2 skills in CLI load order. Missing roots and malformed
- * SKILL.md files are skipped. On name collisions, later sources win.
+ * SKILL.md files are skipped. On name collisions, later sources win. Omit cwd
+ * to skip project roots and project config files.
  */
 export function discoverOpenCode2Skills(
   cwd?: string,
@@ -453,7 +368,7 @@ export function discoverOpenCode2Skills(
   const skillsByName = new Map<string, ServerProviderSkill>();
   const ancestors =
     cwd === undefined || cwd.trim().length === 0 ? [] : collectWorkspaceAncestors(cwd);
-  const configured = collectConfiguredSkillSources(cwd, resolvedEnvironment, allowProcessHome);
+  const configured = collectConfiguredSkillDirectories(cwd, resolvedEnvironment, allowProcessHome);
 
   if (home.length > 0) {
     scanSkillRoot(skillsByName, NodePath.join(home, ".claude", "skills"), "user");
@@ -473,7 +388,7 @@ export function discoverOpenCode2Skills(
   for (const ancestor of ancestors) {
     scanNativeSkillFolders(skillsByName, NodePath.join(ancestor, ".opencode"), "project");
   }
-  for (const directory of configured.directories) {
+  for (const directory of configured) {
     scanSkillRoot(skillsByName, directory.path, directory.scope);
   }
 

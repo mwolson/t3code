@@ -100,6 +100,7 @@ export const OpenCode2RuntimeOperation = Schema.Literals([
   "shell.list",
   "shell.output",
   "shell.remove",
+  "skill.list",
   "startOpenCode2ServerProcess",
 ]);
 export type OpenCode2RuntimeOperation = typeof OpenCode2RuntimeOperation.Type;

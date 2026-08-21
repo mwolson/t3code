@@ -6,11 +6,7 @@ import * as NodePath from "node:path";
 import { assert } from "@effect/vitest";
 import { describe, it } from "vite-plus/test";
 
-import {
-  collectOpenCode2SkillHttpCatalogs,
-  discoverOpenCode2Skills,
-  parseOpenCode2HttpCatalogIndex,
-} from "./OpenCode2Skills.ts";
+import { discoverOpenCode2Skills } from "./OpenCode2Skills.ts";
 
 function writeSkill(skillsDir: string, directoryName: string, contents: string): void {
   const skillDir = NodePath.join(skillsDir, directoryName);
@@ -228,7 +224,7 @@ describe("discoverOpenCode2Skills", () => {
     );
   });
 
-  it("collects HTTP catalog URLs from config without fetching them", () => {
+  it("ignores HTTP catalog URLs in the skills config array", () => {
     const { home, workspace } = makeWorkspace();
     NodeFS.mkdirSync(NodePath.join(home, ".config", "opencode"), { recursive: true });
     NodeFS.writeFileSync(
@@ -236,26 +232,27 @@ describe("discoverOpenCode2Skills", () => {
       JSON.stringify({ skills: ["https://example.com/opencode/skills/"] }),
     );
 
-    const catalogs = collectOpenCode2SkillHttpCatalogs(workspace, { HOME: home });
-    assert.deepEqual(catalogs, [{ url: "https://example.com/opencode/skills/", scope: "user" }]);
+    const skills = discoverOpenCode2Skills(workspace, { HOME: home });
+    assert.deepEqual(skills, []);
   });
 
-  it("maps HTTP catalog index entries to picker skills", () => {
-    const skills = parseOpenCode2HttpCatalogIndex(
-      "https://example.com/opencode/skills/",
-      {
-        skills: [{ name: "git-release", description: "Release notes." }],
-      },
-      "user",
+  it("omits project skills when cwd is not provided", () => {
+    const { home, workspace } = makeWorkspace();
+    writeSkill(
+      NodePath.join(home, ".config", "opencode", "skills"),
+      "review",
+      ["---", "description: User review.", "---"].join("\n"),
     );
-    assert.deepEqual(skills, [
-      {
-        name: "git-release",
-        path: "https://example.com/opencode/skills/git-release",
-        enabled: true,
-        scope: "user",
-        description: "Release notes.",
-      },
-    ]);
+    writeSkill(
+      NodePath.join(workspace, ".opencode", "skills"),
+      "deploy",
+      ["---", "description: Project deploy.", "---"].join("\n"),
+    );
+
+    const skills = discoverOpenCode2Skills(undefined, { HOME: home });
+    assert.deepEqual(
+      skills.map((skill) => skill.name),
+      ["review"],
+    );
   });
 });

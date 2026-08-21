@@ -14,7 +14,7 @@
  *
  * @module provider/Layers/OpenCode2Provider
  */
-import type { AgentV2Info, ModelV2Info } from "@opencode-ai/sdk-next/v2";
+import type { AgentV2Info, ModelV2Info, SkillV2Info } from "@opencode-ai/sdk-next/v2";
 
 type IntegrationInfo = {
   readonly id: string;
@@ -31,14 +31,11 @@ import {
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { createModelCapabilities } from "@t3tools/shared/model";
-import {
-  collectOpenCode2SkillHttpCatalogs,
-  discoverOpenCode2Skills,
-  loadOpenCode2HttpCatalogSkills,
-} from "../Drivers/OpenCode2Skills.ts";
+import { discoverOpenCode2Skills } from "../Drivers/OpenCode2Skills.ts";
 import {
   OPENCODE2_AUTO_AGENT,
   OPENCODE2_DEFAULT_VARIANT,
@@ -530,6 +527,97 @@ export const makePendingOpenCode2Provider = (
     });
   });
 
+const OPENCODE2_SKILL_LIST_TIMEOUT_MS = 8_000;
+
+function listedOpenCode2SkillEntries(response: unknown): ReadonlyArray<SkillV2Info> {
+  if (Array.isArray(response)) {
+    return response as ReadonlyArray<SkillV2Info>;
+  }
+  if (response === null || typeof response !== "object") {
+    return [];
+  }
+  const data = (response as { readonly data?: unknown }).data;
+  if (Array.isArray(data)) {
+    return data as ReadonlyArray<SkillV2Info>;
+  }
+  if (data !== null && typeof data === "object") {
+    const inner = (data as { readonly data?: unknown }).data;
+    if (Array.isArray(inner)) {
+      return inner as ReadonlyArray<SkillV2Info>;
+    }
+  }
+  return [];
+}
+
+function mapOpenCode2ListedSkills(
+  entries: ReadonlyArray<SkillV2Info>,
+): ReadonlyArray<ServerProviderSkill> {
+  const skills: Array<ServerProviderSkill> = [];
+  for (const entry of entries) {
+    if (entry.slash === false) {
+      continue;
+    }
+    const name = entry.name.trim();
+    if (name.length === 0) {
+      continue;
+    }
+    const skillPath = entry.location.trim() || name;
+    const description = entry.description?.trim() ?? "";
+    skills.push({
+      name,
+      path: skillPath,
+      enabled: true,
+      ...(description.length > 0 ? { description } : {}),
+    });
+  }
+  return skills.toSorted((left, right) => left.name.localeCompare(right.name));
+}
+
+/**
+ * Authoritative `$` catalog for a thread project directory. Uses OpenCode's
+ * location-scoped `skill.list` when the server is up; otherwise falls back to
+ * disk discovery for that cwd. Does not fetch HTTP catalogs from T3.
+ */
+export const listOpenCode2SkillsForDirectory = Effect.fn("listOpenCode2SkillsForDirectory")(
+  function* (
+    settings: OpenCode2Settings,
+    cwd: string,
+    environment?: NodeJS.ProcessEnv,
+  ): Effect.fn.Return<ReadonlyArray<ServerProviderSkill>, never, OpenCode2Runtime> {
+    const runtime = yield* OpenCode2Runtime;
+    const resolvedEnvironment = environment ?? process.env;
+    if (!settings.enabled) {
+      return discoverOpenCode2Skills(undefined, resolvedEnvironment);
+    }
+    const listed = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* runtime.connectToOpenCode2Server({
+          binaryPath: settings.binaryPath,
+          serverUrl: settings.serverUrl,
+          serverPassword: settings.serverPassword,
+          environment: resolvedEnvironment,
+        });
+        const client = runtime.createOpenCode2SdkClient({
+          baseUrl: server.url,
+          directory: cwd,
+          serverPassword: server.password,
+        });
+        const response = yield* runOpenCode2Sdk("skill.list", () =>
+          client.v2.skill.list({ location: { directory: cwd } }),
+        );
+        return mapOpenCode2ListedSkills(listedOpenCode2SkillEntries(response));
+      }),
+    ).pipe(
+      Effect.timeoutOption(OPENCODE2_SKILL_LIST_TIMEOUT_MS),
+      Effect.orElseSucceed(() => Option.none()),
+    );
+    if (Option.isSome(listed) && listed.value.length > 0) {
+      return listed.value;
+    }
+    return discoverOpenCode2Skills(cwd, resolvedEnvironment);
+  },
+);
+
 export const checkOpenCode2ProviderStatus = Effect.fn("checkOpenCode2ProviderStatus")(function* (
   settings: OpenCode2Settings,
   cwd: string,
@@ -540,23 +628,7 @@ export const checkOpenCode2ProviderStatus = Effect.fn("checkOpenCode2ProviderSta
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const customModels = settings.customModels;
   const isExternalServer = settings.serverUrl.trim().length > 0;
-  let skills: ReadonlyArray<ServerProviderSkill> = [];
-  if (settings.enabled) {
-    skills = discoverOpenCode2Skills(cwd, resolvedEnvironment);
-    const catalogs = collectOpenCode2SkillHttpCatalogs(cwd, resolvedEnvironment);
-    if (catalogs.length > 0) {
-      const remote = yield* Effect.tryPromise(() => loadOpenCode2HttpCatalogSkills(catalogs)).pipe(
-        Effect.orElseSucceed((): ReadonlyArray<ServerProviderSkill> => []),
-      );
-      if (remote.length > 0) {
-        const byName = new Map(skills.map((skill) => [skill.name, skill]));
-        for (const skill of remote) {
-          byName.set(skill.name, skill);
-        }
-        skills = [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
-      }
-    }
-  }
+  const skills = settings.enabled ? discoverOpenCode2Skills(undefined, resolvedEnvironment) : [];
 
   const draft = (input: {
     readonly installed: boolean;
