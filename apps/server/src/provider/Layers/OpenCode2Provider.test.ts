@@ -1,6 +1,11 @@
 // @ts-nocheck — inventory fixtures predate ModelV2Info/AgentV2Info shape.
+// @effect-diagnostics nodeBuiltinImport:off
 /* eslint-disable */
 // Model/agent fixtures are structural for inventory tests across SDK generations.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { assert, it } from "@effect/vitest";
 import { OpenCode2Settings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -664,6 +669,51 @@ describe("flattenOpenCode2Models", () => {
   });
 });
 
+function listOpenCode2SkillsForDirectoryWithRuntime(
+  runtime: OpenCode2Runtime.OpenCode2Runtime["Service"],
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+) {
+  return listOpenCode2SkillsForDirectory(OPENCODE2_TEST_SETTINGS, cwd, environment).pipe(
+    Effect.provideService(OpenCode2Runtime.OpenCode2Runtime, runtime),
+  );
+}
+
+function openCode2SkillListRuntime(
+  list: () => Promise<unknown>,
+): OpenCode2Runtime.OpenCode2Runtime["Service"] {
+  return OpenCode2Runtime.OpenCode2Runtime.of({
+    startOpenCode2ServerProcess: () => Effect.die("unexpected server process start"),
+    connectToOpenCode2Server: () =>
+      Effect.succeed({
+        exitCode: null,
+        external: false,
+        password: "test-password",
+        url: "http://127.0.0.1:1234",
+      }),
+    createOpenCode2SdkClient: () =>
+      ({
+        v2: {
+          skill: { list },
+        },
+      }) as never,
+  });
+}
+
+function makeSkillListWorkspace(): { environment: NodeJS.ProcessEnv; workspace: string } {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-opencode2-skill-list-"));
+  const home = NodePath.join(tempDir, "home");
+  const workspace = NodePath.join(tempDir, "workspace");
+  NodeFS.mkdirSync(NodePath.join(workspace, ".git"), { recursive: true });
+  const skillDir = NodePath.join(workspace, ".opencode", "skills", "disk-skill");
+  NodeFS.mkdirSync(skillDir, { recursive: true });
+  NodeFS.writeFileSync(
+    NodePath.join(skillDir, "SKILL.md"),
+    ["---", "name: disk-skill", "description: Disk fallback skill.", "---"].join("\n"),
+  );
+  return { environment: { HOME: home }, workspace };
+}
+
 describe("listOpenCode2SkillsForDirectory", () => {
   it.effect("maps OpenCode skill.list without sending skill bodies", () =>
     Effect.gen(function* () {
@@ -759,6 +809,90 @@ describe("listOpenCode2SkillsForDirectory", () => {
       assert.deepEqual(
         skills.map((skill) => skill.name),
         ["deploy"],
+      );
+    }),
+  );
+
+  it.effect("keeps a successful empty skill.list instead of disk skills", () =>
+    Effect.gen(function* () {
+      const { environment, workspace } = makeSkillListWorkspace();
+      const skills = yield* listOpenCode2SkillsForDirectoryWithRuntime(
+        openCode2SkillListRuntime(async () => ({ data: { data: [] } })),
+        workspace,
+        environment,
+      );
+
+      assert.deepEqual(skills, []);
+    }),
+  );
+
+  it.effect("keeps a mapped-out skill.list instead of disk skills", () =>
+    Effect.gen(function* () {
+      const { environment, workspace } = makeSkillListWorkspace();
+      const skills = yield* listOpenCode2SkillsForDirectoryWithRuntime(
+        openCode2SkillListRuntime(async () => ({
+          data: {
+            data: [
+              {
+                name: "hidden",
+                slash: false,
+                location: "/cache/opencode/skills/hidden/SKILL.md",
+                content: "hidden",
+              },
+            ],
+          },
+        })),
+        workspace,
+        environment,
+      );
+
+      assert.deepEqual(skills, []);
+    }),
+  );
+
+  it.effect("falls back to disk skills after the skill.list timeout", () =>
+    Effect.gen(function* () {
+      const { environment, workspace } = makeSkillListWorkspace();
+      const skillsFiber = yield* listOpenCode2SkillsForDirectoryWithRuntime(
+        openCode2SkillListRuntime(() => new Promise(() => {})),
+        workspace,
+        environment,
+      ).pipe(Effect.forkChild);
+
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("8 seconds");
+      const skills = yield* Fiber.join(skillsFiber);
+
+      assert.deepEqual(
+        skills.map((skill) => skill.name),
+        ["disk-skill"],
+      );
+    }),
+  );
+
+  it.effect("falls back to disk skills when skill.list fails", () =>
+    Effect.gen(function* () {
+      const { environment, workspace } = makeSkillListWorkspace();
+      const sdkFailure = yield* listOpenCode2SkillsForDirectoryWithRuntime(
+        openCode2SkillListRuntime(async () => {
+          throw new Error("skill.list failed");
+        }),
+        workspace,
+        environment,
+      );
+      const connectionFailure = yield* listOpenCode2SkillsForDirectoryWithRuntime(
+        failingOpenCode2Runtime("network-failed"),
+        workspace,
+        environment,
+      );
+
+      assert.deepEqual(
+        sdkFailure.map((skill) => skill.name),
+        ["disk-skill"],
+      );
+      assert.deepEqual(
+        connectionFailure.map((skill) => skill.name),
+        ["disk-skill"],
       );
     }),
   );
