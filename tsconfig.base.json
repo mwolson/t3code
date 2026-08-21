@@ -21,6 +21,7 @@
     "plugins": [
       {
         "name": "@effect/language-service",
+        "allowedDuplicatedPackages": ["@distilled.cloud/cloudflare", "@distilled.cloud/core"],
         "namespaceImportPackages": ["@effect/platform-node", "effect"],
         "diagnosticSeverity": {
           "importFromBarrel": "error",
