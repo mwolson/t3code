@@ -66,6 +66,8 @@ import {
   scoreQueryMatch,
 } from "@t3tools/shared/searchRanking";
 import { resolveProviderOptionDescriptors } from "../../lib/providerOptions";
+import { useEnvironmentQuery } from "../../state/query";
+import { serverEnvironment } from "../../state/server";
 import { useComposerPathSearch } from "../../state/use-composer-path-search";
 import { ComposerCommandPopover, type ComposerCommandItem } from "./ComposerCommandPopover";
 import { collapsedComposerActions } from "./ThreadComposer.logic";
@@ -361,6 +363,18 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ) ?? null
     );
   }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
+  const projectSkillsQuery = useEnvironmentQuery(
+    selectedProviderStatus?.driver === "opencode2" &&
+      props.projectCwd !== null &&
+      props.projectCwd.length > 0 &&
+      selectedProviderStatus.instanceId
+      ? serverEnvironment.listProviderSkills({
+          environmentId: props.environmentId,
+          input: { instanceId: selectedProviderStatus.instanceId, cwd: props.projectCwd },
+        })
+      : null,
+  );
+  const pickerSkills = projectSkillsQuery.data?.skills ?? selectedProviderStatus?.skills ?? [];
 
   // ── Trigger detection ────────────────────────────────────
   const [composerSelection, setComposerSelection] = useState(() => ({
@@ -441,7 +455,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     }
 
     if (composerTrigger.kind === "skill") {
-      const enabledSkills = (selectedProviderStatus?.skills ?? []).filter((s) => s.enabled);
+      const enabledSkills = pickerSkills.filter((s) => s.enabled);
       const normalizedQuery = normalizeSearchQuery(composerTrigger.query, {
         trimLeadingPattern: /^\$+/,
       });
@@ -538,7 +552,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     }
 
     return [];
-  }, [composerTrigger, pathSearch.entries, selectedProviderStatus]);
+  }, [composerTrigger, pathSearch.entries, pickerSkills, selectedProviderStatus]);
 
   // ── Handle command selection ──────────────────────────────
   const { onChangeDraftMessage, onUpdateInteractionMode, draftMessage, onSendMessage } = props;
@@ -817,7 +831,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
               ref={inputRef}
               multiline
               value={props.draftMessage}
-              skills={selectedProviderStatus?.skills ?? []}
+              skills={pickerSkills}
               selection={composerSelection}
               onChangeText={props.onChangeDraftMessage}
               onSelectionChange={handleSelectionChange}
