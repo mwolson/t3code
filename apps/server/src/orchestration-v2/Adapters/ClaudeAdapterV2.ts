@@ -3050,7 +3050,7 @@ export function makeClaudeAdapterV2(
           readonly output: ClaudeNativeToolOutput;
           readonly status: Extract<
             OrchestrationV2TurnItem["status"],
-            "running" | "completed" | "failed"
+            "running" | "completed" | "failed" | "interrupted"
           >;
           readonly startedAt: DateTime.Utc;
           readonly updatedAt: DateTime.Utc;
