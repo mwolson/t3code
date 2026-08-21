@@ -74,6 +74,7 @@ import {
   OrchestrationSearchThreadsInput,
   OrchestrationSearchThreadsResult,
 } from "./orchestration.ts";
+import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   ProviderUploadFeedbackError,
   ProviderUploadFeedbackInput,
@@ -181,6 +182,7 @@ import {
   ServerLifecycleStreamEvent,
   ServerRemoveKeybindingInput,
   ServerRemoveKeybindingResult,
+  ServerProviderSkill,
   ServerProviderUpdatedPayload,
   ServerSelfUpdateError,
   ServerSelfUpdateInput,
@@ -297,6 +299,7 @@ export const WS_METHODS = {
   serverProbe: "server.probe",
   serverGetConfig: "server.getConfig",
   serverRefreshProviders: "server.refreshProviders",
+  providersListSkills: "providers.listSkills",
   serverUpdateProvider: "server.updateProvider",
   serverUpdateServer: "server.updateServer",
   serverUpdateServerWithProgress: "server.updateServerWithProgress",
@@ -400,6 +403,17 @@ export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProv
     instanceId: Schema.optional(ProviderInstanceId),
   }),
   success: ServerProviderUpdatedPayload,
+  error: EnvironmentAuthorizationError,
+});
+
+export const WsProvidersListSkillsRpc = Rpc.make(WS_METHODS.providersListSkills, {
+  payload: Schema.Struct({
+    instanceId: ProviderInstanceId,
+    cwd: TrimmedNonEmptyString,
+  }),
+  success: Schema.Struct({
+    skills: Schema.Array(ServerProviderSkill),
+  }),
   error: EnvironmentAuthorizationError,
 });
 
@@ -1143,6 +1157,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
+  WsProvidersListSkillsRpc,
   WsServerUpdateProviderRpc,
   WsServerUpdateServerRpc,
   WsServerUpdateServerWithProgressRpc,

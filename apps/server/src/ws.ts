@@ -130,6 +130,7 @@ import {
   observeRpcStream as instrumentRpcStream,
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
+import * as ProviderInstanceRegistry from "./provider/Services/ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
@@ -585,6 +586,7 @@ const makeWsRpcLayer = (
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const providerInstanceRegistry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
       const config = yield* ServerConfig.ServerConfig;
@@ -1596,6 +1598,27 @@ const makeWsRpcLayer = (
               ),
             ),
             { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.providersListSkills]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.providersListSkills,
+            Effect.gen(function* () {
+              const instance = yield* providerInstanceRegistry.getInstance(input.instanceId);
+              if (instance?.listSkills) {
+                const skills = yield* instance.listSkills(input.cwd);
+                return { skills };
+              }
+              if (instance) {
+                const snapshot = yield* instance.snapshot.getSnapshot;
+                return { skills: snapshot.skills };
+              }
+              const providers = yield* providerRegistry.getProviders;
+              const snapshot = providers.find(
+                (provider) => provider.instanceId === input.instanceId,
+              );
+              return { skills: snapshot?.skills ?? [] };
+            }),
+            { "rpc.aggregate": "server" },
           ),
         [WS_METHODS.serverUpdateProvider]: (input) =>
           observeRpcEffect(

@@ -31,6 +31,7 @@ import { makeOpenCode2TextGeneration } from "../../textGeneration/OpenCode2TextG
 import { ProviderDriverError } from "../Errors.ts";
 import {
   checkOpenCode2ProviderStatus,
+  listOpenCode2SkillsForDirectory,
   makePendingOpenCode2Provider,
 } from "../Layers/OpenCode2Provider.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
@@ -226,6 +227,10 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
         snapshot,
         orchestrationAdapter,
         textGeneration,
+        listSkills: (cwd) =>
+          listOpenCode2SkillsForDirectory(effectiveConfig, cwd, processEnv).pipe(
+            Effect.provideService(OpenCode2Runtime, openCode2Runtime),
+          ),
       } satisfies ProviderInstance;
     }),
 };
