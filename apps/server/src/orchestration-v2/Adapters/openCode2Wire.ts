@@ -1,9 +1,7 @@
 /**
  * OpenCode 2 wire helpers. Maps runtime type strings onto the adapter switch's
- * internal names. next-16916 emits short forms (`session.step.*`,
- * `session.text.*`); earlier beta builds used `session.next.*` for the same
- * lifecycle. beta-17498 replaced admitted/pending with `session.inbox.*` and
- * first-class `session.execution.*`. All of those are accepted.
+ * internal names. The pinned 17823 wire uses short step/text names,
+ * `session.inbox.*` admission, and first-class `session.execution.*`.
  */
 
 /** Canonical event type names used by the adapter switch. */
@@ -58,49 +56,21 @@ export type OpenCode2CanonicalEventType =
   | "unknown";
 
 /**
- * Lifecycle renames. Internal switch cases keep short canonical names.
- * Accept both `session.next.*` (earlier beta) and short forms (next-16916).
+ * Lifecycle renames on the pinned 17823 wire. Internal switch cases keep
+ * short canonical names.
  */
 const WIRE_TYPE_ALIASES: Readonly<Record<string, OpenCode2CanonicalEventType>> = {
   "session.agent.switched": "session.agent.selected",
   "session.model.switched": "session.model.selected",
-  "session.next.agent.switched": "session.agent.selected",
-  "session.next.model.switched": "session.model.selected",
-  "session.next.prompt.admitted": "session.input.admitted",
-  "session.next.prompted": "session.input.admitted",
-  "session.next.shell.started": "session.shell.started",
-  "session.next.shell.ended": "session.shell.ended",
-  "session.next.step.started": "session.execution.started",
-  // step.ended is not always a full-turn terminal (tool-calls continues).
-  // Handlers inspect finish before settling.
-  "session.next.step.ended": "session.execution.succeeded",
-  "session.next.step.failed": "session.execution.failed",
-  "session.next.text.started": "session.text.started",
-  "session.next.text.delta": "session.text.delta",
-  "session.next.text.ended": "session.text.ended",
-  "session.next.reasoning.started": "session.reasoning.started",
-  "session.next.reasoning.delta": "session.reasoning.delta",
-  "session.next.reasoning.ended": "session.reasoning.ended",
-  "session.next.compaction.started": "session.compaction.started",
-  "session.next.compaction.admitted": "session.compaction.started",
-  "session.next.compaction.delta": "session.compaction.delta",
-  "session.next.compaction.ended": "session.compaction.ended",
-  "session.next.compaction.failed": "session.compaction.failed",
   "session.compaction.admitted": "session.compaction.started",
-  "session.next.tool.input.started": "session.tool.input.started",
-  "session.next.tool.input.delta": "session.tool.input.delta",
-  "session.next.tool.input.ended": "session.tool.input.ended",
-  "session.next.tool.called": "session.tool.called",
-  "session.next.tool.progress": "session.tool.progress",
-  "session.next.tool.success": "session.tool.success",
-  "session.next.tool.failed": "session.tool.failed",
-  "session.next.retried": "session.retry.scheduled",
   "session.inbox.delivered": "session.input.admitted",
   "session.inbox.enqueued": "session.input.admitted",
   "session.input.promoted": "session.input.admitted",
   "session.prompt.admitted": "session.input.admitted",
   "session.prompted": "session.input.admitted",
   "session.step.started": "session.execution.started",
+  // step.ended is not always a full-turn terminal (tool-calls continues).
+  // Handlers inspect finish before settling.
   "session.step.ended": "session.execution.succeeded",
   "session.step.failed": "session.execution.failed",
   "session.retried": "session.retry.scheduled",
@@ -204,7 +174,7 @@ export type OpenCode2WireSession = {
   };
 };
 
-/** Accept the legacy nested session info and next-16916's flattened event. */
+/** Accept nested session info and the flattened session-created event. */
 export function openCode2WireSession(event: {
   readonly created?: number;
   readonly data?: unknown;
@@ -253,8 +223,8 @@ export function openCode2WireSession(event: {
 
 export function openCode2WireCallID(event: { readonly data?: unknown }): string | undefined {
   const data = openCode2WireData(event);
-  // next-16916 tool events key the call with `id` (and put the tool name on
-  // `name`). Earlier beta builds used `callID` / `callId` for the same field.
+  // 17823 tool events key the call with `id` and put the tool name on `name`.
+  // `callID` / `callId` remain accepted when present.
   const value = data.callID ?? data.callId ?? data.id;
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
@@ -268,7 +238,7 @@ export function openCode2WireToolName(event: { readonly data?: unknown }): strin
   return undefined;
 }
 
-/** Normalize tool result metadata across the beta and next-16916 wire shapes. */
+/** Normalize tool result metadata across the 17823 wire shapes. */
 export function openCode2WireToolMetadata(event: {
   readonly data?: unknown;
 }): Record<string, unknown> | undefined {
