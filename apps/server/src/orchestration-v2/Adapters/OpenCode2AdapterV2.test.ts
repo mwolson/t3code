@@ -230,7 +230,7 @@ describe("bindOpenCode2CanonicalProviderThread", () => {
 
 describe("OpenCode 2 post-settle wake classification", () => {
   const syntheticAdmission = v2Event({
-    type: "session.next.prompt.admitted",
+    type: "session.inbox.enqueued",
     data: {
       sessionID: "ses_root",
       inputID: "input_wake",
@@ -261,7 +261,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
     assert.isFalse(
       openCode2IsPostSettleWakeAdmission(
         v2Event({
-          type: "session.next.prompt.admitted",
+          type: "session.inbox.enqueued",
           data: {
             sessionID: "ses_root",
             inputID: "input_user",
@@ -279,7 +279,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
     assert.isFalse(
       openCode2IsPostSettleWakeAdmission(
         v2Event({
-          type: "session.next.prompt.admitted",
+          type: "session.inbox.enqueued",
           data: {
             sessionID: "ses_root",
             inputID: "input_background_instruction",
@@ -301,7 +301,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
     assert.isTrue(
       openCode2IsPostSettleWakeAdmission(
         v2Event({
-          type: "session.next.prompt.admitted",
+          type: "session.inbox.enqueued",
           data: {
             sessionID: "ses_root",
             inputID: "input_shell_wake",
@@ -335,7 +335,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
 
   it("defers cancelled wake ownership until input promotion identifies the execution", () => {
     const cancelledAdmission = v2Event({
-      type: "session.next.prompt.admitted",
+      type: "session.inbox.enqueued",
       data: {
         sessionID: "ses_root",
         inputID: "input_cancelled",
@@ -362,7 +362,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
   it("isolates cancellation synthetic inputs without dropping the wake boundary", () => {
     for (const state of ["cancelled", "interrupted"] as const) {
       const event = v2Event({
-        type: "session.next.prompt.admitted",
+        type: "session.inbox.enqueued",
         data: {
           sessionID: "ses_root",
           inputID: `input_${state}`,
@@ -393,7 +393,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
       assert.isTrue(
         openCode2IsCancelledPostSettleWake(
           v2Event({
-            type: "session.next.prompt.admitted",
+            type: "session.inbox.enqueued",
             data: {
               sessionID: "ses_root",
               inputID: "input_cancelled",
@@ -410,7 +410,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
     assert.isFalse(
       openCode2IsCancelledPostSettleWake(
         v2Event({
-          type: "session.next.prompt.admitted",
+          type: "session.inbox.enqueued",
           data: {
             sessionID: "ses_root",
             inputID: "input_status",
@@ -434,7 +434,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
       assert.isFalse(
         openCode2IsCancelledPostSettleWake(
           v2Event({
-            type: "session.next.prompt.admitted",
+            type: "session.inbox.enqueued",
             data: {
               sessionID: "ses_root",
               inputID: "input_not_cancelled",
@@ -452,7 +452,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
 
   it("suppresses an empty interrupted background-shell wake", () => {
     const interruptedShellAdmission = v2Event({
-      type: "session.next.prompt.admitted",
+      type: "session.inbox.enqueued",
       data: {
         sessionID: "ses_root",
         inputID: "input_interrupted_shell",
@@ -473,7 +473,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
     assert.isFalse(
       openCode2IsCancelledPostSettleWake(
         v2Event({
-          type: "session.next.prompt.admitted",
+          type: "session.inbox.enqueued",
           data: {
             sessionID: "ses_root",
             inputID: "input_failed_shell",
@@ -495,7 +495,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
     assert.isTrue(
       openCode2IsCancelledPostSettleWake(
         v2Event({
-          type: "session.next.prompt.admitted",
+          type: "session.inbox.enqueued",
           data: {
             sessionID: "ses_child",
             inputID: "input_child_cancelled",
@@ -511,7 +511,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
     assert.isFalse(
       openCode2IsPostSettleWakeAdmission(
         v2Event({
-          type: "session.next.prompt.admitted",
+          type: "session.inbox.enqueued",
           data: {
             sessionID: "ses_child",
             inputID: "input_child_cancelled",
@@ -532,13 +532,13 @@ describe("OpenCode 2 post-settle wake classification", () => {
   it("closes a buffered wake only on execution terminal or idle", () => {
     assert.isFalse(
       openCode2EventEndsExecution(
-        v2Event({ type: "session.next.step.started", data: { sessionID: "ses_root" } }),
+        v2Event({ type: "session.step.started", data: { sessionID: "ses_root" } }),
       ),
     );
     assert.isFalse(
       openCode2EventEndsExecution(
         v2Event({
-          type: "session.next.step.ended",
+          type: "session.step.ended",
           data: { sessionID: "ses_root", finish: "tool-calls" },
         }),
       ),
@@ -552,8 +552,8 @@ describe("OpenCode 2 post-settle wake classification", () => {
       ),
     );
     for (const type of [
-      "session.next.step.ended",
-      "session.next.step.failed",
+      "session.step.ended",
+      "session.step.failed",
       "session.execution.interrupted",
       "session.idle",
     ] as const) {
@@ -564,7 +564,7 @@ describe("OpenCode 2 post-settle wake classification", () => {
     assert.isTrue(
       openCode2EventEndsExecution(
         v2Event({
-          type: "session.next.step.ended",
+          type: "session.step.ended",
           data: { sessionID: "ses_root", finish: "stop" },
         }),
       ),
@@ -577,7 +577,7 @@ describe("OpenCode 2 wake evidence bounds", () => {
     const sessionID = "ses_deferred_child";
     const buffer = makeOpenCode2DeferredChildEventBuffer();
     const admitted = {
-      type: "session.next.prompt.admitted",
+      type: "session.inbox.enqueued",
       data: { sessionID, inputID: "input_deferred_child" },
     };
     const started = {
@@ -590,7 +590,7 @@ describe("OpenCode 2 wake evidence bounds", () => {
       bufferOpenCode2DeferredChildEvent(
         buffer,
         {
-          type: "session.next.reasoning.delta",
+          type: "session.reasoning.delta",
           data: { sessionID, delta: String(index) },
         },
         sessionID,
@@ -600,12 +600,12 @@ describe("OpenCode 2 wake evidence bounds", () => {
     assert.isTrue(
       bufferOpenCode2DeferredChildEvent(
         buffer,
-        { type: "session.next.reasoning.delta", data: { sessionID, delta: "overflow" } },
+        { type: "session.reasoning.delta", data: { sessionID, delta: "overflow" } },
         sessionID,
       ),
     );
     const terminal = {
-      type: "session.next.step.ended",
+      type: "session.step.ended",
       data: { sessionID, finish: "stop" },
     };
     assert.isFalse(bufferOpenCode2DeferredChildEvent(buffer, terminal, sessionID));
@@ -624,7 +624,7 @@ describe("OpenCode 2 wake evidence bounds", () => {
     for (let index = 0; index <= OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT; index += 1) {
       bufferOpenCode2DeferredChildEvent(
         buffer,
-        { type: "session.next.reasoning.delta", data: { sessionID, delta: String(index) } },
+        { type: "session.reasoning.delta", data: { sessionID, delta: String(index) } },
         sessionID,
       );
     }
@@ -1964,10 +1964,8 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
       normalizeOpenCode2WireType("session.retry.scheduled"),
       "session.retry.scheduled",
     );
-    assert.strictEqual(
-      normalizeOpenCode2WireType("session.next.retried"),
-      "session.retry.scheduled",
-    );
+    assert.strictEqual(normalizeOpenCode2WireType("session.next.retried"), "unknown");
+    assert.strictEqual(normalizeOpenCode2WireType("session.next.step.failed"), "unknown");
   });
 
   it("normalizes inbox enqueue and delivery as input admission", () => {
