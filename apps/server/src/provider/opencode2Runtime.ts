@@ -369,10 +369,13 @@ export function openCode2SharedServerKey(input: {
   readonly hostname?: string;
 }): string {
   const environment = input.environment ?? {};
+  const home = environment.HOME?.trim() || NodeOS.homedir();
+  const dataHome = environment.XDG_DATA_HOME?.trim() || NodePath.join(home, ".local", "share");
+  const stateHome = environment.XDG_STATE_HOME?.trim() || NodePath.join(home, ".local", "state");
   return [
     input.binaryPath.trim(),
-    environment.XDG_DATA_HOME?.trim() ?? "",
-    environment.XDG_STATE_HOME?.trim() ?? "",
+    dataHome,
+    stateHome,
     input.hostname?.trim() || DEFAULT_HOSTNAME,
   ].join("\0");
 }
