@@ -9,7 +9,7 @@
  *     SDK's own `.data` is the parsed body and the body carries its own
  *     envelope;
  *   - the event vocabulary is a flat stream of typed lifecycle events
- *     (`session.next.*` steps, tools, text) rather than 1.x's
+ *     (`session.step.*` / `session.text.*`) rather than 1.x's
  *     `message.part.updated` carrying a whole part object;
  *   - the model binds at session create via `ModelRef`, not per prompt;
  *   - permission asks can still arrive under the legacy `permission.asked`
@@ -783,7 +783,7 @@ export function openCode2EventEndsExecution(event: {
   if (type !== "session.execution.succeeded") {
     return false;
   }
-  // session.step.ended / session.next.step.ended alias to succeeded. Intermediate
+  // session.step.ended aliases to succeeded. Intermediate
   // tool-call steps must not clear activeExecution or settle wakes.
   return openCode2StepFinishSettlesTurn(openCode2WireData(event).finish);
 }
@@ -7067,9 +7067,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               lastEventAtMs = yield* Clock.currentTimeMillis;
               // The admitted input id is the closest native turn correlation
               // point 2.x offers, and it arrives on the prompt response before
-              // `session.input.admitted` reaches the event stream. next-16916
-              // returns a single-wrapped body (`data.id`); older beta SDKs used
-              // the double envelope (`data.data.id`).
+              // `session.input.admitted` reaches the event stream. The pinned
+              // client returns a single-wrapped body (`data.id`); a double
+              // envelope (`data.data.id`) is still accepted.
               const promptedBody =
                 prompted !== null && typeof prompted === "object" && "data" in prompted
                   ? (prompted as { data?: unknown }).data
