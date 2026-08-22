@@ -172,6 +172,109 @@ describe("OpenCode2AdapterV2 replay testkit", () => {
     }),
   );
 
+  it.effect("holds a prior HTTP error until the confirming event is handled", () =>
+    Effect.gen(function* () {
+      const replied = {
+        type: "permission.replied",
+        data: { sessionID: "ses_1", requestID: "req_1", reply: "once" },
+      };
+      const controller = new OpenCode2ReplayController(
+        transcript([
+          {
+            type: "expect_outbound",
+            frame: {
+              type: "session.permission.reply",
+              input: { sessionID: "ses_1", requestID: "req_1", reply: "once" },
+            },
+          },
+          {
+            type: "emit_inbound",
+            frame: { type: "sdk.event", event: replied },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              type: "sdk.error",
+              operation: "session.permission.reply",
+              message: "closed after accept",
+            },
+          },
+          { type: "runtime_exit", status: "success" },
+        ]),
+      );
+      const client = makeReplayClient(controller) as unknown as {
+        readonly permission: {
+          readonly reply: (input: unknown) => Promise<unknown>;
+        };
+      };
+      const iterator = controller.events()[Symbol.asyncIterator]();
+      let replySettled = false;
+      const reply = client.permission
+        .reply({ sessionID: "ses_1", requestID: "req_1", reply: "once" })
+        .then(
+          () => {
+            replySettled = true;
+            return "resolved";
+          },
+          () => {
+            replySettled = true;
+            return "rejected";
+          },
+        );
+
+      const event = yield* Effect.promise(() => iterator.next());
+      assert.deepStrictEqual(event.value, replied);
+      assert.isFalse(replySettled);
+
+      const [status] = yield* Effect.promise(() => Promise.all([reply, iterator.next()]));
+      assert.strictEqual(status, "rejected");
+      controller.assertComplete();
+    }),
+  );
+
+  it.effect("lets HTTP started during an event consume the next response", () =>
+    Effect.gen(function* () {
+      const started = {
+        type: "shell.started",
+        data: { id: "shl_1" },
+      };
+      const controller = new OpenCode2ReplayController(
+        transcript([
+          {
+            type: "emit_inbound",
+            frame: { type: "sdk.event", event: started },
+          },
+          {
+            type: "expect_outbound",
+            frame: { type: "shell.output", input: { id: "shl_1" } },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              type: "sdk.response",
+              operation: "shell.output",
+              data: { output: "ok" },
+            },
+          },
+          { type: "runtime_exit", status: "success" },
+        ]),
+      );
+      const client = makeReplayClient(controller) as unknown as {
+        readonly shell: {
+          readonly output: (input: unknown) => Promise<{ data: { data: unknown } }>;
+        };
+      };
+      const iterator = controller.events()[Symbol.asyncIterator]();
+      const event = yield* Effect.promise(() => iterator.next());
+      assert.deepStrictEqual(event.value, started);
+
+      const output = yield* Effect.promise(() => client.shell.output({ id: "shl_1" }));
+      assert.deepStrictEqual(output.data.data, { output: "ok" });
+      yield* Effect.promise(() => iterator.next());
+      controller.assertComplete();
+    }),
+  );
+
   it.effect("terminates every concurrent subscriber after a successful runtime exit", () =>
     Effect.gen(function* () {
       const controller = new OpenCode2ReplayController(
@@ -312,13 +415,11 @@ describe("OpenCode2AdapterV2 replay testkit", () => {
       const iterator = controller.events()[Symbol.asyncIterator]();
       const inbound = iterator.next();
       const client = makeReplayClient(controller) as unknown as {
-        readonly v2: {
-          readonly agent: {
-            readonly list: (input: unknown) => Promise<{ data: { data: unknown } }>;
-          };
+        readonly agent: {
+          readonly list: (input: unknown) => Promise<{ data: { data: unknown } }>;
         };
       };
-      const catalog = client.v2.agent.list(catalogInput);
+      const catalog = client.agent.list(catalogInput);
 
       const [eventValue, catalogValue] = yield* Effect.promise(() =>
         Promise.all([inbound, catalog]),
@@ -443,19 +544,17 @@ describe("OpenCode2AdapterV2 replay testkit", () => {
       yield* Effect.promise(async () => {
         // makeReplayClient is a structural double; cast past Session3 surface.
         const replay = client as unknown as {
-          v2: {
-            agent: { list: (input: unknown) => Promise<unknown> };
-            mcp: { list: (input: unknown) => Promise<unknown> };
-            session: {
-              instructions: {
-                entry: { put: (input: unknown) => Promise<unknown> };
-              };
+          agent: { list: (input: unknown) => Promise<unknown> };
+          mcp: { list: (input: unknown) => Promise<unknown> };
+          session: {
+            instructions: {
+              entry: { put: (input: unknown) => Promise<unknown> };
             };
           };
         };
-        await replay.v2.agent.list(agentInput);
-        await replay.v2.mcp.list(mcpInput);
-        await replay.v2.session.instructions.entry.put(instructionsInput);
+        await replay.agent.list(agentInput);
+        await replay.mcp.list(mcpInput);
+        await replay.session.instructions.entry.put(instructionsInput);
       });
       controller.assertComplete();
     }),

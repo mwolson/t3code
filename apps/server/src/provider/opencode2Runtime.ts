@@ -13,11 +13,11 @@
  *      stdout beside the URL; beta `lildax` writes it only to
  *      `$XDG_STATE_HOME/opencode/password` (no banner line). Startup still has
  *      to resolve both facts.
- *   3. **Route surface.** 2.x serves only `/api/*`. The SDK is versioned to
- *      match and is pinned here under the `@opencode-ai/sdk-next` alias, since
- *      two majors of one package name cannot coexist. Its `client.v2.*`
- *      namespace is the `/api/*` one; `client.session.*` is the legacy surface
- *      and 404s against a 2.x server.
+ *   3. **Route surface.** 2.x serves only `/api/*`. The HTTP client is
+ *      `@opencode-ai/client` (`0.0.0-beta-17823`). Its `session.*` / `event.*`
+ *      groups are the `/api/*` surface. Do not use `@opencode-ai/sdk` here;
+ *      that package is the OpenCode 1.x client. The packaged T3 OpenCode 2 CLI
+ *      pin is tracked separately and may lag this client stamp.
  *
  * `live-scenarios/tests/opencode2-drive-probe.mjs` in the parent workspace
  * exercises this contract against a real binary and fails first if 2.x moves.
@@ -28,7 +28,7 @@
  * overrun the desktop's 2-second grace, the sidecar still reaps the remainder
  * via pipe EOF.
  */
-import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk-next/v2";
+import { ClientError, OpenCode, type OpenCodeClient } from "@opencode-ai/client";
 import * as NetService from "@t3tools/shared/Net";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -147,13 +147,18 @@ export class OpenCode2RuntimeError extends Schema.TaggedErrorClass<OpenCode2Runt
 
 export const isOpenCode2RuntimeError = Schema.is(OpenCode2RuntimeError);
 
+function openCode2SdkErrorCause(cause: unknown): unknown {
+  return cause instanceof ClientError && cause.cause !== undefined ? cause.cause : cause;
+}
+
 function openCode2SdkErrorCategoryFromText(
   cause: unknown,
 ): Extract<
   OpenCode2RuntimeErrorCategory,
   "authentication-failed" | "model-unavailable" | "network-failed" | "sdk-request-failed"
 > {
-  const detail = openCodeRuntimeErrorDetail(cause).toLowerCase();
+  if (cause instanceof ClientError && cause.reason === "Transport") return "network-failed";
+  const detail = openCodeRuntimeErrorDetail(openCode2SdkErrorCause(cause)).toLowerCase();
   if (detail.startsWith("model unavailable:")) return "model-unavailable";
   if (
     detail.includes("401") ||
@@ -253,7 +258,7 @@ export class OpenCode2Runtime extends Context.Service<
       readonly baseUrl: string;
       readonly directory: string;
       readonly serverPassword: string;
-    }) => OpencodeClient;
+    }) => OpenCodeClient;
   }
 >()("t3/provider/opencode2Runtime") {}
 
@@ -769,13 +774,14 @@ export const make = Effect.gen(function* () {
   const createOpenCode2SdkClient: OpenCode2Runtime["Service"]["createOpenCode2SdkClient"] = (
     input,
   ) =>
-    createOpencodeClient({
+    OpenCode.make({
       baseUrl: input.baseUrl,
-      directory: input.directory,
-      ...(input.serverPassword.trim().length === 0
-        ? {}
-        : { headers: { Authorization: openCode2AuthorizationHeader(input.serverPassword) } }),
-      throwOnError: true,
+      headers: {
+        "x-opencode-directory": encodeURIComponent(input.directory),
+        ...(input.serverPassword.trim().length === 0
+          ? {}
+          : { Authorization: openCode2AuthorizationHeader(input.serverPassword) }),
+      },
     });
 
   return {

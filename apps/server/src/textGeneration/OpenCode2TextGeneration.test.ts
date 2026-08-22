@@ -1,4 +1,4 @@
-import type { OpencodeClient } from "@opencode-ai/sdk-next/v2";
+import type { OpenCodeClient } from "@opencode-ai/client";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import {
@@ -155,39 +155,24 @@ const OpenCode2RuntimeTestDouble: OpenCode2Runtime.OpenCode2Runtime["Service"] =
       };
     };
     return {
-      // next-16916 prompt uses the raw hey-api client (flat `{ text }` body).
-      client: {
-        post: async (options: {
-          readonly path?: { readonly sessionID?: string };
-          readonly body?: Record<string, unknown>;
-        }) =>
-          runPrompt({
-            sessionID: options.path?.sessionID,
-            ...options.body,
-          }),
-      },
-      v2: {
-        session: {
-          create: async (parameters: Record<string, unknown>) => {
-            runtimeMock.state.sessionCreateRequests.push(parameters);
-            return { data: { data: { id: "temporary-session" } } };
-          },
-          prompt: async (parameters: Record<string, unknown>) => runPrompt(parameters),
-          wait: async (parameters: Record<string, unknown>) => {
-            runtimeMock.state.sessionWaitRequests.push(parameters);
-            return { data: undefined };
-          },
-          context: async (parameters: Record<string, unknown>) => {
-            runtimeMock.state.sessionContextRequests.push(parameters);
-            return assistantTextResponse(runtimeMock.state.assistantText);
-          },
-          interrupt: async (parameters: Record<string, unknown>) => {
-            runtimeMock.state.sessionInterruptRequests.push(parameters);
-            return { data: undefined };
-          },
+      session: {
+        create: async (parameters: Record<string, unknown>) => {
+          runtimeMock.state.sessionCreateRequests.push(parameters);
+          return { id: "temporary-session" };
+        },
+        prompt: async (parameters: Record<string, unknown>) => runPrompt(parameters),
+        wait: async (parameters: Record<string, unknown>) => {
+          runtimeMock.state.sessionWaitRequests.push(parameters);
+        },
+        context: async (parameters: Record<string, unknown>) => {
+          runtimeMock.state.sessionContextRequests.push(parameters);
+          return assistantTextResponse(runtimeMock.state.assistantText);
+        },
+        interrupt: async (parameters: Record<string, unknown>) => {
+          runtimeMock.state.sessionInterruptRequests.push(parameters);
         },
       },
-    } as unknown as OpencodeClient;
+    } as unknown as OpenCodeClient;
   },
 };
 

@@ -4,7 +4,7 @@
  * A separate adapter rather than a mode of `OpenCodeAdapterV2`: 2.x shares the
  * vendor name and the tool vocabulary with 1.x and nothing else. Concretely,
  *
- *   - the wire surface is `/api/*` only, reached through `client.v2.*`;
+ *   - the wire surface is `/api/*` only, reached through `@opencode-ai/client`;
  *   - every response is double-wrapped, `{ data: { data: … } }`, because the
  *     SDK's own `.data` is the parsed body and the body carries its own
  *     envelope;
@@ -14,7 +14,7 @@
  *   - the model binds at session create via `ModelRef`, not per prompt;
  *   - permission asks can still arrive under the legacy `permission.asked`
  *     name, but replies always use the `/api` session-scoped
- *     `client.v2.session.*` routes. Self-spawned full-access servers also get
+ *     `client.session.*` / `client.permission.*` routes. Self-spawned full-access servers also get
  *     `permission: "allow"` injected into `OPENCODE_CONFIG_CONTENT` at spawn.
  *
  * `live-scenarios/tests/opencode2-drive-probe.mjs` in the parent workspace is
@@ -28,15 +28,15 @@
  *
  * @module orchestration-v2/Adapters/OpenCode2AdapterV2
  */
-import type {
-  AgentV2Info,
-  ModelV2Info,
-  PromptInputFileAttachment,
-  QuestionV2Info,
-  SessionMessage,
-  SessionV2Info,
-  V2Event,
-} from "@opencode-ai/sdk-next/v2";
+import {
+  isSessionNotFoundError,
+  isShellNotFoundError,
+  type AgentInfo,
+  type ModelInfo,
+  type SessionInfo,
+  type SessionMessageInfo,
+  type V2Event,
+} from "@opencode-ai/client";
 import {
   normalizeOpenCode2WireType,
   openCode2StepFinishSettlesTurn,
@@ -56,11 +56,18 @@ import {
   unwrapOpenCode2Payload,
 } from "./openCode2Wire.ts";
 
-/** Local shims for types dropped or renamed in the beta SDK generation. */
-type AgentInfoV2 = AgentV2Info;
-type ModelInfo = ModelV2Info;
-type SessionInfoV2 = SessionV2Info;
-type SessionMessageInfo = SessionMessage;
+type AgentInfoV2 = AgentInfo;
+type SessionInfoV2 = SessionInfo;
+type PromptInputFileAttachment = {
+  readonly uri: string;
+  readonly name?: string;
+};
+type QuestionV2Info = {
+  readonly header: string;
+  readonly question: string;
+  readonly options: ReadonlyArray<{ readonly label: string; readonly description: string }>;
+  readonly multiple?: boolean;
+};
 type SessionPendingInfo = {
   readonly sessionID: string;
   readonly type?: string;
@@ -1667,6 +1674,34 @@ export function unwrapOpenCode2Data<A>(
 }
 
 /** @internal exported for tests */
+function openCode2ClientHttpStatus(cause: unknown): number | undefined {
+  const direct = recordNumber(cause, "status");
+  if (direct !== undefined) return direct;
+  return recordNumber(recordValue(cause, "cause"), "status");
+}
+
+/** @internal exported for tests */
+export function openCode2ClientRemovalAlreadyMissing(cause: unknown): boolean {
+  return (
+    isSessionNotFoundError(cause) ||
+    isShellNotFoundError(cause) ||
+    openCode2ClientHttpStatus(cause) === 404
+  );
+}
+
+/** @internal exported for tests */
+export function settleOpenCode2ClientRemoval(request: Promise<unknown>): Promise<unknown> {
+  return request.then(
+    (data) => data ?? {},
+    (cause) => {
+      if (openCode2ClientRemovalAlreadyMissing(cause)) {
+        return { error: cause, response: { status: 404 } };
+      }
+      throw cause;
+    },
+  );
+}
+
 export function removeOpenCode2Session(
   sessionID: string,
   request: Effect.Effect<unknown, OpenCode2RuntimeError>,
@@ -1691,7 +1726,7 @@ export function removeOpenCode2Session(
 export function openCode2ShellRemovalSucceeded(response: unknown): boolean {
   const error = recordValue(response, "error");
   const status = recordNumber(recordValue(response, "response"), "status");
-  return error === undefined || status === 404;
+  return error === undefined || status === 404 || openCode2ClientRemovalAlreadyMissing(error);
 }
 
 /**
@@ -2296,35 +2331,11 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           directory: input.providerSession.cwd,
           serverPassword: connection.password,
         });
-        const detachedSessionRemove = (
-          client as unknown as {
-            v2?: { session?: { remove?: (input: { sessionID: string }) => Promise<unknown> } };
-            client?: { delete: (options: Record<string, unknown>) => Promise<unknown> };
-          }
-        ).v2?.session?.remove;
-        const detachedHttpDelete = (
-          client as unknown as {
-            client?: { delete: (options: Record<string, unknown>) => Promise<unknown> };
-          }
-        ).client?.delete;
         yield* removeOpenCode2Session(
           sessionID,
-          runOpenCode2Sdk("session.remove", () => {
-            if (detachedSessionRemove !== undefined) {
-              return detachedSessionRemove({ sessionID });
-            }
-            if (detachedHttpDelete === undefined) {
-              return Promise.resolve({
-                error: { message: "OpenCode 2 session remove is unavailable" },
-                response: { status: 500 },
-              });
-            }
-            return detachedHttpDelete({
-              url: "/api/session/{sessionID}",
-              path: { sessionID },
-              throwOnError: false,
-            });
-          }),
+          runOpenCode2Sdk("session.remove", () =>
+            settleOpenCode2ClientRemoval(client.session.remove({ sessionID })),
+          ),
         );
       }).pipe(
         Effect.mapError((cause) =>
@@ -2368,87 +2379,32 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           serverPassword: connection.password,
         });
 
-        // Session3 typed SDK omits some routes that still exist on the wire
-        // (session delete, shell remove/output). Use the raw hey-api client.
-        type OpenCode2RawHttpClient = {
-          readonly delete: (options: Record<string, unknown>) => Promise<unknown>;
-          readonly get: (options: Record<string, unknown>) => Promise<unknown>;
-          readonly post: (options: Record<string, unknown>) => Promise<unknown>;
-          readonly put: (options: Record<string, unknown>) => Promise<unknown>;
-        };
-        const rawHttpClient = (): OpenCode2RawHttpClient =>
-          (client as unknown as { client: OpenCode2RawHttpClient }).client;
-
-        // Prefer typed/mock SDK methods when present (replay testkit); fall back
-        // to raw HTTP for Session3 builds that omit these on client.v2.
-        const v2Shell = (
-          client as unknown as {
-            v2?: {
-              shell?: {
-                output?: (input: Record<string, unknown>) => Promise<unknown>;
-                remove?: (input: Record<string, unknown>) => Promise<unknown>;
-              };
-              session?: {
-                remove?: (input: Record<string, unknown>) => Promise<unknown>;
-              };
-            };
-          }
-        ).v2;
-
-        const deleteSessionHttp = (sessionID: string) => {
-          if (v2Shell?.session?.remove !== undefined) {
-            return v2Shell.session.remove({ sessionID });
-          }
-          return rawHttpClient().delete({
-            url: "/api/session/{sessionID}",
-            path: { sessionID },
-            throwOnError: false,
-          });
-        };
+        const deleteSessionHttp = (sessionID: string) =>
+          settleOpenCode2ClientRemoval(client.session.remove({ sessionID }));
 
         const removeShellHttp = (input: {
           readonly id: string;
           readonly location: SessionInfoV2["location"];
-        }) => {
-          if (v2Shell?.shell?.remove !== undefined) {
-            return v2Shell.shell.remove({
+        }) =>
+          settleOpenCode2ClientRemoval(
+            client.shell.remove({
               id: input.id,
               location: input.location,
-            });
-          }
-          return rawHttpClient().delete({
-            url: "/api/shell/{id}",
-            path: { id: input.id },
-            query: { directory: input.location.directory },
-            throwOnError: false,
-          });
-        };
+            }),
+          );
 
         const readShellOutputHttp = (input: {
           readonly id: string;
           readonly location: SessionInfoV2["location"];
           readonly cursor: string;
           readonly limit: string;
-        }) => {
-          if (v2Shell?.shell?.output !== undefined) {
-            return v2Shell.shell.output({
-              id: input.id,
-              location: input.location,
-              cursor: input.cursor,
-              limit: input.limit,
-            });
-          }
-          return rawHttpClient().get({
-            url: "/api/shell/{id}/output",
-            path: { id: input.id },
-            query: {
-              cursor: input.cursor,
-              limit: input.limit,
-              directory: input.location.directory,
-            },
-            throwOnError: false,
+        }) =>
+          client.shell.output({
+            id: input.id,
+            location: input.location,
+            cursor: Number(input.cursor),
+            limit: Number(input.limit),
           });
-        };
 
         const now = yield* DateTime.now;
         let sessionEntity: OrchestrationV2ProviderSession = {
@@ -2574,7 +2530,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         /** Model inventory is cached per spawned server and also supplies safe compaction limits. */
         let variantCatalog: ReadonlyMap<string, ReadonlySet<string>> | null = null;
         const readVariantCatalog = sdkCall("model.list", {}, () =>
-          client.v2.model.list({ location: { directory: cwd } }),
+          client.model.list({ location: { directory: cwd } }),
         ).pipe(
           Effect.flatMap((response) =>
             unwrapOpenCode2Data<ReadonlyArray<ModelInfo>>("model.list", response).pipe(
@@ -4655,7 +4611,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             const replied = yield* sdkCall(
               "session.permission.reply",
               { sessionID, requestID, reply },
-              () => client.v2.session.permission.reply({ sessionID, requestID, reply }),
+              () => client.permission.reply({ sessionID, requestID, reply }),
             ).pipe(
               Effect.as(true),
               Effect.catch((cause: OpenCode2RuntimeError) =>
@@ -6058,7 +6014,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           abortController.signal.addEventListener("abort", onFirstSessionAbort, { once: true });
         }
         const firstSubscription = yield* sdkCall("event.subscribe", {}, () =>
-          client.v2.event.subscribe({ signal: firstStreamController.signal }),
+          Promise.resolve(client.event.subscribe({ signal: firstStreamController.signal })),
         );
         lastEventAtMs = yield* Clock.currentTimeMillis;
 
@@ -6094,7 +6050,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         // Resubscribe loop: `/api/event` is volatile (slow consumer overflows).
         // A single failed or hung pull must not leave active turns uninterruptible.
         const eventPump = Effect.gen(function* () {
-          let pendingStream: AsyncIterable<unknown> | null = firstSubscription.stream;
+          let pendingStream: AsyncIterable<unknown> | null = firstSubscription;
           let streamController = firstStreamController;
           let onSessionAbort = onFirstSessionAbort;
 
@@ -6180,9 +6136,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 return yield* consumeEventStream(stream);
               }
               const subscription = yield* sdkCall("event.subscribe", {}, () =>
-                client.v2.event.subscribe({ signal: streamController.signal }),
+                Promise.resolve(client.event.subscribe({ signal: streamController.signal })),
               );
-              return yield* consumeEventStream(subscription.stream);
+              return yield* consumeEventStream(subscription);
             }).pipe(
               Effect.catchCause((cause) =>
                 Effect.succeed(
@@ -6407,7 +6363,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const knownAgentIDs = Effect.fnUntraced(function* () {
           if (agentCatalog !== null) return agentCatalog;
           const fetched = yield* sdkCall("agent.list", {}, () =>
-            client.v2.agent.list({ location: { directory: cwd } }),
+            client.agent.list({ location: { directory: cwd } }),
           ).pipe(
             Effect.flatMap((response) =>
               unwrapOpenCode2Data<ReadonlyArray<AgentInfoV2>>("agent.list", response).pipe(
@@ -6478,7 +6434,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               ...(plan.variant === undefined ? {} : { variant: plan.variant }),
             };
             yield* sdkCall("session.switchModel", { sessionID, model }, () =>
-              client.v2.session.switchModel({ sessionID, model }),
+              client.session.switchModel({ sessionID, model }),
             );
             state.boundModel = modelSelection.model;
             state.boundVariant = plan.variant ?? null;
@@ -6486,16 +6442,13 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           const agent = selection.agent;
           if (agent !== undefined && state.boundAgent !== agent) {
             yield* sdkCall("session.switchAgent", { sessionID, agent }, () =>
-              client.v2.session.switchAgent({ sessionID, agent }),
+              client.session.switchAgent({ sessionID, agent }),
             );
             state.boundAgent = agent;
           }
         });
 
-        // next-16916+ prompt body is flat `{ text, files?, delivery? }`. The
-        // pinned beta SDK still types/maps a nested `prompt` field, which the
-        // server rejects with `Missing key at ["text"]`. Post through the raw
-        // hey-api client so the wire matches the running binary.
+        // Prompt body is flat `{ text, files?, delivery? }` on `@opencode-ai/client`.
         const promptPayload = (message: ProviderAdapterV2TurnInput["message"]) => {
           const text = message.text.trim();
           const files = toOpenCode2FileAttachments({
@@ -6518,31 +6471,19 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           readonly files?: ReturnType<typeof toOpenCode2FileAttachments>;
           readonly delivery?: "steer" | "queue";
         }) =>
-          rawHttpClient().post({
-            url: "/api/session/{sessionID}/prompt",
-            path: { sessionID: input.sessionID },
-            body: {
-              text: input.text,
-              ...(input.files === undefined || input.files.length === 0
-                ? {}
-                : { files: input.files }),
-              ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
-            },
-            headers: { "Content-Type": "application/json" },
-            throwOnError: true,
+          client.session.prompt({
+            sessionID: input.sessionID,
+            text: input.text,
+            ...(input.files === undefined || input.files.length === 0
+              ? {}
+              : { files: input.files }),
+            ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
           });
 
-        // Session3 has no session.fork. The HTTP route still exists; current
-        // binaries require body.boundary (not the older messageID-only shape
-        // Session2 still maps). Post through the raw hey-api client so the wire
-        // matches, same pattern as flat session.prompt.
         const postSessionFork = (parameters: ReturnType<typeof openCode2ForkParameters>) =>
-          rawHttpClient().post({
-            url: "/api/session/{sessionID}/fork",
-            path: { sessionID: parameters.sessionID },
-            body: { boundary: parameters.$body_boundary },
-            headers: { "Content-Type": "application/json" },
-            throwOnError: true,
+          client.session.fork({
+            sessionID: parameters.sessionID,
+            boundary: parameters.$body_boundary,
           });
 
         const readSnapshot = Effect.fnUntraced(function* (
@@ -6550,7 +6491,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         ) {
           const sessionID = nativeThreadId(providerThread);
           const response = yield* sdkCall("message.list", { sessionID }, () =>
-            client.v2.session.messages({ sessionID }),
+            client.message.list({ sessionID }),
           );
           const nativeMessages = yield* unwrapOpenCode2Data<Array<SessionMessageInfo>>(
             "message.list",
@@ -6617,54 +6558,17 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             sessionID,
             // Prefer live Session3 when present; replay client still implements
             // these routes so fixtures can assert the post-settle probes.
-            pending: (() => {
-              const pendingList = (
-                client.v2.session as {
-                  pending?: { list: (input: { sessionID: string }) => Promise<unknown> };
-                }
-              ).pending?.list;
-              const listInbox = sdkCall("session.inbox.list", { sessionID }, () =>
-                rawHttpClient().get({
-                  url: "/api/session/{sessionID}/inbox",
-                  path: { sessionID },
-                  throwOnError: false,
-                }),
-              ).pipe(
-                Effect.flatMap((response) =>
-                  unwrapOpenCode2Data<unknown>("session.inbox.list", response),
-                ),
-                Effect.map(openCode2PendingItemsFromList),
-              );
-              if (pendingList === undefined) {
-                // The pinned SDK has no pending.list. beta-17498 replaced
-                // /pending with /inbox, so speak the live route.
-                return listInbox;
-              }
-              return sdkCall("session.pending.list", { sessionID }, () =>
-                pendingList({ sessionID }),
-              ).pipe(
-                Effect.flatMap((response) =>
-                  unwrapOpenCode2Data<unknown>("session.pending.list", response),
-                ),
-                Effect.map(openCode2PendingItemsFromList),
-              );
-            })(),
-            shells: sdkCall("shell.list", { location: state.location }, () => {
-              const shellList = (
-                client.v2 as {
-                  shell?: {
-                    list: (input: { location: SessionInfoV2["location"] }) => Promise<unknown>;
-                  };
-                }
-              ).shell?.list;
-              if (shellList !== undefined) {
-                return shellList({ location: state.location });
-              }
-              return rawHttpClient().get({
-                url: `/api/shell?${openCode2LocationQuery(state.location.directory)}`,
-                throwOnError: false,
-              });
-            }).pipe(
+            pending: sdkCall("session.inbox.list", { sessionID }, () =>
+              client.session.inbox.list({ sessionID }),
+            ).pipe(
+              Effect.flatMap((response) =>
+                unwrapOpenCode2Data<unknown>("session.inbox.list", response),
+              ),
+              Effect.map(openCode2PendingItemsFromList),
+            ),
+            shells: sdkCall("shell.list", { location: state.location }, () =>
+              client.shell.list({ location: state.location }),
+            ).pipe(
               Effect.flatMap((response) => unwrapOpenCode2Data<unknown>("shell.list", response)),
               Effect.map(openCode2ShellsFromList),
               Effect.tap((shells) =>
@@ -6726,22 +6630,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           if (!hasT3Mcp) return;
           let lastStatus = "missing";
           for (let attempt = 0; attempt < 50; attempt++) {
-            const mcpList = (
-              client.v2 as {
-                mcp?: {
-                  list: (input: { location: { directory: string } }) => Promise<unknown>;
-                };
-              }
-            ).mcp?.list;
-            const listed = yield* sdkCall("mcp.list", { location: { directory: cwd } }, () => {
-              if (mcpList !== undefined) {
-                return mcpList({ location: { directory: cwd } });
-              }
-              return rawHttpClient().get({
-                url: `/api/mcp?${openCode2LocationQuery(cwd)}`,
-                throwOnError: false,
-              });
-            });
+            const listed = yield* sdkCall("mcp.list", { location: { directory: cwd } }, () =>
+              client.mcp.list({ location: { directory: cwd } }),
+            );
             const servers = yield* unwrapOpenCode2Data<unknown>("mcp.list", listed).pipe(
               Effect.map(openCode2McpServersFromList),
               Effect.catchCause(() => Effect.succeed<ReadonlyArray<McpServer>>([])),
@@ -6772,36 +6663,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             key: OPENCODE2_T3_INSTRUCTION_KEY,
             value,
           } as const;
-          const putViaSdk = (
-            client.v2.session as {
-              instructions?: {
-                entry?: {
-                  put?: (input: {
-                    readonly sessionID: string;
-                    readonly key: string;
-                    readonly value: unknown;
-                  }) => Promise<unknown>;
-                };
-              };
-            }
-          ).instructions?.entry?.put;
-
-          yield* sdkCall("session.instructions.entry.put", payload, () => {
-            if (putViaSdk !== undefined) {
-              return putViaSdk(payload);
-            }
-            // Session3 typed SDK omits this route; the wire still has PUT.
-            return rawHttpClient().put({
-              url: "/api/session/{sessionID}/instructions/entries/{key}",
-              path: {
-                sessionID,
-                key: OPENCODE2_T3_INSTRUCTION_KEY,
-              },
-              body: { value },
-              headers: { "Content-Type": "application/json" },
-              throwOnError: true,
-            });
-          });
+          yield* sdkCall("session.instructions.entry.put", payload, () =>
+            client.session.instructions.entry.put(payload),
+          );
         });
 
         yield* waitForT3Mcp();
@@ -6875,7 +6739,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 location: { directory: threadInput.runtimePolicy.cwd ?? cwd },
               };
               const response = yield* sdkCall("session.create", parameters, () =>
-                client.v2.session.create(parameters),
+                client.session.create(parameters),
               );
               const nativeSession = yield* unwrapOpenCode2Data<SessionInfoV2>(
                 "session.create",
@@ -6920,7 +6784,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 );
               }
               const response = yield* sdkCall("session.get", { sessionID }, () =>
-                client.v2.session.get({ sessionID }),
+                client.session.get({ sessionID }),
               );
               const nativeSession = yield* unwrapOpenCode2Data<SessionInfoV2>(
                 "session.get",
@@ -7210,7 +7074,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const interruptedRemote = yield* sdkCallWithTimeout(
                 "session.interrupt",
                 { sessionID },
-                () => client.v2.session.interrupt({ sessionID }),
+                () => client.session.interrupt({ sessionID }),
                 OPENCODE2_INTERRUPT_REQUEST_TIMEOUT_MS,
               );
               const interruptRequestConfirmed = Option.isSome(interruptedRemote);
@@ -7342,8 +7206,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                     pending.formOptionValues,
                     pending.questions.map((question) => question.multiple === true),
                   );
-                  // Session3 has no session.form client method; post the form
-                  // reply body that current next-line binaries accept.
                   yield* respondWithRuntimeRequestSettlement(
                     pending,
                     {
@@ -7352,12 +7214,10 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                       rememberPermissionForSession: false,
                     },
                     sdkCall("session.form.reply", { sessionID, formID: requestID, answer }, () =>
-                      rawHttpClient().post({
-                        url: "/api/session/{sessionID}/form/{formID}/reply",
-                        path: { sessionID, formID: requestID },
-                        body: { answer },
-                        headers: { "Content-Type": "application/json" },
-                        throwOnError: true,
+                      client.form.reply({
+                        sessionID,
+                        formID: requestID,
+                        answer,
                       }),
                     ),
                   );
@@ -7371,10 +7231,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                     rememberPermissionForSession: false,
                   },
                   sdkCall("session.question.reply", { sessionID, requestID, answers }, () =>
-                    client.v2.session.question.reply({
+                    client.form.reply({
                       sessionID,
-                      requestID,
-                      questionV2Reply: { answers },
+                      formID: requestID,
+                      answer: Object.fromEntries(
+                        answers.map((answer, index) => [`${index}`, answer]),
+                      ),
                     }),
                   ),
                 );
@@ -7393,7 +7255,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 pending,
                 openCode2RuntimeRequestResponseSettlement(requestInput.decision),
                 sdkCall("session.permission.reply", { sessionID, requestID, reply }, () =>
-                  client.v2.session.permission.reply({ sessionID, requestID, reply }),
+                  client.permission.reply({ sessionID, requestID, reply }),
                 ),
               );
             }).pipe(
@@ -7427,7 +7289,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 );
               }
               const response = yield* sdkCall("message.list", { sessionID }, () =>
-                client.v2.session.messages({ sessionID }),
+                client.message.list({ sessionID }),
               );
               const nativeMessages = yield* unwrapOpenCode2Data<Array<SessionMessageInfo>>(
                 "message.list",
@@ -7449,14 +7311,14 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   "session.revert.stage",
                   { sessionID, messageID: boundaryMessageId, files: true },
                   () =>
-                    client.v2.session.revert.stage({
+                    client.session.revert.stage({
                       sessionID,
                       messageID: boundaryMessageId!,
                       files: true,
                     }),
                 );
                 yield* sdkCall("session.revert.commit", { sessionID }, () =>
-                  client.v2.session.revert.commit({ sessionID }),
+                  client.session.revert.commit({ sessionID }),
                 );
               }
               const snapshot = yield* readSnapshot(rollbackInput.providerThread);
@@ -7504,15 +7366,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const parameters = openCode2ForkParameters(sessionID, boundaryMessageId);
               // Prefer a typed/mock session.fork when present (replay testkit);
               // production Session3 has none, so post the boundary body raw.
-              const response = yield* sdkCall("session.fork", parameters, () => {
-                const sessionWithFork = client.v2.session as {
-                  fork?: (params: ReturnType<typeof openCode2ForkParameters>) => Promise<unknown>;
-                };
-                if (typeof sessionWithFork.fork === "function") {
-                  return sessionWithFork.fork(parameters);
-                }
-                return postSessionFork(parameters);
-              });
+              const response = yield* sdkCall("session.fork", parameters, () =>
+                postSessionFork(parameters),
+              );
               const nativeSession = yield* unwrapOpenCode2Data<SessionInfoV2>(
                 "session.fork",
                 response,

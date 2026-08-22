@@ -1,4 +1,4 @@
-import type { V2Event } from "@opencode-ai/sdk-next/v2";
+import type { V2Event } from "@opencode-ai/client";
 type SessionPendingInfo = {
   sessionID: string;
   type?: string;
@@ -104,6 +104,7 @@ import {
   pruneOpenCode2RetiredSuppressWakes,
   rememberOpenCode2SessionPermission,
   removeOpenCode2Session,
+  settleOpenCode2ClientRemoval,
   unwrapOpenCode2Data,
 } from "./OpenCode2AdapterV2.ts";
 import {
@@ -688,6 +689,21 @@ describe("removeOpenCode2Session", () => {
     ),
   );
 
+  it.effect("treats the typed client's session-not-found error as deleted", () =>
+    Effect.gen(function* () {
+      const settled = yield* Effect.promise(() =>
+        settleOpenCode2ClientRemoval(
+          Promise.reject({
+            _tag: "SessionNotFoundError",
+            sessionID: "ses_missing",
+            message: "session not found",
+          }),
+        ),
+      );
+      yield* removeOpenCode2Session("ses_missing", Effect.succeed(settled));
+    }),
+  );
+
   it.effect("retains non-idempotent native deletion failures", () =>
     Effect.gen(function* () {
       const failure = yield* removeOpenCode2Session(
@@ -714,6 +730,15 @@ describe("OpenCode 2 shell removal", () => {
       openCode2ShellRemovalSucceeded({
         error: { name: "ShellNotFoundError" },
         response: { status: 404 },
+      }),
+    );
+    assert.isTrue(
+      openCode2ShellRemovalSucceeded({
+        error: {
+          _tag: "ShellNotFoundError",
+          id: "shl_missing",
+          message: "shell not found",
+        },
       }),
     );
     assert.isFalse(
@@ -1868,6 +1893,17 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
         code: "ContextOverflowError",
       }).code,
       "provider.context-limit",
+    );
+  });
+
+  it("passes through live retry events", () => {
+    assert.strictEqual(
+      normalizeOpenCode2WireType("session.retry.scheduled"),
+      "session.retry.scheduled",
+    );
+    assert.strictEqual(
+      normalizeOpenCode2WireType("session.next.retried"),
+      "session.retry.scheduled",
     );
   });
 
