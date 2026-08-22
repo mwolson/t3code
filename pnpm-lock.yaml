@@ -86,36 +86,36 @@ catalogs:
       version: 2.9.0
 
 overrides:
-  '@clerk/backend': 'catalog:'
-  '@clerk/clerk-js': 'catalog:'
+  '@clerk/backend': 3.14.0
+  '@clerk/clerk-js': 6.25.13
   '@clerk/clerk-js>@base-org/account': '-'
   '@clerk/clerk-js>@coinbase/wallet-sdk': '-'
   '@clerk/clerk-js>@solana/wallet-adapter-base': '-'
   '@clerk/clerk-js>@solana/wallet-adapter-react': '-'
   '@clerk/clerk-js>@solana/wallet-standard': '-'
   '@clerk/clerk-js>@wallet-standard/core': '-'
-  '@clerk/electron': 'catalog:'
-  '@clerk/electron-passkeys': 'catalog:'
-  '@clerk/expo': 'catalog:'
-  '@clerk/react': 'catalog:'
-  '@clerk/shared': 'catalog:'
-  '@effect/atom-react': 'catalog:'
-  '@effect/platform-bun': 'catalog:'
-  '@effect/platform-node': 'catalog:'
-  '@effect/platform-node-shared': 'catalog:'
-  '@effect/sql-pg': 'catalog:'
-  '@effect/sql-sqlite-bun': 'catalog:'
-  '@effect/vitest': 'catalog:'
+  '@clerk/electron': 0.0.24
+  '@clerk/electron-passkeys': 0.0.3
+  '@clerk/expo': 4.2.0
+  '@clerk/react': 6.12.10
+  '@clerk/shared': 4.25.10
+  '@effect/atom-react': 4.0.0-beta.103
+  '@effect/platform-bun': 4.0.0-beta.103
+  '@effect/platform-node': 4.0.0-beta.103
+  '@effect/platform-node-shared': 4.0.0-beta.103
+  '@effect/sql-pg': 4.0.0-beta.103
+  '@effect/sql-sqlite-bun': 4.0.0-beta.103
+  '@effect/vitest': 4.0.0-beta.103
   '@effect/vitest>vitest': '-'
   '@expo/metro-config': 56.0.14
   '@pierre/diffs>@shikijs/transformers': ^4.2.0
-  '@types/node': 'catalog:'
-  effect: 'catalog:'
+  '@types/node': 24.12.4
+  effect: 4.0.0-beta.103
   expo-modules-jsi: 56.0.10
   expo-sharing>@expo/config-plugins: 56.0.9
   expo-sharing>@expo/config-types: 56.0.6
-  vite: 'catalog:'
-  yaml: 'catalog:'
+  vite: npm:@voidzero-dev/vite-plus-core@0.2.2
+  yaml: ^2.9.0
 
 packageExtensionsChecksum: sha256-CUzzeefpj3gNFrCKNBhV9FOaniNbrLdKyIhWQyXuaiE=
 
