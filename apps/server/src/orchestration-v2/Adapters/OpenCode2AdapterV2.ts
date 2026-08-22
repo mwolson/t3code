@@ -1192,6 +1192,24 @@ export function openCode2ProviderFailure(input: {
     });
   }
   if (
+    input.code === "provider.internal" ||
+    input.statusCode === 502 ||
+    input.statusCode === 503 ||
+    input.statusCode === 504 ||
+    /endpoint is unavailable|service unavailable|upstream request failed/i.test(evidence)
+  ) {
+    const status =
+      input.statusCode === 502 || input.statusCode === 503 || input.statusCode === 504
+        ? ` (HTTP ${input.statusCode})`
+        : "";
+    return makeProviderFailure({
+      message: `OpenCode 2 lost the model endpoint${status}. Wait, then retry the turn.`,
+      code: "provider.unavailable",
+      class: "provider_error",
+      retryable: true,
+    });
+  }
+  if (
     input.code === "ContextOverflowError" ||
     /context (?:length|window|limit)|maximum context|prompt is too long|token limit|too many tokens/i.test(
       evidence,
