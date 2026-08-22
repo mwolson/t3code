@@ -475,6 +475,7 @@ interface ActiveOpenCode2Turn {
   finalized: boolean;
   terminalStatus: TerminalTurnStatus | null;
   providerRetry: OpenCode2ProviderRetry | null;
+  pendingExecutionFailure: OrchestrationV2ProviderFailure | null;
 }
 
 interface OpenCode2SubagentContext {
@@ -951,6 +952,31 @@ export function openCode2ProviderRetryIsScheduled(
   return providerRetry !== null && nowMs <= providerRetry.scheduledUntilAtMs;
 }
 
+/**
+ * 17823 emits `session.step.failed` before `session.retry.scheduled` for a
+ * still-retryable unknown finish. Hold that failure until a retry is
+ * announced. Only idle or another execution.failed prove OpenCode stopped.
+ * Stop and session.error keep their own handlers. Trailing usage or text
+ * events must not settle it.
+ * A failure that arrives after OpenCode already announced a retry for this
+ * attempt is the exhausted case.
+ */
+export function openCode2ShouldHoldExecutionFailure(input: {
+  readonly retryable: boolean | null;
+  readonly hasAnnouncedRetry: boolean;
+}): boolean {
+  if (input.retryable !== true) return false;
+  return !input.hasAnnouncedRetry;
+}
+
+export function openCode2EventSettlesHeldExecutionFailure(type: string): boolean {
+  return type === "session.idle" || type === "session.execution.failed";
+}
+
+export function openCode2EventClearsHeldExecutionFailure(type: string): boolean {
+  return type === "session.execution.succeeded";
+}
+
 export function openCode2HasInFlightPendingWork(input: {
   readonly toolStatuses: ReadonlyArray<OpenCode2ToolStatus>;
   readonly shellStatuses: ReadonlyArray<string>;
@@ -1186,6 +1212,14 @@ export function openCode2ProviderFailure(input: {
       code: "Integration.Authorization",
       class: "provider_error",
       retryable: false,
+    });
+  }
+  if (/unknown finish reason/i.test(input.message)) {
+    return makeProviderFailure({
+      message: "OpenCode 2 ended a model step with an unknown finish reason.",
+      code: "provider.invalid-output",
+      class: "provider_error",
+      retryable: true,
     });
   }
   return makeProviderFailure({
@@ -4252,6 +4286,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             finalized: false,
             terminalStatus: null,
             providerRetry: null,
+            pendingExecutionFailure: null,
           };
           state.activeTurn = turn;
           state.providerTurns.set(String(providerTurnId), providerTurn);
@@ -5018,6 +5053,33 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             }
             return;
           }
+          if (eventSessionId !== undefined) {
+            const held = activeFor(eventSessionId);
+            if (
+              held !== null &&
+              activeTurnOwnsOpenCode2Execution(held.state, held.turn, context.replayWakeInputId)
+            ) {
+              if (eventType === "session.execution.started") {
+                held.turn.providerRetry = null;
+              }
+              if (held.turn.pendingExecutionFailure !== null) {
+                if (openCode2EventClearsHeldExecutionFailure(eventType)) {
+                  held.turn.pendingExecutionFailure = null;
+                } else if (openCode2EventSettlesHeldExecutionFailure(eventType)) {
+                  const pendingFailure = held.turn.pendingExecutionFailure;
+                  held.turn.pendingExecutionFailure = null;
+                  if (held.turn.isRoot) {
+                    yield* updateProviderSession("error", pendingFailure.message);
+                  }
+                  yield* finalizeTurn(held.state, held.turn, "failed", {
+                    failure: pendingFailure,
+                  });
+                  held.state.quarantined = false;
+                  if (!isReplay) held.state.activeExecution = null;
+                }
+              }
+            }
+          }
           const isCancelledPostSettleWake = openCode2IsCancelledPostSettleWake(event);
           const admittedState =
             eventType === "session.input.admitted"
@@ -5525,6 +5587,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 statusCode: openCode2ProviderErrorStatus(event.data.error),
                 hasProviderRetry: true,
               });
+              active.turn.pendingExecutionFailure = null;
               active.turn.providerRetry = {
                 retry,
                 failure,
@@ -5856,6 +5919,18 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                   nowMs,
                 ),
               });
+              if (
+                openCode2ShouldHoldExecutionFailure({
+                  retryable: failure.retryable,
+                  hasAnnouncedRetry: active.turn.providerRetry !== null,
+                })
+              ) {
+                active.turn.pendingExecutionFailure = {
+                  ...failure,
+                  retryable: true,
+                };
+                return;
+              }
               if (active.turn.isRoot) yield* updateProviderSession("error", failure.message);
               yield* finalizeTurn(active.state, active.turn, "failed", {
                 failure,
@@ -5896,6 +5971,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               ) {
                 return;
               }
+              active.turn.pendingExecutionFailure = null;
               yield* finalizeTurn(active.state, active.turn, "interrupted");
               // The native event is the authoritative confirmation that the
               // execution ended, so an unconfirmed-interrupt quarantine (if
@@ -5963,6 +6039,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               for (const sessionID of targetSessionIDs) {
                 const active = terminalFor(sessionID);
                 if (active === null) continue;
+                active.turn.pendingExecutionFailure = null;
                 yield* finalizeTurn(
                   active.state,
                   active.turn,
@@ -6943,6 +7020,7 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 finalized: false,
                 terminalStatus: null,
                 providerRetry: null,
+                pendingExecutionFailure: null,
               };
               state.appThread = turnInput.appThread;
               state.activeTurn = turn;

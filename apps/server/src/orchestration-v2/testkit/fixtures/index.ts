@@ -82,6 +82,10 @@ import { openCode2QuestionLegacyInput } from "./opencode2_question_legacy/input.
 import { assertOpenCode2QuestionLegacyOutput } from "./opencode2_question_legacy/output.ts";
 import { openCode2RetryInput } from "./opencode2_retry/input.ts";
 import { assertOpenCode2RetryOutput } from "./opencode2_retry/output.ts";
+import { openCode2RetryUnknownFinishInput } from "./opencode2_retry_unknown_finish/input.ts";
+import { assertOpenCode2RetryUnknownFinishOutput } from "./opencode2_retry_unknown_finish/output.ts";
+import { openCode2UnknownFinishIdleInput } from "./opencode2_unknown_finish_idle/input.ts";
+import { assertOpenCode2UnknownFinishIdleOutput } from "./opencode2_unknown_finish_idle/output.ts";
 import { openCode2ShellProjectionInput } from "./opencode2_shell_projection/input.ts";
 import { assertOpenCode2ShellProjectionOutput } from "./opencode2_shell_projection/output.ts";
 import { openCode2ShellTerminalsInput } from "./opencode2_shell_terminals/input.ts";
@@ -1065,6 +1069,21 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     ],
   },
   {
+    name: "opencode2_retry_unknown_finish",
+    buildInput: openCode2RetryUnknownFinishInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_retry_unknown_finish/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertOpenCode2RetryUnknownFinishOutput,
+      },
+    ],
+  },
+  {
     name: "opencode2_shell_projection",
     buildInput: openCode2ShellProjectionInput,
     providers: [
@@ -1167,6 +1186,21 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         modelSelection: OPENCODE2_MODEL_SELECTION,
         assertOutput: assertOpenCode2ThreadDeleteOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_unknown_finish_idle",
+    buildInput: openCode2UnknownFinishIdleInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode2"),
+        transcriptFile: new URL(
+          "./opencode2_unknown_finish_idle/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertOpenCode2UnknownFinishIdleOutput,
       },
     ],
   },

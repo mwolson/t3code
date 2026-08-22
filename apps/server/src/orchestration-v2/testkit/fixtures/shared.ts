@@ -58,6 +58,10 @@ export const OPENCODE2_COMPACTION_INTERRUPT_PROMPT =
   "Begin compacting the current context and wait for it to finish.";
 export const OPENCODE2_RETRY_PROMPT =
   "Recover from the transient provider error, then respond exactly: retry fixture complete";
+export const OPENCODE2_RETRY_UNKNOWN_FINISH_PROMPT =
+  "Recover from the unknown finish reason, then respond exactly: unknown finish retry complete";
+export const OPENCODE2_UNKNOWN_FINISH_IDLE_PROMPT =
+  "Trigger the unknown finish reason, then wait for OpenCode to stop retrying.";
 export const OPENCODE2_SUBAGENT_PROMPT =
   "Use the subagent tool exactly once with description child fixture and prompt Respond exactly CHILD_OK. Then respond exactly PARENT_OK.";
 export const OPENCODE2_SUBAGENT_BACKGROUND_PROMPT =
