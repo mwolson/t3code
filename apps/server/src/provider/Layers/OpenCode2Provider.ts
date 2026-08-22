@@ -14,7 +14,11 @@
  *
  * @module provider/Layers/OpenCode2Provider
  */
-import type { AgentV2Info, ModelV2Info, SkillV2Info } from "@opencode-ai/sdk-next/v2";
+import type {
+  AgentInfo as AgentV2Info,
+  ModelInfo as ModelV2Info,
+  SkillInfo as SkillV2Info,
+} from "@opencode-ai/client";
 
 type IntegrationInfo = {
   readonly id: string;
@@ -466,33 +470,26 @@ const loadOpenCode2Inventory = (input: {
             Effect.gen(function* () {
               const [modelResponse, agentResponse, integrationResponse] = yield* Effect.all(
                 [
-                  runOpenCode2Sdk("model.list", () => client.v2.model.list({ location })),
-                  runOpenCode2Sdk("agent.list", () => client.v2.agent.list({ location })),
-                  runOpenCode2Sdk("integration.list", () =>
-                    client.v2.integration.list({ location }),
-                  ),
+                  runOpenCode2Sdk("model.list", () => client.model.list({ location })),
+                  runOpenCode2Sdk("agent.list", () => client.agent.list({ location })),
+                  runOpenCode2Sdk("integration.list", () => client.integration.list({ location })),
                 ],
                 { concurrency: "unbounded" },
               );
               return {
-                models: modelResponse.data?.data ?? [],
-                agents: agentResponse.data?.data ?? [],
-                connectedIntegrationIDs: (integrationResponse.data?.data ?? [])
+                models: modelResponse.data ?? [],
+                agents: agentResponse.data ?? [],
+                connectedIntegrationIDs: (integrationResponse.data ?? [])
                   .filter((integration: IntegrationInfo) => integration.connections.length > 0)
                   .map((integration: IntegrationInfo) => integration.id),
               } satisfies OpenCode2InventorySnapshot;
             }),
           ),
-          runOpenCode2Sdk("health.get", () =>
-            client.global.health().catch(() => client.v2.health.get()),
-          ),
+          runOpenCode2Sdk("health.get", () => client.health.get()),
         ],
         { concurrency: "unbounded" },
       );
-      const healthBody = healthResponse.data as
-        | { readonly version?: string; readonly data?: { readonly version?: string } }
-        | undefined;
-      const versionRaw = healthBody?.version ?? healthBody?.data?.version ?? "";
+      const versionRaw = typeof healthResponse.version === "string" ? healthResponse.version : "";
       return {
         inventory,
         version: parseOpenCode2Version(String(versionRaw)),
@@ -603,7 +600,7 @@ export const listOpenCode2SkillsForDirectory = Effect.fn("listOpenCode2SkillsFor
           serverPassword: server.password,
         });
         const response = yield* runOpenCode2Sdk("skill.list", () =>
-          client.v2.skill.list({ location: { directory: cwd } }),
+          client.skill.list({ location: { directory: cwd } }),
         );
         return mapOpenCode2ListedSkills(listedOpenCode2SkillEntries(response));
       }),

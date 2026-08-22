@@ -94,35 +94,28 @@ function openCode2RuntimeWithHealthVersion(
   models: () => Array<any> = () => [BIG_PICKLE_MODEL],
 ): OpenCode2Runtime.OpenCode2Runtime["Service"] {
   const client = {
-    global: {
-      health: async () => ({ data: { healthy: true as const, version } }),
+    health: {
+      get: async () => ({ healthy: true as const, version }),
     },
-    v2: {
-      agent: {
-        list: async () => ({ data: { data: [BUILD_AGENT] } }),
-      },
-      health: {
-        get: async () => ({ data: { healthy: true as const, version } }),
-      },
-      integration: {
-        list: async () => ({
-          data: {
-            data: [
-              {
-                id: "opencode",
-                name: "OpenCode",
-                methods: [],
-                connections: [{ type: "env", name: "OPENCODE_TEST_KEY" }],
-              } satisfies IntegrationInfo,
-            ],
-          },
-        }),
-      },
-      model: {
-        list: async () => ({ data: { data: models() } }),
-      },
+    agent: {
+      list: async () => ({ data: [BUILD_AGENT] }),
     },
-  } as unknown as OpencodeClient;
+    integration: {
+      list: async () => ({
+        data: [
+          {
+            id: "opencode",
+            name: "OpenCode",
+            methods: [],
+            connections: [{ type: "env", name: "OPENCODE_TEST_KEY" }],
+          } satisfies IntegrationInfo,
+        ],
+      }),
+    },
+    model: {
+      list: async () => ({ data: models() }),
+    },
+  } as never;
 
   return OpenCode2Runtime.OpenCode2Runtime.of({
     startOpenCode2ServerProcess: () => Effect.die("unexpected server process start"),
@@ -693,9 +686,7 @@ function openCode2SkillListRuntime(
       }),
     createOpenCode2SdkClient: () =>
       ({
-        v2: {
-          skill: { list },
-        },
+        skill: { list },
       }) as never,
   });
 }
@@ -718,27 +709,25 @@ describe("listOpenCode2SkillsForDirectory", () => {
   it.effect("maps OpenCode skill.list without sending skill bodies", () =>
     Effect.gen(function* () {
       const client = {
-        v2: {
-          skill: {
-            list: async () => ({
-              data: {
-                data: [
-                  {
-                    name: "git-release",
-                    description: "Release notes.",
-                    location: "/cache/opencode/skills/git-release/git-release.md",
-                    content: "# Do not ship this",
-                  },
-                  {
-                    name: "hidden",
-                    slash: false,
-                    location: "/cache/opencode/skills/hidden/SKILL.md",
-                    content: "hidden",
-                  },
-                ],
-              },
-            }),
-          },
+        skill: {
+          list: async () => ({
+            data: {
+              data: [
+                {
+                  name: "git-release",
+                  description: "Release notes.",
+                  location: "/cache/opencode/skills/git-release/git-release.md",
+                  content: "# Do not ship this",
+                },
+                {
+                  name: "hidden",
+                  slash: false,
+                  location: "/cache/opencode/skills/hidden/SKILL.md",
+                  content: "hidden",
+                },
+              ],
+            },
+          }),
         },
       };
       const runtime = OpenCode2Runtime.OpenCode2Runtime.of({
@@ -773,19 +762,17 @@ describe("listOpenCode2SkillsForDirectory", () => {
   it.effect("accepts a single-wrapped skill.list payload", () =>
     Effect.gen(function* () {
       const client = {
-        v2: {
-          skill: {
-            list: async () => ({
-              data: [
-                {
-                  name: "deploy",
-                  description: "Deploy.",
-                  location: "/repo/.opencode/skills/deploy/SKILL.md",
-                  content: "# hidden",
-                },
-              ],
-            }),
-          },
+        skill: {
+          list: async () => ({
+            data: [
+              {
+                name: "deploy",
+                description: "Deploy.",
+                location: "/repo/.opencode/skills/deploy/SKILL.md",
+                content: "# hidden",
+              },
+            ],
+          }),
         },
       };
       const runtime = OpenCode2Runtime.OpenCode2Runtime.of({
