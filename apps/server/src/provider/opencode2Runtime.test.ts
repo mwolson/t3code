@@ -946,6 +946,20 @@ describe("openCode2SharedServerKey", () => {
     });
     assert.notStrictEqual(left, right);
   });
+
+  it("separates HOME fallbacks when XDG homes are absent", () => {
+    const left = openCode2SharedServerKey({
+      binaryPath: "opencode2",
+      environment: { HOME: "/home/alice" },
+    });
+    const right = openCode2SharedServerKey({
+      binaryPath: "opencode2",
+      environment: { HOME: "/home/bob" },
+    });
+    assert.notStrictEqual(left, right);
+    assert.include(left, "/home/alice/.local/share");
+    assert.include(right, "/home/bob/.local/state");
+  });
 });
 
 describe("environmentForSharedOpenCode2Server", () => {
