@@ -6617,25 +6617,27 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           });
         });
 
-        const sessionHasPendingBackgroundWork = (
+        const consumePendingBackgroundWork = (
           sessionID: string,
           inspected: boolean | undefined,
-        ) =>
-          inspected === true ||
-          (runningShellIdsBySession.get(sessionID)?.size ?? 0) > 0 ||
-          holdPendingWorkAfterClear.has(sessionID);
+        ) => {
+          const hold = holdPendingWorkAfterClear.delete(sessionID);
+          return (
+            inspected === true || (runningShellIdsBySession.get(sessionID)?.size ?? 0) > 0 || hold
+          );
+        };
 
         const hasPendingBackgroundWorkForState = (state: OpenCode2ThreadState) =>
           inspectPendingBackgroundWork(state).pipe(
             Effect.map((inspected) =>
-              sessionHasPendingBackgroundWork(state.nativeSessionId, inspected),
+              consumePendingBackgroundWork(state.nativeSessionId, inspected),
             ),
             Effect.catchCause((cause) =>
               Effect.logWarning("Failed to inspect OpenCode 2 pending background work.", {
                 errorTag: causeErrorTag(cause),
                 provider: OPENCODE2_PROVIDER,
                 providerThreadId: state.providerThread.id,
-              }).pipe(Effect.as(sessionHasPendingBackgroundWork(state.nativeSessionId, undefined))),
+              }).pipe(Effect.as(consumePendingBackgroundWork(state.nativeSessionId, undefined))),
             ),
           );
 
@@ -6716,14 +6718,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
               const sessionID = nativeThreadId(providerThread);
               const state = threads.get(sessionID);
               if (state === undefined) {
-                return sessionHasPendingBackgroundWork(sessionID, undefined);
+                return consumePendingBackgroundWork(sessionID, undefined);
               }
               const inspected = yield* inspectPendingBackgroundWork(state).pipe(Effect.option);
-              const hold = holdPendingWorkAfterClear.delete(sessionID);
-              return (
-                (inspected._tag === "Some" && inspected.value) ||
-                (runningShellIdsBySession.get(sessionID)?.size ?? 0) > 0 ||
-                hold
+              return consumePendingBackgroundWork(
+                sessionID,
+                inspected._tag === "Some" ? inspected.value : undefined,
               );
             }).pipe(
               Effect.catchCause((cause) =>
