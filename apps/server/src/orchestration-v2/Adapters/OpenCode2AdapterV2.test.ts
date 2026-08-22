@@ -18,7 +18,6 @@ type ShellInfoV2 = {
 };
 import {
   ContextHandoffId,
-  EnvironmentId,
   type OrchestrationV2ProviderThread,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -32,7 +31,6 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
-import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import { describe } from "vite-plus/test";
 
@@ -47,8 +45,6 @@ import {
   openCode2ChildTurnItemOrdinals,
   openCode2CleanEofResubscribeDelayMs,
   openCode2CompactionDiagnostics,
-  openCode2EnvironmentWithPermission,
-  openCode2EnvironmentWithT3Mcp,
   openCode2EventClearsHeldExecutionFailure,
   openCode2EventEndsExecution,
   openCode2EventSettlesHeldExecutionFailure,
@@ -117,17 +113,6 @@ import {
 } from "./openCode2Wire.ts";
 
 const v2Event = (event: unknown) => event as V2Event;
-
-const t3McpSession = {
-  environmentId: EnvironmentId.make("environment:test"),
-  threadId: ThreadId.make("thread:test"),
-  providerSessionId: "provider-session:test",
-  providerInstanceId: ProviderInstanceId.make("opencode2"),
-  endpoint: "http://127.0.0.1:43123/mcp",
-  authorizationHeader: "Bearer test-token",
-};
-const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
-const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 describe("OpenCode 2 wire input ids", () => {
   it("reads every supported input id alias", () => {
@@ -843,158 +828,6 @@ describe("openCode2T3OrchestrationInstructions", () => {
     assert.include(text, "includeModelOptions: true");
     assert.isBelow(Buffer.byteLength(JSON.stringify(text), "utf8"), 8 * 1024);
   });
-});
-
-describe("openCode2EnvironmentWithT3Mcp", () => {
-  it.effect("merges a per-thread server into process-local inline config", () =>
-    Effect.gen(function* () {
-      const environment = {
-        CUSTOM_ENV: "preserved",
-        OPENCODE_CONFIG_CONTENT: encodeJson({
-          agent: { build: { mode: "primary" } },
-          mcp: {
-            existing: {
-              type: "local",
-              command: ["existing-mcp"],
-            },
-          },
-        }),
-      };
-      const result = yield* openCode2EnvironmentWithT3Mcp(environment, t3McpSession);
-      const resultEnvironment: NodeJS.ProcessEnv = result;
-
-      assert.strictEqual(resultEnvironment.CUSTOM_ENV, "preserved");
-      assert.deepStrictEqual(decodeJson(result.OPENCODE_CONFIG_CONTENT ?? ""), {
-        agent: { build: { mode: "primary" } },
-        mcp: {
-          existing: {
-            type: "local",
-            command: ["existing-mcp"],
-          },
-          "t3-code": {
-            type: "remote",
-            url: t3McpSession.endpoint,
-            headers: { Authorization: t3McpSession.authorizationHeader },
-            oauth: false,
-          },
-        },
-      });
-      assert.notStrictEqual(result, environment);
-    }),
-  );
-
-  it.effect("rejects inline config whose MCP field cannot be merged safely", () =>
-    Effect.gen(function* () {
-      const failure = yield* openCode2EnvironmentWithT3Mcp(
-        { OPENCODE_CONFIG_CONTENT: encodeJson({ mcp: false }) },
-        t3McpSession,
-      ).pipe(Effect.flip);
-
-      assert.isDefined(failure);
-    }),
-  );
-
-  it.effect("creates inline config when content is absent or empty", () =>
-    Effect.gen(function* () {
-      const environments: Array<NodeJS.ProcessEnv> = [{}, { OPENCODE_CONFIG_CONTENT: "" }];
-      for (const environment of environments) {
-        const result = yield* openCode2EnvironmentWithT3Mcp(environment, t3McpSession);
-        assert.deepStrictEqual(decodeJson(result.OPENCODE_CONFIG_CONTENT ?? ""), {
-          mcp: {
-            "t3-code": {
-              type: "remote",
-              url: t3McpSession.endpoint,
-              headers: { Authorization: t3McpSession.authorizationHeader },
-              oauth: false,
-            },
-          },
-        });
-      }
-    }),
-  );
-});
-
-describe("openCode2EnvironmentWithPermission", () => {
-  const policy = (overrides: Record<string, unknown>) =>
-    ({
-      cwd: "/tmp",
-      interactionMode: "default",
-      runtimeMode: "default",
-      ...overrides,
-    }) as never;
-
-  it.effect("injects allow while preserving inline MCP config for implicit full access", () =>
-    Effect.gen(function* () {
-      const environment = {
-        OPENCODE_CONFIG_CONTENT: encodeJson({
-          mcp: {
-            existing: {
-              type: "local",
-              command: ["existing-mcp"],
-            },
-          },
-        }),
-      };
-      const result = yield* openCode2EnvironmentWithPermission(
-        environment,
-        policy({ runtimeMode: "full-access" }),
-      );
-
-      assert.deepStrictEqual(decodeJson(result.OPENCODE_CONFIG_CONTENT ?? ""), {
-        permission: "allow",
-        mcp: {
-          existing: {
-            type: "local",
-            command: ["existing-mcp"],
-          },
-        },
-      });
-    }),
-  );
-
-  it.effect("does not inject allow when the policy requires approval", () =>
-    Effect.gen(function* () {
-      const environment = {
-        OPENCODE_CONFIG_CONTENT: encodeJson({
-          mcp: {
-            existing: {
-              type: "local",
-              command: ["existing-mcp"],
-            },
-          },
-        }),
-      };
-      const result = yield* openCode2EnvironmentWithPermission(
-        environment,
-        policy({ approvalPolicy: "on-request", runtimeMode: "full-access" }),
-      );
-
-      assert.strictEqual(result, environment);
-      assert.deepStrictEqual(decodeJson(result.OPENCODE_CONFIG_CONTENT ?? ""), {
-        mcp: {
-          existing: {
-            type: "local",
-            command: ["existing-mcp"],
-          },
-        },
-      });
-    }),
-  );
-
-  it.effect("injects allow when content is absent or empty", () =>
-    Effect.gen(function* () {
-      const environments: Array<NodeJS.ProcessEnv> = [{}, { OPENCODE_CONFIG_CONTENT: "" }];
-      for (const environment of environments) {
-        const result = yield* openCode2EnvironmentWithPermission(
-          environment,
-          policy({ runtimeMode: "full-access" }),
-        );
-        assert.deepStrictEqual(decodeJson(result.OPENCODE_CONFIG_CONTENT ?? ""), {
-          permission: "allow",
-        });
-      }
-    }),
-  );
 });
 
 describe("openCode2AutoPermissionReply", () => {

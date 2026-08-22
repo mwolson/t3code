@@ -19,11 +19,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
+  environmentForSharedOpenCode2Server,
   escalateOpenCode2ServerTermination,
   isOpenCode2RuntimeError,
   OpenCode2Runtime,
   layer,
   openCode2AuthorizationHeader,
+  openCode2SharedServerKey,
   parseOpenCode2Startup,
   readOpenCode2StatePassword,
   runOpenCode2Sdk,
@@ -898,6 +900,156 @@ describe("OpenCode2Runtime startup cleanup", () => {
       assert.deepStrictEqual(killOptions, [
         { killSignal: "SIGTERM", forceKillAfter: "500 millis" },
       ]);
+    }),
+  );
+});
+
+describe("openCode2SharedServerKey", () => {
+  it("ignores session-varying inline config", () => {
+    const left = openCode2SharedServerKey({
+      binaryPath: "opencode2",
+      environment: {
+        XDG_DATA_HOME: "/data",
+        XDG_STATE_HOME: "/state",
+        OPENCODE_CONFIG_CONTENT: '{"mcp":1}',
+      },
+    });
+    const right = openCode2SharedServerKey({
+      binaryPath: "opencode2",
+      environment: {
+        XDG_DATA_HOME: "/data",
+        XDG_STATE_HOME: "/state",
+        OPENCODE_CONFIG_CONTENT: '{"permission":"allow"}',
+      },
+    });
+    assert.strictEqual(left, right);
+  });
+
+  it("separates managed data homes", () => {
+    const left = openCode2SharedServerKey({
+      binaryPath: "opencode2",
+      environment: { XDG_DATA_HOME: "/a" },
+    });
+    const right = openCode2SharedServerKey({
+      binaryPath: "opencode2",
+      environment: { XDG_DATA_HOME: "/b" },
+    });
+    assert.notStrictEqual(left, right);
+  });
+});
+
+describe("environmentForSharedOpenCode2Server", () => {
+  it("strips inline config and keeps instance env", () => {
+    const environment = environmentForSharedOpenCode2Server({
+      OPENCODE_CONFIG_CONTENT: '{"mcp":1}',
+      OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS: "1",
+      XDG_DATA_HOME: "/data",
+    });
+    assert.deepStrictEqual(environment, {
+      OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS: "1",
+      XDG_DATA_HOME: "/data",
+    });
+  });
+});
+
+describe("OpenCode2Runtime shared server", () => {
+  const bannerSpawner = (spawnCount: { value: number }) => {
+    const encoder = new TextEncoder();
+    return ChildProcessSpawner.make(() =>
+      Effect.sync(() => {
+        spawnCount.value += 1;
+        const port = 4700 + spawnCount.value;
+        return ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(40 + spawnCount.value),
+          exitCode: Effect.never,
+          isRunning: Effect.succeed(true),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.make(
+            encoder.encode(
+              `server listening on http://127.0.0.1:${port}\nserver password shared-password\n`,
+            ),
+          ),
+          stderr: Stream.never,
+          all: Stream.never,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.never,
+        });
+      }),
+    );
+  };
+
+  it.effect("reuses one spawned process across connect calls", () =>
+    Effect.gen(function* () {
+      const spawnCount = { value: 0 };
+      const first = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const runtime = yield* OpenCode2Runtime;
+          const connection = yield* runtime.connectToOpenCode2Server({
+            binaryPath: "opencode2",
+            environment: {
+              XDG_DATA_HOME: "/data",
+              OPENCODE_CONFIG_CONTENT: '{"mcp":1}',
+            },
+          });
+          const again = yield* runtime.connectToOpenCode2Server({
+            binaryPath: "opencode2",
+            environment: {
+              XDG_DATA_HOME: "/data",
+              OPENCODE_CONFIG_CONTENT: '{"permission":"allow"}',
+            },
+          });
+          return { connection, again };
+        }),
+      ).pipe(
+        Effect.provide(layer),
+        Effect.provideService(SpawnedProcessReaper, {
+          track: () => Effect.void,
+          untrack: () => Effect.void,
+        }),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, bannerSpawner(spawnCount)),
+        Effect.provideService(HostProcessPlatform, "win32"),
+      );
+
+      assert.strictEqual(spawnCount.value, 1);
+      assert.strictEqual(first.connection.url, first.again.url);
+      assert.strictEqual(first.connection.password, "shared-password");
+      assert.isFalse(first.connection.external);
+    }),
+  );
+
+  it.effect("does not kill the shared process when a caller scope closes", () =>
+    Effect.gen(function* () {
+      const spawnCount = { value: 0 };
+      const urls = yield* Effect.gen(function* () {
+        const runtime = yield* OpenCode2Runtime;
+        const first = yield* Effect.scoped(
+          runtime.connectToOpenCode2Server({
+            binaryPath: "opencode2",
+            environment: { XDG_DATA_HOME: "/data" },
+          }),
+        );
+        const second = yield* Effect.scoped(
+          runtime.connectToOpenCode2Server({
+            binaryPath: "opencode2",
+            environment: { XDG_DATA_HOME: "/data" },
+          }),
+        );
+        return { first: first.url, second: second.url };
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(layer),
+        Effect.provideService(SpawnedProcessReaper, {
+          track: () => Effect.void,
+          untrack: () => Effect.void,
+        }),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, bannerSpawner(spawnCount)),
+        Effect.provideService(HostProcessPlatform, "win32"),
+      );
+
+      assert.strictEqual(spawnCount.value, 1);
+      assert.strictEqual(urls.first, urls.second);
     }),
   );
 });
