@@ -57,12 +57,11 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")("OpenCode 2 runtime (live)
         });
 
         // Any authenticated call proves the header is right; session.create is
-        // the one the adapter reaches for first. `client.v2.*` is the /api/*
-        // namespace, and the response carries its own `data` envelope.
+        // the one the adapter reaches for first.
         const created = yield* OpenCode2Runtime.runOpenCode2Sdk("session.create", () =>
-          client.v2.session.create({ location: { directory: process.cwd() } }),
+          client.session.create({ location: { directory: process.cwd() } }),
         );
-        const sessionId = (created.data as { data?: { id?: string } } | undefined)?.data?.id;
+        const sessionId = created.id;
         assert.isString(sessionId, "session.create returned no id");
 
         yield* Scope.close(scope, Effect.void as never).pipe(Effect.ignore);

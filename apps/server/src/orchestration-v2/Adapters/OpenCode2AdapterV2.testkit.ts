@@ -1,4 +1,4 @@
-import type { OpencodeClient, V2Event } from "@opencode-ai/sdk-next/v2";
+import type { OpenCodeClient, V2Event } from "@opencode-ai/client";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ProviderInstanceId,
@@ -121,6 +121,12 @@ function replayValueMatches(expected: unknown, actual: unknown): boolean {
         Object.prototype.hasOwnProperty.call(actual, key) && replayValueMatches(value, actual[key]),
     );
   }
+  if (
+    (typeof expected === "string" && typeof actual === "number" && expected === String(actual)) ||
+    (typeof expected === "number" && typeof actual === "string" && String(expected) === actual)
+  ) {
+    return true;
+  }
   return Object.is(expected, actual);
 }
 
@@ -144,6 +150,8 @@ export class OpenCode2ReplayController {
   private cursor = 0;
   private claimedEventCursor: number | null = null;
   private claimedResponseCursor: number | null = null;
+  private currentEventEpoch = 0;
+  private pendingEventHandling = false;
   private successfulRuntimeExit = false;
   private readonly waiters = new Set<() => void>();
   private failure: unknown = null;
@@ -212,13 +220,23 @@ export class OpenCode2ReplayController {
     }
   }
 
-  async response(operation: OpenCode2RuntimeOperation): Promise<unknown> {
+  eventEpoch(): number {
+    return this.currentEventEpoch;
+  }
+
+  async response(
+    operation: OpenCode2RuntimeOperation,
+    startedAtEventEpoch = this.currentEventEpoch,
+  ): Promise<unknown> {
     while (true) {
       this.throwFailure();
       if (this.abortController.signal.aborted) {
         throw new Error(`OpenCode 2 replay aborted while waiting for ${operation}.`);
       }
-      if (this.claimedResponseCursor === this.cursor) {
+      if (
+        this.claimedResponseCursor === this.cursor ||
+        (this.pendingEventHandling && startedAtEventEpoch < this.currentEventEpoch)
+      ) {
         await this.changed();
         continue;
       }
@@ -321,8 +339,14 @@ export class OpenCode2ReplayController {
             this.throwFailure();
             const event = frame.event as V2Event;
             this.advance();
-            this.releaseEventClaim(claimedCursor);
-            yield event;
+            this.currentEventEpoch += 1;
+            this.pendingEventHandling = true;
+            try {
+              yield event;
+            } finally {
+              this.pendingEventHandling = false;
+              this.notifyWaiters();
+            }
             continue;
           } finally {
             this.releaseEventClaim(claimedCursor);
@@ -425,43 +449,11 @@ export class OpenCode2ReplayController {
   }
 }
 
-export function makeReplayClient(controller: OpenCode2ReplayController): OpencodeClient {
+export function makeReplayClient(controller: OpenCode2ReplayController): OpenCodeClient {
   const request = async (operation: OpenCode2RuntimeOperation, input: unknown) => {
+    const startedAtEventEpoch = controller.eventEpoch();
     await controller.expectOutbound({ type: operation, input });
-    return { data: { data: await controller.response(operation) } };
-  };
-  const rawPost = async (input: Record<string, unknown>) => {
-    const path = frameRecord(input.path);
-    const body = frameRecord(input.body);
-    if (input.url === "/api/session/{sessionID}/prompt") {
-      if (
-        path?.sessionID === undefined ||
-        typeof body?.text !== "string" ||
-        body.prompt !== undefined
-      ) {
-        throw new Error("Replay session.prompt must use a flat text body.");
-      }
-      const { delivery, ...prompt } = body;
-      return request("session.prompt", {
-        sessionID: path.sessionID,
-        prompt,
-        ...(typeof delivery === "string" ? { delivery } : {}),
-      });
-    }
-    if (input.url === "/api/session/{sessionID}/fork") {
-      return request("session.fork", {
-        sessionID: path?.sessionID,
-        $body_boundary: body?.boundary,
-      });
-    }
-    if (input.url === "/api/session/{sessionID}/form/{formID}/reply") {
-      return request("session.form.reply", {
-        sessionID: path?.sessionID,
-        formID: path?.formID,
-        answer: body?.answer,
-      });
-    }
-    throw new Error(`Unsupported replay POST route: ${String(input.url)}`);
+    return { data: { data: await controller.response(operation, startedAtEventEpoch) } };
   };
   /**
    * Catalog probes may run at openSession/ensureThread before the transcript
@@ -479,69 +471,102 @@ export function makeReplayClient(controller: OpenCode2ReplayController): Opencod
     return request(operation, input);
   };
   return {
-    client: {
-      post: rawPost,
+    agent: {
+      list: (input: unknown) =>
+        optionalCatalog("agent.list", input, [{ id: "build" }, { id: "plan" }]),
     },
-    v2: {
-      agent: {
-        list: (input: unknown) =>
-          optionalCatalog("agent.list", input, [{ id: "build" }, { id: "plan" }]),
-      },
-      event: {
-        subscribe: async (options?: { readonly signal?: AbortSignal }) => {
-          await controller.expectOutbound({ type: "event.subscribe" });
-          return { stream: controller.events(options?.signal) };
-        },
-      },
-      message: {
-        list: (input: unknown) => request("message.list", input),
-      },
-      mcp: {
-        list: (input: unknown) => optionalCatalog("mcp.list", input, []),
-      },
-      model: {
-        list: (input: unknown) => optionalCatalog("model.list", input, []),
-      },
-      session: {
-        context: (input: unknown) => request("session.context", input),
-        create: (input: unknown) => request("session.create", input),
-        fork: (input: unknown) => request("session.fork", input),
-        get: (input: unknown) => request("session.get", input),
-        interrupt: (input: unknown) => request("session.interrupt", input),
-        instructions: {
-          entry: {
-            put: (input: unknown) => request("session.instructions.entry.put", input),
+    event: {
+      subscribe: (options?: { readonly signal?: AbortSignal }) => {
+        const subscribed = controller.expectOutbound({ type: "event.subscribe" });
+        return {
+          async *[Symbol.asyncIterator]() {
+            await subscribed;
+            yield* controller.events(options?.signal);
           },
-        },
-        // Beta Session3 projects messages under session.messages; older
-        // transcripts still label the operation message.list.
-        messages: (input: unknown) => request("message.list", input),
-        pending: {
-          list: (input: unknown) => request("session.pending.list", input),
-        },
-        permission: {
-          reply: (input: unknown) => request("session.permission.reply", input),
-        },
-        prompt: (input: unknown) => request("session.prompt", input),
-        remove: (input: unknown) => request("session.remove", input),
-        question: {
-          reply: (input: unknown) => request("session.question.reply", input),
-        },
-        revert: {
-          commit: (input: unknown) => request("session.revert.commit", input),
-          stage: (input: unknown) => request("session.revert.stage", input),
-        },
-        switchAgent: (input: unknown) => request("session.switchAgent", input),
-        switchModel: (input: unknown) => request("session.switchModel", input),
-        wait: (input: unknown) => request("session.wait", input),
-      },
-      shell: {
-        list: (input: unknown) => request("shell.list", input),
-        output: (input: unknown) => request("shell.output", input),
-        remove: (input: unknown) => request("shell.remove", input),
+        };
       },
     },
-  } as unknown as OpencodeClient;
+    form: {
+      reply: (input: {
+        readonly sessionID: string;
+        readonly formID: string;
+        readonly answer: unknown;
+      }) => {
+        if (controller.expectsOutbound("session.question.reply")) {
+          const answers = P.isObject(input.answer) ? Object.values(input.answer) : [input.answer];
+          return request("session.question.reply", {
+            sessionID: input.sessionID,
+            requestID: input.formID,
+            questionV2Reply: { answers },
+          });
+        }
+        return request("session.form.reply", input);
+      },
+    },
+    message: {
+      list: (input: unknown) => request("message.list", input),
+    },
+    mcp: {
+      list: (input: unknown) => optionalCatalog("mcp.list", input, []),
+    },
+    model: {
+      list: (input: unknown) => optionalCatalog("model.list", input, []),
+    },
+    permission: {
+      reply: (input: unknown) => request("session.permission.reply", input),
+    },
+    session: {
+      context: (input: unknown) => request("session.context", input),
+      create: (input: unknown) => request("session.create", input),
+      fork: (input: { readonly sessionID: string; readonly boundary: unknown }) =>
+        request("session.fork", {
+          sessionID: input.sessionID,
+          $body_boundary: input.boundary,
+        }),
+      get: (input: unknown) => request("session.get", input),
+      inbox: {
+        list: (input: unknown) => request("session.pending.list", input),
+      },
+      instructions: {
+        entry: {
+          put: (input: unknown) => request("session.instructions.entry.put", input),
+        },
+      },
+      interrupt: (input: unknown) => request("session.interrupt", input),
+      prompt: (input: {
+        readonly sessionID: string;
+        readonly text: string;
+        readonly files?: unknown;
+        readonly delivery?: string;
+      }) => {
+        if (typeof input.text !== "string") {
+          throw new Error("Replay session.prompt must use a flat text body.");
+        }
+        const prompt = {
+          text: input.text,
+          ...(input.files === undefined ? {} : { files: input.files }),
+        };
+        return request("session.prompt", {
+          sessionID: input.sessionID,
+          prompt,
+          ...(typeof input.delivery === "string" ? { delivery: input.delivery } : {}),
+        });
+      },
+      remove: (input: unknown) => request("session.remove", input),
+      revert: {
+        commit: (input: unknown) => request("session.revert.commit", input),
+        stage: (input: unknown) => request("session.revert.stage", input),
+      },
+      switchAgent: (input: unknown) => request("session.switchAgent", input),
+      switchModel: (input: unknown) => request("session.switchModel", input),
+      wait: (input: unknown) => request("session.wait", input),
+    },
+    shell: {
+      list: (input: unknown) => request("shell.list", input),
+      output: (input: unknown) => request("shell.output", input),
+      remove: (input: unknown) => request("shell.remove", input),
+    },
+  } as unknown as OpenCodeClient;
 }
 
 function makeOpenCode2ReplayRuntimeLayer(transcript: OpenCode2SdkReplayTranscript) {
