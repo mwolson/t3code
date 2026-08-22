@@ -117,11 +117,12 @@ export function useSelectedThreadRequests() {
       if (!selectedThreadShell) {
         return;
       }
+      if (!activePendingUserInput || activePendingUserInput.requestId !== requestId) return;
 
       const requestKey = scopedRequestKey(selectedThreadShell.environmentId, requestId);
       setUserInputDraftCustomAnswer(requestKey, questionId, customAnswer);
     },
-    [selectedThreadShell],
+    [activePendingUserInput, selectedThreadShell],
   );
 
   const onRespondToApproval = useCallback(
