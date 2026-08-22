@@ -14,8 +14,9 @@
  *   - the model binds at session create via `ModelRef`, not per prompt;
  *   - permission asks can still arrive under the legacy `permission.asked`
  *     name, but replies always use the `/api` session-scoped
- *     `client.session.*` / `client.permission.*` routes. Self-spawned full-access servers also get
- *     `permission: "allow"` injected into `OPENCODE_CONFIG_CONTENT` at spawn.
+ *     `client.session.*` / `client.permission.*` routes. Threads attach to one
+ *     T3-owned OpenCode 2 process per binary and managed data home. T3 MCP is
+ *     registered after connect with `mcp.add`.
  *
  * `live-scenarios/tests/opencode2-drive-probe.mjs` in the parent workspace is
  * the executable statement of this contract against a real binary.
@@ -272,11 +273,6 @@ export const OPENCODE2_RUNTIME_REQUEST_DEDUPE_PER_SESSION_LIMIT = 1_024;
 const DEFAULT_OPENCODE2_SETTINGS = Schema.decodeSync(OpenCode2SettingsSchema)({});
 const OPENCODE2_T3_MCP_NAME = "t3-code";
 const OPENCODE2_T3_INSTRUCTION_KEY = "t3-code.orchestration";
-const OpenCode2InlineConfig = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown));
-const OpenCode2McpConfig = Schema.Record(Schema.String, Schema.Unknown);
-const decodeOpenCode2InlineConfig = Schema.decodeUnknownEffect(OpenCode2InlineConfig);
-const decodeOpenCode2McpConfig = Schema.decodeUnknownEffect(OpenCode2McpConfig);
-const encodeOpenCode2InlineConfig = Schema.encodeEffect(OpenCode2InlineConfig);
 
 /**
  * 2.x keeps 1.x's durable session/message identifiers and adds a durable
@@ -1956,59 +1952,6 @@ export function openCode2T3OrchestrationInstructions(): string {
 }
 
 /**
- * Add T3's per-thread MCP server to a spawned OpenCode 2 process without
- * writing the user's global or project configuration.
- *
- * @internal exported for tests
- */
-export const openCode2EnvironmentWithT3Mcp = Effect.fn(
-  "OpenCode2AdapterV2.openCode2EnvironmentWithT3Mcp",
-)(function* (environment: NodeJS.ProcessEnv, session: McpProviderSession.McpProviderSessionConfig) {
-  const config = yield* decodeOpenCode2InlineConfig(environment.OPENCODE_CONFIG_CONTENT || "{}");
-  const mcp = yield* decodeOpenCode2McpConfig(config.mcp ?? {});
-  const content = yield* encodeOpenCode2InlineConfig({
-    ...config,
-    mcp: {
-      ...mcp,
-      [OPENCODE2_T3_MCP_NAME]: {
-        type: "remote",
-        url: session.endpoint,
-        headers: { Authorization: session.authorizationHeader },
-        oauth: false,
-      },
-    },
-  });
-  return {
-    ...environment,
-    OPENCODE_CONFIG_CONTENT: content,
-  } satisfies NodeJS.ProcessEnv;
-});
-
-/**
- * Give a self-spawned full-access OpenCode 2 server its fixed startup policy.
- *
- * @internal exported for tests
- */
-export const openCode2EnvironmentWithPermission = Effect.fn(
-  "OpenCode2AdapterV2.openCode2EnvironmentWithPermission",
-)(function* (
-  environment: NodeJS.ProcessEnv,
-  runtimePolicy: ProviderAdapterV2TurnInput["runtimePolicy"],
-) {
-  if (!isOpenCodeAllowAllPolicy(runtimePolicy)) return environment;
-
-  const config = yield* decodeOpenCode2InlineConfig(environment.OPENCODE_CONFIG_CONTENT || "{}");
-  const content = yield* encodeOpenCode2InlineConfig({
-    ...config,
-    permission: "allow",
-  });
-  return {
-    ...environment,
-    OPENCODE_CONFIG_CONTENT: content,
-  } satisfies NodeJS.ProcessEnv;
-});
-
-/**
  * 2.x has no session-scoped permission ruleset — `session.create` accepts none
  * and its native `always` reply persists project-wide — so T3 evaluates each
  * request against the same rules used by the 1.x adapter and replies only for
@@ -2134,18 +2077,6 @@ function openCode2SessionPermissionMatches(
   const resources = request.resources.length === 0 ? ["*"] : request.resources;
   return resources.every((resource) =>
     permission.resources.some((pattern) => openCode2WildcardMatch(pattern, resource)),
-  );
-}
-
-function isOpenCodeAllowAllPolicy(
-  runtimePolicy: ProviderAdapterV2TurnInput["runtimePolicy"],
-): boolean {
-  const rules = openCodePermissionRules(runtimePolicy);
-  return (
-    rules.length === 1 &&
-    rules[0]?.permission === "*" &&
-    rules[0].pattern === "*" &&
-    rules[0].action === "allow"
   );
 }
 
@@ -2406,25 +2337,12 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const selfSpawning = !(options.settings.serverUrl?.trim() ?? "");
         const hasT3Mcp = mcpSession !== undefined && selfSpawning;
-        const environmentWithMcp =
-          hasT3Mcp && mcpSession !== undefined
-            ? yield* openCode2EnvironmentWithT3Mcp(options.environment, mcpSession)
-            : options.environment;
-        // The injected policy is fixed at spawn, like 1.x's session.create
-        // ruleset. A stricter mid-thread turn does not re-gate asks suppressed
-        // by allow-all until the provider session is reopened.
-        const injectedAllowPolicy = selfSpawning && isOpenCodeAllowAllPolicy(input.runtimePolicy);
-        const environment = injectedAllowPolicy
-          ? yield* openCode2EnvironmentWithPermission(environmentWithMcp, input.runtimePolicy)
-          : environmentWithMcp;
         const connection = yield* runtime.connectToOpenCode2Server({
           binaryPath: options.settings.binaryPath,
           serverUrl: options.settings.serverUrl,
           serverPassword: options.settings.serverPassword,
-          environment,
+          environment: options.environment,
         });
-        const spawnedWithInjectedAllowPolicy = injectedAllowPolicy && !connection.external;
-        let warnedAboutInjectedAllowPolicy = false;
         const client = runtime.createOpenCode2SdkClient({
           baseUrl: connection.url,
           directory: cwd,
@@ -6722,8 +6640,9 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
           );
 
         const waitForT3Mcp = Effect.fnUntraced(function* () {
-          if (!hasT3Mcp) return;
+          if (!hasT3Mcp || mcpSession === undefined) return;
           let lastStatus = "missing";
+          let added = false;
           for (let attempt = 0; attempt < 50; attempt++) {
             const listed = yield* sdkCall("mcp.list", { location: { directory: cwd } }, () =>
               client.mcp.list({ location: { directory: cwd } }),
@@ -6735,6 +6654,21 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
             const server = servers.find((candidate) => candidate.name === OPENCODE2_T3_MCP_NAME);
             lastStatus = server === undefined ? "missing" : mcpServerStatus(server);
             if (lastStatus === "connected") return;
+            if (lastStatus === "missing" && !added) {
+              added = true;
+              const payload = {
+                server: OPENCODE2_T3_MCP_NAME,
+                location: { directory: cwd },
+                config: {
+                  type: "remote" as const,
+                  url: mcpSession.endpoint,
+                  headers: { Authorization: mcpSession.authorizationHeader },
+                  oauth: false as const,
+                },
+              };
+              yield* sdkCall("mcp.add", payload, () => client.mcp.add(payload));
+              continue;
+            }
             if (lastStatus !== "missing" && lastStatus !== "pending") {
               return yield* new OpenCode2RuntimeError({
                 operation: "mcp.list",
@@ -6957,22 +6891,6 @@ export function makeOpenCode2AdapterV2(options: OpenCode2AdapterV2Options): Prov
                 state.providerThread,
                 turnInput.providerThread,
               );
-              if (
-                spawnedWithInjectedAllowPolicy &&
-                !warnedAboutInjectedAllowPolicy &&
-                !isOpenCodeAllowAllPolicy(turnInput.runtimePolicy)
-              ) {
-                warnedAboutInjectedAllowPolicy = true;
-                yield* Effect.logWarning(
-                  "OpenCode 2 session was spawned with an allow-all permission policy; a stricter runtime mode will not re-gate suppressed permission asks until the session is reopened.",
-                  {
-                    provider: OPENCODE2_PROVIDER,
-                    providerSessionId: input.providerSessionId,
-                    threadId: turnInput.threadId,
-                    runtimeMode: turnInput.runtimePolicy.runtimeMode,
-                  },
-                );
-              }
               const providerBufferedContinuation =
                 turnInput.message.createdBy === "agent" &&
                 turnInput.message.creationSource === "provider";

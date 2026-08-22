@@ -21,12 +21,11 @@
  *
  * `live-scenarios/tests/opencode2-drive-probe.mjs` in the parent workspace
  * exercises this contract against a real binary and fails first if 2.x moves.
- * Spawned-server lifetime is guaranteed by the scope finalizer's process-group
- * kill, which returns immediately when the group is gone and escalates after
- * 500ms when descendants remain, plus the stdin-EOF watchdog sidecar that
- * reaps on confirmed parent death. If many sessions tear down sequentially and
- * overrun the desktop's 2-second grace, the sidecar still reaps the remainder
- * via pipe EOF.
+ * `connectToOpenCode2Server` reuses one spawned process per binary and managed
+ * data/state home for the runtime layer lifetime. Direct
+ * `startOpenCode2ServerProcess` calls stay bound to the caller scope. Process
+ * teardown still uses the scope finalizer's process-group kill plus the
+ * stdin-EOF watchdog sidecar.
  */
 import { ClientError, OpenCode, type OpenCodeClient } from "@opencode-ai/client";
 import * as NetService from "@t3tools/shared/Net";
@@ -43,6 +42,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -73,6 +73,7 @@ export const OpenCode2RuntimeOperation = Schema.Literals([
   "generate.text",
   "health.get",
   "integration.list",
+  "mcp.add",
   "mcp.list",
   "message.list",
   "model.list",
@@ -240,9 +241,10 @@ export class OpenCode2Runtime extends Context.Service<
       readonly timeoutMs?: number;
     }) => Effect.Effect<OpenCode2ServerProcess, OpenCode2RuntimeError, Scope.Scope>;
     /**
-     * Connect to an externally-managed server, or spawn one. An external server
-     * must carry its own password: 2.x has no unauthenticated mode, so there is
-     * nothing to fall back to.
+     * Connect to an externally-managed server, or reuse the spawned server for
+     * this binary and managed data home. An external server must carry its own
+     * password: 2.x has no unauthenticated mode, so there is nothing to fall
+     * back to.
      */
     readonly connectToOpenCode2Server: (input: {
       readonly binaryPath: string;
@@ -362,7 +364,52 @@ export function escalateOpenCode2ServerTermination(
   });
 }
 
+/**
+ * Identity for the one T3-owned OpenCode 2 process. Session-varying inline
+ * config is excluded so inventory and every thread share the same server.
+ *
+ * @internal exported for tests
+ */
+export function openCode2SharedServerKey(input: {
+  readonly binaryPath: string;
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly hostname?: string;
+}): string {
+  const environment = input.environment ?? {};
+  return [
+    input.binaryPath.trim(),
+    environment.XDG_DATA_HOME?.trim() ?? "",
+    environment.XDG_STATE_HOME?.trim() ?? "",
+    input.hostname?.trim() || DEFAULT_HOSTNAME,
+  ].join("\0");
+}
+
+/**
+ * Drop per-session inline config before spawning the shared process.
+ *
+ * @internal exported for tests
+ */
+export function environmentForSharedOpenCode2Server(
+  environment: NodeJS.ProcessEnv | undefined,
+): NodeJS.ProcessEnv | undefined {
+  if (environment === undefined) return undefined;
+  const next = { ...environment };
+  delete next.OPENCODE_CONFIG_CONTENT;
+  return next;
+}
+
 export const make = Effect.gen(function* () {
+  const layerScope = yield* Effect.scope;
+  const sharedServerLock = yield* Semaphore.make(1);
+  const sharedServers = yield* Ref.make(
+    new Map<
+      string,
+      {
+        readonly connection: OpenCode2ServerConnection;
+        readonly isRunning: Effect.Effect<boolean>;
+      }
+    >(),
+  );
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const netService = yield* NetService.NetService;
   const hostPlatform = yield* HostProcessPlatform;
@@ -759,19 +806,38 @@ export const make = Effect.gen(function* () {
       });
     }
 
-    return startOpenCode2ServerProcess({
+    const key = openCode2SharedServerKey({
       binaryPath: input.binaryPath,
       ...(input.environment !== undefined ? { environment: input.environment } : {}),
-      ...(input.port !== undefined ? { port: input.port } : {}),
       ...(input.hostname !== undefined ? { hostname: input.hostname } : {}),
-      ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
-    }).pipe(
-      Effect.map((server) => ({
-        url: server.url,
-        password: server.password,
-        exitCode: server.exitCode,
-        external: false,
-      })),
+    });
+    const spawnEnvironment = environmentForSharedOpenCode2Server(input.environment);
+    return sharedServerLock.withPermits(1)(
+      Effect.gen(function* () {
+        const current = (yield* Ref.get(sharedServers)).get(key);
+        if (current !== undefined && (yield* current.isRunning)) {
+          return current.connection;
+        }
+        const server = yield* startOpenCode2ServerProcess({
+          binaryPath: input.binaryPath,
+          ...(spawnEnvironment !== undefined ? { environment: spawnEnvironment } : {}),
+          ...(input.port !== undefined ? { port: input.port } : {}),
+          ...(input.hostname !== undefined ? { hostname: input.hostname } : {}),
+          ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+        }).pipe(Effect.provideService(Scope.Scope, layerScope));
+        const connection: OpenCode2ServerConnection = {
+          url: server.url,
+          password: server.password,
+          exitCode: server.exitCode,
+          external: false,
+        };
+        yield* Ref.update(sharedServers, (servers) => {
+          const next = new Map(servers);
+          next.set(key, { connection, isRunning: server.isRunning });
+          return next;
+        });
+        return connection;
+      }),
     );
   };
 
