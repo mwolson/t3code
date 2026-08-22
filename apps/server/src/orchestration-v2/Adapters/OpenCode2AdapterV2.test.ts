@@ -49,7 +49,9 @@ import {
   openCode2CompactionDiagnostics,
   openCode2EnvironmentWithPermission,
   openCode2EnvironmentWithT3Mcp,
+  openCode2EventClearsHeldExecutionFailure,
   openCode2EventEndsExecution,
+  openCode2EventSettlesHeldExecutionFailure,
   openCode2FormAnswer,
   openCode2FormQuestions,
   openCode2ForkEventPumpInScope,
@@ -84,6 +86,7 @@ import {
   openCode2ShouldChargeStreamFailure,
   openCode2ShouldFailActiveTurnsAfterCleanEof,
   openCode2ShouldForceInterruptFinalize,
+  openCode2ShouldHoldExecutionFailure,
   openCode2ShouldQuarantineInterruptedSession,
   openCode2ShouldResubscribeStalledStream,
   openCode2ShouldSettleTurn,
@@ -1870,6 +1873,23 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
     assert.notInclude(unknown.message, secret);
     assert.notInclude(unknown.message, "raw payload");
 
+    const unknownFinish = openCode2ProviderFailure({
+      message: "The provider response ended with an unknown finish reason.",
+      code: "provider.invalid-output",
+    });
+    assert.equal(unknownFinish.code, "provider.invalid-output");
+    assert.equal(
+      unknownFinish.message,
+      "OpenCode 2 ended a model step with an unknown finish reason.",
+    );
+    assert.isTrue(unknownFinish.retryable);
+    const otherInvalidOutput = openCode2ProviderFailure({
+      message: "malformed tool arguments",
+      code: "provider.invalid-output",
+    });
+    assert.equal(otherInvalidOutput.code, "provider.error");
+    assert.isNull(otherInvalidOutput.retryable);
+
     assert.equal(
       openCode2ProviderFailure({
         message: "invalid key",
@@ -1893,6 +1913,48 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
         code: "ContextOverflowError",
       }).code,
       "provider.context-limit",
+    );
+  });
+
+  it("holds a retryable step failure until OpenCode announces another retry", () => {
+    assert.isTrue(
+      openCode2ShouldHoldExecutionFailure({
+        retryable: true,
+        hasAnnouncedRetry: false,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldHoldExecutionFailure({
+        retryable: true,
+        hasAnnouncedRetry: true,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldHoldExecutionFailure({
+        retryable: false,
+        hasAnnouncedRetry: false,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldHoldExecutionFailure({
+        retryable: null,
+        hasAnnouncedRetry: false,
+      }),
+    );
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("session.retry.scheduled"));
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("unknown"));
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("session.usage.updated"));
+    assert.isTrue(openCode2EventSettlesHeldExecutionFailure("session.idle"));
+    assert.isTrue(openCode2EventSettlesHeldExecutionFailure("session.execution.failed"));
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("session.execution.interrupted"));
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("session.error"));
+    assert.isTrue(openCode2EventClearsHeldExecutionFailure("session.execution.succeeded"));
+    assert.isFalse(openCode2EventClearsHeldExecutionFailure("session.execution.started"));
+    assert.equal(normalizeOpenCode2WireType("session.usage.updated"), "unknown");
+    assert.isFalse(
+      openCode2EventSettlesHeldExecutionFailure(
+        normalizeOpenCode2WireType("session.usage.updated"),
+      ),
     );
   });
 
