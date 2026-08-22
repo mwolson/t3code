@@ -127,6 +127,9 @@ const OpenCode2RuntimeTestDouble: OpenCode2Runtime.OpenCode2Runtime["Service"] =
           category: "external-server-password-required",
         });
       }
+      if (!serverUrl && runtimeMock.state.startError !== undefined) {
+        return yield* runtimeMock.state.startError;
+      }
       return {
         url: serverUrl ?? "http://127.0.0.1:4500",
         password: serverPassword ?? "password-1",
@@ -242,7 +245,7 @@ beforeEach(() => {
 });
 
 it.layer(OpenCode2TextGenerationTestLayer)("OpenCode2TextGeneration", (it) => {
-  it.effect("generates with Big Pickle, reuses the local server, and closes it after idling", () =>
+  it.effect("generates with Big Pickle through the shared server connect path", () =>
     withOpenCode2TextGeneration(DEFAULT_SETTINGS, (textGeneration) =>
       Effect.gen(function* () {
         const input = {
@@ -261,7 +264,11 @@ it.layer(OpenCode2TextGenerationTestLayer)("OpenCode2TextGeneration", (it) => {
           body: "Use the stateless generation endpoint.",
         });
         expect(second).toEqual(first);
-        expect(runtimeMock.state.startCalls).toEqual(["fake-opencode2"]);
+        expect(runtimeMock.state.startCalls).toEqual([]);
+        expect(runtimeMock.state.connectCalls).toEqual([
+          { binaryPath: "fake-opencode2" },
+          { binaryPath: "fake-opencode2" },
+        ]);
         expect(runtimeMock.state.sessionCreateRequests).toHaveLength(2);
         expect(runtimeMock.state.sessionCreateRequests[0]).toMatchObject({
           location: { directory: process.cwd() },
@@ -276,33 +283,9 @@ it.layer(OpenCode2TextGenerationTestLayer)("OpenCode2TextGeneration", (it) => {
 
         yield* advanceIdleClock;
 
-        expect(runtimeMock.state.closeCalls).toEqual(["http://127.0.0.1:4500"]);
+        expect(runtimeMock.state.closeCalls).toEqual([]);
       }),
     ).pipe(Effect.provide(TestClock.layer())),
-  );
-
-  it.effect("replaces the shared local server when its process has exited", () =>
-    withOpenCode2TextGeneration(DEFAULT_SETTINGS, (textGeneration) =>
-      Effect.gen(function* () {
-        const first = yield* textGeneration.generateCommitMessage(DEFAULT_COMMIT_INPUT);
-        runtimeMock.state.runningServers[0] = false;
-        const [second, third] = yield* Effect.all(
-          [
-            textGeneration.generateCommitMessage(DEFAULT_COMMIT_INPUT),
-            textGeneration.generateCommitMessage(DEFAULT_COMMIT_INPUT),
-          ],
-          { concurrency: "unbounded" },
-        );
-
-        expect(second).toEqual(first);
-        expect(third).toEqual(first);
-        expect(runtimeMock.state.startCalls).toEqual(["fake-opencode2", "fake-opencode2"]);
-        expect(runtimeMock.state.closeCalls).toEqual(["http://127.0.0.1:4500"]);
-        expect(runtimeMock.state.clientConnections.map((connection) => connection.baseUrl)).toEqual(
-          ["http://127.0.0.1:4500", "http://127.0.0.1:4501", "http://127.0.0.1:4501"],
-        );
-      }),
-    ),
   );
 
   it.effect("uses the configured authenticated server without spawning", () =>
@@ -335,7 +318,7 @@ it.layer(OpenCode2TextGenerationTestLayer)("OpenCode2TextGeneration", (it) => {
         const secret = "OPEN_CODE_2_STARTUP_SECRET";
         const cause = new Error(secret);
         runtimeMock.state.startError = new OpenCode2Runtime.OpenCode2RuntimeError({
-          operation: "startOpenCode2ServerProcess",
+          operation: "connectToOpenCode2Server",
           category: "startup-failed",
           cause,
         });
@@ -344,7 +327,7 @@ it.layer(OpenCode2TextGenerationTestLayer)("OpenCode2TextGeneration", (it) => {
           .generateCommitMessage(DEFAULT_COMMIT_INPUT)
           .pipe(Effect.flip);
 
-        expect(error.message).toContain("OpenCode 2 server startup failed.");
+        expect(error.message).toContain("OpenCode 2 server connection failed.");
         expect(error.message).not.toContain(secret);
         expect(error.cause).toMatchObject({
           _tag: "OpenCode2RuntimeError",

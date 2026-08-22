@@ -8,11 +8,8 @@ import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shar
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { extractJsonObject } from "@t3tools/shared/schemaJson";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
-import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
-import * as Semaphore from "effect/Semaphore";
 
 import { parseOpenCodeModelSlug } from "../provider/opencodeRuntime.ts";
 import * as OpenCode2Runtime from "../provider/opencode2Runtime.ts";
@@ -29,7 +26,6 @@ import {
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
 
-const OPENCODE2_TEXT_GENERATION_IDLE_TTL = "30 seconds";
 const OPENCODE2_TEXT_GENERATION_MODEL_RETRY_DELAY = "500 millis";
 const OPENCODE2_TEXT_GENERATION_MODEL_MAX_ATTEMPTS = 5;
 
@@ -88,13 +84,6 @@ function extractAssistantTextFromMessages(payload: unknown): string | null {
   return null;
 }
 
-interface SharedOpenCode2TextGenerationServerState {
-  server: OpenCode2Runtime.OpenCode2ServerProcess | null;
-  serverScope: Scope.Closeable | null;
-  activeRequests: number;
-  idleCloseFiber: Fiber.Fiber<void, never> | null;
-}
-
 function modelRefFor(
   operation: OpenCode2TextGenerationOperation,
   modelSelection: ModelSelection,
@@ -131,129 +120,32 @@ export const makeOpenCode2TextGeneration = Effect.fn("makeOpenCode2TextGeneratio
 ) {
   const runtime = yield* OpenCode2Runtime.OpenCode2Runtime;
   const resolvedEnvironment = environment ?? process.env;
-  const idleFiberScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
-    Scope.close(scope, Exit.void),
-  );
-  const sharedServerMutex = yield* Semaphore.make(1);
-  const sharedServerState: SharedOpenCode2TextGenerationServerState = {
-    server: null,
-    serverScope: null,
-    activeRequests: 0,
-    idleCloseFiber: null,
-  };
+  const connectScope = yield* Effect.scope;
 
-  const closeSharedServer = Effect.fn("OpenCode2TextGeneration.closeSharedServer")(function* () {
-    const scope = sharedServerState.serverScope;
-    sharedServerState.server = null;
-    sharedServerState.serverScope = null;
-    sharedServerState.activeRequests = 0;
-    if (scope !== null) {
-      yield* Scope.close(scope, Exit.void).pipe(Effect.ignore);
-    }
-  });
-
-  const cancelIdleCloseFiber = Effect.fn("OpenCode2TextGeneration.cancelIdleCloseFiber")(
-    function* () {
-      const idleCloseFiber = sharedServerState.idleCloseFiber;
-      sharedServerState.idleCloseFiber = null;
-      if (idleCloseFiber !== null) {
-        yield* Fiber.interrupt(idleCloseFiber).pipe(Effect.ignore);
-      }
-    },
-  );
-
-  const scheduleIdleClose = Effect.fn("OpenCode2TextGeneration.scheduleIdleClose")(function* (
-    server: OpenCode2Runtime.OpenCode2ServerProcess,
-  ) {
-    yield* cancelIdleCloseFiber();
-    sharedServerState.idleCloseFiber = yield* Effect.sleep(OPENCODE2_TEXT_GENERATION_IDLE_TTL).pipe(
-      Effect.andThen(
-        sharedServerMutex.withPermit(
-          Effect.gen(function* () {
-            if (sharedServerState.server !== server || sharedServerState.activeRequests > 0) {
-              return;
-            }
-            sharedServerState.idleCloseFiber = null;
-            yield* closeSharedServer();
-          }),
+  const configuredServerUrl = settings.serverUrl.trim();
+  const connectToServer = (operation: OpenCode2TextGenerationOperation) =>
+    runtime
+      .connectToOpenCode2Server({
+        binaryPath: settings.binaryPath,
+        environment: resolvedEnvironment,
+        ...(configuredServerUrl.length === 0
+          ? {}
+          : {
+              serverUrl: configuredServerUrl,
+              serverPassword: settings.serverPassword,
+            }),
+      })
+      .pipe(
+        Effect.provideService(Scope.Scope, connectScope),
+        Effect.mapError(
+          (cause) =>
+            new TextGenerationError({
+              operation,
+              detail: "OpenCode 2 server connection failed.",
+              cause,
+            }),
         ),
-      ),
-      Effect.forkIn(idleFiberScope),
-    );
-  });
-
-  const acquireSharedServer = (
-    operation: OpenCode2TextGenerationOperation,
-  ): Effect.Effect<OpenCode2Runtime.OpenCode2ServerProcess, TextGenerationError> =>
-    sharedServerMutex.withPermit(
-      Effect.gen(function* () {
-        yield* cancelIdleCloseFiber();
-        const existingServer = sharedServerState.server;
-        if (existingServer !== null) {
-          const isRunning = yield* existingServer.isRunning;
-          if (isRunning) {
-            sharedServerState.activeRequests += 1;
-            return existingServer;
-          }
-          yield* closeSharedServer();
-        }
-
-        return yield* Effect.uninterruptibleMask((restore) =>
-          Effect.gen(function* () {
-            const serverScope = yield* Scope.make();
-            const startedExit = yield* Effect.exit(
-              restore(
-                runtime
-                  .startOpenCode2ServerProcess({
-                    binaryPath: settings.binaryPath,
-                    environment: resolvedEnvironment,
-                  })
-                  .pipe(
-                    Effect.provideService(Scope.Scope, serverScope),
-                    Effect.mapError(
-                      (cause) =>
-                        new TextGenerationError({
-                          operation,
-                          detail: "OpenCode 2 server startup failed.",
-                          cause,
-                        }),
-                    ),
-                  ),
-              ),
-            );
-            if (Exit.isFailure(startedExit)) {
-              yield* Scope.close(serverScope, Exit.void).pipe(Effect.ignore);
-              return yield* Effect.failCause(startedExit.cause);
-            }
-
-            sharedServerState.server = startedExit.value;
-            sharedServerState.serverScope = serverScope;
-            sharedServerState.activeRequests = 1;
-            return startedExit.value;
-          }),
-        );
-      }),
-    );
-
-  const releaseSharedServer = (server: OpenCode2Runtime.OpenCode2ServerProcess) =>
-    sharedServerMutex.withPermit(
-      Effect.gen(function* () {
-        if (sharedServerState.server !== server) return;
-        sharedServerState.activeRequests = Math.max(0, sharedServerState.activeRequests - 1);
-        if (sharedServerState.activeRequests === 0) {
-          yield* scheduleIdleClose(server);
-        }
-      }),
-    );
-
-  yield* Effect.addFinalizer(() =>
-    sharedServerMutex.withPermit(
-      Effect.gen(function* () {
-        yield* cancelIdleCloseFiber();
-        yield* closeSharedServer();
-      }),
-    ),
-  );
+      );
 
   const sdkCall = <A>(
     operation: OpenCode2TextGenerationOperation,
@@ -389,32 +281,9 @@ export const makeOpenCode2TextGeneration = Effect.fn("makeOpenCode2TextGeneratio
       );
     });
 
-    const rawOutput =
-      settings.serverUrl.length > 0
-        ? yield* runtime
-            .connectToOpenCode2Server({
-              binaryPath: settings.binaryPath,
-              serverUrl: settings.serverUrl,
-              serverPassword: settings.serverPassword,
-              environment: resolvedEnvironment,
-            })
-            .pipe(
-              Effect.provideService(Scope.Scope, idleFiberScope),
-              Effect.mapError(
-                (cause) =>
-                  new TextGenerationError({
-                    operation: input.operation,
-                    detail: "OpenCode 2 server connection failed.",
-                    cause,
-                  }),
-              ),
-              Effect.flatMap(runAgainstServer),
-            )
-        : yield* Effect.acquireUseRelease(
-            acquireSharedServer(input.operation),
-            runAgainstServer,
-            releaseSharedServer,
-          );
+    const rawOutput = yield* connectToServer(input.operation).pipe(
+      Effect.flatMap(runAgainstServer),
+    );
 
     const decodeOutput = Schema.decodeEffect(Schema.fromJsonString(input.outputSchemaJson));
     return yield* decodeOutput(extractJsonObject(rawOutput)).pipe(
