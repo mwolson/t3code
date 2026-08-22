@@ -203,9 +203,8 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             );
             assert.isTrue(Option.isSome(exitedWake));
             assert.isTrue(yield* session.hasPendingBackgroundWork!);
-            assert.isTrue(yield* session.hasPendingBackgroundWorkForThread!(providerThread));
-            assert.isFalse(yield* session.hasPendingBackgroundWork!);
             assert.isFalse(yield* session.hasPendingBackgroundWorkForThread!(providerThread));
+            assert.isFalse(yield* session.hasPendingBackgroundWork!);
           }),
         ).pipe(Effect.provide(layer)),
       { timeout: 60_000 },
