@@ -113,6 +113,7 @@ const PASSTHROUGH_TYPES = new Set<string>([
   "session.execution.started",
   "session.execution.succeeded",
   "session.idle",
+  "session.retry.scheduled",
   "session.input.admitted",
   "session.error",
   "session.text.started",
@@ -364,7 +365,11 @@ export function openCode2WireAgent(event: { readonly data?: unknown }): string |
  * (`{ data: T }` vs `{ data: { data: T } }`).
  */
 export function unwrapOpenCode2Payload<A>(result: unknown): A | undefined {
-  if (!isRecord(result)) return undefined;
+  if (result === undefined || result === null) return undefined;
+  if (!isRecord(result)) return result as A;
+  if (!("data" in result) || result.data === undefined) {
+    return Object.keys(result).length === 0 ? undefined : (result as A);
+  }
   const outer = result.data;
   if (outer === undefined || outer === null) return undefined;
   // Prefer the double-wrapped body envelope `{ data: T }` used by /api responses.

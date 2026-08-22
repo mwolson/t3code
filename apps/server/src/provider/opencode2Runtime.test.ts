@@ -1,3 +1,4 @@
+import { ClientError } from "@opencode-ai/client";
 import { assert, describe, it } from "@effect/vitest";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Deferred from "effect/Deferred";
@@ -218,6 +219,23 @@ describe("OpenCode2Runtime errors", () => {
       assert.strictEqual(network.category, "network-failed");
       assert.notInclude(authentication.message, "PRIVATE_RESPONSE");
       assert.notInclude(network.message, "PRIVATE_ADDRESS");
+    }),
+  );
+
+  it.effect("classifies the typed client's transport wrapper as a network failure", () =>
+    Effect.gen(function* () {
+      const cause = new ClientError("Transport", {
+        cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:9"), {
+          code: "ECONNREFUSED",
+        }),
+      });
+      const error = yield* runOpenCode2Sdk("health.get", async () => {
+        throw cause;
+      }).pipe(Effect.flip);
+
+      assert.strictEqual(error.category, "network-failed");
+      assert.strictEqual(error.cause, cause);
+      assert.notInclude(error.message, "ECONNREFUSED");
     }),
   );
 

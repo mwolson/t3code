@@ -1,4 +1,4 @@
-import type { ModelRef, OpencodeClient } from "@opencode-ai/sdk-next/v2";
+import type { ModelRef, OpenCodeClient } from "@opencode-ai/client";
 import {
   TextGenerationError,
   type ModelSelection,
@@ -42,11 +42,7 @@ const OpenCode2TextGenerationOperation = Schema.Literals([
 type OpenCode2TextGenerationOperation = typeof OpenCode2TextGenerationOperation.Type;
 
 const OpenCode2SessionCreateResponse = Schema.Struct({
-  data: Schema.Struct({
-    data: Schema.Struct({
-      id: Schema.String,
-    }),
-  }),
+  id: Schema.String,
 });
 const decodeOpenCode2SessionCreateResponse = Schema.decodeUnknownEffect(
   OpenCode2SessionCreateResponse,
@@ -292,7 +288,7 @@ export const makeOpenCode2TextGeneration = Effect.fn("makeOpenCode2TextGeneratio
 
   const generateWithSession = Effect.fn("OpenCode2TextGeneration.generateWithSession")(
     function* (input: {
-      readonly client: OpencodeClient;
+      readonly client: OpenCodeClient;
       readonly operation: OpenCode2TextGenerationOperation;
       readonly cwd: string;
       readonly prompt: string;
@@ -300,7 +296,7 @@ export const makeOpenCode2TextGeneration = Effect.fn("makeOpenCode2TextGeneratio
       readonly agent?: string;
     }) {
       const createResponse = yield* sdkCall(input.operation, "session.create", () =>
-        input.client.v2.session.create({
+        input.client.session.create({
           model: input.model,
           location: { directory: input.cwd },
           ...(input.agent === undefined ? {} : { agent: input.agent }),
@@ -316,35 +312,22 @@ export const makeOpenCode2TextGeneration = Effect.fn("makeOpenCode2TextGeneratio
             }),
         ),
       );
-      const sessionID = created.data.data.id;
+      const sessionID = created.id;
       const promptText =
         typeof input.prompt === "string" ? input.prompt : String(input.prompt ?? "");
 
       return yield* Effect.gen(function* () {
-        // Session3 prompt admits input and schedules the agent loop; it does
-        // not return generation text. next-16916 takes a flat body (`text`),
-        // not the nested `prompt` field the beta SDK still maps.
-        const rawClient = (
-          input.client as unknown as {
-            client: {
-              post: (options: Record<string, unknown>) => Promise<unknown>;
-            };
-          }
-        ).client;
         yield* sdkCall(input.operation, "session.prompt", () =>
-          rawClient.post({
-            url: "/api/session/{sessionID}/prompt",
-            path: { sessionID },
-            body: { text: promptText },
-            headers: { "Content-Type": "application/json" },
-            throwOnError: true,
+          input.client.session.prompt({
+            sessionID,
+            text: promptText,
           }),
         );
         yield* sdkCall(input.operation, "session.wait", () =>
-          input.client.v2.session.wait({ sessionID }),
+          input.client.session.wait({ sessionID }),
         );
         const messagesResponse = yield* sdkCall(input.operation, "session.context", () =>
-          input.client.v2.session.context({ sessionID }),
+          input.client.session.context({ sessionID }),
         );
         const text = extractAssistantTextFromMessages(messagesResponse);
         if (text === null || text.length === 0) {
@@ -357,7 +340,7 @@ export const makeOpenCode2TextGeneration = Effect.fn("makeOpenCode2TextGeneratio
       }).pipe(
         Effect.ensuring(
           sdkCall(input.operation, "session.interrupt", () =>
-            input.client.v2.session.interrupt({ sessionID }),
+            input.client.session.interrupt({ sessionID }),
           ).pipe(
             Effect.catch((cause) =>
               Effect.logWarning(
