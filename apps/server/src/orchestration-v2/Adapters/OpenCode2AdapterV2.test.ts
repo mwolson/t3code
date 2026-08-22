@@ -1866,6 +1866,18 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
     assert.equal(rateLimit.code, "provider.rate-limit");
     assert.isTrue(rateLimit.retryable);
 
+    const unavailable = openCode2ProviderFailure({
+      message: "Upstream request failed: Endpoint is unavailable.",
+      code: "provider.internal",
+      statusCode: 503,
+    });
+    assert.equal(unavailable.code, "provider.unavailable");
+    assert.equal(
+      unavailable.message,
+      "OpenCode 2 lost the model endpoint (HTTP 503). Wait, then retry the turn.",
+    );
+    assert.isTrue(unavailable.retryable);
+
     const unknown = openCode2ProviderFailure({
       message: `raw payload token=${secret}`,
       code: "RawProviderFailure",
