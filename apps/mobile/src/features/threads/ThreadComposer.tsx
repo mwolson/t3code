@@ -70,6 +70,10 @@ import { resolveProviderOptionDescriptors } from "../../lib/providerOptions";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useComposerPathSearch } from "../../state/use-composer-path-search";
+import {
+  rememberModelOptions,
+  withRememberedModelOptions,
+} from "../../state/use-model-option-memory";
 import { ComposerCommandPopover, type ComposerCommandItem } from "./ComposerCommandPopover";
 import { collapsedComposerActions } from "./ThreadComposer.logic";
 import {
@@ -660,7 +664,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ownerId: settingsOwnerId,
       providerGroups: threadProviderGroups,
       selectedModel: currentModelSelection,
-      onSelectModel: (option) => props.onUpdateModelSelection(option.selection),
+      onSelectModel: (option) =>
+        props.onUpdateModelSelection(withRememberedModelOptions(option.selection)),
       optionDescriptors: providerOptionDescriptors,
       onUpdateOptionSelections: (options) => {
         const optionsLocked =
@@ -673,6 +678,11 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           );
           return;
         }
+        rememberModelOptions(
+          currentModelSelection.instanceId,
+          currentModelSelection.model,
+          options ?? [],
+        );
         props.onUpdateModelSelection({ ...currentModelSelection, options });
       },
       runtimeMode: currentRuntimeMode,
