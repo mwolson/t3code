@@ -59,6 +59,10 @@ import { resolveProviderOptionDescriptors } from "../../lib/providerOptions";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { useComposerPathSearch } from "../../state/use-composer-path-search";
+import {
+  rememberModelOptions,
+  withRememberedModelOptions,
+} from "../../state/use-model-option-memory";
 import { ComposerCommandPopover, type ComposerCommandItem } from "./ComposerCommandPopover";
 import { matchesSlashSkillQuery } from "./composerSlashSkillSearch";
 import { collapsedComposerActions } from "./ThreadComposer.logic";
@@ -645,10 +649,27 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       environmentId: props.environmentId,
       providerGroups: threadProviderGroups,
       selectedModel: currentModelSelection,
-      onSelectModel: (option) => props.onUpdateModelSelection(option.selection),
+      onSelectModel: (option) =>
+        props.onUpdateModelSelection(withRememberedModelOptions(option.selection)),
       optionDescriptors: providerOptionDescriptors,
-      onUpdateOptionSelections: (options) =>
-        props.onUpdateModelSelection({ ...currentModelSelection, options }),
+      onUpdateOptionSelections: (options) => {
+        const optionsLocked =
+          props.optionChangeBlocked === true &&
+          props.optionChangeBlockedInstanceId === currentModelSelection.instanceId;
+        if (optionsLocked) {
+          Alert.alert(
+            "Start a new chat to change options",
+            "This provider applies these options when a conversation starts.",
+          );
+          return;
+        }
+        rememberModelOptions(
+          currentModelSelection.instanceId,
+          currentModelSelection.model,
+          options ?? [],
+        );
+        props.onUpdateModelSelection({ ...currentModelSelection, options });
+      },
       runtimeMode: currentRuntimeMode,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
     }),
