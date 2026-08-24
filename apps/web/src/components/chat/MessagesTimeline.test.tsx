@@ -690,6 +690,37 @@ describe("MessagesTimeline", () => {
     expect(userMarkup).not.toContain("Sent by another agent");
   });
 
+  it("renders wake prompts as left-aligned work-log rows", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-wake",
+            kind: "work",
+            createdAt: MESSAGE_CREATED_AT,
+            entry: {
+              id: "work-wake",
+              createdAt: MESSAGE_CREATED_AT,
+              label: "Delegated task finished",
+              detail: "retry-progress-precedent-20260824",
+              tone: "tool",
+              toolTitle: "Delegated task finished",
+              toolLifecycleStatus: "completed",
+              itemType: "user_message",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Delegated task finished");
+    expect(markup).toContain("retry-progress-precedent-20260824");
+    expect(markup).not.toContain("Sent by another agent");
+    expect(markup).not.toContain("rounded-2xl bg-accent p-3");
+  });
+
   it("keeps a subagent parent-thread link at the top of an empty timeline", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(

@@ -17,6 +17,10 @@ import type {
 } from "@t3tools/client-runtime/state/thread-requests";
 import type { ThreadRunSummary, ThreadRuntimeSummary } from "@t3tools/client-runtime/state/shell";
 import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
+import {
+  isWakePromptMessage,
+  resolveWakePromptPresentation,
+} from "@t3tools/shared/wakePromptPresentation";
 
 import type { ChatMessage, ProposedPlan, SessionPhase, TurnDiffSummary } from "./types";
 import * as DateTime from "effect/DateTime";
@@ -557,6 +561,27 @@ export function providerErrorPresentation(
   };
 }
 
+function projectedWakePromptWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry {
+  const { item } = row;
+  const presentation = resolveWakePromptPresentation(
+    item.type === "user_message" ? item : { text: "" },
+  );
+  const heading = presentation?.heading ?? "Background task finished";
+  return {
+    id: item.id,
+    createdAt: projectedItemCreatedAt(row),
+    runId: item.runId,
+    label: heading,
+    ...(presentation?.preview ? { detail: presentation.preview } : {}),
+    tone: "tool",
+    toolTitle: heading,
+    toolLifecycleStatus: "completed",
+    itemType: item.type,
+    structuredPayload: item,
+    projectedItem: row,
+  };
+}
+
 function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry {
   const { item } = row;
   const title = item.title?.trim() || null;
@@ -691,6 +716,17 @@ export function deriveTimelineEntriesFromVisibleTurnItems(input: {
     const createdAt = projectedItemCreatedAt(row);
     const attempt = resolveAttempt(item);
     const attemptMetadata = attempt === undefined ? {} : { attempt };
+    if (item.type === "user_message" && isWakePromptMessage(item)) {
+      entries.push({
+        id: item.id,
+        kind: "work",
+        createdAt,
+        entry: projectedWakePromptWorkEntry(row),
+        ...attemptMetadata,
+      });
+      continue;
+    }
+
     if (item.type === "user_message" || item.type === "assistant_message") {
       const message: ChatMessage = {
         id: item.messageId,

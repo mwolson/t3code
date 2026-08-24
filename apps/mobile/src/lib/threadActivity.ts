@@ -9,6 +9,10 @@ import {
   type T3McpToolLogo,
   type T3McpToolPresentation,
 } from "@t3tools/shared/t3McpToolPresentation";
+import {
+  isWakePromptMessage,
+  resolveWakePromptPresentation,
+} from "@t3tools/shared/wakePromptPresentation";
 import type {
   ChatAttachment,
   MessageId,
@@ -482,6 +486,41 @@ function itemPreview(item: OrchestrationV2TurnItem): string | null {
   }
 }
 
+function toWakePromptFeedActivity(row: OrchestrationV2ProjectedTurnItem): ThreadFeedActivity {
+  const item = row.item;
+  const presentation = resolveWakePromptPresentation(
+    item.type === "user_message" ? item : { text: "" },
+  );
+  const summary = presentation?.heading ?? "Background task finished";
+  const detail = presentation?.preview ?? null;
+  const fullText = item.type === "user_message" ? item.text : summary;
+  const getFullDetail = memoizeValue(() => fullText);
+  const getCopyText = memoizeValue(() =>
+    [summary, detail, fullText]
+      .filter(
+        (value, index, values): value is string =>
+          Boolean(value) && values.indexOf(value) === index,
+      )
+      .join("\n"),
+  );
+  return {
+    id: `${row.visibility}:${row.sourceThreadId}:${row.sourceItemId}`,
+    createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
+    runId: item.runId,
+    summary,
+    detail,
+    canExpand: true,
+    getFullDetail,
+    getCopyText,
+    icon: presentation?.kind === "delegated" ? "agent" : "zap",
+    logo: null,
+    toolLike: true,
+    prominent: false,
+    status: "success",
+    projectedItem: row,
+  };
+}
+
 function toFeedActivity(row: OrchestrationV2ProjectedTurnItem): ThreadFeedActivity {
   const item = row.item;
   const toolPresentation = itemToolPresentation(item);
@@ -890,6 +929,17 @@ export function buildThreadFeed(
       continue;
     }
     const createdAt = DateTime.formatIso(item.startedAt ?? item.updatedAt);
+    if (item.type === "user_message" && isWakePromptMessage(item)) {
+      const activity = toWakePromptFeedActivity(row);
+      entries.push({
+        type: "activity",
+        id: activity.id,
+        createdAt,
+        runId: item.runId,
+        activity,
+      });
+      continue;
+    }
     if (item.type === "user_message" || item.type === "assistant_message") {
       const updatedAt = DateTime.formatIso(item.updatedAt);
       entries.push({

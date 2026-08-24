@@ -3074,6 +3074,9 @@ function liveWorkEntryLabel(
 }
 
 function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
+  if (workEntry.itemType === "user_message") {
+    return "bot";
+  }
   if (workEntry.itemType === "user_input_request") {
     return "message-circle";
   }
