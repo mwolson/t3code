@@ -255,6 +255,22 @@ export function computeMessageDurationStart(
   return result;
 }
 
+export function timelineRowAnchorMessageId(row: MessagesTimelineRow): MessageId | null {
+  if (row.kind === "message") {
+    return row.message.id;
+  }
+  if (row.kind !== "work") {
+    return null;
+  }
+  for (const entry of row.groupedEntries) {
+    const item = entry.projectedItem?.item ?? entry.structuredPayload;
+    if (item?.type === "user_message") {
+      return item.messageId;
+    }
+  }
+  return null;
+}
+
 export function normalizeCompactToolLabel(value: string): string {
   return value.replace(/\s+(?:complete|completed)\s*$/i, "").trim();
 }

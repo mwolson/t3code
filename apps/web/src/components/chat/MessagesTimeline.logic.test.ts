@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import { MessageId } from "@t3tools/contracts";
 import {
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
@@ -7,7 +8,82 @@ import {
   resolveAssistantMessageCopyState,
   resolveTimelineToolPresentation,
   shouldPreserveAssistantLineBreaks,
+  timelineRowAnchorMessageId,
 } from "./MessagesTimeline.logic";
+
+describe("timelineRowAnchorMessageId", () => {
+  it("returns the message id for a chat row", () => {
+    const messageId = MessageId.make("message-user");
+    expect(
+      timelineRowAnchorMessageId({
+        kind: "message",
+        id: "row-message",
+        createdAt: "2026-08-30T00:00:00.000Z",
+        message: {
+          id: messageId,
+          role: "user",
+          text: "Hello",
+          runId: null,
+          streaming: false,
+          createdAt: "2026-08-30T00:00:00.000Z",
+          updatedAt: "2026-08-30T00:00:00.000Z",
+        },
+        durationStart: "2026-08-30T00:00:00.000Z",
+        showAssistantMeta: false,
+        showAssistantCopyButton: false,
+        assistantCopyStreaming: false,
+      }),
+    ).toBe(messageId);
+  });
+
+  it("returns the originating user message id for a wake work row", () => {
+    const messageId = MessageId.make("wake-message");
+    expect(
+      timelineRowAnchorMessageId({
+        kind: "work",
+        id: "row-work",
+        createdAt: "2026-08-30T00:00:00.000Z",
+        groupedEntries: [
+          {
+            id: "wake-entry",
+            createdAt: "2026-08-30T00:00:00.000Z",
+            label: "Background task finished",
+            tone: "tool",
+            itemType: "user_message",
+            projectedItem: {
+              item: {
+                type: "user_message",
+                messageId,
+                createdBy: "agent",
+                creationSource: "provider",
+                text: "Background command completed (exit 0): sleep 1",
+              },
+            },
+          },
+        ],
+      } as never),
+    ).toBe(messageId);
+  });
+
+  it("returns null for ordinary tool work rows", () => {
+    expect(
+      timelineRowAnchorMessageId({
+        kind: "work",
+        id: "row-tool",
+        createdAt: "2026-08-30T00:00:00.000Z",
+        groupedEntries: [
+          {
+            id: "tool-entry",
+            createdAt: "2026-08-30T00:00:00.000Z",
+            label: "Ran command",
+            tone: "tool",
+            itemType: "command_execution",
+          },
+        ],
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("shouldPreserveAssistantLineBreaks", () => {
   it("preserves Claude insight formatting without changing regular markdown", () => {

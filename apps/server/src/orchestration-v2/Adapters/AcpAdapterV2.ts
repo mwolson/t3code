@@ -2954,6 +2954,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             providerThreadId: route.providerThreadId,
             driver,
             detail: null,
+            providerWake: { kind: "background_task", count: 1 },
             clearIfCurrent: () =>
               continuationPermit.withPermit(
                 Effect.gen(function* () {

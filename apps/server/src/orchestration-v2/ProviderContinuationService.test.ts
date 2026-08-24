@@ -23,6 +23,7 @@ import {
   ProviderContinuationRequests,
   layer as continuationRequestsLayer,
 } from "./ProviderContinuationRequests.ts";
+import { OrchestratorDispatchError } from "./Orchestrator.ts";
 import { workerLive } from "./ProviderContinuationService.ts";
 import { ThreadManagementService } from "./ThreadManagementService.ts";
 
@@ -34,6 +35,7 @@ const delegatedMessageId = MessageId.make("message-provider-continuation-delegat
 const projection = {
   thread: { archivedAt: null, deletedAt: null },
   messages: [],
+  runs: [],
 } as unknown as OrchestrationV2ThreadProjection;
 
 const request = (
@@ -112,9 +114,13 @@ describe("ProviderContinuationService", () => {
       yield* Effect.gen(function* () {
         const requests = yield* ProviderContinuationRequests;
         yield* requests.offer(request());
-        const command = (yield* Queue.take(dispatched)) as { readonly creationSource: string };
+        const command = (yield* Queue.take(dispatched)) as {
+          readonly creationSource: string;
+          readonly providerWake?: unknown;
+        };
         // ClaudeAdapterV2 keys on this to attach buffered CLI output.
         assert.equal(command.creationSource, "provider");
+        assert.deepEqual(command.providerWake, { kind: "background_task", count: 1 });
       }).pipe(
         Effect.provide(
           testLayer({ dispatched, getThreadProjection: () => Effect.succeed(projection) }),
@@ -601,6 +607,272 @@ describe("ProviderContinuationService", () => {
       }).pipe(
         Effect.provide(
           testLayer({ dispatched, getThreadProjection: () => Effect.succeed(projection) }),
+        ),
+        Effect.scoped,
+      );
+    });
+  });
+
+  const queuedCodexWakeProjection = {
+    thread: { archivedAt: null, deletedAt: null },
+    messages: [
+      {
+        id: "message-codex-wake",
+        text: "Background command completed (exit 1): sleep 12\n\nOutput tail:\nCODEX_BG_A",
+        createdBy: "agent",
+        creationSource: "provider",
+      },
+    ],
+    runs: [
+      {
+        id: "run-codex-wake",
+        status: "queued",
+        userMessageId: "message-codex-wake",
+        ordinal: 2,
+        queuePosition: 1,
+      },
+    ],
+  } as unknown as OrchestrationV2ThreadProjection;
+
+  it.effect("appends a later Codex background-command wake onto the queued one", () => {
+    return Effect.gen(function* () {
+      const dispatched = yield* Queue.unbounded<unknown>();
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests;
+        yield* requests.offer(
+          request(
+            undefined,
+            "Background command completed (exit 0): sleep 18\n\nOutput tail:\nCODEX_BG_B",
+          ),
+        );
+        const command = (yield* Queue.take(dispatched)) as {
+          readonly type: string;
+          readonly runId: string;
+          readonly text: string;
+        };
+        assert.equal(command.type, "queued-run.edit");
+        assert.equal(command.runId, "run-codex-wake");
+        assert.include(command.text, "CODEX_BG_A");
+        assert.include(command.text, "CODEX_BG_B");
+        assert.deepEqual((command as { readonly providerWake?: unknown }).providerWake, {
+          kind: "background_command",
+          count: 2,
+        });
+        yield* Effect.yieldNow;
+        assert.isTrue(Option.isNone(yield* Queue.poll(dispatched)));
+      }).pipe(
+        Effect.provide(
+          testLayer({
+            dispatched,
+            getThreadProjection: () => Effect.succeed(queuedCodexWakeProjection),
+          }),
+        ),
+        Effect.scoped,
+      );
+    });
+  });
+
+  it.effect("does not fold a Claude canned wake into a queued Codex command wake", () => {
+    return Effect.gen(function* () {
+      const dispatched = yield* Queue.unbounded<unknown>();
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests;
+        yield* requests.offer(request());
+        const command = (yield* Queue.take(dispatched)) as {
+          readonly type?: string;
+          readonly creationSource: string;
+          readonly text: string;
+          readonly providerWake?: unknown;
+        };
+        assert.notEqual(command.type, "queued-run.edit");
+        assert.equal(command.creationSource, "provider");
+        assert.equal(command.text, "Background task completed.");
+        assert.deepEqual(command.providerWake, { kind: "background_task", count: 1 });
+      }).pipe(
+        Effect.provide(
+          testLayer({
+            dispatched,
+            getThreadProjection: () => Effect.succeed(queuedCodexWakeProjection),
+          }),
+        ),
+        Effect.scoped,
+      );
+    });
+  });
+
+  it.effect("stamps providerWake on a new Codex continuation dispatch", () => {
+    return Effect.gen(function* () {
+      const dispatched = yield* Queue.unbounded<unknown>();
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests;
+        yield* requests.offer({
+          threadId,
+          providerThreadId,
+          driver,
+          detail: "custom wake",
+          providerWake: { kind: "background_command", count: 1 },
+        });
+        const command = (yield* Queue.take(dispatched)) as {
+          readonly type: string;
+          readonly providerWake?: {
+            readonly kind: "background_command" | "background_task";
+            readonly count: number;
+          };
+        };
+        assert.equal(command.type, "message.dispatch");
+        assert.deepEqual(command.providerWake, { kind: "background_command", count: 1 });
+      }).pipe(
+        Effect.provide(
+          testLayer({ dispatched, getThreadProjection: () => Effect.succeed(projection) }),
+        ),
+        Effect.scoped,
+      );
+    });
+  });
+
+  it.effect("appends a metadata-tagged Codex wake onto a queued command wake", () => {
+    return Effect.gen(function* () {
+      const dispatched = yield* Queue.unbounded<unknown>();
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests;
+        yield* requests.offer({
+          threadId,
+          providerThreadId,
+          driver,
+          detail: "custom second wake",
+          providerWake: { kind: "background_command", count: 1 },
+        });
+        const command = (yield* Queue.take(dispatched)) as {
+          readonly type: string;
+          readonly text: string;
+          readonly providerWake?: {
+            readonly kind: "background_command" | "background_task";
+            readonly count: number;
+          };
+        };
+        assert.equal(command.type, "queued-run.edit");
+        assert.include(command.text, "CODEX_BG_A");
+        assert.include(command.text, "custom second wake");
+        assert.deepEqual(command.providerWake, { kind: "background_command", count: 2 });
+      }).pipe(
+        Effect.provide(
+          testLayer({
+            dispatched,
+            getThreadProjection: () => Effect.succeed(queuedCodexWakeProjection),
+          }),
+        ),
+        Effect.scoped,
+      );
+    });
+  });
+
+  it.effect("dispatches a new Codex wake when coalescing onto a run that already promoted", () => {
+    return Effect.gen(function* () {
+      const dispatched = yield* Queue.unbounded<unknown>();
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests;
+        yield* requests.offer(
+          request(
+            undefined,
+            "Background command completed (exit 0): sleep 18\n\nOutput tail:\nCODEX_BG_B",
+          ),
+        );
+        const command = (yield* Queue.take(dispatched)) as {
+          readonly type: string;
+          readonly text: string;
+          readonly providerWake?: {
+            readonly kind: "background_command" | "background_task";
+            readonly count: number;
+          };
+        };
+        assert.equal(command.type, "message.dispatch");
+        assert.include(command.text, "CODEX_BG_B");
+        assert.deepEqual(command.providerWake, { kind: "background_command", count: 1 });
+        yield* Effect.yieldNow;
+        assert.isTrue(Option.isNone(yield* Queue.poll(dispatched)));
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            continuationRequestsLayer,
+            workerLive.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  idAllocatorLayer,
+                  continuationRequestsLayer,
+                  Layer.mock(ThreadManagementService)({
+                    getThreadProjection: () => Effect.succeed(queuedCodexWakeProjection),
+                    dispatch: (command) => {
+                      if (command.type === "queued-run.edit") {
+                        return Effect.fail(
+                          new OrchestratorDispatchError({
+                            commandId: command.commandId,
+                            commandType: command.type,
+                            cause: `Run ${command.runId} is not queued.`,
+                          }),
+                        );
+                      }
+                      return Queue.offer(dispatched, command).pipe(Effect.as({} as never));
+                    },
+                  }),
+                ),
+              ),
+            ),
+          ),
+        ),
+        Effect.scoped,
+      );
+    });
+  });
+
+  it.effect("does not wrap dispatchIfCurrent twice when coalesce edit fails", () => {
+    return Effect.gen(function* () {
+      const dispatched = yield* Queue.unbounded<unknown>();
+      let wrapCount = 0;
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests;
+        const dispatchIfCurrent = <A, E, R>(effect: Effect.Effect<A, E, R>) => {
+          wrapCount += 1;
+          return effect.pipe(Effect.map(Option.some));
+        };
+        yield* requests.offer(
+          request(
+            dispatchIfCurrent,
+            "Background command completed (exit 0): sleep 18\n\nOutput tail:\nCODEX_BG_B",
+          ),
+        );
+        const command = (yield* Queue.take(dispatched)) as { readonly type: string };
+        assert.equal(command.type, "message.dispatch");
+        assert.equal(wrapCount, 1);
+        yield* Effect.yieldNow;
+        assert.isTrue(Option.isNone(yield* Queue.poll(dispatched)));
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            continuationRequestsLayer,
+            workerLive.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  idAllocatorLayer,
+                  continuationRequestsLayer,
+                  Layer.mock(ThreadManagementService)({
+                    getThreadProjection: () => Effect.succeed(queuedCodexWakeProjection),
+                    dispatch: (command) => {
+                      if (command.type === "queued-run.edit") {
+                        return Effect.fail(
+                          new OrchestratorDispatchError({
+                            commandId: command.commandId,
+                            commandType: command.type,
+                            cause: `Run ${command.runId} is not queued.`,
+                          }),
+                        );
+                      }
+                      return Queue.offer(dispatched, command).pipe(Effect.as({} as never));
+                    },
+                  }),
+                ),
+              ),
+            ),
+          ),
         ),
         Effect.scoped,
       );

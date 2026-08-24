@@ -2038,6 +2038,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.equal(harness.continuationRequests[0]?.providerThreadId, harness.providerThread.id);
         assert.equal(harness.continuationRequests[0]?.driver, CLAUDE_PROVIDER);
         assert.equal(harness.continuationRequests[0]?.detail, WAKE_SUMMARY);
+        assert.deepEqual(harness.continuationRequests[0]?.providerWake, {
+          kind: "background_task",
+          count: 1,
+        });
 
         yield* Queue.offer(harness.sdkMessages, wakeResult);
         let settleYields = 0;

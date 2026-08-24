@@ -372,6 +372,142 @@ describe("V2 session presentation", () => {
     }
   });
 
+  it("renders delegated and background wake prompts as work-log rows", () => {
+    const now = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
+    const threadId = ThreadId.make("thread-wake");
+    const runId = RunId.make("run-wake");
+    const taskId =
+      "node:delegated-task:command%3Amcp%3A60ee323f-f008-4b52-ae3f-7fdf19dbab11%3Adelegate-task%3Aretry-progress-precedent-20260824";
+    const base = (id: string, ordinal: number) => ({
+      id: TurnItemId.make(id),
+      threadId,
+      runId,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal,
+      status: "completed" as const,
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+    });
+    const delegatedItem = {
+      ...base("item-delegated-wake", 0),
+      type: "user_message" as const,
+      messageId: MessageId.make("message-delegated-wake"),
+      inputIntent: "turn_start" as const,
+      text: `Delegated task ${taskId} reached a terminal state. Use task_status with taskId ${taskId} to read the result.`,
+      attachments: [],
+      createdBy: "agent" as const,
+      creationSource: "server" as const,
+    } satisfies OrchestrationV2TurnItem;
+    const backgroundItem = {
+      ...base("item-background-wake", 1),
+      type: "user_message" as const,
+      messageId: MessageId.make("message-background-wake"),
+      inputIntent: "turn_start" as const,
+      text: "Background task completed.",
+      attachments: [],
+      createdBy: "agent" as const,
+      creationSource: "provider" as const,
+    } satisfies OrchestrationV2TurnItem;
+    const peerItem = {
+      ...base("item-peer-message", 2),
+      type: "user_message" as const,
+      messageId: MessageId.make("message-peer"),
+      inputIntent: "turn_start" as const,
+      text: "Review this area",
+      attachments: [],
+      createdBy: "agent" as const,
+      creationSource: "provider" as const,
+    } satisfies OrchestrationV2TurnItem;
+    const projected = (item: OrchestrationV2TurnItem, position: number) => ({
+      position,
+      visibility: "local" as const,
+      sourceThreadId: threadId,
+      sourceItemId: item.id,
+      item,
+    });
+
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [
+        projected(delegatedItem, 0),
+        projected(backgroundItem, 1),
+        projected(peerItem, 2),
+      ],
+      optimisticMessages: [],
+    });
+
+    expect(entries.map((entry) => entry.kind)).toEqual(["work", "work", "message"]);
+    const delegatedEntry = entries[0];
+    const backgroundEntry = entries[1];
+    const peerEntry = entries[2];
+    expect(delegatedEntry?.kind).toBe("work");
+    if (delegatedEntry?.kind === "work") {
+      expect(delegatedEntry.entry.label).toBe("Delegated task finished");
+      expect(delegatedEntry.entry.detail).toBe("retry-progress-precedent-20260824");
+      expect(delegatedEntry.entry.itemType).toBe("user_message");
+    }
+    expect(backgroundEntry?.kind).toBe("work");
+    if (backgroundEntry?.kind === "work") {
+      expect(backgroundEntry.entry.label).toBe("Background task finished");
+    }
+    expect(peerEntry?.kind).toBe("message");
+    if (peerEntry?.kind === "message") {
+      expect(peerEntry.message.text).toBe("Review this area");
+    }
+  });
+
+  it("renders two glued delegated wake sentences as one work-log row", () => {
+    const now = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
+    const threadId = ThreadId.make("thread-wake-glued");
+    const runId = RunId.make("run-wake-glued");
+    const item = {
+      id: TurnItemId.make("item-glued-wake"),
+      threadId,
+      runId,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "completed" as const,
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "user_message" as const,
+      messageId: MessageId.make("message-glued-wake"),
+      inputIntent: "turn_start" as const,
+      text: "Delegated task task-a reached a terminal state. Use task_status with taskId task-a to read the result.Delegated task task-b reached a terminal state. Use task_status with taskId task-b to read the result.",
+      attachments: [],
+      createdBy: "agent" as const,
+      creationSource: "server" as const,
+    } satisfies OrchestrationV2TurnItem;
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [
+        {
+          position: 0,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: item.id,
+          item,
+        },
+      ],
+      optimisticMessages: [],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.kind).toBe("work");
+    if (entries[0]?.kind === "work") {
+      expect(entries[0].entry.label).toBe("2 delegated tasks finished");
+      expect(entries[0].entry.detail).toBe("task-a, task-b");
+    }
+  });
+
   it("waits for a dispatched turn item before adding queued input to the timeline", () => {
     const projection = makeThreadProjectionFixture();
     const now = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");

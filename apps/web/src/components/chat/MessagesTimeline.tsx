@@ -78,6 +78,7 @@ import {
   MAX_VISIBLE_WORK_LOG_ENTRIES,
   deriveMessagesTimelineRows,
   normalizeCompactToolLabel,
+  timelineRowAnchorMessageId,
   resolveTimelineToolPresentation,
   resolveAssistantMessageCopyState,
   resolveTimelineIsAtEnd,
@@ -461,8 +462,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [anchorMessageId, onAnchorSizeChanged],
   );
   const anchoredEndSpace = useMemo(() => {
-    const config = resolveChatListAnchoredEndSpace(rows, anchorMessageId, (row) =>
-      row.kind === "message" ? row.message.id : null,
+    const config = resolveChatListAnchoredEndSpace(
+      rows,
+      anchorMessageId,
+      timelineRowAnchorMessageId,
     );
     return config
       ? { ...config, onReady: handleAnchorReady, onSizeChanged: handleAnchorSizeChanged }
@@ -2615,6 +2618,9 @@ const toolCallExpandedBodyClassName =
   "max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[length:var(--font-size-code,0.6875rem)] leading-relaxed select-text";
 
 function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
+  if (workEntry.itemType === "user_message") {
+    return "bot";
+  }
   if (workEntry.itemType === "user_input_request") {
     return "message-circle";
   }

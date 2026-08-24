@@ -3453,6 +3453,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                       providerThreadId: context.providerThread.id,
                       driver: CODEX_PROVIDER,
                       detail: codexBackgroundCommandDetail(payload.item),
+                      providerWake: { kind: "background_command", count: 1 },
                     });
                   }
                 }

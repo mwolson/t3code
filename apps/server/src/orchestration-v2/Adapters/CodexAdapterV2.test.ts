@@ -1870,6 +1870,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             `Background command completed (exit 0): ${BG_COMMAND}\n\n` +
               "Output tail:\nCODEX_BG_WAKE_DONE",
           );
+          assert.deepEqual(request?.providerWake, { kind: "background_command", count: 1 });
 
           const lateCommandUpdateIndex = () =>
             harness.events.findIndex(

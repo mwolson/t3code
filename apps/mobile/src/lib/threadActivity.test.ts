@@ -244,6 +244,56 @@ describe("buildThreadFeed", () => {
     expect(activities[0]?.detail).toBe("Run interrupted before provider start");
   });
 
+  it("renders delegated and background wake prompts as work-log activity", () => {
+    const taskId =
+      "node:delegated-task:command%3Amcp%3A60ee323f-f008-4b52-ae3f-7fdf19dbab11%3Adelegate-task%3Aretry-progress-precedent-20260824";
+    const delegated = projected(
+      {
+        ...userMessage(),
+        id: TurnItemId.make("item-delegated-wake"),
+        messageId: MessageId.make("message-delegated-wake"),
+        createdBy: "agent",
+        creationSource: "server",
+        text: `Delegated task ${taskId} reached a terminal state. Use task_status with taskId ${taskId} to read the result.`,
+      },
+      0,
+    );
+    const background = projected(
+      {
+        ...userMessage(),
+        id: TurnItemId.make("item-background-wake"),
+        messageId: MessageId.make("message-background-wake"),
+        createdBy: "agent",
+        creationSource: "provider",
+        text: "Background task completed.",
+      },
+      1,
+    );
+    const peer = projected(
+      {
+        ...userMessage(),
+        id: TurnItemId.make("item-peer-message"),
+        messageId: MessageId.make("message-peer"),
+        createdBy: "agent",
+        creationSource: "provider",
+        text: "Review this area",
+      },
+      2,
+    );
+
+    const feed = buildThreadFeed([delegated, background, peer]);
+    expect(feed.map((entry) => entry.type)).toEqual(["activity-group", "message"]);
+    const activities = feed[0]?.type === "activity-group" ? feed[0].activities : [];
+    expect(activities.map((activity) => activity.summary)).toEqual([
+      "Delegated task finished",
+      "Background task finished",
+    ]);
+    expect(activities[0]?.detail).toBe("retry-progress-precedent-20260824");
+    expect(activities[0]?.icon).toBe("agent");
+    expect(activities[1]?.icon).toBe("zap");
+    expect(feed[1]?.type === "message" ? feed[1].message.text : undefined).toBe("Review this area");
+  });
+
   it("preserves authoritative V2 order instead of sorting reconstructed collections", () => {
     const rows = [
       projected(userMessage("2026-06-20T00:00:03.000Z"), 0),

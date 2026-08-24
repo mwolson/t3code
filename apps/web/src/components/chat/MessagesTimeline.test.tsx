@@ -624,6 +624,50 @@ describe("MessagesTimeline", () => {
     expect(onAnchorSizeChanged).toHaveBeenCalledWith(secondEntry.message.id, 240);
   });
 
+  it("anchors a wake work-log row by its originating user message id", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const wakeMessageId = MessageId.make("wake-message");
+    const onAnchorReady = vi.fn();
+    const onAnchorSizeChanged = vi.fn();
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        anchorMessageId={wakeMessageId}
+        onAnchorReady={onAnchorReady}
+        onAnchorSizeChanged={onAnchorSizeChanged}
+        timelineEntries={[
+          buildUserTimelineEntry("Earlier prompt."),
+          {
+            id: "wake-work",
+            kind: "work",
+            createdAt: MESSAGE_CREATED_AT,
+            entry: {
+              id: "wake-entry",
+              createdAt: MESSAGE_CREATED_AT,
+              label: "Background task finished",
+              tone: "tool",
+              itemType: "user_message",
+              toolLifecycleStatus: "completed",
+              projectedItem: {
+                item: {
+                  type: "user_message",
+                  messageId: wakeMessageId,
+                  createdBy: "agent",
+                  creationSource: "provider",
+                  text: "Background command completed (exit 0): sleep 1",
+                },
+              },
+            },
+          } as never,
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('data-anchor-index="1"');
+    expect(onAnchorReady).toHaveBeenCalledWith(wakeMessageId, 1);
+    expect(onAnchorSizeChanged).toHaveBeenCalledWith(wakeMessageId, 240);
+  });
+
   it("renders collapse controls for long user messages", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -679,6 +723,37 @@ describe("MessagesTimeline", () => {
     expect(agentMarkup).toContain('data-user-message-attribution="agent"');
     expect(agentMarkup).toContain("Sent by another agent");
     expect(userMarkup).not.toContain("Sent by another agent");
+  });
+
+  it("renders wake prompts as left-aligned work-log rows", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-wake",
+            kind: "work",
+            createdAt: MESSAGE_CREATED_AT,
+            entry: {
+              id: "work-wake",
+              createdAt: MESSAGE_CREATED_AT,
+              label: "Delegated task finished",
+              detail: "retry-progress-precedent-20260824",
+              tone: "tool",
+              toolTitle: "Delegated task finished",
+              toolLifecycleStatus: "completed",
+              itemType: "user_message",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Delegated task finished");
+    expect(markup).toContain("retry-progress-precedent-20260824");
+    expect(markup).not.toContain("Sent by another agent");
+    expect(markup).not.toContain("rounded-2xl bg-accent p-3");
   });
 
   it("keeps a subagent parent-thread link at the top of an empty timeline", async () => {

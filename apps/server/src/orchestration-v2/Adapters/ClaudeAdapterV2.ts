@@ -3746,6 +3746,7 @@ export function makeClaudeAdapterV2(
             providerThreadId: route.providerThreadId,
             driver: CLAUDE_PROVIDER,
             detail,
+            providerWake: { kind: "background_task", count: 1 },
           });
         });
 

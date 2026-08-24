@@ -49,6 +49,7 @@ import {
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
+import { isWakePromptMessage } from "@t3tools/shared/wakePromptPresentation";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { truncate } from "@t3tools/shared/String";
@@ -3820,6 +3821,9 @@ function ChatViewContent(props: ChatViewProps) {
       threadKey: activeThreadKey,
       runId: activeActivityRun.runId,
     };
+    if (isWakePromptMessage(dispatchedUserItem.item)) {
+      return;
+    }
     if (
       pendingTimelineAnchorRef.current !== null ||
       timelineScrollModeRef.current === "free-scrolling"

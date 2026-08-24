@@ -27,6 +27,15 @@ export interface ProviderContinuationRequest {
     readonly messageId: MessageId;
   };
   /**
+   * Durable tag for a provider-native continuation. The continuation worker
+   * copies this onto the conversation message so chip hide and work-log
+   * classification can key off metadata instead of canned prompt text.
+   */
+  readonly providerWake?: {
+    readonly kind: "background_command" | "background_task";
+    readonly count: number;
+  };
+  /**
    * How the continuation turn gets its content.
    *
    * `adapter_buffered` (default) is the provider-native wake: the adapter has

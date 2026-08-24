@@ -1039,6 +1039,158 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("coalesces queued Codex background-command wakes when the queue drains", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* OrchestratorV2;
+      const eventSink = yield* EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-codex-wake-coalesce-thread");
+      const firstWakeText =
+        "Background command completed (exit 1): sleep 12; echo CODEX_BG_A; exit 1\n\nOutput tail:\nCODEX_BG_A";
+      const secondWakeText =
+        "Background command completed (exit 0): sleep 18; echo CODEX_BG_B\n\nOutput tail:\nCODEX_BG_B";
+
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-codex-wake-coalesce-create"),
+        threadId,
+        projectId: ProjectId.make("runtime-layer-codex-wake-coalesce-project"),
+        title: "Coalesce Codex wakes",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-codex-wake-coalesce-active"),
+        threadId,
+        messageId: MessageId.make("runtime-layer-codex-wake-coalesce-active"),
+        text: "Active",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "agent",
+        creationSource: "provider",
+        commandId: CommandId.make("runtime-layer-codex-wake-coalesce-first"),
+        threadId,
+        messageId: MessageId.make("runtime-layer-codex-wake-coalesce-first"),
+        text: firstWakeText,
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "queue_after_active" },
+        providerWake: { kind: "background_command", count: 1 },
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "agent",
+        creationSource: "provider",
+        commandId: CommandId.make("runtime-layer-codex-wake-coalesce-second"),
+        threadId,
+        messageId: MessageId.make("runtime-layer-codex-wake-coalesce-second"),
+        text: secondWakeText,
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "queue_after_active" },
+        providerWake: { kind: "background_command", count: 1 },
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-codex-wake-coalesce-user"),
+        threadId,
+        messageId: MessageId.make("runtime-layer-codex-wake-coalesce-user"),
+        text: "Visible queued message",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "queue_after_active" },
+      });
+
+      const before = yield* orchestrator.getThreadProjection(threadId);
+      const activeRun = before.runs.find((run) => run.status === "starting");
+      const queuedRuns = before.runs
+        .filter((run) => run.status === "queued")
+        .toSorted((left, right) => left.ordinal - right.ordinal);
+      const firstWakeRun = queuedRuns[0];
+      const secondWakeRun = queuedRuns[1];
+      const userQueuedRun = queuedRuns[2];
+      assert.isDefined(activeRun);
+      assert.isDefined(firstWakeRun);
+      assert.isDefined(secondWakeRun);
+      assert.isDefined(userQueuedRun);
+
+      const promotedRunIds = yield* Queue.unbounded<RunId>();
+      const afterSequence = yield* orchestrator.getThreadEventSequence(threadId);
+      yield* eventSink.stream({ threadId, afterSequence }).pipe(
+        Stream.runForEach((stored) =>
+          stored.event.type === "run.updated" && stored.event.payload.status === "starting"
+            ? Queue.offer(promotedRunIds, stored.event.payload.id)
+            : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+
+      const activeCompletedAt = yield* DateTime.now;
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("runtime-layer-codex-wake-coalesce-active-completed"),
+            type: "run.updated",
+            threadId,
+            runId: activeRun.id,
+            ...(activeRun.rootNodeId === null ? {} : { nodeId: activeRun.rootNodeId }),
+            providerInstanceId: activeRun.providerInstanceId,
+            occurredAt: activeCompletedAt,
+            payload: {
+              ...activeRun,
+              status: "completed",
+              completedAt: activeCompletedAt,
+            },
+          },
+        ],
+      });
+
+      assert.equal(yield* Queue.take(promotedRunIds), firstWakeRun.id);
+      const afterPromote = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(afterPromote.runs.find((run) => run.id === firstWakeRun.id)?.status, "starting");
+      assert.equal(
+        afterPromote.runs.find((run) => run.id === secondWakeRun.id)?.status,
+        "cancelled",
+      );
+      assert.equal(afterPromote.runs.find((run) => run.id === userQueuedRun.id)?.status, "queued");
+      const mergedMessage = afterPromote.messages.find(
+        (message) => message.id === firstWakeRun.userMessageId,
+      );
+      assert.include(mergedMessage?.text ?? "", "CODEX_BG_A");
+      assert.include(mergedMessage?.text ?? "", "CODEX_BG_B");
+      assert.deepEqual(mergedMessage?.providerWake, { kind: "background_command", count: 2 });
+      const promotedItem = afterPromote.turnItems.find(
+        (item) => item.type === "user_message" && item.messageId === firstWakeRun.userMessageId,
+      );
+      assert.isDefined(promotedItem);
+      if (promotedItem.type !== "user_message") {
+        assert.fail("promoted wake must be a user message");
+      }
+      assert.include(promotedItem.text, "CODEX_BG_A");
+      assert.include(promotedItem.text, "CODEX_BG_B");
+      assert.deepEqual(promotedItem.providerWake, { kind: "background_command", count: 2 });
+      assert.isUndefined(
+        afterPromote.turnItems.find(
+          (item) => item.type === "user_message" && item.messageId === secondWakeRun.userMessageId,
+        ),
+      );
+    }),
+  );
+
   it.effect("edits and removes queued runs", () =>
     Effect.gen(function* () {
       const orchestrator = yield* OrchestratorV2;

@@ -7443,6 +7443,10 @@ describe("AcpAdapterV2", () => {
       assert.lengthOf(continuationRequests, 1);
       const continuationRequest = continuationRequests[0]!;
       assert.isDefined(continuationRequest.dispatchIfCurrent);
+      assert.deepEqual(continuationRequest.providerWake, {
+        kind: "background_task",
+        count: 1,
+      });
 
       yield* runtime.startTurn(
         makeTurnInput({

@@ -85,6 +85,38 @@ describe("thread workflows", () => {
     expect(state.canPromoteToSteer).toBe(true);
   });
 
+  it("does not hide a queued user message because an assistant row quotes a wake header", () => {
+    const state = deriveThreadQueueWorkflowState({
+      thread: { id: "thread", activeProviderThreadId: null },
+      runs: [
+        {
+          id: "visible",
+          status: "queued",
+          userMessageId: "message-visible",
+          ordinal: 2,
+          queuePosition: 1,
+        },
+      ],
+      messages: [
+        {
+          id: "assistant-noise",
+          role: "assistant",
+          createdBy: "agent",
+          creationSource: "provider",
+          text: "Background command completed (exit 0): not a queued wake",
+        },
+        { id: "message-visible", text: "Visible queued message", createdBy: "user" },
+      ],
+      providerTurns: [],
+      providerThreads: [],
+      providerSessions: [],
+    } as never);
+
+    expect(state.queuedRuns.map(({ run, text }) => [run.id, text])).toEqual([
+      ["visible", "Visible queued message"],
+    ]);
+  });
+
   it("hides automatic completion delivery from the visible queue", () => {
     const state = deriveThreadQueueWorkflowState({
       thread: { id: "thread", activeProviderThreadId: null },
@@ -122,6 +154,112 @@ describe("thread workflows", () => {
     } as never);
 
     expect(state.queuedRuns.map(({ run, text }) => [run.id, text])).toEqual([
+      ["visible", "Visible queued message"],
+    ]);
+  });
+
+  it("hides provider wake continuations from the visible queue", () => {
+    const state = deriveThreadQueueWorkflowState({
+      thread: { id: "thread", activeProviderThreadId: null },
+      runs: [
+        {
+          id: "claude-automatic",
+          status: "queued",
+          userMessageId: "message-claude-automatic",
+          ordinal: 1,
+          queuePosition: 1,
+        },
+        {
+          id: "codex-automatic",
+          status: "queued",
+          userMessageId: "message-codex-automatic",
+          ordinal: 2,
+          queuePosition: 2,
+        },
+        {
+          id: "codex-detail",
+          status: "queued",
+          userMessageId: "message-codex-detail",
+          ordinal: 3,
+          queuePosition: 3,
+        },
+        {
+          id: "codex-metadata",
+          status: "queued",
+          userMessageId: "message-codex-metadata",
+          ordinal: 4,
+          queuePosition: 4,
+        },
+        {
+          id: "peer-agent",
+          status: "queued",
+          userMessageId: "message-peer-agent",
+          ordinal: 5,
+          queuePosition: 5,
+        },
+        {
+          id: "user-provider-message",
+          status: "queued",
+          userMessageId: "message-user-provider",
+          ordinal: 6,
+          queuePosition: 6,
+        },
+        {
+          id: "visible",
+          status: "queued",
+          userMessageId: "message-visible",
+          ordinal: 7,
+          queuePosition: 7,
+        },
+      ],
+      messages: [
+        {
+          id: "message-claude-automatic",
+          text: "Background task completed.",
+          createdBy: "agent",
+          creationSource: "provider",
+        },
+        {
+          id: "message-codex-automatic",
+          text: "Background command completed: sleep 20",
+          createdBy: "agent",
+          creationSource: "provider",
+        },
+        {
+          id: "message-codex-detail",
+          text: "Background command completed (exit 1): sleep 15; echo CODEX_BG_FAIL; exit 1\n\nOutput tail:\nCODEX_BG_FAIL",
+          createdBy: "agent",
+          creationSource: "provider",
+        },
+        {
+          id: "message-codex-metadata",
+          text: "custom wake",
+          createdBy: "agent",
+          creationSource: "provider",
+          providerWake: { kind: "background_command", count: 1 },
+        },
+        {
+          id: "message-peer-agent",
+          text: "Review this area",
+          createdBy: "agent",
+          creationSource: "provider",
+        },
+        {
+          id: "message-user-provider",
+          text: "Background task completed.",
+          createdBy: "user",
+          creationSource: "provider",
+        },
+        { id: "message-visible", text: "Visible queued message" },
+      ],
+      providerTurns: [],
+      providerThreads: [],
+      providerSessions: [],
+    } as never);
+
+    expect(state.queuedRuns.map(({ run, text }) => [run.id, text])).toEqual([
+      ["peer-agent", "Review this area"],
+      ["user-provider-message", "Background task completed."],
       ["visible", "Visible queued message"],
     ]);
   });
