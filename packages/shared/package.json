@@ -83,6 +83,10 @@
       "types": "./src/toolActivity.ts",
       "import": "./src/toolActivity.ts"
     },
+    "./wakePromptPresentation": {
+      "types": "./src/wakePromptPresentation.ts",
+      "import": "./src/wakePromptPresentation.ts"
+    },
     "./t3McpToolPresentation": {
       "types": "./src/t3McpToolPresentation.ts",
       "import": "./src/t3McpToolPresentation.ts"
