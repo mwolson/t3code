@@ -83,6 +83,10 @@
       "types": "./src/favicon.ts",
       "import": "./src/favicon.ts"
     },
+    "./wakePromptPresentation": {
+      "types": "./src/wakePromptPresentation.ts",
+      "import": "./src/wakePromptPresentation.ts"
+    },
     "./Struct": {
       "types": "./src/Struct.ts",
       "import": "./src/Struct.ts"
