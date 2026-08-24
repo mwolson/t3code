@@ -2470,9 +2470,10 @@ describe("orchestrator MCP toolkit", () => {
             ).toBe("always");
             yield* expectOffersToStay(0);
 
-            // A child that terminalizes after the coalesced delivery started
-            // is held for one successor. It must not fan out into a second
-            // concurrent delivery for the same parent run.
+            // Children that terminalize after the coalesced delivery started
+            // are held for one successor. That successor waits for every
+            // known sibling from the originating parent run so the two-run
+            // bound cannot silently strand the last result.
             const lateParentThreadId = ThreadId.make("thread:mcp-late-completion-parent");
             const lateParentGate = yield* Deferred.make<void>();
             const lateDeliveryGate = yield* Deferred.make<void>();
@@ -2671,8 +2672,26 @@ describe("orchestrator MCP toolkit", () => {
               generation: firstLateDelivery.generation + 1,
               taskIds: [lateTask.id],
             });
-            const lateOffers = yield* waitForContinuationOffers(2);
-            expect(lateOffers).toHaveLength(2);
+            // Reserve one successor as soon as the first delivery settles,
+            // but do not offer it while another sibling from the originating
+            // parent run is still active. Wake-policy updates use the same
+            // central offer path as startup recovery, so they must not bypass
+            // the hold. The final sibling then joins that successor.
+            yield* orchestrator.dispatch({
+              type: "delegated_task.wake-policy",
+              commandId: CommandId.make("command:mcp-late-parent:late-policy-settled"),
+              parentThreadId: lateParentThreadId,
+              taskId: lateTask.id,
+              completionWake: "settled_only",
+            });
+            yield* orchestrator.dispatch({
+              type: "delegated_task.wake-policy",
+              commandId: CommandId.make("command:mcp-late-parent:late-policy-always"),
+              parentThreadId: lateParentThreadId,
+              taskId: lateTask.id,
+              completionWake: "always",
+            });
+            yield* expectOffersToStay(1);
             expect(
               successorReserved.runs.filter((run) => {
                 const message = successorReserved.messages.find(
@@ -2685,43 +2704,6 @@ describe("orchestrator MCP toolkit", () => {
               return yield* Effect.die(new Error("Late completion successor delivery missing."));
             }
 
-            // The bounded successor can coalesce a late result only once. A
-            // third terminal after that successor has started remains
-            // inspectable, but cannot recursively create a third parent run.
-            const successorGate = yield* Deferred.make<void>();
-            deliveryTerminalGates.set(lateParentThreadId, successorGate);
-            yield* orchestrator.dispatch({
-              type: "message.dispatch",
-              createdBy: "agent",
-              creationSource: "server",
-              commandId: CommandId.make("command:mcp-late-parent:dispatch-successor-delivery"),
-              threadId: lateParentThreadId,
-              messageId: successorDelivery.messageId,
-              text: "Delegated task reached a terminal state.",
-              attachments: [],
-              modelSelection: codexSelection,
-              dispatchMode: { type: "queue_after_active" },
-              delegatedCompletion: {
-                parentRunId: lateParentRun.id,
-                generation: successorDelivery.generation,
-                taskIds: successorDelivery.taskIds,
-              },
-            });
-            const activeSuccessor = yield* waitForProjection(
-              orchestrator,
-              lateParentThreadId,
-              (projection) =>
-                projection.runs.some(
-                  (run) =>
-                    run.userMessageId === successorDelivery.messageId && run.status === "running",
-                ),
-            );
-            const activeSuccessorRun = activeSuccessor.runs.find(
-              (run) => run.userMessageId === successorDelivery.messageId,
-            );
-            if (activeSuccessorRun === undefined) {
-              return yield* Effect.die(new Error("Late completion successor did not start."));
-            }
             const thirdLateChildProjection = yield* waitForProjection(
               orchestrator,
               thirdLateTask.childThreadId,
@@ -2740,15 +2722,69 @@ describe("orchestrator MCP toolkit", () => {
               commandId: CommandId.make("command:mcp-late-parent:interrupt-third-late-child"),
               threadId: thirdLateTask.childThreadId,
               runId: thirdLateChildRun.id,
-              reason: "Terminalize after the bounded successor started.",
+              reason: "Terminalize before releasing the bounded successor.",
             });
-            yield* waitForProjection(
+            const completeSuccessor = yield* waitForProjection(
+              orchestrator,
+              lateParentThreadId,
+              (projection) => {
+                const delivery = projection.runs.find((run) => run.id === lateParentRun.id)
+                  ?.delegatedCompletion?.delivery;
+                return (
+                  delivery?.messageId === successorDelivery.messageId &&
+                  delivery.taskIds.includes(lateTask.id) &&
+                  delivery.taskIds.includes(thirdLateTask.id)
+                );
+              },
+            );
+            const completeSuccessorDelivery = completeSuccessor.runs.find(
+              (run) => run.id === lateParentRun.id,
+            )?.delegatedCompletion?.delivery;
+            if (completeSuccessorDelivery === undefined || completeSuccessorDelivery === null) {
+              return yield* Effect.die(new Error("Complete successor delivery missing."));
+            }
+            expect(completeSuccessorDelivery.taskIds).toEqual(
+              expect.arrayContaining([lateTask.id, thirdLateTask.id]),
+            );
+            expect(completeSuccessorDelivery.taskIds).toHaveLength(2);
+            const lateOffers = yield* waitForContinuationOffers(2);
+            expect(lateOffers).toHaveLength(2);
+
+            const successorGate = yield* Deferred.make<void>();
+            deliveryTerminalGates.set(lateParentThreadId, successorGate);
+            yield* orchestrator.dispatch({
+              type: "message.dispatch",
+              createdBy: "agent",
+              creationSource: "server",
+              commandId: CommandId.make("command:mcp-late-parent:dispatch-successor-delivery"),
+              threadId: lateParentThreadId,
+              messageId: completeSuccessorDelivery.messageId,
+              text: "Delegated tasks reached terminal states.",
+              attachments: [],
+              modelSelection: codexSelection,
+              dispatchMode: { type: "queue_after_active" },
+              delegatedCompletion: {
+                parentRunId: lateParentRun.id,
+                generation: completeSuccessorDelivery.generation,
+                taskIds: completeSuccessorDelivery.taskIds,
+              },
+            });
+            const activeSuccessor = yield* waitForProjection(
               orchestrator,
               lateParentThreadId,
               (projection) =>
-                projection.subagents.find((task) => task.id === thirdLateTask.id)
-                  ?.completionDelivery?.state === "pending",
+                projection.runs.some(
+                  (run) =>
+                    run.userMessageId === completeSuccessorDelivery.messageId &&
+                    run.status === "running",
+                ),
             );
+            const activeSuccessorRun = activeSuccessor.runs.find(
+              (run) => run.userMessageId === completeSuccessorDelivery.messageId,
+            );
+            if (activeSuccessorRun === undefined) {
+              return yield* Effect.die(new Error("Late completion successor did not start."));
+            }
             yield* Deferred.succeed(successorGate, undefined);
             const exhaustedCohort = yield* waitForProjection(
               orchestrator,
@@ -2757,13 +2793,18 @@ describe("orchestrator MCP toolkit", () => {
                 const cohort = projection.runs.find(
                   (run) => run.id === lateParentRun.id,
                 )?.delegatedCompletion;
+                const lateDelivery = projection.subagents.find((task) => task.id === lateTask.id)
+                  ?.completionDelivery?.state;
+                const thirdDelivery = projection.subagents.find(
+                  (task) => task.id === thirdLateTask.id,
+                )?.completionDelivery?.state;
                 return (
                   cohort?.settledDeliveryCount === 2 &&
                   cohort.delivery === null &&
                   projection.runs.find((run) => run.id === activeSuccessorRun.id)?.status ===
                     "completed" &&
-                  projection.subagents.find((task) => task.id === thirdLateTask.id)
-                    ?.completionDelivery?.state === "pending"
+                  lateDelivery === "delivered" &&
+                  thirdDelivery === "delivered"
                 );
               },
             );
