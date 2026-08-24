@@ -123,10 +123,18 @@ export function useThreadOutboxDrain(): void {
     ensureThreadOutboxLoaded();
     // Keep the multi-environment config graph live for delivery-time reads and
     // wake the drain when a previously missing environment config arrives.
+    // The atom can notify while another component is mid-render (first
+    // useAtomValue on this atom). Defer the tick so we never setState during
+    // that render.
+    let active = true;
     const unsubscribeServerConfigs = subscribeEnvironmentServerConfigs(() => {
-      setRetryTick((current) => current + 1);
+      setTimeout(() => {
+        if (!active) return;
+        setRetryTick((current) => current + 1);
+      }, 0);
     });
     return () => {
+      active = false;
       unsubscribeServerConfigs();
       deferredConfigMessageIdsRef.current.clear();
       for (const timer of retryTimersRef.current.values()) {
