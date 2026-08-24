@@ -231,7 +231,13 @@ function AssistantForkButton(props: {
           },
         })
           .then(async (result) => {
-            if (result._tag !== "Success") return;
+            if (result._tag !== "Success") {
+              Alert.alert(
+                "Could not fork",
+                "The server did not create the forked thread. Check the connection and try again.",
+              );
+              return;
+            }
             const targetThreadReady = await waitForThreadShell(props.environmentId, targetThreadId);
             if (!targetThreadReady) {
               Alert.alert(
@@ -247,7 +253,8 @@ function AssistantForkButton(props: {
           })
           .finally(() => setBusy(false));
       }}
-      className="h-7 w-7 items-center justify-center disabled:opacity-40"
+      hitSlop={8}
+      className="h-11 w-11 items-center justify-center disabled:opacity-40"
     >
       {busy ? (
         <ActivityIndicator size="small" />
