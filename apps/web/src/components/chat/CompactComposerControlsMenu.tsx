@@ -14,7 +14,10 @@ import {
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
-  runtimeModeOptions: ReadonlyArray<RuntimeMode>;
+  runtimeModeOptions: ReadonlyArray<{
+    readonly mode: RuntimeMode;
+    readonly label: string;
+  }>;
   showInteractionModeToggle: boolean;
   traitsMenuContent?: ReactNode;
   onToggleInteractionMode: () => void;
@@ -65,15 +68,9 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             props.onRuntimeModeChange(value as RuntimeMode);
           }}
         >
-          {props.runtimeModeOptions.map((mode) => (
-            <MenuRadioItem key={mode} value={mode}>
-              {mode === "approval-required"
-                ? "Supervised"
-                : mode === "auto-accept-edits"
-                  ? "Auto-accept edits"
-                  : mode === "auto"
-                    ? "Auto"
-                    : "Full access"}
+          {props.runtimeModeOptions.map((option) => (
+            <MenuRadioItem key={option.mode} value={option.mode}>
+              {option.label}
             </MenuRadioItem>
           ))}
         </MenuRadioGroup>

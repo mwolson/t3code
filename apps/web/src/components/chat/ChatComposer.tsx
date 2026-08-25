@@ -244,34 +244,41 @@ import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 
-const runtimeModeConfig: Record<
-  RuntimeMode,
-  { label: string; description: string; icon: LucideIcon }
-> = {
-  "approval-required": {
-    label: "Supervised",
-    description: "Ask before commands and file changes.",
-    icon: LockIcon,
-  },
-  "auto-accept-edits": {
+type RuntimeModeOption = {
+  readonly mode: RuntimeMode;
+  readonly label: string;
+  readonly description: string;
+  readonly icon: LucideIcon;
+};
+
+const supervisedRuntimeModeOption = {
+  mode: "approval-required",
+  label: "Supervised",
+  description: "Ask before commands and file changes.",
+  icon: LockIcon,
+} satisfies RuntimeModeOption;
+
+const runtimeModeOptions = [
+  supervisedRuntimeModeOption,
+  {
+    mode: "auto-accept-edits",
     label: "Auto-accept edits",
     description: "Auto-approve edits, ask before other actions.",
     icon: PenLineIcon,
   },
-  auto: {
+  {
+    mode: "auto",
     label: "Auto",
     description: "An AI reviewer approves routine actions; risky ones still ask.",
     icon: SparklesIcon,
   },
-  "full-access": {
+  {
+    mode: "full-access",
     label: "Full access",
     description: "Allow commands and edits without prompts.",
     icon: LockOpenIcon,
   },
-};
-
-const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
-const piRuntimeModeOptions = runtimeModeOptions.filter((mode) => mode !== "auto");
+] satisfies ReadonlyArray<RuntimeModeOption>;
 const COMPOSER_FLOATING_LAYER_SELECTOR = [
   '[data-slot="popover-popup"]',
   '[data-slot="menu-popup"]',
@@ -316,12 +323,14 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   showInteractionModeToggle: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
-  runtimeModeOptions: ReadonlyArray<RuntimeMode>;
+  runtimeModeOptions: ReadonlyArray<RuntimeModeOption>;
   showPlanToggle: boolean;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
 }) {
-  const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
+  const runtimeModeOption =
+    runtimeModeOptions.find((option) => option.mode === props.runtimeMode) ??
+    supervisedRuntimeModeOption;
   const RuntimeModeIcon = runtimeModeOption.icon;
   const interactionModeTooltip =
     props.interactionMode === "plan"
@@ -376,11 +385,15 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
             <SelectValue>{runtimeModeOption.label}</SelectValue>
           </TooltipTrigger>
           <SelectPopup alignItemWithTrigger={false}>
-            {props.runtimeModeOptions.map((mode) => {
-              const option = runtimeModeConfig[mode];
+            {props.runtimeModeOptions.map((option) => {
               const OptionIcon = option.icon;
               return (
-                <SelectItem key={mode} value={mode} hideIndicator className="min-w-64 py-2">
+                <SelectItem
+                  key={option.mode}
+                  value={option.mode}
+                  hideIndicator
+                  className="min-w-64 py-2"
+                >
                   <div className="flex min-w-0 items-center gap-3">
                     <div className="grid min-w-0 flex-1 gap-0.5">
                       <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
@@ -886,13 +899,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // disabled.
   const selectedProvider: ProviderDriverKind =
     selectedProviderEntry?.driverKind ?? requestedDriverKind;
-  const compatibleRuntimeModeOptions =
-    selectedProvider === "pi" ? piRuntimeModeOptions : runtimeModeOptions;
-  // Old Pi threads may have persisted Auto before Pi's supported modes were
-  // narrowed. Pi enforces that legacy value as Supervised, so display the
-  // behavior users actually get without offering Auto for new selections.
-  const compatibleRuntimeMode =
-    selectedProvider === "pi" && runtimeMode === "auto" ? "approval-required" : runtimeMode;
+  const supportedRuntimeModes = selectedProviderEntry?.snapshot.supportedRuntimeModes;
+  const compatibleRuntimeModeOptions = supportedRuntimeModes
+    ? runtimeModeOptions.filter((option) => supportedRuntimeModes.includes(option.mode))
+    : runtimeModeOptions;
+  // Older threads can contain a mode their current provider no longer offers.
+  // Display the provider's first supported mode, which is also its safe legacy
+  // fallback, without mutating persisted state until the user makes a choice.
+  const compatibleRuntimeMode = compatibleRuntimeModeOptions.some(
+    (option) => option.mode === runtimeMode,
+  )
+    ? runtimeMode
+    : (compatibleRuntimeModeOptions[0]?.mode ?? runtimeMode);
 
   const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({
     threadRef: composerDraftTarget,
