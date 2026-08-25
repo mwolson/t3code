@@ -379,12 +379,12 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
               }),
           ),
         );
-      const extensionPath =
-        mcpSession === undefined
-          ? undefined
-          : yield* provideCacheFs(
-              materializePiT3McpExtension(options.serverConfig.providerStatusCacheDir),
-            );
+      // The extension owns both the optional MCP bridge and Pi's permission
+      // hook. Materialize it even when this session has no MCP credential so
+      // Supervised never silently degrades to unrestricted tool execution.
+      const extensionPath = yield* provideCacheFs(
+        materializePiT3McpExtension(options.serverConfig.providerStatusCacheDir),
+      );
       const resolvedLaunchArgs = resolvePiLaunchArgs(options.settings.launchArgs);
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
@@ -2137,19 +2137,19 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
               steerInput.message.text,
               steerInput.message.attachments,
             );
-            // Reading attachments suspends, so the turn is revalidated here:
-            // without this a steer resolved after the turn ended would be
-            // accepted by an idle session or by the next turn.
-            if (threadState?.activeTurn !== turn) {
-              return yield* protocolError(`Pi turn ${steerInput.providerTurnId} is not active`);
-            }
             // Same fire-and-forget contract as `prompt`: a steer that expands
-            // a slash command must not block on the ack.
+            // a slash command must not block on the ack. The final active-turn
+            // check lives inside the permit so settlement cannot overtake it.
             yield* sessionEventPermit.withPermits(1)(
-              connection.send({
-                type: "steer",
-                message: payload.message,
-                ...(payload.images.length === 0 ? {} : { images: payload.images }),
+              Effect.gen(function* () {
+                if (threadState?.activeTurn !== turn) {
+                  return yield* protocolError(`Pi turn ${steerInput.providerTurnId} is not active`);
+                }
+                yield* connection.send({
+                  type: "steer",
+                  message: payload.message,
+                  ...(payload.images.length === 0 ? {} : { images: payload.images }),
+                });
               }),
             );
           }).pipe(
