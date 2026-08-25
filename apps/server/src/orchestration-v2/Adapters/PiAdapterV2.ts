@@ -325,8 +325,6 @@ interface ActivePiTurn {
   sawAgentActivity: boolean;
   /** Only slash-command prompts can complete without starting an agent run. */
   readonly promptMayBeCommandOnly: boolean;
-  /** Pi's id-less prompt responses are ordered, so retain why each prompt was sent. */
-  readonly pendingPromptResponses: Array<"turn_start" | "steer">;
   /** Pi reports context as unknown immediately after compaction; keep its estimate for the meter. */
   latestCompactionAfterTokens: number | null;
   activeCompaction: PiCompactionState | null;
@@ -478,6 +476,12 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
       let baselineModel: { provider: string; modelId: string } | null = null;
       let baselineThinking: string | null = null;
       let autoCompactionEnabled: boolean | undefined;
+      // Prompt responses carry no id. Keep their session-wide send order and
+      // owner so a late ack from a settled turn cannot affect the next turn.
+      const pendingPromptResponses: Array<{
+        readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
+        readonly kind: "turn_start" | "steer";
+      }> = [];
       // Invalidates optional post-turn stats reads when rollback changes the
       // active branch before an older read completes.
       let contextUsageGeneration = 0;
@@ -1647,8 +1651,9 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             // Correlated responses never reach the pump; an id-less response
             // is the deferred ack of a fire-and-forget prompt/steer.
             const command = recordString(event, "command");
-            const promptKind =
-              command === "prompt" ? turn?.pendingPromptResponses.shift() : undefined;
+            const pendingPrompt = command === "prompt" ? pendingPromptResponses.shift() : undefined;
+            const responseTurn =
+              pendingPrompt?.providerTurnId === turn?.providerTurn.id ? turn : null;
             if (event["success"] === true) {
               // Deferred success ack. Command-only prompts (pure extension
               // slash commands) never start an agent run and never emit
@@ -1656,17 +1661,17 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
               // re-queued behind any events Pi emitted before answering
               // get_state, which keeps the check stream-ordered.
               if (
-                promptKind === "turn_start" &&
-                turn !== null &&
-                turn.promptMayBeCommandOnly &&
-                !turn.sawAgentActivity
+                pendingPrompt?.kind === "turn_start" &&
+                responseTurn !== null &&
+                responseTurn.promptMayBeCommandOnly &&
+                !responseTurn.sawAgentActivity
               ) {
-                yield* scheduleCommandOnlySettleProbe(turn);
+                yield* scheduleCommandOnlySettleProbe(responseTurn);
               }
               return;
             }
             if (event["success"] !== false) return;
-            if (command === "steer" || promptKind === "steer") {
+            if (command === "steer" || pendingPrompt?.kind === "steer") {
               // A rejected steer only means that one message was refused. The
               // turn it was aimed at is still running on Pi, so terminalizing
               // here would report a failure while output keeps streaming.
@@ -1675,8 +1680,14 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
               });
               return;
             }
-            if (turn !== null && (command === "prompt" || command === "parse")) {
-              turn.failure = makeProviderFailure({
+            const failedTurn =
+              command === "prompt" && pendingPrompt?.kind === "turn_start"
+                ? responseTurn
+                : command === "parse"
+                  ? turn
+                  : null;
+            if (failedTurn !== null) {
+              failedTurn.failure = makeProviderFailure({
                 message: recordString(event, "error") ?? "Pi rejected the prompt.",
                 class: "provider_error",
               });
@@ -2091,7 +2102,6 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
               interrupted: false,
               sawAgentActivity: false,
               promptMayBeCommandOnly: payload.message.trimStart().startsWith("/"),
-              pendingPromptResponses: ["turn_start"],
               latestCompactionAfterTokens: null,
               activeCompaction: null,
               activeProviderRetry: null,
@@ -2108,6 +2118,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
                 message: payload.message,
                 ...(payload.images.length === 0 ? {} : { images: payload.images }),
               });
+              pendingPromptResponses.push({ providerTurnId: providerTurn.id, kind: "turn_start" });
               yield* emit({
                 type: "provider_turn.updated",
                 driver: PI_PROVIDER,
@@ -2172,7 +2183,12 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
                   message: payload.message,
                   ...(payload.images.length === 0 ? {} : { images: payload.images }),
                 });
-                if (type === "prompt") turn.pendingPromptResponses.push("steer");
+                if (type === "prompt") {
+                  pendingPromptResponses.push({
+                    providerTurnId: turn.providerTurn.id,
+                    kind: "steer",
+                  });
+                }
               }),
             );
           }).pipe(
