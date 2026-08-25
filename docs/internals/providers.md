@@ -19,12 +19,12 @@ orchestration layer does not know which one is behind a thread.
 | `pi`          | [`Drivers/PiDriver.ts`][pi]             |
 
 The Pi driver speaks Pi's stdio JSONL RPC mode (`pi --mode rpc`) and spawns the user's own `pi`
-install, preserving its skills, context files, custom models, auth, and sessions. T3 replaces Pi's
-official `subagent` extension with a session-persisting variant. That launch uses
-`--no-extensions`, then explicitly re-adds the T3 extensions and the user's discovered extensions;
-project-local extensions are only re-added when Pi has standing project trust. Extension UI dialogs
-surface as orchestration runtime requests, and Pi's session statistics feed the shared context
-window meter.
+install, preserving its skills, context files, custom models, auth, extensions, and sessions. Pi
+owns native extension discovery. T3 explicitly injects only its namespaced MCP bridge. The shared
+`delegate_task` tool owns durable child threads, while results from Pi's installed example
+`subagent` extension are projected without synthetic child sessions. Extension UI dialogs surface
+as orchestration runtime requests, and optional Pi session statistics feed the shared context window
+meter after turn terminalization. Pi 0.80.5 is the minimum supported protocol version.
 
 Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
 adapter in a child scope. Adapter implementations live beside them in
