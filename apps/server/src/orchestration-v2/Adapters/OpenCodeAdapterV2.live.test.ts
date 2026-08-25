@@ -19,22 +19,22 @@ import * as Stream from "effect/Stream";
 import { describe } from "vite-plus/test";
 
 import { ServerConfig } from "../../config.ts";
-import * as OpenCode2Runtime from "../../provider/opencode2Runtime.ts";
+import * as OpenCodeRuntime from "../../provider/opencodeRuntime.ts";
 import * as SpawnedProcessReaper from "../../provider/SpawnedProcessReaper.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../IdAllocator.ts";
 import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
 import {
-  makeOpenCode2AdapterV2,
+  makeOpenCodeAdapterV2,
   OpenCode2ProviderCapabilitiesV2,
   unwrapOpenCode2Data,
-} from "./OpenCode2AdapterV2.ts";
+} from "./OpenCodeAdapterV2.ts";
 
 const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-opencode2-pending-work-",
 }).pipe(Layer.provide(NodeServices.layer));
 const decodeOpenCode2Settings = Schema.decodeUnknownEffect(OpenCode2Settings);
 const layer = Layer.mergeAll(
-  OpenCode2Runtime.layer.pipe(
+  OpenCodeRuntime.layer.pipe(
     Layer.provide(SpawnedProcessReaper.layer),
     Layer.provide(NodeServices.layer),
   ),
@@ -72,16 +72,16 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
       () =>
         Effect.scoped(
           Effect.gen(function* () {
-            const runtime = yield* OpenCode2Runtime.OpenCode2Runtime;
-            const server = yield* runtime.startOpenCode2ServerProcess({
+            const runtime = yield* OpenCodeRuntime.OpenCodeRuntime;
+            const server = yield* runtime.connectToOpenCodeServer({
               binaryPath: "opencode2",
             });
-            const client = runtime.createOpenCode2SdkClient({
+            const client = runtime.createOpenCodeSdkClient({
               baseUrl: server.url,
               directory: process.cwd(),
               serverPassword: server.password,
             });
-            const created = yield* OpenCode2Runtime.runOpenCode2Sdk("session.create", () =>
+            const created = yield* OpenCodeRuntime.runOpenCodeSdk("session.create", () =>
               client.session.create({
                 location: { directory: process.cwd() },
                 model: { providerID: "opencode", id: "glm-5-free" },
@@ -92,12 +92,12 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
               created,
             );
             yield* Effect.addFinalizer(() =>
-              OpenCode2Runtime.runOpenCode2Sdk("session.remove", () =>
+              OpenCodeRuntime.runOpenCodeSdk("session.remove", () =>
                 client.session.remove({ sessionID: session.id }),
               ).pipe(Effect.ignore),
             );
 
-            const prompted = yield* OpenCode2Runtime.runOpenCode2Sdk("session.prompt", () =>
+            const prompted = yield* OpenCodeRuntime.runOpenCodeSdk("session.prompt", () =>
               client.session.prompt({
                 sessionID: session.id,
                 text: "Reply with OK.",
@@ -120,11 +120,11 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
           Effect.gen(function* () {
             const serverConfig = yield* ServerConfig;
             const idAllocator = yield* IdAllocatorV2;
-            const runtime = yield* OpenCode2Runtime.OpenCode2Runtime;
-            const server = yield* runtime.startOpenCode2ServerProcess({
+            const runtime = yield* OpenCodeRuntime.OpenCodeRuntime;
+            const server = yield* runtime.connectToOpenCodeServer({
               binaryPath: "opencode2",
             });
-            const client = runtime.createOpenCode2SdkClient({
+            const client = runtime.createOpenCodeSdkClient({
               baseUrl: server.url,
               directory: process.cwd(),
               serverPassword: server.password,
@@ -140,7 +140,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
               interactionMode: "default",
               cwd: process.cwd(),
             });
-            const adapter = makeOpenCode2AdapterV2({
+            const adapter = makeOpenCodeAdapterV2({
               instanceId,
               settings: yield* decodeOpenCode2Settings({
                 binaryPath: "opencode2",
@@ -168,7 +168,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             assert.isDefined(session.hasPendingBackgroundWork);
             assert.isDefined(session.hasPendingBackgroundWorkForThread);
 
-            const created = yield* OpenCode2Runtime.runOpenCode2Sdk("shell.create", () =>
+            const created = yield* OpenCodeRuntime.runOpenCodeSdk("shell.create", () =>
               client.shell.create({
                 location: { directory: process.cwd() },
                 command: "sleep 20",
@@ -190,7 +190,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             );
             assert.isTrue(Option.isSome(createdWake));
 
-            yield* OpenCode2Runtime.runOpenCode2Sdk("shell.remove", () =>
+            yield* OpenCodeRuntime.runOpenCodeSdk("shell.remove", () =>
               client.shell.remove({
                 id: shell.id,
                 location: { directory: process.cwd() },
@@ -215,21 +215,21 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
       () =>
         Effect.scoped(
           Effect.gen(function* () {
-            const runtime = yield* OpenCode2Runtime.OpenCode2Runtime;
-            const server = yield* runtime.startOpenCode2ServerProcess({
+            const runtime = yield* OpenCodeRuntime.OpenCodeRuntime;
+            const server = yield* runtime.connectToOpenCodeServer({
               binaryPath: "opencode2",
             });
-            const client = runtime.createOpenCode2SdkClient({
+            const client = runtime.createOpenCodeSdkClient({
               baseUrl: server.url,
               directory: process.cwd(),
               serverPassword: server.password,
             });
             const abortController = new AbortController();
             yield* Effect.addFinalizer(() => Effect.sync(() => abortController.abort()));
-            const subscription = yield* OpenCode2Runtime.runOpenCode2Sdk("event.subscribe", () =>
+            const subscription = yield* OpenCodeRuntime.runOpenCodeSdk("event.subscribe", () =>
               Promise.resolve(client.event.subscribe({ signal: abortController.signal })),
             );
-            const created = yield* OpenCode2Runtime.runOpenCode2Sdk("session.create", () =>
+            const created = yield* OpenCodeRuntime.runOpenCodeSdk("session.create", () =>
               client.session.create({
                 location: { directory: process.cwd() },
                 model: { providerID: "opencode", id: "glm-5.2" },
@@ -240,14 +240,14 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
               created,
             );
             yield* Effect.addFinalizer(() =>
-              OpenCode2Runtime.runOpenCode2Sdk("session.remove", () =>
+              OpenCodeRuntime.runOpenCodeSdk("session.remove", () =>
                 client.session.remove({ sessionID: session.id }),
               ).pipe(Effect.ignore),
             );
             const eventFiber = yield* Stream.fromAsyncIterable(
               subscription,
               (cause) =>
-                new OpenCode2Runtime.OpenCode2RuntimeError({
+                new OpenCodeRuntime.OpenCodeRuntimeError({
                   operation: "event.subscribe",
                   category: "event-subscription-failed",
                   cause,
@@ -266,23 +266,23 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
               Effect.forkScoped,
             );
 
-            yield* OpenCode2Runtime.runOpenCode2Sdk("session.prompt", () =>
+            yield* OpenCodeRuntime.runOpenCodeSdk("session.prompt", () =>
               client.session.prompt({
                 sessionID: session.id,
                 text: "Remember this sentence: native compaction fixture context.",
               }),
             );
-            yield* OpenCode2Runtime.runOpenCode2Sdk("session.wait", () =>
+            yield* OpenCodeRuntime.runOpenCodeSdk("session.wait", () =>
               client.session.wait({ sessionID: session.id }),
             );
             const compactionId = `msg_t3_live_compaction_${yield* Clock.currentTimeMillis}`;
-            yield* OpenCode2Runtime.runOpenCode2Sdk("session.compact", () =>
+            yield* OpenCodeRuntime.runOpenCodeSdk("session.compact", () =>
               client.session.compact({
                 sessionID: session.id,
                 id: compactionId,
               }),
             );
-            yield* OpenCode2Runtime.runOpenCode2Sdk("session.wait", () =>
+            yield* OpenCodeRuntime.runOpenCodeSdk("session.wait", () =>
               client.session.wait({ sessionID: session.id }),
             );
 
@@ -314,11 +314,11 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
           Effect.gen(function* () {
             const serverConfig = yield* ServerConfig;
             const idAllocator = yield* IdAllocatorV2;
-            const runtime = yield* OpenCode2Runtime.OpenCode2Runtime;
-            const server = yield* runtime.startOpenCode2ServerProcess({
+            const runtime = yield* OpenCodeRuntime.OpenCodeRuntime;
+            const server = yield* runtime.connectToOpenCodeServer({
               binaryPath: "opencode2",
             });
-            const client = runtime.createOpenCode2SdkClient({
+            const client = runtime.createOpenCodeSdkClient({
               baseUrl: server.url,
               directory: process.cwd(),
               serverPassword: server.password,
@@ -327,7 +327,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             const providerSessionId = ProviderSessionId.make(
               "provider-session-opencode2-live-delete-test",
             );
-            const adapter = makeOpenCode2AdapterV2({
+            const adapter = makeOpenCodeAdapterV2({
               instanceId,
               settings: yield* decodeOpenCode2Settings({
                 binaryPath: "opencode2",
@@ -342,7 +342,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             const deleteDetachedThread = adapter.deleteDetachedThread;
             assert.isDefined(deleteDetachedThread);
 
-            const created = yield* OpenCode2Runtime.runOpenCode2Sdk("session.create", () =>
+            const created = yield* OpenCodeRuntime.runOpenCodeSdk("session.create", () =>
               client.session.create({
                 location: { directory: process.cwd() },
                 model: { providerID: "opencode", id: "glm-5.2" },
@@ -394,7 +394,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
             yield* deleteDetachedThread({ providerSession, providerThread });
             yield* deleteDetachedThread({ providerSession, providerThread });
 
-            const missing = yield* OpenCode2Runtime.runOpenCode2Sdk("session.get", () =>
+            const missing = yield* OpenCodeRuntime.runOpenCodeSdk("session.get", () =>
               client.session.get({ sessionID: nativeSession.id }),
             ).pipe(Effect.either);
             assert.equal(missing._tag, "Left");

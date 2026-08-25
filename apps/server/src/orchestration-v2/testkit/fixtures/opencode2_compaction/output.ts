@@ -39,7 +39,7 @@ export function assertOpenCode2CompactionOutput(
   assert.equal(compactions.length, 2, "each lifecycle must retain one stable compaction row");
   const completed = compactions.find((compaction) => compaction.status === "completed");
   assert.isDefined(completed);
-  assert.equal(completed.driver, "opencode2");
+  assert.equal(completed.driver, "opencode");
   assert.equal(completed.summary, "Summary from compaction.");
   assert.equal(completed.usedTokenCount, 902_000);
   assert.equal(completed.inputTokenCount, 272_000);
@@ -51,7 +51,7 @@ export function assertOpenCode2CompactionOutput(
 
   const interrupted = compactions.find((compaction) => compaction.status === "cancelled");
   assert.isDefined(interrupted);
-  assert.equal(interrupted.driver, "opencode2");
+  assert.equal(interrupted.driver, "opencode");
   assert.equal(interrupted.summary, "Partial summary");
   assert.equal(interrupted.usedTokenCount, 902_000);
   assert.equal(interrupted.inputTokenCount, 272_000);

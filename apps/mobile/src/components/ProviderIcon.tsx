@@ -73,15 +73,7 @@ export function ProviderIcon(props: ProviderIconProps) {
     const frameFill = palette === "dark" ? "#F1ECEC" : "#211E1E";
     return (
       <Svg width={size} height={size} viewBox="0 0 32 40" fill="none">
-        {iconKind === "opencode2" ? (
-          <>
-            <Path fill="#2E6CE9" d="M24 32H8V8H24V32Z" />
-            <Path fill="#82C4FF" d="M24 11H8V8H24V11Z" />
-            <Path fill="#0A2055" d="M24 32H8V29H24V32Z" />
-          </>
-        ) : (
-          <Path fill={detailFill} d="M24 32H8V16H24V32Z" />
-        )}
+        <Path fill={detailFill} d="M24 32H8V16H24V32Z" />
         <Path fill={frameFill} d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" />
       </Svg>
     );

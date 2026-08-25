@@ -17,7 +17,6 @@ orchestration layer does not know which one is behind a thread.
 | `cursor`      | [`Drivers/CursorDriver.ts`][cursor]            |
 | `grok`        | [`Drivers/GrokDriver.ts`][grok]                |
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode]        |
-| `opencode2`   | [`Drivers/OpenCode2Driver.ts`][opencode2]      |
 | `pi`          | [`Drivers/PiDriver.ts`][pi]                    |
 
 The Pi driver speaks Pi's stdio JSONL RPC mode (`pi --mode rpc`) and spawns the user's own `pi`
@@ -177,8 +176,7 @@ when a request opens (approval) or user input is requested, via
 [cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts
 [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
 [opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
-[opencode-server-owner]: ../../apps/server/src/provider/OpenCodeServerOwner.ts
-[opencode2]: ../../apps/server/src/provider/Drivers/OpenCode2Driver.ts
+
 [pi]: ../../apps/server/src/provider/Drivers/PiDriver.ts
 [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
 [instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts

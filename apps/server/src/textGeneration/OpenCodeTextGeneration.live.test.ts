@@ -6,13 +6,13 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { describe } from "vite-plus/test";
 
-import * as OpenCode2Runtime from "../provider/opencode2Runtime.ts";
+import * as OpenCodeRuntime from "../provider/opencodeRuntime.ts";
 import * as SpawnedProcessReaper from "../provider/SpawnedProcessReaper.ts";
-import { makeOpenCode2TextGeneration } from "./OpenCode2TextGeneration.ts";
+import { makeOpenCodeTextGeneration } from "./OpenCodeTextGeneration.ts";
 
 const decodeOpenCode2Settings = Schema.decodeUnknownEffect(OpenCode2Settings);
 const decodeChatAttachment = Schema.decodeUnknownEffect(ChatAttachment);
-const layer = OpenCode2Runtime.layer.pipe(
+const layer = OpenCodeRuntime.layer.pipe(
   Layer.provide(SpawnedProcessReaper.layer),
   Layer.provide(NodeServices.layer),
 );
@@ -26,7 +26,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")("OpenCode 2 text generatio
           const settings = yield* decodeOpenCode2Settings({
             binaryPath: "opencode2",
           });
-          const textGeneration = yield* makeOpenCode2TextGeneration(settings);
+          const textGeneration = yield* makeOpenCodeTextGeneration(settings);
           const result = yield* textGeneration.generateThreadTitle({
             cwd: process.cwd(),
             message: "Add deterministic OpenCode 2 text generation coverage.",

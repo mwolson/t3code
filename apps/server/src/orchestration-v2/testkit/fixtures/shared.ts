@@ -348,7 +348,7 @@ export const OPENCODE_MODEL_SELECTION = {
 } satisfies ModelSelection;
 
 export const OPENCODE2_MODEL_SELECTION = {
-  instanceId: ProviderInstanceId.make("opencode2"),
+  instanceId: ProviderInstanceId.make("opencode"),
   model: "opencode/big-pickle",
 } satisfies ModelSelection;
 

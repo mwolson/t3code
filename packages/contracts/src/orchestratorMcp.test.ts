@@ -69,7 +69,7 @@ describe("orchestrator MCP contracts", () => {
     const summary = {
       providerInstanceId: "opencode2",
       driverKind: "opencode2",
-      displayName: "OpenCode 2",
+      displayName: "OpenCode",
       canRunChildTask: true,
       canRunCrossProviderChildTask: true,
       constraints: [],

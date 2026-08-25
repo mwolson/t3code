@@ -1,1173 +1,1937 @@
-import { assert, describe, it } from "@effect/vitest";
+import type { V2Event } from "@opencode-ai/client";
+type SessionPendingInfo = {
+  sessionID: string;
+  type?: string;
+  id?: string;
+  admittedSeq?: number;
+  [key: string]: unknown;
+};
+type ShellInfoV2 = {
+  id: string;
+  status: string;
+  metadata: Record<string, unknown>;
+  command?: string;
+  cwd?: string;
+  exit?: number;
+  time?: { started?: number; completed?: number };
+  [key: string]: unknown;
+};
 import {
-  NodeId,
-  OpenCodeSettings,
-  ProjectId,
+  ContextHandoffId,
+  type OrchestrationV2ProviderThread,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
-  ProviderTurnId,
-  RunAttemptId,
-  RunId,
-  MessageId,
   ThreadId,
-  type OrchestrationV2ProviderTurn,
 } from "@t3tools/contracts";
-import * as Effect from "effect/Effect";
+import { assert, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
-import * as Fiber from "effect/Fiber";
+import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as Queue from "effect/Queue";
-import * as Schema from "effect/Schema";
-import * as Stream from "effect/Stream";
-import * as TestClock from "effect/testing/TestClock";
-
-import type { EventNdjsonLogger } from "../../provider/Layers/EventNdjsonLogger.ts";
-import type { OpenCodeRuntimeShape } from "../../provider/opencodeRuntime.ts";
-import type { ServerConfig } from "../../config.ts";
-import { IdAllocatorV2, layer as idAllocatorLayer } from "../IdAllocator.ts";
+import * as Fiber from "effect/Fiber";
+import * as Scope from "effect/Scope";
+import { describe } from "vite-plus/test";
 
 import {
-  advanceOpenCodePromptAdmission,
-  cancelOpenCodePromptAdmission,
-  openCodeBoundaryAfterProviderTurn,
-  openCodeChildPermissionRules,
-  openCodePermissionRules,
-  openCodePermissionRequestKind,
-  openCodeToolProjectionKind,
-  makeOpenCodeProtocolLogger,
-  makeOpenCodeAdapterV2,
-  OPENCODE_PROVIDER,
-  OpenCodeProviderCapabilitiesV2,
-  reconcileOpenCodePromptAdmissionStatus,
+  bindOpenCode2CanonicalProviderThread,
+  bufferOpenCode2DeferredChildEvent,
+  drainOpenCode2DeferredChildEvents,
+  forgetOpenCode2SessionPermission,
+  openCode2AllActiveTurnsAwaitRuntimeRequest,
+  openCode2AutoPermissionReply,
+  openCode2CanAdoptMissingExecutionStart,
+  openCode2ChildTurnItemOrdinals,
+  openCode2CleanEofResubscribeDelayMs,
+  openCode2CompactionDiagnostics,
+  openCode2EventClearsHeldExecutionFailure,
+  openCode2EventEndsExecution,
+  openCode2EventSettlesHeldExecutionFailure,
+  openCode2FormAnswer,
+  openCode2FormQuestions,
+  openCode2ForkEventPumpInScope,
+  openCode2ForkParameters,
+  openCode2InterruptedThreadDisposition,
+  openCode2HasInFlightPendingWork,
+  openCode2LocationQuery,
+  openCode2McpServersFromList,
+  openCode2ShellsFromList,
+  openCode2IsCancelledPostSettleWake,
+  openCode2IsPostSettleWakeAdmission,
+  openCode2LastErrorAt,
+  openCode2PendingItemsFromList,
+  openCode2PendingWorkForSession,
+  openCode2PermissionAutoReply,
+  openCode2PermissionAutoReplyForSession,
+  openCode2ProviderErrorStatus,
+  openCode2ProviderFailure,
+  openCode2ProviderRetryIsScheduled,
+  openCode2PermissionReplyStatus,
+  openCode2QuestionId,
+  openCode2RuntimeRequestEventId,
+  openCode2RuntimeRequestNativeKey,
+  openCode2RuntimeRequestResponseSettlement,
+  openCode2SessionSelectionParameters,
+  openCode2SessionErrorMessage,
+  openCode2SessionErrorStatus,
+  openCode2SessionErrorTargetSessionIds,
+  openCode2ShellRemovalSucceeded,
+  openCode2ShouldChargeCleanEofBudget,
+  openCode2ShouldChargeStallBudget,
+  openCode2ShouldChargeStreamFailure,
+  openCode2ShouldFailActiveTurnsAfterCleanEof,
+  openCode2ShouldForceInterruptFinalize,
+  openCode2ShouldHoldExecutionFailure,
+  openCode2ShouldQuarantineInterruptedSession,
+  openCode2ShouldResubscribeStalledStream,
+  openCode2ShouldSettleTurn,
+  openCode2T3OrchestrationInstructions,
+  openCode2ToolNeedsTerminalOverride,
+  openCode2TokenUsage,
+  makeOpenCode2DeferredChildEventBuffer,
+  normalizeOpenCode2PermissionEvent,
+  OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+  OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT,
+  OPENCODE2_EVENT_PENDING_RESUBSCRIBE_DELAY_MS,
+  OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS,
+  OPENCODE2_EVENT_STALL_MS,
+  OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
+  OPENCODE2_PROMOTED_INPUT_ID_LIMIT,
+  OPENCODE2_RETIRED_SUPPRESS_WAKE_LIMIT,
+  pruneOpenCode2PromotedInputIds,
+  pruneOpenCode2RetiredSuppressWakes,
+  rememberOpenCode2SessionPermission,
+  removeOpenCode2Session,
+  settleOpenCode2ClientRemoval,
+  unwrapOpenCode2Data,
 } from "./OpenCodeAdapterV2.ts";
-import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
+import {
+  normalizeOpenCode2WireType,
+  openCode2WireAdmittedInput,
+  openCode2WireInputID,
+} from "./openCodeWire.ts";
 
-const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
-const OPEN_CODE_TEST_SETTINGS = Schema.decodeSync(OpenCodeSettings)({
-  serverUrl: "http://test.invalid",
+const v2Event = (event: unknown) => event as V2Event;
+
+describe("OpenCode 2 wire input ids", () => {
+  it("reads every supported input id alias", () => {
+    for (const key of [
+      "inputID",
+      "inputId",
+      "inboxID",
+      "inboxId",
+      "messageID",
+      "messageId",
+      "id",
+    ]) {
+      assert.strictEqual(openCode2WireInputID({ data: { [key]: `input:${key}` } }), `input:${key}`);
+    }
+  });
+
+  it("prefers the native input id over compatibility aliases", () => {
+    assert.strictEqual(
+      openCode2WireInputID({
+        data: { inputID: "native", inputId: "camel", messageID: "message" },
+      }),
+      "native",
+    );
+  });
 });
 
-function promiseGate<A>() {
-  let resolve!: (value: A) => void;
-  const promise = new Promise<A>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
-function asyncEventStream() {
-  const values: Array<{ value: unknown; handled: ReturnType<typeof promiseGate<void>> }> = [];
-  const waiters: Array<(value: IteratorResult<unknown>) => void> = [];
-  let previousHandled: ReturnType<typeof promiseGate<void>> | undefined;
-  return {
-    close() {
-      for (const waiter of waiters.splice(0)) waiter({ done: true, value: undefined });
-    },
-    push(value: unknown) {
-      const handled = promiseGate<void>();
-      const waiter = waiters.shift();
-      if (waiter) {
-        previousHandled = handled;
-        waiter({ done: false, value });
-      } else values.push({ value, handled });
-      return handled.promise;
-    },
-    stream: {
-      [Symbol.asyncIterator]() {
-        return {
-          next: () => {
-            previousHandled?.resolve();
-            const entry = values.shift();
-            if (entry !== undefined) {
-              previousHandled = entry.handled;
-              return Promise.resolve({ done: false as const, value: entry.value });
-            }
-            return new Promise<IteratorResult<unknown>>((resolve) => waiters.push(resolve));
-          },
-        };
-      },
-    },
-  };
-}
-
-function runtimePolicy(
-  runtimeMode: ProviderAdapterV2RuntimePolicy["runtimeMode"],
-  override: Partial<ProviderAdapterV2RuntimePolicy> = {},
-): ProviderAdapterV2RuntimePolicy {
-  return ProviderAdapterV2RuntimePolicy.make({
-    runtimeMode,
-    interactionMode: "default",
-    cwd: null,
-    ...override,
-  });
-}
-
-function permissionAction(rules: ReturnType<typeof openCodePermissionRules>, permission: string) {
-  return rules.findLast((rule) => rule.permission === "*" || rule.permission === permission)
-    ?.action;
-}
-
-function providerTurn(input: {
-  readonly id: string;
-  readonly ordinal: number;
-  readonly nativeId: string | null;
-}): OrchestrationV2ProviderTurn {
-  return {
-    id: ProviderTurnId.make(input.id),
-    providerThreadId: ProviderThreadId.make("provider-thread:opencode-test"),
-    nodeId: NodeId.make(`node:${input.id}`),
-    runAttemptId: null,
-    nativeTurnRef:
-      input.nativeId === null
-        ? null
-        : { driver: OPENCODE_PROVIDER, nativeId: input.nativeId, strength: "weak" },
-    ordinal: input.ordinal,
-    status: "completed",
-    startedAt: null,
-    completedAt: null,
-  };
-}
-
-const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(function* (
-  suffix: string,
-  nativeSessionId: string,
-  client: object,
-) {
-  const idAllocator = yield* IdAllocatorV2;
-  const instanceId = ProviderInstanceId.make(`opencode-${suffix}`);
-  const threadId = ThreadId.make(`thread-opencode-${suffix}`);
-  const modelSelection = {
-    instanceId,
-    model: "anthropic/claude-sonnet",
-    options: [],
-  };
-  const policy = runtimePolicy("full-access", { cwd: "/workspace" });
-  const adapter = makeOpenCodeAdapterV2({
-    instanceId,
-    settings: OPEN_CODE_TEST_SETTINGS,
-    environment: {},
-    runtime: {
-      connectToOpenCodeServer: () => Effect.succeed({ url: "http://test.invalid", external: true }),
-      createOpenCodeSdkClient: () => client,
-    } as unknown as OpenCodeRuntimeShape,
-    idAllocator,
-    serverConfig: {
-      cwd: "/workspace",
-      attachmentsDir: "/tmp/attachments",
-    } as ServerConfig["Service"],
-  });
-  const runtime = yield* adapter.openSession({
-    threadId,
-    providerSessionId: ProviderSessionId.make(`session-opencode-${suffix}`),
-    modelSelection,
-    runtimePolicy: policy,
-  });
-  const providerThread = yield* runtime.ensureThread({
-    threadId,
-    modelSelection,
-    runtimePolicy: policy,
-  });
-  const now = yield* DateTime.now;
-  const startTurn = () =>
-    runtime.startTurn({
-      appThread: {
-        id: threadId,
-        projectId: ProjectId.make(`project-opencode-${suffix}`),
-        title: suffix,
-        providerInstanceId: modelSelection.instanceId,
-        modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-        activeProviderThreadId: providerThread.id,
-        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
-        forkedFrom: null,
-        createdBy: "user",
-        creationSource: "web",
-        createdAt: now,
-        updatedAt: now,
-        archivedAt: null,
-        settledOverride: null,
-        settledAt: null,
-        lastVisitedAt: null,
-        deletedAt: null,
-      },
-      threadId,
-      runId: RunId.make(`run-opencode-${suffix}`),
-      runOrdinal: 1,
-      providerTurnOrdinal: 1,
-      attemptId: RunAttemptId.make(`attempt-opencode-${suffix}`),
-      rootNodeId: NodeId.make(`node-opencode-${suffix}`),
-      providerThread,
-      message: {
-        createdBy: "user",
-        creationSource: "web",
-        messageId: MessageId.make(`message-opencode-${suffix}`),
-        text: "hello",
-        attachments: [],
-      },
-      modelSelection,
-      runtimePolicy: policy,
-    });
-  return {
-    nativeSessionId,
-    now,
-    policy,
-    providerThread,
-    runId: RunId.make(`run-opencode-${suffix}`),
-    runtime,
-    startTurn,
-    threadId,
-  };
-});
-
-describe("OpenCodeAdapterV2", () => {
-  it.effect("keeps a newly admitted prompt alive across stale idle and delayed busy evidence", () =>
+describe("unwrapOpenCode2Data", () => {
+  it.effect("reads through both envelopes", () =>
     Effect.gen(function* () {
-      const idAllocator = yield* IdAllocatorV2;
-      const nativeEvents = asyncEventStream();
-      const prompt = promiseGate<void>();
-      const promptStarted = promiseGate<void>();
-      const steerPrompt = promiseGate<void>();
-      const steerPromptStarted = promiseGate<void>();
-      const stopPromptStarted = promiseGate<void>();
-      const statusCalled = promiseGate<void>();
-      const steerStatusCalled = promiseGate<void>();
-      const abortCalled = promiseGate<void>();
-      let status: "idle" | "busy" = "busy";
-      let promptCalls = 0;
-      let statusCalls = 0;
-      const promptInputs: Array<{ readonly messageID?: string }> = [];
-      const client = {
-        event: {
-          subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
-            options.signal?.addEventListener("abort", () => nativeEvents.close(), { once: true });
-            return { stream: nativeEvents.stream };
-          },
-        },
-        session: {
-          create: async () => ({
-            data: { id: "native-opencode-race", time: { created: 1, updated: 1 } },
-          }),
-          promptAsync: async (
-            input: { readonly messageID?: string },
-            options?: { readonly signal?: AbortSignal },
-          ) => {
-            promptInputs.push(input);
-            promptCalls += 1;
-            if (promptCalls === 1) {
-              promptStarted.resolve();
-              await prompt.promise;
-            } else if (promptCalls === 2) {
-              steerPromptStarted.resolve();
-              await steerPrompt.promise;
-            } else {
-              stopPromptStarted.resolve();
-              await new Promise<void>((_resolve, reject) =>
-                options?.signal?.addEventListener("abort", () => reject(options.signal!.reason), {
-                  once: true,
-                }),
-              );
-            }
-            return { data: true };
-          },
-          status: async () => ({
-            data: (() => {
-              statusCalls += 1;
-              if (statusCalls === 1) statusCalled.resolve();
-              else steerStatusCalled.resolve();
-              return { "native-opencode-race": { type: status } };
-            })(),
-          }),
-          messages: async () => ({ data: [] }),
-          abort: async () => {
-            abortCalled.resolve();
-            return { data: true };
-          },
-        },
-        mcp: { add: async () => ({ data: true }) },
-      };
-      const adapter = makeOpenCodeAdapterV2({
-        instanceId: ProviderInstanceId.make("opencode-test"),
-        settings: OPEN_CODE_TEST_SETTINGS,
-        environment: {},
-        runtime: {
-          connectToOpenCodeServer: () =>
-            Effect.succeed({ url: "http://test.invalid", external: true }),
-          createOpenCodeSdkClient: () => client,
-        } as unknown as OpenCodeRuntimeShape,
-        idAllocator,
-        serverConfig: {
-          cwd: "/workspace",
-          attachmentsDir: "/tmp/attachments",
-        } as ServerConfig["Service"],
+      const payload = yield* unwrapOpenCode2Data("session.create", {
+        data: { data: { id: "ses_1" } },
       });
-      const threadId = ThreadId.make("thread-opencode-admission-race");
-      const providerSessionId = ProviderSessionId.make("session-opencode-admission-race");
-      const modelSelection = {
-        instanceId: ProviderInstanceId.make("opencode-test"),
-        model: "anthropic/claude-sonnet",
-        options: [],
-      };
-      const policy = runtimePolicy("full-access", { cwd: "/workspace" });
-      const runtime = yield* adapter.openSession({
-        threadId,
-        providerSessionId,
-        modelSelection,
-        runtimePolicy: policy,
+      assert.deepStrictEqual(payload, {
+        id: "ses_1",
       });
-      const providerThread = yield* runtime.ensureThread({
-        threadId,
-        modelSelection,
-        runtimePolicy: policy,
-      });
-      const now = yield* DateTime.now;
-      const attemptId = RunAttemptId.make("attempt-opencode-admission-race");
-      const runId = RunId.make("run-opencode-admission-race");
-      const start = yield* runtime
-        .startTurn({
-          appThread: {
-            id: threadId,
-            projectId: ProjectId.make("project-opencode-admission-race"),
-            title: "race",
-            providerInstanceId: modelSelection.instanceId,
-            modelSelection,
-            runtimeMode: "full-access",
-            interactionMode: "default",
-            branch: null,
-            worktreePath: null,
-            activeProviderThreadId: providerThread.id,
-            lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
-            forkedFrom: null,
-            createdBy: "user",
-            creationSource: "web",
-            createdAt: now,
-            updatedAt: now,
-            archivedAt: null,
-            settledOverride: null,
-            settledAt: null,
-            lastVisitedAt: null,
-            deletedAt: null,
-          },
-          threadId,
-          runId,
-          runOrdinal: 1,
-          providerTurnOrdinal: 1,
-          attemptId,
-          rootNodeId: NodeId.make("node-opencode-admission-race"),
-          providerThread,
-          message: {
-            createdBy: "user",
-            creationSource: "web",
-            messageId: MessageId.make("message-opencode-admission-race"),
-            text: "hello",
-            attachments: [],
-          },
-          modelSelection,
-          runtimePolicy: policy,
-        })
-        .pipe(Effect.forkScoped);
-
-      yield* Effect.promise(() => promptStarted.promise);
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "session.status",
-          properties: { sessionID: "native-opencode-race", status: { type: "idle" } },
-        }),
-      );
-      prompt.resolve();
-      yield* Fiber.join(start);
-      assert.match(promptInputs[0]?.messageID ?? "", /^msg_[0-9a-f]{12}[0-9A-Za-z]{28}$/);
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "session.status",
-          properties: { sessionID: "native-opencode-race", status: { type: "busy" } },
-        }),
-      );
-      status = "busy";
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "message.updated",
-          properties: {
-            sessionID: "native-opencode-race",
-            info: {
-              id: "stale-user-message",
-              sessionID: "native-opencode-race",
-              role: "user",
-              time: { created: DateTime.toEpochMillis(now) },
-            },
-          },
-        }),
-      );
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "session.status",
-          properties: { sessionID: "native-opencode-race", status: { type: "idle" } },
-        }),
-      );
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "message.updated",
-          properties: {
-            sessionID: "native-opencode-race",
-            info: {
-              id: promptInputs[0]!.messageID!,
-              sessionID: "native-opencode-race",
-              role: "user",
-              time: { created: DateTime.toEpochMillis(now) },
-            },
-          },
-        }),
-      );
-
-      yield* Effect.promise(() => statusCalled.promise);
-
-      const snapshot = yield* runtime.readThreadSnapshot({ providerThread });
-      assert.equal(snapshot.providerTurns.at(-1)?.status, "running");
-      const activeTurn = snapshot.providerTurns.at(-1)!;
-      const steer = yield* runtime
-        .steerTurn({
-          threadId,
-          runId,
-          providerThread,
-          providerTurnId: activeTurn.id,
-          message: {
-            messageId: MessageId.make("message-opencode-steer-race"),
-            text: "follow up",
-            attachments: [],
-            createdBy: "user",
-            creationSource: "web",
-          },
-        })
-        .pipe(Effect.forkScoped);
-      yield* Effect.promise(() => steerPromptStarted.promise);
-      assert.notEqual(promptInputs[1]?.messageID, promptInputs[0]?.messageID);
-      steerPrompt.resolve();
-      yield* Fiber.join(steer);
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "session.status",
-          properties: { sessionID: "native-opencode-race", status: { type: "busy" } },
-        }),
-      );
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "message.updated",
-          properties: {
-            sessionID: "native-opencode-race",
-            info: {
-              id: promptInputs[0]!.messageID!,
-              sessionID: "native-opencode-race",
-              role: "user",
-              time: { created: DateTime.toEpochMillis(now) },
-            },
-          },
-        }),
-      );
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "session.status",
-          properties: { sessionID: "native-opencode-race", status: { type: "idle" } },
-        }),
-      );
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "message.updated",
-          properties: {
-            sessionID: "native-opencode-race",
-            info: {
-              id: promptInputs[1]!.messageID!,
-              sessionID: "native-opencode-race",
-              role: "user",
-              time: { created: DateTime.toEpochMillis(now) },
-            },
-          },
-        }),
-      );
-      yield* Effect.promise(() => steerStatusCalled.promise);
-      const pendingSteer = yield* runtime
-        .steerTurn({
-          threadId,
-          runId,
-          providerThread,
-          providerTurnId: activeTurn.id,
-          message: {
-            messageId: MessageId.make("message-opencode-stop-pending"),
-            text: "pending when stopped",
-            attachments: [],
-            createdBy: "user",
-            creationSource: "web",
-          },
-        })
-        .pipe(Effect.exit, Effect.forkScoped);
-      yield* Effect.promise(() => stopPromptStarted.promise);
-      const interrupt = yield* runtime
-        .interruptTurn({ providerThread, providerTurnId: activeTurn.id })
-        .pipe(Effect.forkScoped);
-      yield* Effect.promise(() => abortCalled.promise);
-      yield* Fiber.join(interrupt);
-      assert.isTrue(Exit.isFailure(yield* Fiber.join(pendingSteer)));
-      const promptWhileStopping = yield* Effect.exit(
-        runtime.steerTurn({
-          threadId,
-          runId,
-          providerThread,
-          providerTurnId: activeTurn.id,
-          message: {
-            messageId: MessageId.make("message-opencode-after-stop"),
-            text: "must not pass the pending stop",
-            attachments: [],
-            createdBy: "user",
-            creationSource: "web",
-          },
-        }),
-      );
-      assert.isTrue(Exit.isFailure(promptWhileStopping));
-      assert.equal(promptCalls, 3);
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "session.status",
-          properties: { sessionID: "native-opencode-race", status: { type: "idle" } },
-        }),
-      );
-      const interrupted = yield* runtime.readThreadSnapshot({ providerThread });
-      assert.equal(interrupted.providerTurns.at(-1)?.status, "interrupted");
-    }).pipe(Effect.provide(idAllocatorLayer), Effect.scoped),
+    }),
   );
 
-  it.effect("interrupts an initial prompt while its SDK request is pending", () =>
+  // The failure mode this guards is silent: reading one layer yields the
+  // envelope, which looks like a valid object and fails much later.
+  it.effect("fails through the typed channel for an outer-only envelope", () =>
     Effect.gen(function* () {
-      const idAllocator = yield* IdAllocatorV2;
-      const nativeEvents = asyncEventStream();
-      const promptStarted = promiseGate<void>();
-      const abortCalled = promiseGate<void>();
-      let abortCalls = 0;
-      const client = {
-        event: {
-          subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
-            options.signal?.addEventListener("abort", () => nativeEvents.close(), { once: true });
-            return { stream: nativeEvents.stream };
-          },
-        },
-        session: {
-          create: async () => ({
-            data: { id: "native-opencode-initial-stop", time: { created: 1, updated: 1 } },
-          }),
-          promptAsync: async (_input: unknown, options?: { readonly signal?: AbortSignal }) => {
-            promptStarted.resolve();
-            await new Promise<void>((_resolve, reject) => {
-              const signal = options?.signal;
-              if (signal?.aborted) {
-                reject(signal.reason);
-                return;
-              }
-              signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
-            });
-            return { data: true };
-          },
-          status: async () => ({
-            data: { "native-opencode-initial-stop": { type: "idle" as const } },
-          }),
-          messages: async () => ({ data: [] }),
-          abort: async () => {
-            abortCalls += 1;
-            abortCalled.resolve();
-            return { data: true };
-          },
-        },
-        mcp: { add: async () => ({ data: true }) },
-      };
-      const adapter = makeOpenCodeAdapterV2({
-        instanceId: ProviderInstanceId.make("opencode-initial-stop-test"),
-        settings: OPEN_CODE_TEST_SETTINGS,
-        environment: {},
-        runtime: {
-          connectToOpenCodeServer: () =>
-            Effect.succeed({ url: "http://test.invalid", external: true }),
-          createOpenCodeSdkClient: () => client,
-        } as unknown as OpenCodeRuntimeShape,
-        idAllocator,
-        serverConfig: {
-          cwd: "/workspace",
-          attachmentsDir: "/tmp/attachments",
-        } as ServerConfig["Service"],
-      });
-      const threadId = ThreadId.make("thread-opencode-initial-stop");
-      const providerSessionId = ProviderSessionId.make("session-opencode-initial-stop");
-      const modelSelection = {
-        instanceId: ProviderInstanceId.make("opencode-initial-stop-test"),
-        model: "anthropic/claude-sonnet",
-        options: [],
-      };
-      const policy = runtimePolicy("full-access", { cwd: "/workspace" });
-      const runtime = yield* adapter.openSession({
-        threadId,
-        providerSessionId,
-        modelSelection,
-        runtimePolicy: policy,
-      });
-      const providerThread = yield* runtime.ensureThread({
-        threadId,
-        modelSelection,
-        runtimePolicy: policy,
-      });
-      const terminalEvents = yield* runtime.events.pipe(
-        Stream.takeUntil((event) => event.type === "turn.terminal"),
-        Stream.runCollect,
-        Effect.forkScoped,
-      );
-      const now = yield* DateTime.now;
-      const start = yield* runtime
-        .startTurn({
-          appThread: {
-            id: threadId,
-            projectId: ProjectId.make("project-opencode-initial-stop"),
-            title: "initial stop",
-            providerInstanceId: modelSelection.instanceId,
-            modelSelection,
-            runtimeMode: "full-access",
-            interactionMode: "default",
-            branch: null,
-            worktreePath: null,
-            activeProviderThreadId: providerThread.id,
-            lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
-            forkedFrom: null,
-            createdBy: "user",
-            creationSource: "web",
-            createdAt: now,
-            updatedAt: now,
-            archivedAt: null,
-            settledOverride: null,
-            settledAt: null,
-            lastVisitedAt: null,
-            deletedAt: null,
-          },
-          threadId,
-          runId: RunId.make("run-opencode-initial-stop"),
-          runOrdinal: 1,
-          providerTurnOrdinal: 1,
-          attemptId: RunAttemptId.make("attempt-opencode-initial-stop"),
-          rootNodeId: NodeId.make("node-opencode-initial-stop"),
-          providerThread,
-          message: {
-            createdBy: "user",
-            creationSource: "web",
-            messageId: MessageId.make("message-opencode-initial-stop"),
-            text: "hello",
-            attachments: [],
-          },
-          modelSelection,
-          runtimePolicy: policy,
-        })
-        .pipe(Effect.forkScoped);
+      const error = yield* unwrapOpenCode2Data("session.create", { data: {} }).pipe(Effect.flip);
+      assert.strictEqual(error.operation, "session.create");
+      assert.strictEqual(error.category, "missing-response-payload");
+    }),
+  );
 
-      yield* Effect.promise(() => promptStarted.promise);
-      const running = yield* runtime.readThreadSnapshot({ providerThread });
-      const activeTurn = running.providerTurns.at(-1)!;
-      const interrupt = yield* runtime
-        .interruptTurn({ providerThread, providerTurnId: activeTurn.id })
-        .pipe(Effect.forkScoped);
+  it.effect("fails through the typed channel for a missing payload", () =>
+    Effect.gen(function* () {
+      const error = yield* unwrapOpenCode2Data("session.get", {}).pipe(Effect.flip);
+      assert.strictEqual(error.operation, "session.get");
+      assert.strictEqual(error.category, "missing-response-payload");
+    }),
+  );
+});
 
-      yield* Effect.promise(() => abortCalled.promise);
-      yield* Fiber.join(start);
-      yield* Fiber.join(interrupt);
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "session.status",
-          properties: {
-            sessionID: "native-opencode-initial-stop",
-            status: { type: "idle" },
+describe("bindOpenCode2CanonicalProviderThread", () => {
+  const now = DateTime.makeUnsafe("2026-08-20T19:24:25.000Z");
+  const nativeThread = {
+    id: ProviderThreadId.make("provider-thread:native"),
+    driver: ProviderDriverKind.make("opencode"),
+    providerInstanceId: ProviderInstanceId.make("opencode"),
+    providerSessionId: ProviderSessionId.make("provider-session:test"),
+    appThreadId: ThreadId.make("thread:test"),
+    ownerNodeId: null,
+    nativeThreadRef: {
+      driver: ProviderDriverKind.make("opencode"),
+      nativeId: "ses_native",
+      strength: "strong" as const,
+    },
+    nativeConversationHeadRef: null,
+    status: "active" as const,
+    firstRunOrdinal: 1,
+    lastRunOrdinal: 1,
+    handoffIds: [],
+    forkedFrom: null,
+    pendingBackgroundTasks: [{ taskId: "shell_1", taskType: "shell" }],
+    createdAt: now,
+    updatedAt: now,
+  } satisfies OrchestrationV2ProviderThread;
+  const pendingThread = {
+    ...nativeThread,
+    id: ProviderThreadId.make("provider-thread:pending"),
+    status: "idle" as const,
+    handoffIds: [ContextHandoffId.make("handoff:1")],
+    pendingBackgroundTasks: [],
+  } satisfies OrchestrationV2ProviderThread;
+
+  it("keeps the pending T3 id and the native session ref", () => {
+    const bound = bindOpenCode2CanonicalProviderThread(nativeThread, pendingThread);
+    assert.strictEqual(bound.id, ProviderThreadId.make("provider-thread:pending"));
+    assert.strictEqual(bound.nativeThreadRef?.nativeId, "ses_native");
+    assert.strictEqual(bound.status, "active");
+    assert.deepEqual(bound.handoffIds, [ContextHandoffId.make("handoff:1")]);
+    assert.deepEqual(bound.pendingBackgroundTasks, [{ taskId: "shell_1", taskType: "shell" }]);
+  });
+});
+
+describe("OpenCode 2 post-settle wake classification", () => {
+  const syntheticAdmission = v2Event({
+    type: "session.inbox.enqueued",
+    data: {
+      sessionID: "ses_root",
+      inputID: "input_wake",
+      input: {
+        type: "synthetic",
+        data: { text: '<subagent state="completed">child completed</subagent>' },
+        delivery: "queue",
+      },
+    },
+  });
+
+  it("classifies provider completion admissions for input-aware ownership", () => {
+    assert.isTrue(
+      openCode2IsPostSettleWakeAdmission(syntheticAdmission, {
+        isChildSession: false,
+      }),
+    );
+    assert.isTrue(
+      openCode2IsPostSettleWakeAdmission(syntheticAdmission, {
+        isChildSession: false,
+      }),
+    );
+    assert.isFalse(
+      openCode2IsPostSettleWakeAdmission(syntheticAdmission, {
+        isChildSession: true,
+      }),
+    );
+    assert.isFalse(
+      openCode2IsPostSettleWakeAdmission(
+        v2Event({
+          type: "session.inbox.enqueued",
+          data: {
+            sessionID: "ses_root",
+            inputID: "input_user",
+            input: { type: "user", data: { text: "hello" }, delivery: "queue" },
           },
         }),
-      );
+        {
+          isChildSession: false,
+        },
+      ),
+    );
+  });
 
-      const events = Array.from(yield* Fiber.join(terminalEvents));
-      const terminals = events.filter((event) => event.type === "turn.terminal");
-      assert.equal(abortCalls, 1);
-      assert.lengthOf(terminals, 1);
-      assert.equal(terminals[0]?.status, "interrupted");
-      assert.isNull(terminals[0]?.failure ?? null);
-      assert.isFalse(
-        events.some(
-          (event) =>
-            (event.type === "turn.terminal" && event.status === "failed") ||
-            (event.type === "provider_session.updated" && event.providerSession.status === "error"),
+  it("keeps in-turn synthetic control instructions on their owning execution", () => {
+    assert.isFalse(
+      openCode2IsPostSettleWakeAdmission(
+        v2Event({
+          type: "session.inbox.enqueued",
+          data: {
+            sessionID: "ses_root",
+            inputID: "input_background_instruction",
+            input: {
+              type: "synthetic",
+              data: {
+                text: "User requested that active blocking work be moved to the background.",
+              },
+              delivery: "steer",
+            },
+          },
+        }),
+        { isChildSession: false },
+      ),
+    );
+  });
+
+  it("accepts observed provider metadata when completion text is not wrapped", () => {
+    assert.isTrue(
+      openCode2IsPostSettleWakeAdmission(
+        v2Event({
+          type: "session.inbox.enqueued",
+          data: {
+            sessionID: "ses_root",
+            inputID: "input_shell_wake",
+            input: {
+              type: "synthetic",
+              data: {
+                text: "shell completed",
+                metadata: { source: "shell", state: "completed" },
+              },
+              delivery: "steer",
+            },
+          },
+        }),
+        { isChildSession: false },
+      ),
+    );
+  });
+
+  it("classifies a synthetic wake beside an allocated user execution", () => {
+    assert.isTrue(
+      openCode2IsPostSettleWakeAdmission(syntheticAdmission, {
+        isChildSession: false,
+      }),
+    );
+    assert.isTrue(
+      openCode2IsPostSettleWakeAdmission(syntheticAdmission, {
+        isChildSession: false,
+      }),
+    );
+  });
+
+  it("defers cancelled wake ownership until input promotion identifies the execution", () => {
+    const cancelledAdmission = v2Event({
+      type: "session.inbox.enqueued",
+      data: {
+        sessionID: "ses_root",
+        inputID: "input_cancelled",
+        input: {
+          type: "synthetic",
+          data: { text: '<subagent state="cancelled">cancelled continuation</subagent>' },
+          delivery: "queue",
+        },
+      },
+    });
+
+    assert.isTrue(
+      openCode2IsPostSettleWakeAdmission(cancelledAdmission, {
+        isChildSession: false,
+      }),
+    );
+    assert.isTrue(
+      openCode2IsPostSettleWakeAdmission(syntheticAdmission, {
+        isChildSession: false,
+      }),
+    );
+  });
+
+  it("isolates cancellation synthetic inputs without dropping the wake boundary", () => {
+    for (const state of ["cancelled", "interrupted"] as const) {
+      const event = v2Event({
+        type: "session.inbox.enqueued",
+        data: {
+          sessionID: "ses_root",
+          inputID: `input_${state}`,
+          input: {
+            type: "synthetic",
+            data: { text: `<subagent state="${state}">partial output</subagent>` },
+            delivery: "queue",
+          },
+        },
+      });
+      assert.isTrue(openCode2IsCancelledPostSettleWake(event));
+      assert.isTrue(
+        openCode2IsPostSettleWakeAdmission(event, {
+          isChildSession: false,
+        }),
+      );
+    }
+    assert.isFalse(openCode2IsCancelledPostSettleWake(syntheticAdmission));
+  });
+
+  it("accepts the observed state marker with flexible tag attributes", () => {
+    for (const text of [
+      ` \n\t<subagent state = "cancelled">partial output</subagent>`,
+      `<subagent state = "cancelled">partial output</subagent>`,
+      `<subagent data="provider" state='interrupted'>partial output</subagent>`,
+      `<subagent state='interrupted' data="provider">partial output</subagent>`,
+    ]) {
+      assert.isTrue(
+        openCode2IsCancelledPostSettleWake(
+          v2Event({
+            type: "session.inbox.enqueued",
+            data: {
+              sessionID: "ses_root",
+              inputID: "input_cancelled",
+              input: {
+                type: "synthetic",
+                data: { text },
+                delivery: "queue",
+              },
+            },
+          }),
         ),
       );
-    }).pipe(Effect.provide(idAllocatorLayer), Effect.scoped),
-  );
-
-  it("holds stale idle through prompt admission until the new user message is observed", () => {
-    const admission = {
-      admissionPending: true,
-      admissionAccepted: false,
-      admissionMessageObserved: false,
-      idleDuringAdmission: false,
-    };
-
-    assert.equal(advanceOpenCodePromptAdmission(admission, "idle"), "hold");
-    assert.equal(advanceOpenCodePromptAdmission(admission, "accepted"), "hold");
-    assert.isTrue(admission.admissionPending);
-    assert.equal(advanceOpenCodePromptAdmission(admission, "user-message"), "reconcile-idle");
-    assert.isTrue(admission.admissionPending);
-  });
-
-  it("releases admission only after prompt acceptance and new-turn evidence", () => {
-    const admission = {
-      admissionPending: true,
-      admissionAccepted: false,
-      admissionMessageObserved: false,
-      idleDuringAdmission: false,
-    };
-
-    assert.equal(advanceOpenCodePromptAdmission(admission, "busy"), "hold");
-    assert.equal(advanceOpenCodePromptAdmission(admission, "accepted"), "release");
-    assert.isFalse(admission.admissionPending);
-  });
-
-  it("invalidates pending admission before aborting a turn", () => {
-    const admission = {
-      admissionGeneration: 4,
-      admissionPending: true,
-      admissionAccepted: false,
-      admissionMessageObserved: false,
-      idleDuringAdmission: false,
-    };
-
-    cancelOpenCodePromptAdmission(admission, 5);
-
-    assert.equal(admission.admissionGeneration, 5);
-    assert.isFalse(admission.admissionPending);
-    assert.equal(advanceOpenCodePromptAdmission(admission, "accepted"), "release");
-  });
-
-  it.effect("reconciles current idle and busy status replies after prompt admission", () =>
-    Effect.gen(function* () {
-      for (const expected of ["idle", "busy"] as const) {
-        const admission = { admissionGeneration: 4, admissionPending: true };
-        const status = yield* Deferred.make<"idle" | "busy" | "unknown">();
-        const fiber = yield* reconcileOpenCodePromptAdmissionStatus(
-          admission,
-          4,
-          Deferred.await(status),
-        ).pipe(Effect.forkChild({ startImmediately: true }));
-
-        yield* Deferred.succeed(status, expected);
-
-        assert.equal(yield* Fiber.join(fiber), expected);
-        assert.isFalse(admission.admissionPending);
-      }
-    }),
-  );
-
-  it.effect("keeps admission pending after a transient status failure", () =>
-    Effect.gen(function* () {
-      const admission = { admissionGeneration: 4, admissionPending: true };
-      assert.equal(
-        yield* reconcileOpenCodePromptAdmissionStatus(admission, 4, Effect.succeed("unknown")),
-        "unknown",
-      );
-      assert.isTrue(admission.admissionPending);
-      assert.equal(
-        yield* reconcileOpenCodePromptAdmissionStatus(admission, 4, Effect.succeed("idle")),
-        "idle",
-      );
-      assert.isFalse(admission.admissionPending);
-    }),
-  );
-
-  it.effect("retries a transient status failure without another idle event", () =>
-    Effect.gen(function* () {
-      const nativeSessionId = "native-opencode-status-retry";
-      const nativeEvents = asyncEventStream();
-      const promptRelease = promiseGate<void>();
-      const promptCalls = yield* Queue.unbounded<string>();
-      const statusCalls = yield* Queue.unbounded<number>();
-      let statusCallCount = 0;
-      const client = {
-        event: {
-          subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
-            options.signal?.addEventListener("abort", () => nativeEvents.close(), { once: true });
-            return { stream: nativeEvents.stream };
-          },
-        },
-        session: {
-          create: async () => ({
-            data: { id: nativeSessionId, time: { created: 1, updated: 1 } },
-          }),
-          promptAsync: async (input: { readonly messageID?: string }) => {
-            Queue.offerUnsafe(promptCalls, input.messageID!);
-            await promptRelease.promise;
-            return { data: true };
-          },
-          status: async () => {
-            statusCallCount += 1;
-            Queue.offerUnsafe(statusCalls, statusCallCount);
-            if (statusCallCount === 1) throw new Error("transient status failure");
-            return { data: { [nativeSessionId]: { type: "idle" as const } } };
-          },
-          messages: async () => ({ data: [] }),
-          abort: async () => ({ data: true }),
-        },
-        mcp: { add: async () => ({ data: true }) },
-      };
-      const harness = yield* makeOpenCodeRuntimeHarness("status-retry", nativeSessionId, client);
-      const terminalEvents = yield* harness.runtime.events.pipe(
-        Stream.takeUntil((event) => event.type === "turn.terminal"),
-        Stream.runCollect,
-        Effect.forkScoped,
-      );
-      const start = yield* harness.startTurn().pipe(Effect.forkScoped);
-      const admissionMessageId = yield* Queue.take(promptCalls);
-
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "session.status",
-          properties: { sessionID: nativeSessionId, status: { type: "idle" } },
-        }),
-      );
-      promptRelease.resolve();
-      yield* Fiber.join(start);
-      const userMessage = {
-        type: "message.updated",
-        properties: {
-          sessionID: nativeSessionId,
-          info: {
-            id: admissionMessageId,
-            sessionID: nativeSessionId,
-            role: "user",
-            time: { created: DateTime.toEpochMillis(harness.now) },
-          },
-        },
-      };
-      yield* Effect.promise(() => nativeEvents.push(userMessage));
-      assert.equal(yield* Queue.take(statusCalls), 1);
-
-      yield* Effect.promise(() => nativeEvents.push(userMessage));
-      assert.equal(statusCallCount, 1, "duplicate events must share the generation's retry worker");
-      yield* TestClock.adjust("250 millis");
-      assert.equal(yield* Queue.take(statusCalls), 2);
-
-      const events = Array.from(yield* Fiber.join(terminalEvents));
-      const terminals = events.filter((event) => event.type === "turn.terminal");
-      assert.equal(statusCallCount, 2);
-      assert.lengthOf(terminals, 1);
-      assert.equal(terminals[0]?.status, "completed");
-      assert.isNull(terminals[0]?.failure ?? null);
-    }).pipe(Effect.provide(idAllocatorLayer), Effect.scoped),
-  );
-
-  it.effect("does not let a queued status retry adopt a newer steer generation", () =>
-    Effect.gen(function* () {
-      const nativeSessionId = "native-opencode-stale-status-retry";
-      const nativeEvents = asyncEventStream();
-      const firstPromptRelease = promiseGate<void>();
-      const promptCalls = yield* Queue.unbounded<string>();
-      const statusCalls = yield* Queue.unbounded<number>();
-      let promptCallCount = 0;
-      let statusCallCount = 0;
-      const client = {
-        event: {
-          subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
-            options.signal?.addEventListener("abort", () => nativeEvents.close(), { once: true });
-            return { stream: nativeEvents.stream };
-          },
-        },
-        session: {
-          create: async () => ({
-            data: { id: nativeSessionId, time: { created: 1, updated: 1 } },
-          }),
-          promptAsync: async (input: { readonly messageID?: string }) => {
-            promptCallCount += 1;
-            Queue.offerUnsafe(promptCalls, input.messageID!);
-            if (promptCallCount === 1) {
-              await firstPromptRelease.promise;
-            }
-            return { data: true };
-          },
-          status: async () => {
-            statusCallCount += 1;
-            Queue.offerUnsafe(statusCalls, statusCallCount);
-            if (statusCallCount === 1) throw new Error("transient status failure");
-            return { data: { [nativeSessionId]: { type: "idle" as const } } };
-          },
-          messages: async () => ({ data: [] }),
-          abort: async () => ({ data: true }),
-        },
-        mcp: { add: async () => ({ data: true }) },
-      };
-      const harness = yield* makeOpenCodeRuntimeHarness(
-        "stale-status-retry",
-        nativeSessionId,
-        client,
-      );
-      const start = yield* harness.startTurn().pipe(Effect.forkScoped);
-      const firstAdmissionMessageId = yield* Queue.take(promptCalls);
-
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "session.status",
-          properties: { sessionID: nativeSessionId, status: { type: "idle" } },
-        }),
-      );
-      firstPromptRelease.resolve();
-      yield* Fiber.join(start);
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "message.updated",
-          properties: {
-            sessionID: nativeSessionId,
-            info: {
-              id: firstAdmissionMessageId,
-              sessionID: nativeSessionId,
-              role: "user",
-              time: { created: DateTime.toEpochMillis(harness.now) },
+    }
+    assert.isFalse(
+      openCode2IsCancelledPostSettleWake(
+        v2Event({
+          type: "session.inbox.enqueued",
+          data: {
+            sessionID: "ses_root",
+            inputID: "input_status",
+            input: {
+              type: "synthetic",
+              data: { text: `<subagent status="cancelled">partial output</subagent>` },
+              delivery: "queue",
             },
           },
         }),
+      ),
+    );
+  });
+
+  it("requires a top-level cancellation marker at the start of synthetic text", () => {
+    for (const text of [
+      '<subagent state="completed">completed output</subagent>',
+      'quoted text: "<subagent state="cancelled">nested output</subagent>"',
+      '<wrapper><subagent state="interrupted">nested output</subagent></wrapper>',
+    ]) {
+      assert.isFalse(
+        openCode2IsCancelledPostSettleWake(
+          v2Event({
+            type: "session.inbox.enqueued",
+            data: {
+              sessionID: "ses_root",
+              inputID: "input_not_cancelled",
+              input: {
+                type: "synthetic",
+                data: { text },
+                delivery: "queue",
+              },
+            },
+          }),
+        ),
       );
-      assert.equal(yield* Queue.take(statusCalls), 1);
+    }
+  });
 
-      const running = yield* harness.runtime.readThreadSnapshot({
-        providerThread: harness.providerThread,
-      });
-      const activeTurn = running.providerTurns.at(-1)!;
-      yield* harness.runtime.steerTurn({
-        threadId: harness.threadId,
-        runId: harness.runId,
-        providerThread: harness.providerThread,
-        providerTurnId: activeTurn.id,
-        message: {
-          messageId: MessageId.make("message-opencode-stale-status-retry-steer"),
-          text: "new generation",
-          attachments: [],
-          createdBy: "user",
-          creationSource: "web",
+  it("suppresses an empty interrupted background-shell wake", () => {
+    const interruptedShellAdmission = v2Event({
+      type: "session.inbox.enqueued",
+      data: {
+        sessionID: "ses_root",
+        inputID: "input_interrupted_shell",
+        input: {
+          type: "synthetic",
+          data: {
+            text: '<shell id="call_shell" state="error" command="sleep 30">\n\n</shell>',
+            metadata: { source: "shell", state: "error" },
+          },
+          delivery: "steer",
         },
-      });
-      yield* Queue.take(promptCalls);
-      yield* TestClock.adjust("250 millis");
+      },
+    });
+    assert.isTrue(openCode2IsCancelledPostSettleWake(interruptedShellAdmission));
+  });
 
-      const afterRetry = yield* harness.runtime.readThreadSnapshot({
-        providerThread: harness.providerThread,
-      });
-      assert.equal(statusCallCount, 1);
-      assert.equal(afterRetry.providerTurns.at(-1)?.status, "running");
-    }).pipe(Effect.provide(idAllocatorLayer), Effect.scoped),
+  it("keeps a background-shell error that carries output visible", () => {
+    assert.isFalse(
+      openCode2IsCancelledPostSettleWake(
+        v2Event({
+          type: "session.inbox.enqueued",
+          data: {
+            sessionID: "ses_root",
+            inputID: "input_failed_shell",
+            input: {
+              type: "synthetic",
+              data: {
+                text: '<shell state="error">command failed</shell>',
+                metadata: { source: "shell", state: "error" },
+              },
+              delivery: "steer",
+            },
+          },
+        }),
+      ),
+    );
+  });
+
+  it("leaves a child synthetic admission eligible for child-turn creation", () => {
+    assert.isTrue(
+      openCode2IsCancelledPostSettleWake(
+        v2Event({
+          type: "session.inbox.enqueued",
+          data: {
+            sessionID: "ses_child",
+            inputID: "input_child_cancelled",
+            input: {
+              type: "synthetic",
+              data: { text: `<subagent state="cancelled">partial output</subagent>` },
+              delivery: "queue",
+            },
+          },
+        }),
+      ),
+    );
+    assert.isFalse(
+      openCode2IsPostSettleWakeAdmission(
+        v2Event({
+          type: "session.inbox.enqueued",
+          data: {
+            sessionID: "ses_child",
+            inputID: "input_child_cancelled",
+            input: {
+              type: "synthetic",
+              data: { text: `<subagent state="cancelled">partial output</subagent>` },
+              delivery: "queue",
+            },
+          },
+        }),
+        {
+          isChildSession: true,
+        },
+      ),
+    );
+  });
+
+  it("closes a buffered wake only on execution terminal or idle", () => {
+    assert.isFalse(
+      openCode2EventEndsExecution(
+        v2Event({ type: "session.step.started", data: { sessionID: "ses_root" } }),
+      ),
+    );
+    assert.isFalse(
+      openCode2EventEndsExecution(
+        v2Event({
+          type: "session.step.ended",
+          data: { sessionID: "ses_root", finish: "tool-calls" },
+        }),
+      ),
+    );
+    assert.isFalse(
+      openCode2EventEndsExecution(
+        v2Event({
+          type: "session.step.ended",
+          data: { sessionID: "ses_root", finish: "tool_calls" },
+        }),
+      ),
+    );
+    for (const type of [
+      "session.step.ended",
+      "session.step.failed",
+      "session.execution.interrupted",
+      "session.idle",
+    ] as const) {
+      assert.isTrue(
+        openCode2EventEndsExecution(v2Event({ type, data: { sessionID: "ses_root" } })),
+      );
+    }
+    assert.isTrue(
+      openCode2EventEndsExecution(
+        v2Event({
+          type: "session.step.ended",
+          data: { sessionID: "ses_root", finish: "stop" },
+        }),
+      ),
+    );
+  });
+});
+
+describe("OpenCode 2 wake evidence bounds", () => {
+  it("keeps a terminal fallback after an unbound child overflows its event prefix", () => {
+    const sessionID = "ses_deferred_child";
+    const buffer = makeOpenCode2DeferredChildEventBuffer();
+    const admitted = {
+      type: "session.inbox.enqueued",
+      data: { sessionID, inputID: "input_deferred_child" },
+    };
+    const started = {
+      type: "session.execution.started",
+      data: { sessionID },
+    };
+    bufferOpenCode2DeferredChildEvent(buffer, admitted, sessionID);
+    bufferOpenCode2DeferredChildEvent(buffer, started, sessionID);
+    for (let index = 2; index < OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT; index += 1) {
+      bufferOpenCode2DeferredChildEvent(
+        buffer,
+        {
+          type: "session.reasoning.delta",
+          data: { sessionID, delta: String(index) },
+        },
+        sessionID,
+      );
+    }
+
+    assert.isTrue(
+      bufferOpenCode2DeferredChildEvent(
+        buffer,
+        { type: "session.reasoning.delta", data: { sessionID, delta: "overflow" } },
+        sessionID,
+      ),
+    );
+    const terminal = {
+      type: "session.step.ended",
+      data: { sessionID, finish: "stop" },
+    };
+    assert.isFalse(bufferOpenCode2DeferredChildEvent(buffer, terminal, sessionID));
+
+    const drained = drainOpenCode2DeferredChildEvents(buffer);
+    assert.lengthOf(drained, OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT + 1);
+    assert.strictEqual(drained[0], admitted);
+    assert.strictEqual(drained[1], started);
+    assert.strictEqual(drained.at(-1), terminal);
+    assert.isTrue(openCode2EventEndsExecution(drained.at(-1) as V2Event));
+  });
+
+  it("synthesizes a failed terminal at the deferred child overflow boundary", () => {
+    const sessionID = "ses_deferred_child_without_terminal";
+    const buffer = makeOpenCode2DeferredChildEventBuffer();
+    for (let index = 0; index <= OPENCODE2_DEFERRED_CHILD_EVENT_LIMIT; index += 1) {
+      bufferOpenCode2DeferredChildEvent(
+        buffer,
+        { type: "session.reasoning.delta", data: { sessionID, delta: String(index) } },
+        sessionID,
+      );
+    }
+
+    const terminal = drainOpenCode2DeferredChildEvents(buffer).at(-1) as V2Event;
+    assert.strictEqual(terminal.type, "session.execution.failed");
+    assert.isTrue(openCode2EventEndsExecution(terminal));
+  });
+
+  it("evicts the oldest retired suppression evidence in insertion order", () => {
+    const wakes = new Map<string, unknown>();
+    for (let index = 0; index < OPENCODE2_RETIRED_SUPPRESS_WAKE_LIMIT + 2; index += 1) {
+      wakes.set(`input_retired_${index}`, {});
+    }
+
+    pruneOpenCode2RetiredSuppressWakes(wakes);
+
+    assert.equal(wakes.size, OPENCODE2_RETIRED_SUPPRESS_WAKE_LIMIT);
+    assert.isFalse(wakes.has("input_retired_0"));
+    assert.isFalse(wakes.has("input_retired_1"));
+    assert.isTrue(wakes.has(`input_retired_${OPENCODE2_RETIRED_SUPPRESS_WAKE_LIMIT + 1}`));
+  });
+
+  it("keeps recent unclaimed promotion evidence for late admissions", () => {
+    const inputIds = new Set(
+      Array.from(
+        { length: OPENCODE2_PROMOTED_INPUT_ID_LIMIT + 1 },
+        (_, index) => `input_promoted_${index}`,
+      ),
+    );
+
+    pruneOpenCode2PromotedInputIds(inputIds);
+
+    assert.equal(inputIds.size, OPENCODE2_PROMOTED_INPUT_ID_LIMIT);
+    assert.isFalse(inputIds.has("input_promoted_0"));
+    assert.isTrue(inputIds.has(`input_promoted_${OPENCODE2_PROMOTED_INPUT_ID_LIMIT}`));
+  });
+});
+
+describe("OpenCode 2 session selection", () => {
+  it("round-trips a provider model whose id contains a slash", () => {
+    assert.deepStrictEqual(
+      openCode2SessionSelectionParameters({
+        instanceId: ProviderInstanceId.make("opencode"),
+        model: "openrouter/qwen/qwen3-coder",
+      }),
+      {
+        model: {
+          providerID: "openrouter",
+          id: "qwen/qwen3-coder",
+        },
+      },
+    );
+  });
+});
+
+describe("removeOpenCode2Session", () => {
+  it.effect("treats an already-missing native session as deleted", () =>
+    removeOpenCode2Session(
+      "ses_missing",
+      Effect.succeed({
+        data: undefined,
+        error: { name: "SessionNotFoundError" },
+        response: { status: 404 },
+      }),
+    ),
   );
 
-  it.effect("ignores a delayed status reply after steering starts a newer admission", () =>
+  it.effect("treats the typed client's session-not-found error as deleted", () =>
     Effect.gen(function* () {
-      const admission = { admissionGeneration: 4, admissionPending: true };
-      const status = yield* Deferred.make<"idle" | "busy" | "unknown">();
-      const fiber = yield* reconcileOpenCodePromptAdmissionStatus(
-        admission,
-        4,
-        Deferred.await(status),
-      ).pipe(Effect.forkChild({ startImmediately: true }));
-
-      admission.admissionGeneration = 5;
-      admission.admissionPending = true;
-      yield* Deferred.succeed(status, "idle");
-
-      assert.equal(yield* Fiber.join(fiber), "stale");
-      assert.equal(admission.admissionGeneration, 5);
-      assert.isTrue(admission.admissionPending);
+      const settled = yield* Effect.promise(() =>
+        settleOpenCode2ClientRemoval(
+          Promise.reject({
+            _tag: "SessionNotFoundError",
+            sessionID: "ses_missing",
+            message: "session not found",
+          }),
+        ),
+      );
+      yield* removeOpenCode2Session("ses_missing", Effect.succeed(settled));
     }),
   );
 
-  it.effect("does not revive admission when abort wins a pending status lookup", () =>
+  it.effect("retains non-idempotent native deletion failures", () =>
     Effect.gen(function* () {
-      const admission = { admissionGeneration: 4, admissionPending: true };
-      const status = yield* Deferred.make<"idle" | "busy" | "unknown">();
-      const fiber = yield* reconcileOpenCodePromptAdmissionStatus(
-        admission,
-        4,
-        Deferred.await(status),
-      ).pipe(Effect.forkChild({ startImmediately: true }));
+      const failure = yield* removeOpenCode2Session(
+        "ses_broken",
+        Effect.succeed({
+          data: undefined,
+          error: { name: "InternalServerError" },
+          response: { status: 500 },
+        }),
+      ).pipe(Effect.flip);
 
-      cancelOpenCodePromptAdmission(admission, 5);
-      yield* Deferred.succeed(status, "idle");
-
-      assert.equal(yield* Fiber.join(fiber), "stale");
-      assert.isFalse(admission.admissionPending);
+      assert.strictEqual(failure.operation, "session.remove");
+      assert.strictEqual(failure.category, "session-remove-failed");
+      assert.include(failure.message, "session-remove-failed");
+      assert.notInclude(failure.message, "InternalServerError");
     }),
   );
+});
 
-  it.effect("logs bounded structural protocol diagnostics without native payload values", () =>
-    Effect.gen(function* () {
-      const idAllocator = yield* IdAllocatorV2;
-      const records: Array<unknown> = [];
-      const nativeEventLogger: EventNdjsonLogger = {
-        filePath: "/tmp/provider-native.ndjson",
-        write: (event) => Effect.sync(() => void records.push(event)),
-        close: () => Effect.void,
-      };
-      const logProtocolEvent = makeOpenCodeProtocolLogger({
-        nativeEventLogger,
-        idAllocator,
-        providerInstanceId: ProviderInstanceId.make("opencode-test"),
-        providerSessionId: ProviderSessionId.make("provider-session-opencode-test"),
-        threadId: ThreadId.make("thread-opencode-test"),
-      });
-      const secret = "secret-opencode-prompt";
-
-      yield* logProtocolEvent({
-        direction: "outgoing",
-        messageKind: "request",
-        method: "session.prompt",
-        payload: { prompt: secret, nested: { token: secret } },
-      });
-
-      const serialized = encodeUnknownJson(records);
-      assert.notInclude(serialized, secret);
-      assert.include(serialized, '"protocol":"opencode-sdk.sse"');
-      assert.include(serialized, '"method":"session.prompt"');
-      assert.include(serialized, '"fieldCount":2');
-    }).pipe(Effect.provide(idAllocatorLayer)),
-  );
-
-  it("advertises the identity strengths exposed by the SDK boundary", () => {
-    assert.equal(OpenCodeProviderCapabilitiesV2.identity.nativeThreadIds, "strong");
-    assert.equal(OpenCodeProviderCapabilitiesV2.identity.nativeTurnIds, "weak");
-    assert.equal(OpenCodeProviderCapabilitiesV2.identity.nativeItemIds, "strong");
-    assert.equal(OpenCodeProviderCapabilitiesV2.identity.nativeRequestIds, "strong");
-    assert.isTrue(OpenCodeProviderCapabilitiesV2.threads.canForkFromTurn);
-    assert.isTrue(OpenCodeProviderCapabilitiesV2.turns.supportsActiveSteering);
-    assert.equal(OpenCodeProviderCapabilitiesV2.turns.terminalStatusQuality, "strong");
-    assert.isFalse(OpenCodeProviderCapabilitiesV2.subagents.canCloseSubagents);
-  });
-
-  it("maps native permission families to orchestration request kinds", () => {
-    assert.equal(openCodePermissionRequestKind("bash"), "command");
-    assert.equal(openCodePermissionRequestKind("read"), "file-read");
-    assert.equal(openCodePermissionRequestKind("grep"), "file-read");
-    assert.equal(openCodePermissionRequestKind("external_directory"), "file-read");
-    assert.equal(openCodePermissionRequestKind("external_directory", "edit"), "file-change");
-    assert.equal(openCodePermissionRequestKind("edit"), "file-change");
-    assert.equal(openCodePermissionRequestKind("apply_patch"), "file-change");
-    assert.equal(openCodePermissionRequestKind("todowrite"), "command");
-    assert.equal(openCodePermissionRequestKind("custom", "todowrite"), "command");
-  });
-
-  it("maps OpenCode tools to semantic turn-item families", () => {
-    assert.equal(openCodeToolProjectionKind("bash"), "command_execution");
-    assert.equal(openCodeToolProjectionKind("edit"), "file_change");
-    assert.equal(openCodeToolProjectionKind("read"), "file_search");
-    assert.equal(openCodeToolProjectionKind("lsp"), "file_search");
-    assert.equal(openCodeToolProjectionKind("websearch"), "web_search");
-    assert.equal(openCodeToolProjectionKind("codesearch"), "web_search");
-    assert.equal(openCodeToolProjectionKind("todowrite"), "dynamic_tool");
-    assert.equal(openCodeToolProjectionKind("custom_tool"), "dynamic_tool");
-  });
-
-  it("maps runtime modes to safe OpenCode permission rules", () => {
-    const approvalRequired = openCodePermissionRules(runtimePolicy("approval-required"));
-    assert.equal(permissionAction(approvalRequired, "read"), "allow");
-    assert.equal(permissionAction(approvalRequired, "edit"), "ask");
-    assert.equal(permissionAction(approvalRequired, "bash"), "ask");
-    assert.equal(permissionAction(approvalRequired, "doom_loop"), "ask");
-    assert.equal(permissionAction(approvalRequired, "unknown_plugin_tool"), "ask");
-    assert.equal(permissionAction(approvalRequired, "question"), "allow");
-
-    const autoAcceptEdits = openCodePermissionRules(runtimePolicy("auto-accept-edits"));
-    assert.equal(permissionAction(autoAcceptEdits, "edit"), "allow");
-    assert.equal(permissionAction(autoAcceptEdits, "bash"), "ask");
-
-    const fullAccess = openCodePermissionRules(runtimePolicy("full-access"));
-    assert.equal(permissionAction(fullAccess, "bash"), "allow");
-    assert.equal(permissionAction(fullAccess, "edit"), "allow");
-
-    const granularApproval = openCodePermissionRules(
-      runtimePolicy("full-access", {
-        approvalPolicy: { granular: { request_permissions: true } },
+describe("OpenCode 2 shell removal", () => {
+  it("rejects resolved HTTP failures while accepting removed or already-missing shells", () => {
+    assert.isTrue(openCode2ShellRemovalSucceeded({ data: true }));
+    assert.isTrue(
+      openCode2ShellRemovalSucceeded({
+        error: { name: "ShellNotFoundError" },
+        response: { status: 404 },
       }),
     );
-    assert.equal(permissionAction(granularApproval, "bash"), "ask");
-    assert.equal(permissionAction(granularApproval, "read"), "allow");
-
-    const approvalRequiredWorkspaceWrite = openCodePermissionRules(
-      runtimePolicy("approval-required", {
-        sandboxPolicy: {
-          type: "workspaceWrite",
-          writableRoots: ["/tmp/opencode-workspace"],
-          networkAccess: false,
+    assert.isTrue(
+      openCode2ShellRemovalSucceeded({
+        error: {
+          _tag: "ShellNotFoundError",
+          id: "shl_missing",
+          message: "shell not found",
         },
       }),
     );
-    assert.equal(permissionAction(approvalRequiredWorkspaceWrite, "edit"), "ask");
+    assert.isFalse(
+      openCode2ShellRemovalSucceeded({
+        error: { name: "InternalServerError" },
+        response: { status: 500 },
+      }),
+    );
+    assert.isFalse(
+      openCode2ShellRemovalSucceeded({
+        error: { name: "UnknownError" },
+      }),
+    );
+  });
+});
+
+describe("openCode2QuestionId", () => {
+  it("slugs the header so answers keyed by id resolve", () => {
+    assert.strictEqual(openCode2QuestionId(0, "Pick a Branch!"), "question-0-pick-a-branch");
   });
 
-  it("enforces non-interactive sandbox policy through OpenCode permissions", () => {
-    const readOnly = openCodePermissionRules(
-      runtimePolicy("full-access", {
-        approvalPolicy: "never",
-        sandboxPolicy: {
-          type: "readOnly",
-          access: { type: "fullAccess" },
-          networkAccess: false,
-        },
-      }),
-    );
-    assert.equal(permissionAction(readOnly, "read"), "allow");
-    assert.equal(permissionAction(readOnly, "edit"), "deny");
-    assert.equal(permissionAction(readOnly, "bash"), "deny");
-    assert.equal(permissionAction(readOnly, "webfetch"), "deny");
-    assert.equal(permissionAction(readOnly, "doom_loop"), "deny");
-    assert.equal(permissionAction(readOnly, "unknown_plugin_tool"), "deny");
-    assert.equal(permissionAction(readOnly, "external_directory"), "allow");
+  it("falls back to the index when the header carries no usable characters", () => {
+    assert.strictEqual(openCode2QuestionId(2, "  ???  "), "question-2");
+  });
+});
 
-    const workspaceWrite = openCodePermissionRules(
-      runtimePolicy("auto-accept-edits", {
-        approvalPolicy: "never",
-        sandboxPolicy: {
-          type: "workspaceWrite",
-          writableRoots: ["/tmp/opencode-workspace"],
-          networkAccess: true,
-        },
-      }),
-    );
-    assert.equal(permissionAction(workspaceWrite, "edit"), "allow");
-    assert.equal(permissionAction(workspaceWrite, "bash"), "deny");
-    assert.equal(permissionAction(workspaceWrite, "webfetch"), "allow");
-    assert.deepInclude(workspaceWrite, {
-      permission: "external_directory",
-      pattern: "/tmp/opencode-workspace/*",
-      action: "allow",
+describe("openCode2ForkParameters", () => {
+  it("maps a boundary message onto the required before union member", () => {
+    assert.deepStrictEqual(openCode2ForkParameters("ses_123", "msg_456"), {
+      sessionID: "ses_123",
+      $body_boundary: { type: "before", messageID: "msg_456" },
     });
   });
 
-  it("preserves OpenCode's recursion guard on task-created child sessions", () => {
-    const childRules = openCodeChildPermissionRules(runtimePolicy("full-access"), [
-      { permission: "task", pattern: "*", action: "deny" },
-    ]);
+  it("maps a whole-head fork onto the through union member", () => {
+    assert.deepStrictEqual(openCode2ForkParameters("ses_123", undefined), {
+      sessionID: "ses_123",
+      $body_boundary: { type: "through" },
+    });
+  });
+});
 
-    assert.equal(permissionAction(childRules, "read"), "allow");
-    assert.equal(permissionAction(childRules, "bash"), "allow");
-    assert.equal(permissionAction(childRules, "task"), "deny");
+describe("openCode2LocationQuery", () => {
+  it("scopes list routes to a directory", () => {
+    assert.strictEqual(
+      openCode2LocationQuery("/tmp/project"),
+      "location%5Bdirectory%5D=%2Ftmp%2Fproject",
+    );
+  });
+});
 
-    const approvalRequiredPolicy = runtimePolicy("approval-required");
-    const parentRules = openCodePermissionRules(approvalRequiredPolicy);
-    const childApprovalRules = openCodeChildPermissionRules(approvalRequiredPolicy, [
-      ...parentRules.filter((rule) => rule.action === "deny"),
-      { permission: "task", pattern: "*", action: "deny" },
-    ]);
-    assert.equal(permissionAction(childApprovalRules, "bash"), "ask");
-    assert.equal(permissionAction(childApprovalRules, "task"), "deny");
+describe("openCode2ShellsFromList", () => {
+  it("keeps running shells and defaults missing metadata", () => {
+    assert.deepStrictEqual(
+      openCode2ShellsFromList([
+        { id: "sh_1", status: "running", metadata: { sessionID: "ses_a" }, command: "sleep 1" },
+        { id: "sh_2", status: "exited" },
+        { status: "running" },
+      ]),
+      [
+        { id: "sh_1", status: "running", metadata: { sessionID: "ses_a" }, command: "sleep 1" },
+        { id: "sh_2", status: "exited", metadata: {} },
+      ],
+    );
   });
 
-  it("uses the next native user message as the exclusive fork and revert boundary", () => {
-    const first = providerTurn({ id: "turn:first", ordinal: 1, nativeId: "msg-user-1" });
-    const synthetic = providerTurn({ id: "turn:synthetic", ordinal: 2, nativeId: null });
-    const third = providerTurn({ id: "turn:third", ordinal: 3, nativeId: "msg-user-3" });
+  it("peels a location-scoped HTTP envelope", () => {
+    assert.deepStrictEqual(
+      openCode2ShellsFromList({
+        location: { directory: "/tmp/project" },
+        data: [{ id: "sh_1", status: "running", metadata: { sessionID: "ses_a" } }],
+      }),
+      [{ id: "sh_1", status: "running", metadata: { sessionID: "ses_a" } }],
+    );
+  });
+});
+
+describe("openCode2McpServersFromList", () => {
+  it("reads an array catalog and a name-to-status record", () => {
+    assert.deepStrictEqual(
+      openCode2McpServersFromList([{ name: "t3-code", status: "connected" }]),
+      [{ name: "t3-code", status: "connected" }],
+    );
+    assert.deepStrictEqual(openCode2McpServersFromList({ "t3-code": "connected" }), [
+      { name: "t3-code", status: "connected" },
+    ]);
+  });
+});
+
+describe("openCode2T3OrchestrationInstructions", () => {
+  it("includes shared orchestration rules and the OpenCode execute bridge", () => {
+    const text = openCode2T3OrchestrationInstructions();
+    assert.include(text, "use `delegate_task`");
+    assert.include(text, 'tools["t3-code"]');
+    assert.include(text, 'await tools["t3-code"].t3_thread_start');
+    assert.include(text, 'await tools["t3-code"].orchestrator_capabilities');
+    assert.include(text, 'providerInstanceId: "..."');
+    assert.include(text, "modelCursor: 50");
+    assert.include(text, "includeModelOptions: true");
+    assert.isBelow(Buffer.byteLength(JSON.stringify(text), "utf8"), 8 * 1024);
+  });
+});
+
+describe("openCode2AutoPermissionReply", () => {
+  const policy = (overrides: Record<string, unknown>) =>
+    ({
+      cwd: "/tmp",
+      runtimeMode: "default",
+      interactionMode: "default",
+      ...overrides,
+    }) as never;
+  const reply = (
+    overrides: Record<string, unknown>,
+    action: string,
+    resources: ReadonlyArray<string> = ["*"],
+  ) => openCode2AutoPermissionReply(policy(overrides), { action, resources });
+
+  it("approves only the current request in full-access mode", () => {
+    assert.strictEqual(reply({ runtimeMode: "full-access" }, "bash"), "once");
+  });
+
+  it("does not turn approval never into implicit full access", () => {
+    assert.strictEqual(reply({ runtimeMode: "auto", approvalPolicy: "never" }, "bash"), "reject");
+    assert.strictEqual(reply({ runtimeMode: "auto", approvalPolicy: "never" }, "read"), "once");
+  });
+
+  it("surfaces the request when an approval policy asks for one", () => {
+    assert.strictEqual(
+      reply({ runtimeMode: "full-access", approvalPolicy: "always" }, "bash"),
+      null,
+    );
+  });
+
+  // A structured approval policy is a request for interactive review, so
+  // full-access must not silently override it.
+  it("surfaces the request for a structured approval policy", () => {
+    assert.strictEqual(
+      reply({ runtimeMode: "full-access", approvalPolicy: { type: "onRequest" } }, "bash"),
+      null,
+    );
+  });
+
+  it("auto-accepts edits but still asks for shell access", () => {
+    assert.strictEqual(reply({ runtimeMode: "auto-accept-edits" }, "edit"), "once");
+    assert.strictEqual(reply({ runtimeMode: "auto-accept-edits" }, "bash"), null);
+  });
+
+  it("enforces workspace-write and network policy without native persistent grants", () => {
+    const sandboxPolicy = {
+      type: "workspaceWrite",
+      networkAccess: true,
+      writableRoots: ["/workspace/shared"],
+    };
+    const overrides = {
+      runtimeMode: "auto",
+      approvalPolicy: "never",
+      sandboxPolicy,
+    };
+    assert.strictEqual(reply(overrides, "edit"), "once");
+    assert.strictEqual(reply(overrides, "bash"), "reject");
+    assert.strictEqual(reply(overrides, "websearch"), "once");
+    assert.strictEqual(
+      reply(overrides, "external_directory", ["/workspace/shared/file.txt"]),
+      "once",
+    );
+    assert.strictEqual(reply(overrides, "external_directory", ["/outside/file.txt"]), "reject");
+  });
+
+  it("does not let a remembered session grant override a later policy denial", () => {
+    assert.strictEqual(
+      openCode2PermissionAutoReply(
+        policy({ runtimeMode: "auto", approvalPolicy: "never" }),
+        [{ action: "bash", resources: ["*"] }],
+        { action: "bash", resources: ["*"] },
+      ),
+      "reject",
+    );
+  });
+
+  it("uses a remembered session grant when policy still requires approval", () => {
+    assert.strictEqual(
+      openCode2PermissionAutoReply(
+        policy({ runtimeMode: "default" }),
+        [{ action: "bash", resources: ["/workspace/*"] }],
+        { action: "bash", resources: ["/workspace/file.txt"] },
+      ),
+      "once",
+    );
+  });
+
+  it("combines remembered grants per resource in a multi-resource request", () => {
+    assert.strictEqual(
+      openCode2PermissionAutoReply(
+        policy({ runtimeMode: "default" }),
+        [
+          { action: "bash", resources: ["/workspace/first/*"] },
+          { action: "bash", resources: ["/workspace/second/*"] },
+        ],
+        {
+          action: "bash",
+          resources: ["/workspace/first/file.txt", "/workspace/second/file.txt"],
+        },
+      ),
+      "once",
+    );
+  });
+});
+
+describe("normalizeOpenCode2PermissionEvent", () => {
+  it("treats a missing legacy patterns list as a wildcard request", () => {
+    assert.deepStrictEqual(
+      normalizeOpenCode2PermissionEvent("legacy", {
+        id: "permission-1",
+        sessionID: "session-1",
+        permission: "grep",
+        metadata: {},
+        always: [],
+      }),
+      {
+        action: "grep",
+        resources: [],
+        save: [],
+      },
+    );
+  });
+
+  it("accepts preview aliases and singular patterns", () => {
+    assert.deepStrictEqual(
+      normalizeOpenCode2PermissionEvent("v2", {
+        permission: "external_directory",
+        pattern: "/workspace/file.txt",
+        always: ["/workspace/*"],
+      }),
+      {
+        action: "external_directory",
+        resources: ["/workspace/file.txt"],
+        save: ["/workspace/*"],
+      },
+    );
+  });
+});
+
+describe("OpenCode 2 remembered session permissions", () => {
+  it("reads every supported runtime request event id alias", () => {
+    assert.equal(openCode2RuntimeRequestEventId({ requestID: "request-1" }), "request-1");
+    assert.equal(openCode2RuntimeRequestEventId({ formID: "form-1" }), "form-1");
+    assert.equal(openCode2RuntimeRequestEventId({ id: "legacy-1" }), "legacy-1");
+  });
+
+  it("scopes native request ids to their native session", () => {
+    assert.notEqual(
+      openCode2RuntimeRequestNativeKey("session-a", "request-1"),
+      openCode2RuntimeRequestNativeKey("session-b", "request-1"),
+    );
+    assert.equal(
+      openCode2RuntimeRequestNativeKey("session-a", "request-1"),
+      openCode2RuntimeRequestNativeKey("session-a", "request-1"),
+    );
+  });
+
+  it("maps provider permission rejections to cancellation", () => {
+    assert.equal(openCode2PermissionReplyStatus("once"), "resolved");
+    assert.equal(openCode2PermissionReplyStatus("reject"), "cancelled");
+  });
+
+  it("resolves answered requests while cancelling rejected request items", () => {
+    assert.deepStrictEqual(openCode2RuntimeRequestResponseSettlement("accept"), {
+      requestStatus: "resolved",
+      itemStatus: "completed",
+      rememberPermissionForSession: false,
+    });
+    assert.deepStrictEqual(openCode2RuntimeRequestResponseSettlement("decline"), {
+      requestStatus: "resolved",
+      itemStatus: "cancelled",
+      rememberPermissionForSession: false,
+    });
+    assert.deepStrictEqual(openCode2RuntimeRequestResponseSettlement("cancel"), {
+      requestStatus: "resolved",
+      itemStatus: "cancelled",
+      rememberPermissionForSession: false,
+    });
+    assert.deepStrictEqual(openCode2RuntimeRequestResponseSettlement("acceptForSession"), {
+      requestStatus: "resolved",
+      itemStatus: "completed",
+      rememberPermissionForSession: true,
+    });
+  });
+
+  const runtimePolicy = {
+    cwd: "/tmp",
+    interactionMode: "default",
+    runtimeMode: "default",
+  } as never;
+
+  it("scopes remembered grants to their native session", () => {
+    const permissions = new Map();
+    rememberOpenCode2SessionPermission(permissions, "ses_child", {
+      action: "bash",
+      resources: ["/workspace/*"],
+      save: [],
+    });
+    const request = { action: "bash", resources: ["/workspace/file.txt"] };
+
+    assert.strictEqual(
+      openCode2PermissionAutoReplyForSession(runtimePolicy, permissions, "ses_child", request),
+      "once",
+    );
+    assert.isNull(
+      openCode2PermissionAutoReplyForSession(runtimePolicy, permissions, "ses_sibling", request),
+    );
+  });
+
+  it("retains a duplicate grant until every owner revokes it", () => {
+    const permissions = new Map();
+    const permission = {
+      action: "bash",
+      resources: ["/workspace/*"],
+      save: [],
+    };
+    const remembered = rememberOpenCode2SessionPermission(permissions, "ses_root", permission);
+    const duplicate = rememberOpenCode2SessionPermission(permissions, "ses_root", permission);
+    const request = { action: "bash", resources: ["/workspace/file.txt"] };
+
+    assert.isNotNull(remembered);
+    assert.strictEqual(duplicate, remembered);
+    assert.strictEqual(
+      openCode2PermissionAutoReplyForSession(runtimePolicy, permissions, "ses_root", request),
+      "once",
+    );
+    forgetOpenCode2SessionPermission(permissions, "ses_root", remembered!);
+    assert.strictEqual(
+      openCode2PermissionAutoReplyForSession(runtimePolicy, permissions, "ses_root", request),
+      "once",
+    );
+    forgetOpenCode2SessionPermission(permissions, "ses_root", duplicate!);
+    assert.isNull(
+      openCode2PermissionAutoReplyForSession(runtimePolicy, permissions, "ses_root", request),
+    );
+  });
+
+  it("remembers a resource-less grant as a wildcard", () => {
+    const permissions = new Map();
+    rememberOpenCode2SessionPermission(permissions, "ses_root", {
+      action: "grep",
+      resources: [],
+      save: [],
+    });
+
+    assert.strictEqual(
+      openCode2PermissionAutoReplyForSession(runtimePolicy, permissions, "ses_root", {
+        action: "grep",
+        resources: ["/workspace/file.txt"],
+      }),
+      "once",
+    );
+  });
+});
+
+describe("OpenCode 2 child item ordinals", () => {
+  it("reserves a distinct item block for every child turn", () => {
+    assert.deepStrictEqual(openCode2ChildTurnItemOrdinals(1), { user: 100, next: 101 });
+    assert.deepStrictEqual(openCode2ChildTurnItemOrdinals(2), { user: 200, next: 201 });
+  });
+});
+
+describe("openCode2PendingItemsFromList", () => {
+  it("keeps pending and inbox items that name a session", () => {
+    assert.deepStrictEqual(
+      openCode2PendingItemsFromList([
+        { sessionID: "ses_a", id: "pending-1", type: "compaction" },
+        { sessionID: "ses_b", id: "msg_1", type: "user", payload: { text: "hi" } },
+        { id: "orphan" },
+        "skip",
+      ]),
+      [
+        { sessionID: "ses_a", id: "pending-1", type: "compaction" },
+        { sessionID: "ses_b", id: "msg_1", type: "user" },
+      ],
+    );
+  });
+
+  it("returns an empty list for a missing payload", () => {
+    assert.deepStrictEqual(openCode2PendingItemsFromList(undefined), []);
+    assert.deepStrictEqual(openCode2PendingItemsFromList({ data: [] }), []);
+  });
+});
+
+describe("openCode2PendingWorkForSession", () => {
+  const sessionID = "ses_target";
+  const pending = (owner: string): SessionPendingInfo => ({
+    admittedSeq: 1,
+    id: "pending-1",
+    sessionID: owner,
+    timeCreated: 1,
+    type: "compaction",
+  });
+  const shell = (owner: string, status: ShellInfoV2["status"]): ShellInfoV2 => ({
+    id: "shell-1",
+    status,
+    command: "sleep 20",
+    cwd: "/workspace",
+    shell: "/bin/bash",
+    file: "/workspace/shell.out",
+    metadata: { sessionID: owner },
+    time: { started: 1 },
+  });
+
+  it.effect("pins the thread for its durable pending input while still inspecting shells", () =>
+    Effect.gen(function* () {
+      let listedShells = false;
+      const result = yield* openCode2PendingWorkForSession({
+        sessionID,
+        pending: Effect.succeed([pending(sessionID)]),
+        shells: Effect.sync(() => {
+          listedShells = true;
+          return [];
+        }),
+      });
+
+      assert.isTrue(result);
+      assert.isTrue(listedShells);
+    }),
+  );
+
+  it.effect("pins only running shells owned by the same native session", () =>
+    Effect.gen(function* () {
+      assert.isTrue(
+        yield* openCode2PendingWorkForSession({
+          sessionID,
+          pending: Effect.succeed([]),
+          shells: Effect.succeed([shell(sessionID, "running")]),
+        }),
+      );
+      assert.isFalse(
+        yield* openCode2PendingWorkForSession({
+          sessionID,
+          pending: Effect.succeed([pending("ses_sibling")]),
+          shells: Effect.succeed([shell("ses_sibling", "running"), shell(sessionID, "exited")]),
+        }),
+      );
+    }),
+  );
+});
+
+describe("openCode2ToolNeedsTerminalOverride", () => {
+  const part = (status: "pending" | "running" | "completed" | "error", errorMessage?: string) => ({
+    status,
+    errorMessage,
+  });
+
+  it("terminalizes tools that have no native terminal state", () => {
+    assert.isTrue(openCode2ToolNeedsTerminalOverride(part("pending"), "failed"));
+    assert.isTrue(openCode2ToolNeedsTerminalOverride(part("running"), "interrupted"));
+  });
+
+  it("restamps only the provider's interrupt-specific tool failure", () => {
+    assert.isTrue(
+      openCode2ToolNeedsTerminalOverride(
+        part("error", "Tool execution interrupted"),
+        "interrupted",
+      ),
+    );
+    assert.isFalse(
+      openCode2ToolNeedsTerminalOverride(part("error", "command failed"), "interrupted"),
+    );
+    assert.isFalse(
+      openCode2ToolNeedsTerminalOverride(part("error", "Tool execution interrupted"), "failed"),
+    );
+  });
+
+  it("preserves completed tools", () => {
+    assert.isFalse(openCode2ToolNeedsTerminalOverride(part("completed"), "interrupted"));
+  });
+});
+
+describe("OpenCode 2 session errors", () => {
+  it("fans an unscoped error out to every active native session", () => {
+    assert.deepStrictEqual(
+      openCode2SessionErrorTargetSessionIds(undefined, ["ses_first", "ses_second"]),
+      ["ses_first", "ses_second"],
+    );
+    assert.deepStrictEqual(
+      openCode2SessionErrorTargetSessionIds("ses_second", ["ses_first", "ses_second"]),
+      ["ses_second"],
+    );
+    assert.deepStrictEqual(
+      openCode2SessionErrorTargetSessionIds("ses_missing", ["ses_first", "ses_second"]),
+      [],
+    );
+  });
+
+  it("normalizes provider abort errors without poisoning the provider session", () => {
+    const error = {
+      sessionID: "ses_target",
+      error: {
+        name: "MessageAbortedError",
+        data: { message: "The user aborted the request." },
+      },
+    } as const;
+
+    assert.strictEqual(openCode2SessionErrorMessage(error), "The user aborted the request.");
+    assert.strictEqual(openCode2SessionErrorStatus(error, false), "interrupted");
+  });
+
+  it("preserves ordinary provider failures", () => {
+    const error = {
+      error: {
+        name: "UnknownError",
+        data: { message: "Provider exploded." },
+      },
+    } as const;
+
+    assert.strictEqual(openCode2SessionErrorMessage(error), "Provider exploded.");
+    assert.strictEqual(openCode2SessionErrorStatus(error, false), "failed");
+    assert.strictEqual(openCode2SessionErrorStatus(error, true), "interrupted");
+  });
+
+  it("breaks a native thread only when the provider shuts down", () => {
+    assert.strictEqual(openCode2InterruptedThreadDisposition("user" as any), "reusable");
+    assert.strictEqual(openCode2InterruptedThreadDisposition("superseded" as any), "reusable");
+    assert.strictEqual(openCode2InterruptedThreadDisposition("shutdown" as any), "broken");
+  });
+
+  it("uses idle only before the authoritative execution lifecycle starts", () => {
+    assert.isTrue(openCode2ShouldSettleTurn("idle", false));
+    assert.isFalse(openCode2ShouldSettleTurn("execution-terminal", false));
+    assert.isFalse(openCode2ShouldSettleTurn("execution-interrupted", false));
+    assert.isTrue(openCode2ShouldSettleTurn("execution-interrupted", false, true));
+    assert.isFalse(openCode2ShouldSettleTurn("idle", true));
+    assert.isTrue(openCode2ShouldSettleTurn("execution-terminal", true));
+    assert.isTrue(openCode2ShouldSettleTurn("execution-interrupted", true));
+  });
+});
+
+describe("openCode2 interrupt and event-stream recovery helpers", () => {
+  it("keeps an error occurrence stable until the error clears", () => {
+    const firstErrorAt = DateTime.makeUnsafe("2026-08-11T12:00:00Z");
+    const unrelatedUpdateAt = DateTime.makeUnsafe("2026-08-11T12:01:00Z");
+    const repeatedErrorAt = DateTime.makeUnsafe("2026-08-11T12:02:00Z");
+
+    assert.deepStrictEqual(
+      openCode2LastErrorAt({
+        previousError: "event stream stalled",
+        previousErrorAt: firstErrorAt,
+        nextError: "event stream stalled",
+        updatedAt: unrelatedUpdateAt,
+      }),
+      firstErrorAt,
+    );
+    assert.isNull(
+      openCode2LastErrorAt({
+        previousError: "event stream stalled",
+        previousErrorAt: firstErrorAt,
+        nextError: null,
+        updatedAt: unrelatedUpdateAt,
+      }),
+    );
+    assert.deepStrictEqual(
+      openCode2LastErrorAt({
+        previousError: null,
+        previousErrorAt: null,
+        nextError: "event stream stalled",
+        updatedAt: repeatedErrorAt,
+      }),
+      repeatedErrorAt,
+    );
+  });
+
+  it.effect("registers event-pump abort before startup interruption can close the scope", () =>
+    Effect.gen(function* () {
+      const scope = yield* Scope.make();
+      const forked = yield* Deferred.make<void>();
+      const releaseRegistration = yield* Deferred.make<void>();
+      const finalizerOrder: Array<"abort" | "pump"> = [];
+      const startup = yield* openCode2ForkEventPumpInScope({
+        scope,
+        abort: Effect.sync(() => finalizerOrder.push("abort")),
+        pump: Effect.never.pipe(Effect.ensuring(Effect.sync(() => finalizerOrder.push("pump")))),
+        afterFork: Deferred.succeed(forked, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseRegistration)),
+        ),
+      }).pipe(Effect.forkScoped);
+
+      yield* Deferred.await(forked);
+      const interruption = yield* Fiber.interrupt(startup).pipe(Effect.forkScoped);
+      yield* Deferred.succeed(releaseRegistration, undefined);
+      yield* Fiber.join(interruption);
+      yield* Scope.close(scope, Exit.void);
+
+      assert.deepStrictEqual(finalizerOrder, ["abort", "pump"]);
+    }),
+  );
+
+  it("force-finalizes only after an interrupted turn outlives the settle wait", () => {
+    assert.isFalse(
+      openCode2ShouldForceInterruptFinalize({
+        interrupted: true,
+        finalized: false,
+        stillActive: true,
+        waitedMs: OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS - 1,
+        settleTimeoutMs: OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
+      }),
+    );
+    assert.isTrue(
+      openCode2ShouldForceInterruptFinalize({
+        interrupted: true,
+        finalized: false,
+        stillActive: true,
+        waitedMs: OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
+        settleTimeoutMs: OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldForceInterruptFinalize({
+        interrupted: true,
+        finalized: true,
+        stillActive: false,
+        waitedMs: OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
+        settleTimeoutMs: OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldForceInterruptFinalize({
+        interrupted: false,
+        finalized: false,
+        stillActive: true,
+        waitedMs: OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
+        settleTimeoutMs: OPENCODE2_INTERRUPT_SETTLE_TIMEOUT_MS,
+      }),
+    );
+  });
+
+  it("quarantines an ambiguous interrupt or any force-finalized execution", () => {
+    // Confirmed interrupt request and shells stopped: reusable.
+    assert.isFalse(
+      openCode2ShouldQuarantineInterruptedSession({
+        interruptRequestConfirmed: true,
+        shellRemovalConfirmed: true,
+      }),
+    );
+    // A timed-out or failed session.interrupt leaves the native execution
+    // running; Stop still force-finalizes locally, but the session must not
+    // be reused by a follow-up turn.
+    assert.isTrue(
+      openCode2ShouldQuarantineInterruptedSession({
+        interruptRequestConfirmed: false,
+        shellRemovalConfirmed: true,
+      }),
+    );
+    // An owned shell that could not be stopped may still run the interrupted
+    // work on the same native session.
+    assert.isTrue(
+      openCode2ShouldQuarantineInterruptedSession({
+        interruptRequestConfirmed: true,
+        shellRemovalConfirmed: false,
+      }),
+    );
+    assert.isTrue(
+      openCode2ShouldQuarantineInterruptedSession({
+        interruptRequestConfirmed: false,
+        shellRemovalConfirmed: false,
+      }),
+    );
+    // Request acknowledgements are not an execution terminal. If the terminal
+    // never arrives before local force-finalization, the session is ambiguous.
+    assert.isTrue(
+      openCode2ShouldQuarantineInterruptedSession({
+        interruptRequestConfirmed: true,
+        shellRemovalConfirmed: true,
+        forceFinalizedWithoutTerminal: true,
+      }),
+    );
+  });
+
+  it("fails active turns only after the clean-EOF budget with no idle penalty", () => {
+    assert.isFalse(
+      openCode2ShouldFailActiveTurnsAfterCleanEof({
+        consecutiveCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES - 1,
+        maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        cleanEofWindowAgeMs: OPENCODE2_EVENT_STALL_MS,
+        minimumWindowMs: OPENCODE2_EVENT_STALL_MS,
+        hasActiveTurn: true,
+      }),
+    );
+    assert.isTrue(
+      openCode2ShouldFailActiveTurnsAfterCleanEof({
+        consecutiveCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        cleanEofWindowAgeMs: OPENCODE2_EVENT_STALL_MS,
+        minimumWindowMs: OPENCODE2_EVENT_STALL_MS,
+        hasActiveTurn: true,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldFailActiveTurnsAfterCleanEof({
+        consecutiveCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        cleanEofWindowAgeMs: OPENCODE2_EVENT_STALL_MS - 1,
+        minimumWindowMs: OPENCODE2_EVENT_STALL_MS,
+        hasActiveTurn: true,
+      }),
+    );
+    // Idle reconnects (normal resubscription) and replay parking never count
+    // toward the budget.
+    assert.isFalse(
+      openCode2ShouldFailActiveTurnsAfterCleanEof({
+        consecutiveCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES * 10,
+        maxCleanEofs: OPENCODE2_EVENT_CLEAN_EOF_MAX_RESUBSCRIBES,
+        cleanEofWindowAgeMs: OPENCODE2_EVENT_STALL_MS * 10,
+        minimumWindowMs: OPENCODE2_EVENT_STALL_MS,
+        hasActiveTurn: false,
+      }),
+    );
+  });
+
+  it("backs off clean-EOF reconnects while a runtime request is pending", () => {
+    assert.equal(openCode2CleanEofResubscribeDelayMs(1, true), 250);
+    assert.equal(
+      openCode2CleanEofResubscribeDelayMs(100, true),
+      OPENCODE2_EVENT_PENDING_RESUBSCRIBE_DELAY_MS,
+    );
+    assert.equal(
+      openCode2CleanEofResubscribeDelayMs(100, false),
+      OPENCODE2_EVENT_RESUBSCRIBE_DELAY_MS,
+    );
+  });
+
+  it("charges clean-EOF budget only for unexplained peer closes", () => {
+    assert.isTrue(
+      openCode2ShouldChargeCleanEofBudget({
+        watchdogResubscribe: false,
+        hasPendingRuntimeRequest: false,
+        hasInFlightPendingWork: false,
+      }),
+    );
+    // Stall watchdog already owns its own fail budget; local aborts must not
+    // also spend the clean-EOF budget (live: 30s quiet shells then fail).
+    assert.isFalse(
+      openCode2ShouldChargeCleanEofBudget({
+        watchdogResubscribe: true,
+        hasPendingRuntimeRequest: false,
+        hasInFlightPendingWork: false,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldChargeCleanEofBudget({
+        watchdogResubscribe: false,
+        hasPendingRuntimeRequest: false,
+        hasInFlightPendingWork: true,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldChargeCleanEofBudget({
+        watchdogResubscribe: false,
+        hasPendingRuntimeRequest: true,
+        hasInFlightPendingWork: false,
+      }),
+    );
+  });
+
+  it("matches projected child runtime requests to the parent turn and child session", () => {
+    assert.isTrue(
+      openCode2AllActiveTurnsAwaitRuntimeRequest({
+        activeTurns: [
+          { nativeSessionId: "ses_parent", providerTurnId: "turn_parent" },
+          { nativeSessionId: "ses_child", providerTurnId: "turn_child" },
+        ],
+        // Production stores the projected parent turn plus the native child
+        // session, so both active turns are legitimately waiting on one prompt.
+        pendingRequests: [{ nativeSessionId: "ses_child", providerTurnId: "turn_parent" }],
+      }),
+    );
+    assert.isFalse(
+      openCode2AllActiveTurnsAwaitRuntimeRequest({
+        activeTurns: [
+          { nativeSessionId: "ses_parent", providerTurnId: "turn_parent" },
+          { nativeSessionId: "ses_child", providerTurnId: "turn_child" },
+        ],
+        pendingRequests: [{ nativeSessionId: "ses_parent", providerTurnId: "turn_parent" }],
+      }),
+    );
+  });
+
+  it("resubscribes a stalled stream only while a turn is active", () => {
+    assert.isTrue(
+      openCode2ShouldResubscribeStalledStream({
+        sessionAborted: false,
+        hasActiveTurn: true,
+        lastEventAgeMs: OPENCODE2_EVENT_STALL_MS,
+        stallMs: OPENCODE2_EVENT_STALL_MS,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldResubscribeStalledStream({
+        sessionAborted: false,
+        hasActiveTurn: true,
+        lastEventAgeMs: OPENCODE2_EVENT_STALL_MS - 1,
+        stallMs: OPENCODE2_EVENT_STALL_MS,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldResubscribeStalledStream({
+        sessionAborted: false,
+        hasActiveTurn: false,
+        lastEventAgeMs: OPENCODE2_EVENT_STALL_MS,
+        stallMs: OPENCODE2_EVENT_STALL_MS,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldResubscribeStalledStream({
+        sessionAborted: true,
+        hasActiveTurn: true,
+        lastEventAgeMs: OPENCODE2_EVENT_STALL_MS,
+        stallMs: OPENCODE2_EVENT_STALL_MS,
+      }),
+    );
+    // Explained quiet still reconnects so a dead stream cannot hide the event
+    // that clears the local pending marker.
+    assert.isTrue(
+      openCode2ShouldResubscribeStalledStream({
+        sessionAborted: false,
+        hasActiveTurn: true,
+        lastEventAgeMs: OPENCODE2_EVENT_STALL_MS * 10,
+        stallMs: OPENCODE2_EVENT_STALL_MS,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldChargeStallBudget({
+        hasPendingRuntimeRequest: true,
+        hasInFlightPendingWork: false,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldChargeStallBudget({
+        hasPendingRuntimeRequest: false,
+        hasInFlightPendingWork: true,
+      }),
+    );
+    assert.isTrue(
+      openCode2ShouldChargeStallBudget({
+        hasPendingRuntimeRequest: false,
+        hasInFlightPendingWork: false,
+      }),
+    );
+    assert.isFalse(openCode2ShouldChargeStreamFailure(true));
+    assert.isTrue(openCode2ShouldChargeStreamFailure(false));
+  });
+
+  it("expires provider retry deadlines independently of durable retry presentation", () => {
+    const providerRetry = { scheduledUntilAtMs: 1_000 };
+    assert.isTrue(openCode2ProviderRetryIsScheduled(providerRetry, 1_000));
+    assert.isFalse(openCode2ProviderRetryIsScheduled(providerRetry, 1_001));
+    assert.isFalse(openCode2ProviderRetryIsScheduled(null, 0));
+  });
+
+  it("recognizes local work that legitimately keeps an active turn quiet", () => {
+    const base = {
+      toolStatuses: [],
+      shellStatuses: [],
+      hasProviderRetry: false,
+      compactionStatus: null,
+      subagentStatuses: [],
+    } as const;
+    assert.isFalse(openCode2HasInFlightPendingWork(base));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, toolStatuses: ["running"] }));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, toolStatuses: ["pending"] }));
+    assert.isFalse(openCode2HasInFlightPendingWork({ ...base, toolStatuses: ["completed"] }));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, shellStatuses: ["running"] }));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, hasProviderRetry: true }));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, compactionStatus: "running" }));
+    assert.isTrue(openCode2HasInFlightPendingWork({ ...base, subagentStatuses: ["running"] }));
+    assert.isFalse(openCode2HasInFlightPendingWork({ ...base, subagentStatuses: ["completed"] }));
+  });
+
+  it("computes compaction diagnostics from model limits rather than pricing tiers", () => {
+    const usage = openCode2TokenUsage({
+      tokens: {
+        total: 0,
+        input: 272_000,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 630_000, write: 0 },
+      },
+    });
+    assert.deepStrictEqual(
+      openCode2CompactionDiagnostics({
+        usage,
+        limits: { context: 1_050_000, input: 922_000, output: 128_000 },
+        reason: "auto",
+      }),
+      {
+        usedTokenCount: 902_000,
+        inputTokenCount: 272_000,
+        inputLimit: 922_000,
+        contextLimit: 1_050_000,
+        outputReserve: 32_000,
+        triggerThreshold: 902_000,
+        triggerReason: "auto",
+      },
+    );
+    const reportedTotal = openCode2TokenUsage({
+      tokens: {
+        total: 910_000,
+        input: 272_000,
+        output: 1_000,
+        reasoning: 500_000,
+        cache: { read: 630_000, write: 0 },
+      },
+    });
+    assert.equal(
+      openCode2CompactionDiagnostics({
+        usage: reportedTotal,
+        limits: { context: 1_050_000, input: 922_000, output: 128_000 },
+        reason: "manual",
+      })?.usedTokenCount,
+      910_000,
+    );
+    assert.equal(
+      openCode2CompactionDiagnostics({
+        usage,
+        limits: { context: 1_050_000, input: 922_000, output: 3_000 },
+        reason: "auto",
+      })?.triggerThreshold,
+      919_000,
+    );
+    assert.deepStrictEqual(
+      openCode2CompactionDiagnostics({
+        usage,
+        limits: { context: 1_050_000, output: 128_000 },
+        reason: "auto",
+      }),
+      {
+        usedTokenCount: 902_000,
+        inputTokenCount: 272_000,
+        contextLimit: 1_050_000,
+        outputReserve: 32_000,
+        triggerThreshold: 1_018_000,
+        triggerReason: "auto",
+      },
+    );
+    assert.deepStrictEqual(
+      openCode2CompactionDiagnostics({
+        usage,
+        limits: { context: 272_000, input: 272_000, output: 128_000 },
+        reason: "auto",
+      }),
+      {
+        usedTokenCount: 902_000,
+        inputTokenCount: 272_000,
+        inputLimit: 272_000,
+        contextLimit: 272_000,
+        outputReserve: 32_000,
+        triggerThreshold: 252_000,
+        triggerReason: "auto",
+      },
+    );
+  });
+
+  it("classifies provider failures without persisting raw provider payloads", () => {
+    const secret = "gho_abcdefghijklmnopqrstuvwxyz123456";
+    const context = openCode2ProviderFailure({
+      message: `maximum context length; token=${secret}`,
+      code: "ContextLengthExceeded",
+    });
+    assert.equal(context.code, "provider.context-limit");
+    assert.notInclude(context.message, secret);
+
+    const rateLimit = openCode2ProviderFailure({ message: "HTTP 429", code: null });
+    assert.equal(rateLimit.code, "provider.rate-limit");
+    assert.isTrue(rateLimit.retryable);
+
+    const unavailable = openCode2ProviderFailure({
+      message: "Upstream request failed: Endpoint is unavailable.",
+      code: "provider.internal",
+      statusCode: 503,
+    });
+    assert.equal(unavailable.code, "provider.unavailable");
+    assert.equal(
+      unavailable.message,
+      "OpenCode 2 lost the model endpoint (HTTP 503). Wait, then retry the turn.",
+    );
+    assert.isTrue(unavailable.retryable);
+
+    const unknown = openCode2ProviderFailure({
+      message: `raw payload token=${secret}`,
+      code: "RawProviderFailure",
+    });
+    assert.equal(unknown.code, "provider.error");
+    assert.notInclude(unknown.message, secret);
+    assert.notInclude(unknown.message, "raw payload");
+
+    const unknownFinish = openCode2ProviderFailure({
+      message: "The provider response ended with an unknown finish reason.",
+      code: "provider.invalid-output",
+    });
+    assert.equal(unknownFinish.code, "provider.invalid-output");
+    assert.equal(
+      unknownFinish.message,
+      "OpenCode 2 ended a model step with an unknown finish reason.",
+    );
+    assert.isTrue(unknownFinish.retryable);
+    const otherInvalidOutput = openCode2ProviderFailure({
+      message: "malformed tool arguments",
+      code: "provider.invalid-output",
+    });
+    assert.equal(otherInvalidOutput.code, "provider.error");
+    assert.isNull(otherInvalidOutput.retryable);
 
     assert.equal(
-      openCodeBoundaryAfterProviderTurn([third, first, synthetic], first.id),
-      "msg-user-3",
+      openCode2ProviderFailure({
+        message: "invalid key",
+        code: "ProviderAuthError",
+      }).code,
+      "Integration.Authorization",
     );
-    assert.isUndefined(openCodeBoundaryAfterProviderTurn([first, synthetic, third], third.id));
+    assert.equal(
+      openCode2ProviderFailure({
+        message: "request rejected",
+        code: "APIError",
+        statusCode: openCode2ProviderErrorStatus({
+          error: { name: "APIError", data: { message: "secret payload", statusCode: 429 } },
+        }),
+      }).code,
+      "provider.rate-limit",
+    );
+    assert.equal(
+      openCode2ProviderFailure({
+        message: "request rejected",
+        code: "ContextOverflowError",
+      }).code,
+      "provider.context-limit",
+    );
+  });
+
+  it("holds a retryable step failure until OpenCode announces another retry", () => {
+    assert.isTrue(
+      openCode2ShouldHoldExecutionFailure({
+        retryable: true,
+        hasAnnouncedRetry: false,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldHoldExecutionFailure({
+        retryable: true,
+        hasAnnouncedRetry: true,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldHoldExecutionFailure({
+        retryable: false,
+        hasAnnouncedRetry: false,
+      }),
+    );
+    assert.isFalse(
+      openCode2ShouldHoldExecutionFailure({
+        retryable: null,
+        hasAnnouncedRetry: false,
+      }),
+    );
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("session.retry.scheduled"));
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("unknown"));
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("session.usage.updated"));
+    assert.isTrue(openCode2EventSettlesHeldExecutionFailure("session.idle"));
+    assert.isTrue(openCode2EventSettlesHeldExecutionFailure("session.execution.failed"));
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("session.execution.interrupted"));
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("session.error"));
+    assert.isTrue(openCode2EventClearsHeldExecutionFailure("session.execution.succeeded"));
+    assert.isFalse(openCode2EventClearsHeldExecutionFailure("session.execution.started"));
+    assert.equal(normalizeOpenCode2WireType("session.usage.updated"), "unknown");
+    assert.isFalse(
+      openCode2EventSettlesHeldExecutionFailure(
+        normalizeOpenCode2WireType("session.usage.updated"),
+      ),
+    );
+  });
+
+  it("passes through live retry events", () => {
+    assert.strictEqual(
+      normalizeOpenCode2WireType("session.retry.scheduled"),
+      "session.retry.scheduled",
+    );
+    assert.strictEqual(normalizeOpenCode2WireType("session.next.retried"), "unknown");
+    assert.strictEqual(normalizeOpenCode2WireType("session.next.step.failed"), "unknown");
+  });
+
+  it("normalizes inbox enqueue and delivery as input admission", () => {
+    assert.strictEqual(
+      normalizeOpenCode2WireType("session.inbox.enqueued"),
+      "session.input.admitted",
+    );
+    assert.strictEqual(
+      normalizeOpenCode2WireType("session.inbox.delivered"),
+      "session.input.admitted",
+    );
+  });
+
+  it("reads 17498 inbox item payloads and treats delivered as promotion", () => {
+    const enqueued = v2Event({
+      type: "session.inbox.enqueued",
+      data: {
+        sessionID: "ses_root",
+        inboxID: "msg_wake",
+        item: {
+          type: "synthetic",
+          payload: { text: '<subagent state="completed">child completed</subagent>' },
+          delivery: "queue",
+        },
+      },
+    });
+    const userEnqueued = v2Event({
+      type: "session.inbox.enqueued",
+      data: {
+        sessionID: "ses_root",
+        inboxID: "msg_user",
+        item: { type: "user", payload: { text: "hello" }, delivery: "steer" },
+      },
+    });
+    const delivered = v2Event({
+      type: "session.inbox.delivered",
+      data: { sessionID: "ses_root", inboxID: "msg_wake" },
+    });
+    assert.strictEqual(openCode2WireInputID(enqueued), "msg_wake");
+    assert.notEqual(openCode2WireAdmittedInput(enqueued), undefined);
+    assert.equal(openCode2WireAdmittedInput(delivered), undefined);
+    assert.isTrue(openCode2IsPostSettleWakeAdmission(enqueued, { isChildSession: false }));
+    assert.isFalse(openCode2IsPostSettleWakeAdmission(userEnqueued, { isChildSession: false }));
+    assert.isFalse(openCode2IsPostSettleWakeAdmission(delivered, { isChildSession: false }));
+  });
+
+  it("normalizes current compaction admission and failure events", () => {
+    assert.equal(
+      normalizeOpenCode2WireType("session.compaction.admitted"),
+      "session.compaction.started",
+    );
+    assert.equal(
+      normalizeOpenCode2WireType("session.compaction.failed"),
+      "session.compaction.failed",
+    );
+  });
+
+  it("maps form.created question fields onto the UI question shape", () => {
+    const mapped = openCode2FormQuestions({
+      id: "form_1",
+      title: "Handoff model",
+      fields: [
+        {
+          key: "model",
+          title: "Handoff model",
+          description: "Which provider/model should the handoff use?",
+          options: [
+            {
+              label: "Inherited: GLM-5.2 (Recommended)",
+              value: "inherit",
+              description: "Same as current.",
+            },
+            { label: "Claude Fable 5", value: "fable", description: "claudeAgent." },
+          ],
+        },
+      ],
+    });
+    assert.deepStrictEqual(mapped.fieldKeys, ["model"]);
+    assert.strictEqual(mapped.questions[0]?.header, "Handoff model");
+    assert.strictEqual(mapped.questions[0]?.options[0]?.label, "Inherited: GLM-5.2 (Recommended)");
+    assert.deepStrictEqual(mapped.optionValuesByLabel[0], {
+      "Inherited: GLM-5.2 (Recommended)": "inherit",
+      "Claude Fable 5": "fable",
+    });
+    assert.deepStrictEqual(
+      openCode2FormAnswer(
+        mapped.fieldKeys,
+        [["Inherited: GLM-5.2 (Recommended)"]],
+        mapped.optionValuesByLabel,
+      ),
+      { model: "inherit" },
+    );
+  });
+
+  it("adopts a missing execution start only after the turn has parts or interrupt", () => {
+    assert.isTrue(
+      openCode2CanAdoptMissingExecutionStart({
+        executionStarted: true,
+        interrupted: false,
+        partCount: 0,
+      }),
+    );
+    assert.isTrue(
+      openCode2CanAdoptMissingExecutionStart({
+        executionStarted: false,
+        interrupted: false,
+        partCount: 1,
+      }),
+    );
+    assert.isTrue(
+      openCode2CanAdoptMissingExecutionStart({
+        executionStarted: false,
+        interrupted: true,
+        partCount: 0,
+      }),
+    );
+    assert.isFalse(
+      openCode2CanAdoptMissingExecutionStart({
+        executionStarted: false,
+        interrupted: false,
+        partCount: 0,
+      }),
+    );
   });
 });

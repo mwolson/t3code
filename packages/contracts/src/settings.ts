@@ -597,12 +597,12 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
-    binaryPath: makeBinaryPathSetting("opencode").pipe(
+    binaryPath: makeBinaryPathSetting("opencode2").pipe(
       Schema.annotateKey({
         title: "Binary path",
         description: "Path to the OpenCode binary.",
         providerSettingsForm: {
-          placeholder: "opencode",
+          placeholder: "opencode2",
           clearWhenEmpty: "omit",
         },
       }),
