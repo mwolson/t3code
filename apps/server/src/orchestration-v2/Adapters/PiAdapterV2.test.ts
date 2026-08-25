@@ -2100,6 +2100,8 @@ describe("PiAdapterV2", () => {
       );
       const providerTurnId =
         running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
+      yield* fake.emit({ type: "response", command: "prompt", success: true });
+      yield* fake.emit({ type: "agent_start" });
 
       yield* runtime.steerTurn({
         threadId: THREAD_ID,
@@ -2132,6 +2134,27 @@ describe("PiAdapterV2", () => {
       });
       const command = yield* fake.takeRequest("prompt");
       assert.equal(command["message"], "/my-command");
+
+      yield* fake.emit({ type: "agent_settled" });
+      const firstTerminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(firstTerminal.type === "turn.terminal" && firstTerminal.status === "completed");
+
+      yield* startTurn(runtime, providerThread, "default", [], "Second turn", 2);
+      yield* fake.takeRequest("prompt");
+      // The slash command's response belongs to the settled first turn. It
+      // must not consume or fail the second turn's prompt acknowledgement.
+      yield* fake.emit({
+        type: "response",
+        command: "prompt",
+        success: false,
+        error: "late command rejection",
+      });
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "agent_settled" });
+      const secondTerminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(
+        secondTerminal.type === "turn.terminal" && secondTerminal.status === "completed",
+      );
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 });
