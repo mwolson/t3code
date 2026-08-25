@@ -3,7 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { thinkingCapabilitiesForPiModel } from "./piThinkingCapabilities.ts";
 
 describe("thinkingCapabilitiesForPiModel", () => {
-  it("shows Pi's resolved default as the default choice while keeping it inherited", () => {
+  it("gives every choice its real level id and tags Pi's default", () => {
     const capabilities = thinkingCapabilitiesForPiModel(
       {
         reasoning: true,
@@ -23,7 +23,7 @@ describe("thinkingCapabilitiesForPiModel", () => {
         ["low", "Low", false],
         ["medium", "Medium", false],
         ["high", "High", false],
-        ["inherit", "Extra High", true],
+        ["xhigh", "Extra High", true],
       ],
     );
   });
