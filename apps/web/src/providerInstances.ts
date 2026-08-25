@@ -93,28 +93,29 @@ export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boo
   return entry.enabled && entry.isAvailable && entry.status === "ready";
 }
 
-const OPENCODE2_DRIVER_KIND = ProviderDriverKind.make("opencode2");
+const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
 /**
- * Whether an enabled OpenCode 2 instance is still running its very first
+ * Whether an enabled OpenCode instance is still running its very first
  * availability probe, so its `status` says nothing about whether it works.
  *
  * The server marks this state with exactly this snapshot shape (see
  * `shouldRetainMissingProviderModels` in the provider registry): enabled,
  * not yet installed-verified, and `warning`. This is deliberately scoped to
- * OpenCode 2 rather than applied to every driver: its first probe boots a
- * server and retries an empty model inventory, so it stays pending long
- * enough to be visible, whereas for other drivers the same shape is close
- * enough to a real verdict that softening it would hide genuine problems.
+ * OpenCode rather than applied to every driver: its first probe starts or
+ * attaches to the user service and retries an empty model inventory, so it
+ * stays pending long enough to be visible, whereas for other drivers the
+ * same shape is close enough to a real verdict that softening it would hide
+ * genuine problems.
  *
  * A pending instance still cannot serve models, so it stays unselectable.
  * The picker only stops *dimming* it, because a rail entry faded to half
- * opacity was reading as though OpenCode 2 were missing the first time the
+ * opacity was reading as though OpenCode were missing the first time the
  * model picker was opened after app start.
  */
 export function isProviderInstanceInitialProbePending(entry: ProviderInstanceEntry): boolean {
   return (
-    entry.driverKind === OPENCODE2_DRIVER_KIND &&
+    entry.driverKind === OPENCODE_DRIVER_KIND &&
     entry.enabled &&
     !entry.installed &&
     entry.status === "warning"

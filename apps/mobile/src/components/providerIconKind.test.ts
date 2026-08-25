@@ -3,9 +3,9 @@ import { assert, describe, it } from "@effect/vitest";
 import { providerIconKind, providerIconPalette } from "./providerIconKind";
 
 describe("providerIconKind", () => {
-  it("keeps both OpenCode generations distinct", () => {
+  it("uses the OpenCode mark for leftover OpenCode 2 instances", () => {
     assert.strictEqual(providerIconKind("opencode"), "opencode");
-    assert.strictEqual(providerIconKind("opencode2"), "opencode2");
+    assert.strictEqual(providerIconKind("opencode2"), "opencode");
   });
 
   it("preserves existing provider fallbacks", () => {

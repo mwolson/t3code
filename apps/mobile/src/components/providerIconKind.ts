@@ -5,9 +5,8 @@ export function providerIconKind(provider: string | null | undefined): ProviderI
     case "claudeAgent":
       return "claude";
     case "opencode":
-      return "opencode";
     case "opencode2":
-      return "opencode2";
+      return "opencode";
     default:
       return "openai";
   }

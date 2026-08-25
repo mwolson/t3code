@@ -10,7 +10,7 @@ import {
   planOpenCode2VariantAlignment,
   resolveOpenCode2SessionAgent,
   retryEmptyOpenCode2VariantCatalog,
-} from "./OpenCode2AdapterV2.ts";
+} from "./OpenCodeAdapterV2.ts";
 
 describe("openCode2InteractionModeForAgent", () => {
   it("maps every native pair event so matching echoes supersede queued reflections", () => {

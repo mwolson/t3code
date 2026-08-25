@@ -27,9 +27,9 @@ function snapshot(input: {
 }
 
 /** The shape the server publishes while a driver's very first probe runs. */
-const pendingOpenCode2 = snapshot({
-  driver: ProviderDriverKind.make("opencode2"),
-  instanceId: "opencode2",
+const pendingOpenCode = snapshot({
+  driver: ProviderDriverKind.make("opencode"),
+  instanceId: "opencode",
   installed: false,
   status: "warning",
 });
@@ -57,16 +57,16 @@ function railButton(markup: string, instanceId: string): string {
 }
 
 describe("ModelPickerSidebar first open", () => {
-  it("keeps a pending OpenCode 2 rail entry at full opacity instead of dimming it", () => {
-    const markup = render([pendingOpenCode2]);
-    const button = railButton(markup, "opencode2");
+  it("keeps a pending OpenCode rail entry at full opacity instead of dimming it", () => {
+    const markup = render([pendingOpenCode]);
+    const button = railButton(markup, "opencode");
 
-    expect(markup).toContain('data-provider-icon="opencode2"');
+    expect(markup).toContain('viewBox="0 0 32 40"');
     expect(button).not.toContain("opacity-50");
   });
 
   it("still refuses selection while that probe is pending, so the scope cannot go empty", () => {
-    const button = railButton(render([pendingOpenCode2]), "opencode2");
+    const button = railButton(render([pendingOpenCode]), "opencode");
 
     expect(button).toContain("disabled=");
     expect(button).toContain("cursor-not-allowed");
@@ -74,9 +74,9 @@ describe("ModelPickerSidebar first open", () => {
   });
 
   it("names the provider and pending state in the accessible label", () => {
-    const button = railButton(render([pendingOpenCode2]), "opencode2");
+    const button = railButton(render([pendingOpenCode]), "opencode");
 
-    expect(button).toContain("OpenCode 2");
+    expect(button).toContain("OpenCode");
     expect(button).toContain("Checking availability");
   });
 
@@ -84,13 +84,13 @@ describe("ModelPickerSidebar first open", () => {
     const button = railButton(
       render([
         snapshot({
-          driver: ProviderDriverKind.make("opencode"),
-          instanceId: "opencode",
+          driver: ProviderDriverKind.make("codex"),
+          instanceId: "codex",
           installed: false,
           status: "warning",
         }),
       ]),
-      "opencode",
+      "codex",
     );
 
     expect(button).toContain("opacity-50");
@@ -98,32 +98,19 @@ describe("ModelPickerSidebar first open", () => {
     expect(button).not.toContain("Checking availability");
   });
 
-  it("still dims a settled OpenCode 2 failure", () => {
+  it("still dims a settled OpenCode failure", () => {
     const button = railButton(
       render([
         snapshot({
-          driver: ProviderDriverKind.make("opencode2"),
-          instanceId: "opencode2",
+          driver: ProviderDriverKind.make("opencode"),
+          instanceId: "opencode",
           status: "error",
         }),
       ]),
-      "opencode2",
+      "opencode",
     );
 
     expect(button).toContain("opacity-50");
     expect(button).toContain("disabled=");
-  });
-
-  it("keeps both OpenCode generations as separate rail entries", () => {
-    const markup = render([
-      snapshot({ driver: ProviderDriverKind.make("opencode"), instanceId: "opencode" }),
-      snapshot({ driver: ProviderDriverKind.make("opencode2"), instanceId: "opencode2" }),
-    ]);
-
-    expect(markup).toContain('data-model-picker-provider="opencode"');
-    expect(markup).toContain('data-model-picker-provider="opencode2"');
-    expect(markup).toContain('data-provider-icon="opencode"');
-    expect(markup).toContain('data-provider-icon="opencode2"');
-    expect(markup).not.toContain("data-provider-kind-badge");
   });
 });
