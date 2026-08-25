@@ -3,7 +3,7 @@
 // Model/agent fixtures are structural for inventory tests across SDK generations.
 import { describe, expect, it } from "vite-plus/test";
 
-import { flattenOpenCode2Models } from "./OpenCode2Provider.ts";
+import { flattenOpenCodeModels } from "./OpenCodeProvider.ts";
 
 const MODEL = {
   id: "glm-5.2",
@@ -41,7 +41,7 @@ describe("OpenCode 2 agent inventory", () => {
   // The Build/Plan interaction-mode toggle owns the native pair, so no Agent
   // descriptor appears unless custom primary agents exist.
   it("suppresses the agent descriptor when only build and plan exist", () => {
-    const [model] = flattenOpenCode2Models({
+    const [model] = flattenOpenCodeModels({
       models: [MODEL],
       agents: [BUILD_AGENT, PLAN_AGENT],
     });
@@ -57,7 +57,7 @@ describe("OpenCode 2 agent inventory", () => {
       id: "release-captain",
       name: "Release Captain",
     } satisfies any;
-    const [model] = flattenOpenCode2Models({
+    const [model] = flattenOpenCodeModels({
       models: [MODEL],
       agents: [BUILD_AGENT, customAgent],
     });
@@ -72,7 +72,7 @@ describe("OpenCode 2 agent inventory", () => {
       id: "release-captain",
       name: "Release Captain",
     } satisfies any;
-    const [model] = flattenOpenCode2Models({
+    const [model] = flattenOpenCodeModels({
       models: [MODEL],
       agents: [PLAN_AGENT, customAgent],
     });
@@ -87,7 +87,7 @@ describe("OpenCode 2 agent inventory", () => {
       id: "Release-Captain",
       name: "Release Captain",
     } satisfies any;
-    const [model] = flattenOpenCode2Models({
+    const [model] = flattenOpenCodeModels({
       models: [MODEL],
       agents: [customAgent, BUILD_AGENT, PLAN_AGENT],
     });

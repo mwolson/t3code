@@ -647,54 +647,19 @@ export const AntigravityIcon: Icon = (props) => (
   </svg>
 );
 
-const OpenCodeFramePaths = () => (
-  <>
-    <path className="dark:hidden" d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#211E1E" />
-    <path className="hidden dark:block" d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#F1ECEC" />
-  </>
-);
-
-const OpenCodeMarkPaths = () => (
-  <>
-    <path d="M24 32H8V16H24V32Z" fill="#CFCECD" className="dark:hidden" />
-    <path d="M24 32H8V16H24V32Z" fill="#4B4646" className="hidden dark:block" />
-    <OpenCodeFramePaths />
-  </>
-);
-
-// The OpenCode 2 preview borrows the blue inner field, highlight, and shadow
-// from OpenCode's official dev desktop icon while retaining a contrasting
-// neutral outer frame in both application themes.
-const OpenCode2MarkPaths = () => (
-  <>
-    <path d="M24 32H8V8H24V32Z" fill="#2E6CE9" />
-    <path d="M24 11H8V8H24V11Z" fill="#82C4FF" />
-    <path d="M24 32H8V29H24V32Z" fill="#0A2055" />
-    <OpenCodeFramePaths />
-  </>
-);
-
 export const OpenCodeIcon: Icon = (props) => (
-  <svg
-    {...props}
-    viewBox="0 0 32 40"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-    data-provider-icon="opencode"
-  >
-    <OpenCodeMarkPaths />
-  </svg>
-);
-
-export const OpenCode2Icon: Icon = (props) => (
-  <svg
-    {...props}
-    viewBox="0 0 32 40"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-    data-provider-icon="opencode2"
-  >
-    <OpenCode2MarkPaths />
+  <svg {...props} viewBox="0 0 32 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <g clipPath="url(#opencode__clip0_1311_94969)">
+      <path className="dark:hidden" d="M24 32H8V16H24V32Z" fill="#CFCECD" />
+      <path className="dark:hidden" d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#211E1E" />
+      <path className="hidden dark:block" d="M24 32H8V16H24V32Z" fill="#4B4646" />
+      <path className="hidden dark:block" d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#F1ECEC" />
+    </g>
+    <defs>
+      <clipPath id="opencode__clip0_1311_94969">
+        <rect width="32" height="40" fill="white" />
+      </clipPath>
+    </defs>
   </svg>
 );
 
@@ -721,13 +686,16 @@ export const ACPRegistryIcon: Icon = ({ className, ...props }) => (
 );
 
 export const PiAgentIcon: Icon = ({ className, ...props }) => (
-  <svg {...props} viewBox="0 0 800 800" className={cn("fill-none", className)}>
-    <rect width="800" height="800" rx="160" fill="#000" />
+  <svg
+    {...props}
+    viewBox="165.29 165.29 469.43 469.43"
+    fill="none"
+    className={cn("fill-[#0F0F0F] dark:fill-[#F5F5F5]", className)}
+  >
     <path
-      fill="#fff"
       fillRule="evenodd"
       d="M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65Z"
     />
-    <path fill="#fff" d="M517.36 400H634.72V634.72H517.36Z" />
+    <path d="M517.36 400H634.72V634.72H517.36Z" />
   </svg>
 );

@@ -6,7 +6,7 @@ import * as NodePath from "node:path";
 import { assert } from "@effect/vitest";
 import { describe, it } from "vite-plus/test";
 
-import { discoverOpenCode2Skills } from "./OpenCode2Skills.ts";
+import { discoverOpenCode2Skills } from "./OpenCodeSkills.ts";
 
 function writeSkill(skillsDir: string, directoryName: string, contents: string): void {
   const skillDir = NodePath.join(skillsDir, directoryName);

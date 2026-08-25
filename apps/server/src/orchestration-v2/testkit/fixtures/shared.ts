@@ -50,6 +50,8 @@ export const SUBAGENT_PROMPT =
 export const SUBAGENT_V2_PROMPT = "just say hello";
 export const OPENCODE_SUBAGENT_PROMPT =
   "Use the task tool exactly once. Delegate to the general subagent with this prompt: Respond exactly CHILD_OK. After the task completes, respond exactly PARENT_OK.";
+export const OPENCODE_ERROR_CLEANUP_DRAIN_PROMPT =
+  "Run a local command that prints the authoritative cleanup result.";
 export const OPENCODE2_COMPACTION_PROMPT =
   "Compact the current context, then respond exactly: compaction fixture complete";
 export const OPENCODE2_COMPACTION_INTERRUPT_PROMPT =
@@ -92,6 +94,8 @@ export const TURN_INTERRUPT_RECOVERY_PROMPT =
   "Respond with exactly: interrupt recovery fixture complete";
 export const MESSAGE_STEERING_STEER_PROMPT =
   "Actually, respond with exactly: steering fixture observed";
+export const MESSAGE_STEERING_MID_TOOL_PROMPT =
+  "Run this exact local command: `node -e \"console.log('steering fixture tool started'); setTimeout(() => {}, 20000)\"`. Do not answer until it completes, then respond exactly: steering fixture initial response";
 export const THREAD_ROLLBACK_FIRST_PROMPT =
   "Respond with exactly: rollback fixture first turn complete";
 export const THREAD_ROLLBACK_SECOND_PROMPT =
@@ -226,6 +230,12 @@ export type OrchestratorFixtureInputStep =
       readonly text: string;
       readonly attachments?: ReadonlyArray<ChatAttachment>;
       readonly targetRunIndex: number;
+      /**
+       * Hold the steer until the target run has produced this turn item, so a
+       * fixture can steer while a tool is still running rather than while the
+       * assistant is streaming.
+       */
+      readonly waitForTurnItemType?: OrchestrationV2TurnItem["type"];
     }
   | {
       readonly type: "restart";
@@ -340,7 +350,7 @@ export const OPENCODE_MODEL_SELECTION = {
 } satisfies ModelSelection;
 
 export const OPENCODE2_MODEL_SELECTION = {
-  instanceId: ProviderInstanceId.make("opencode2"),
+  instanceId: ProviderInstanceId.make("opencode"),
   model: "opencode/big-pickle",
 } satisfies ModelSelection;
 
@@ -711,6 +721,14 @@ export function materializeFixtureInput(input: {
             threadId: ids.threadId,
             runId: runIdFor(step.targetRunIndex),
           });
+          if (step.waitForTurnItemType !== undefined) {
+            steps.push({
+              type: "await_run_turn_item",
+              threadId: ids.threadId,
+              runId: runIdFor(step.targetRunIndex),
+              itemType: step.waitForTurnItemType,
+            });
+          }
           pushDispatch(
             dispatchMessageCommand({
               commandId: yield* idAllocator.allocate.command({

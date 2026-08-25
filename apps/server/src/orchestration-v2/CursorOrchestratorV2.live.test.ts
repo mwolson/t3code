@@ -23,9 +23,8 @@ import {
   NoOpProviderEventLoggers,
   ProviderEventLoggers,
 } from "../provider/Layers/ProviderEventLoggers.ts";
-import * as OpenCode2Runtime from "../provider/opencode2Runtime.ts";
+import * as OpenCodeRuntime from "../provider/opencodeRuntime.ts";
 import * as SpawnedProcessReaper from "../provider/SpawnedProcessReaper.ts";
-import { OpenCodeRuntimeLive } from "../provider/opencodeRuntime.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -63,8 +62,7 @@ const providerInstanceRegistryLayer = ProviderInstanceRegistryHydrationLive.pipe
       serverSettingsLayer,
       NodeServices.layer,
       FetchHttpClient.layer,
-      OpenCodeRuntimeLive.pipe(Layer.provide(NodeServices.layer)),
-      OpenCode2Runtime.layer.pipe(
+      OpenCodeRuntime.layer.pipe(
         Layer.provide(SpawnedProcessReaper.layer),
         Layer.provide(NodeServices.layer),
       ),

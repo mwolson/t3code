@@ -1,21 +1,28 @@
-import type { Event as OpenCodeEvent, OpencodeClient } from "@opencode-ai/sdk/v2";
+import type { OpenCodeClient, V2Event } from "@opencode-ai/client";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ProviderReplayEntry, type ProviderReplayTranscript } from "@t3tools/contracts";
-import * as Effect from "effect/Effect";
+import {
+  ProviderInstanceId,
+  ProviderReplayEntry,
+  type ProviderReplayTranscript,
+} from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as P from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import { ServerConfig } from "../../config.ts";
 import {
-  OpenCodeRuntime,
-  OpenCodeRuntimeError,
-  type OpenCodeRuntimeShape,
-} from "../../provider/opencodeRuntime.ts";
-import {
   NoOpProviderEventLoggers,
   ProviderEventLoggers,
 } from "../../provider/Layers/ProviderEventLoggers.ts";
+import {
+  OpenCodeRuntime,
+  OpenCodeRuntimeError,
+  type OpenCodeRuntimeOperation,
+} from "../../provider/opencodeRuntime.ts";
 import { layer as idAllocatorLayer } from "../IdAllocator.ts";
 import { ProviderAdapterDriverCreateError } from "../ProviderAdapterDriver.ts";
 import { makeDriverLayer as makeProviderAdapterRegistryDriverLayer } from "../ProviderAdapterRegistry.ts";
@@ -24,28 +31,27 @@ import {
   type OrchestratorV2ProviderReplayHarness,
 } from "../testkit/ProviderReplayHarness.ts";
 import {
-  OPENCODE_DEFAULT_INSTANCE_ID,
-  OPENCODE_DRIVER_KIND,
   OPENCODE_PROVIDER,
   OPENCODE_SDK_PROTOCOL,
   OpenCodeAdapterV2Driver,
 } from "./OpenCodeAdapterV2.ts";
 
-export const OPENCODE_SDK_REPLAY_PROTOCOL = OPENCODE_SDK_PROTOCOL;
+export const OPENCODE2_SDK_REPLAY_PROTOCOL = OPENCODE_SDK_PROTOCOL;
+export const OPENCODE2_REPLAY_INSTANCE_ID = ProviderInstanceId.make("opencode");
 
-const OpenCodeSdkReplayTranscript = Schema.Struct({
+const OpenCode2SdkReplayTranscript = Schema.Struct({
   provider: Schema.Literal(OPENCODE_PROVIDER),
-  protocol: Schema.Literal(OPENCODE_SDK_REPLAY_PROTOCOL),
+  protocol: Schema.Literal(OPENCODE2_SDK_REPLAY_PROTOCOL),
   version: Schema.String,
   scenario: Schema.String,
   metadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
   entries: Schema.Array(ProviderReplayEntry),
 });
-export type OpenCodeSdkReplayTranscript = typeof OpenCodeSdkReplayTranscript.Type;
-const decodeOpenCodeSdkReplayTranscript = Schema.decodeUnknownEffect(OpenCodeSdkReplayTranscript);
+export type OpenCode2SdkReplayTranscript = typeof OpenCode2SdkReplayTranscript.Type;
+const decodeOpenCode2SdkReplayTranscript = Schema.decodeUnknownEffect(OpenCode2SdkReplayTranscript);
 
-export class OpenCodeReplayTranscriptDecodeError extends Schema.TaggedErrorClass<OpenCodeReplayTranscriptDecodeError>()(
-  "OpenCodeReplayTranscriptDecodeError",
+export class OpenCode2ReplayTranscriptDecodeError extends Schema.TaggedErrorClass<OpenCode2ReplayTranscriptDecodeError>()(
+  "OpenCode2ReplayTranscriptDecodeError",
   {
     driver: Schema.optional(Schema.String),
     protocol: Schema.optional(Schema.String),
@@ -54,12 +60,12 @@ export class OpenCodeReplayTranscriptDecodeError extends Schema.TaggedErrorClass
   },
 ) {
   override get message(): string {
-    return `Failed to decode OpenCode replay transcript for scenario ${this.scenario ?? "<unknown>"}.`;
+    return `Failed to decode OpenCode 2 replay transcript for scenario ${this.scenario ?? "<unknown>"}.`;
   }
 }
 
-export class OpenCodeReplayMismatchError extends Schema.TaggedErrorClass<OpenCodeReplayMismatchError>()(
-  "OpenCodeReplayMismatchError",
+export class OpenCode2ReplayMismatchError extends Schema.TaggedErrorClass<OpenCode2ReplayMismatchError>()(
+  "OpenCode2ReplayMismatchError",
   {
     scenario: Schema.String,
     cursor: Schema.Number,
@@ -68,12 +74,12 @@ export class OpenCodeReplayMismatchError extends Schema.TaggedErrorClass<OpenCod
   },
 ) {
   override get message(): string {
-    return `OpenCode replay frame mismatch at cursor ${this.cursor} in scenario ${this.scenario}.`;
+    return `OpenCode 2 replay frame mismatch at cursor ${this.cursor} in scenario ${this.scenario}.`;
   }
 }
 
-export class OpenCodeReplayIncompleteError extends Schema.TaggedErrorClass<OpenCodeReplayIncompleteError>()(
-  "OpenCodeReplayIncompleteError",
+export class OpenCode2ReplayIncompleteError extends Schema.TaggedErrorClass<OpenCode2ReplayIncompleteError>()(
+  "OpenCode2ReplayIncompleteError",
   {
     scenario: Schema.String,
     cursor: Schema.Number,
@@ -81,18 +87,18 @@ export class OpenCodeReplayIncompleteError extends Schema.TaggedErrorClass<OpenC
   },
 ) {
   override get message(): string {
-    return `OpenCode replay ended with ${this.remaining} unconsumed entries in scenario ${this.scenario}.`;
+    return `OpenCode 2 replay ended with ${this.remaining} unconsumed entries in scenario ${this.scenario}.`;
   }
 }
 
-export const OpenCodeReplayError = Schema.Union([
-  OpenCodeReplayTranscriptDecodeError,
-  OpenCodeReplayMismatchError,
-  OpenCodeReplayIncompleteError,
+export const OpenCode2ReplayError = Schema.Union([
+  OpenCode2ReplayTranscriptDecodeError,
+  OpenCode2ReplayMismatchError,
+  OpenCode2ReplayIncompleteError,
 ]);
-export type OpenCodeReplayError = typeof OpenCodeReplayError.Type;
+export type OpenCode2ReplayError = typeof OpenCode2ReplayError.Type;
 export const OpenCodeOrchestratorReplayHarnessError = Schema.Union([
-  OpenCodeReplayError,
+  OpenCode2ReplayError,
   ProviderAdapterDriverCreateError,
 ]);
 export type OpenCodeOrchestratorReplayHarnessError =
@@ -107,34 +113,99 @@ function replayValueMatches(expected: unknown, actual: unknown): boolean {
       expected.every((entry, index) => replayValueMatches(entry, actual[index]))
     );
   }
-  if (typeof expected === "object" && expected !== null) {
-    if (typeof actual !== "object" || actual === null) return false;
-    return Object.entries(expected).every(([key, value]) =>
-      replayValueMatches(value, (actual as Record<string, unknown>)[key]),
+  if (P.isObject(expected)) {
+    if (!P.isObject(actual)) return false;
+    return Object.entries(expected).every(
+      ([key, value]) =>
+        Object.prototype.hasOwnProperty.call(actual, key) && replayValueMatches(value, actual[key]),
     );
+  }
+  if (
+    (typeof expected === "string" && typeof actual === "number" && expected === String(actual)) ||
+    (typeof expected === "number" && typeof actual === "string" && String(expected) === actual)
+  ) {
+    return true;
   }
   return Object.is(expected, actual);
 }
 
 function frameRecord(frame: unknown): Record<string, unknown> | null {
-  return typeof frame === "object" && frame !== null ? (frame as Record<string, unknown>) : null;
+  return P.isObject(frame) ? frame : null;
 }
 
-export class OpenCodeReplayController {
+function isSignalAborted(signal?: AbortSignal): boolean {
+  return signal?.aborted === true;
+}
+
+async function waitForReplayDelay(afterMs: number, signal?: AbortSignal): Promise<boolean> {
+  if (isSignalAborted(signal)) return false;
+  const exit = await Effect.runPromiseExit(Effect.sleep(Duration.millis(afterMs)), { signal });
+  if (Exit.isSuccess(exit)) return true;
+  if (Cause.hasInterruptsOnly(exit.cause)) return false;
+  throw Cause.squash(exit.cause);
+}
+
+export class OpenCode2ReplayController {
   private cursor = 0;
+  private claimedEventCursor: number | null = null;
+  private claimedResponseCursor: number | null = null;
+  private currentEventEpoch = 0;
+  private pendingEventHandling = false;
+  private successfulRuntimeExit = false;
   private readonly waiters = new Set<() => void>();
   private failure: unknown = null;
-  private readonly transcript: OpenCodeSdkReplayTranscript;
+  private readonly transcript: OpenCode2SdkReplayTranscript;
+  private readonly abortController = new AbortController();
 
-  constructor(transcript: OpenCodeSdkReplayTranscript) {
+  constructor(transcript: OpenCode2SdkReplayTranscript) {
     this.transcript = transcript;
+  }
+
+  /** Non-consuming look at the next transcript entry. */
+  peek(): OpenCode2SdkReplayTranscript["entries"][number] | undefined {
+    return this.transcript.entries[this.cursor];
+  }
+
+  /**
+   * True when the next entry is an outbound expect for this operation. Used so
+   * optional startup catalog probes can fall back to canned data when a
+   * fixture does not record them, without racing the event stream.
+   */
+  expectsOutbound(operation: string): boolean {
+    const entry = this.peek();
+    if (entry?.type !== "expect_outbound") return false;
+    const frame = entry.frame;
+    return (
+      typeof frame === "object" &&
+      frame !== null &&
+      "type" in frame &&
+      (frame as { readonly type?: string }).type === operation
+    );
+  }
+
+  /** Wait until a delayed replay consumer releases the cursor, then inspect it. */
+  async expectsOptionalOutbound(operation: string): Promise<boolean> {
+    this.throwFailure();
+    while (this.claimedEventCursor === this.cursor || this.claimedResponseCursor === this.cursor) {
+      await this.changed();
+      this.throwFailure();
+    }
+    return this.expectsOutbound(operation);
   }
 
   async expectOutbound(actual: unknown): Promise<void> {
     try {
+      this.throwFailure();
+      while (
+        this.claimedEventCursor === this.cursor ||
+        this.claimedResponseCursor === this.cursor
+      ) {
+        await this.changed();
+        this.throwFailure();
+      }
       const entry = this.transcript.entries[this.cursor];
       if (entry?.type !== "expect_outbound" || !replayValueMatches(entry.frame, actual)) {
-        throw new OpenCodeReplayMismatchError({
+        throw new OpenCode2ReplayMismatchError({
           scenario: this.transcript.scenario,
           cursor: this.cursor,
           expected: entry?.type === "expect_outbound" ? entry.frame : (entry ?? null),
@@ -148,23 +219,87 @@ export class OpenCodeReplayController {
     }
   }
 
-  async response(operation: string): Promise<unknown> {
+  eventEpoch(): number {
+    return this.currentEventEpoch;
+  }
+
+  async response(
+    operation: OpenCodeRuntimeOperation,
+    startedAtEventEpoch = this.currentEventEpoch,
+  ): Promise<unknown> {
     while (true) {
       this.throwFailure();
+      if (this.abortController.signal.aborted) {
+        throw new Error(`OpenCode 2 replay aborted while waiting for ${operation}.`);
+      }
+      if (
+        this.claimedResponseCursor === this.cursor ||
+        (this.pendingEventHandling && startedAtEventEpoch < this.currentEventEpoch)
+      ) {
+        await this.changed();
+        continue;
+      }
       const entry = this.transcript.entries[this.cursor];
+      if (entry === undefined) {
+        const mismatch = new OpenCode2ReplayMismatchError({
+          scenario: this.transcript.scenario,
+          cursor: this.cursor,
+          expected: { type: "sdk.response", operation },
+          actual: null,
+        });
+        this.fail(mismatch);
+        throw mismatch;
+      }
       if (entry?.type === "emit_inbound") {
         const frame = frameRecord(entry.frame);
         if (frame?.type === "sdk.response" && frame.operation === operation) {
-          if (entry.afterMs !== undefined && entry.afterMs > 0) {
-            await Effect.runPromise(Effect.sleep(Duration.millis(entry.afterMs)));
-          }
           const data = frame.data;
-          this.advance();
-          return data;
+          const claimedCursor = this.cursor;
+          this.claimedResponseCursor = claimedCursor;
+          try {
+            if (entry.afterMs !== undefined && entry.afterMs > 0) {
+              const delayCompleted = await waitForReplayDelay(
+                entry.afterMs,
+                this.abortController.signal,
+              );
+              if (!delayCompleted) {
+                throw new Error(`OpenCode 2 replay aborted while waiting for ${operation}.`);
+              }
+            }
+            this.throwFailure();
+            this.advance();
+            return data;
+          } finally {
+            this.releaseResponseClaim(claimedCursor);
+          }
+        }
+        if (frame?.type === "sdk.error" && frame.operation === operation) {
+          const claimedCursor = this.cursor;
+          this.claimedResponseCursor = claimedCursor;
+          try {
+            if (entry.afterMs !== undefined && entry.afterMs > 0) {
+              const delayCompleted = await waitForReplayDelay(
+                entry.afterMs,
+                this.abortController.signal,
+              );
+              if (!delayCompleted) {
+                throw new Error(`OpenCode 2 replay aborted while waiting for ${operation}.`);
+              }
+            }
+            this.throwFailure();
+            this.advance();
+            throw new OpenCodeRuntimeError({
+              operation,
+              category: "sdk-request-failed",
+              cause: frame.error ?? frame.message,
+            });
+          } finally {
+            this.releaseResponseClaim(claimedCursor);
+          }
         }
       }
       if (entry?.type === "runtime_exit") {
-        const mismatch = new OpenCodeReplayMismatchError({
+        const mismatch = new OpenCode2ReplayMismatchError({
           scenario: this.transcript.scenario,
           cursor: this.cursor,
           expected: { type: "sdk.response", operation },
@@ -177,27 +312,54 @@ export class OpenCodeReplayController {
     }
   }
 
-  async *events(signal?: AbortSignal): AsyncIterable<OpenCodeEvent> {
+  async *events(signal?: AbortSignal): AsyncIterable<V2Event> {
     while (true) {
-      if (signal?.aborted === true) return;
       this.throwFailure();
+      if (isSignalAborted(signal) || this.abortController.signal.aborted) return;
+      if (this.successfulRuntimeExit) return;
+      if (this.claimedEventCursor === this.cursor || this.claimedResponseCursor === this.cursor) {
+        await this.changed(signal);
+        continue;
+      }
       const entry = this.transcript.entries[this.cursor];
       if (entry?.type === "emit_inbound") {
         const frame = frameRecord(entry.frame);
         if (frame?.type === "sdk.event") {
-          if (entry.afterMs !== undefined && entry.afterMs > 0) {
-            await Effect.runPromise(Effect.sleep(Duration.millis(entry.afterMs)));
+          const claimedCursor = this.cursor;
+          this.claimedEventCursor = claimedCursor;
+          try {
+            if (entry.afterMs !== undefined && entry.afterMs > 0) {
+              const delayCompleted = await waitForReplayDelay(
+                entry.afterMs,
+                this.replaySignal(signal),
+              );
+              if (!delayCompleted || isSignalAborted(signal)) return;
+            }
+            this.throwFailure();
+            const event = frame.event as V2Event;
+            this.advance();
+            this.currentEventEpoch += 1;
+            this.pendingEventHandling = true;
+            try {
+              yield event;
+            } finally {
+              this.pendingEventHandling = false;
+              this.notifyWaiters();
+            }
+            continue;
+          } finally {
+            this.releaseEventClaim(claimedCursor);
           }
-          const event = frame.event as OpenCodeEvent;
-          this.advance();
-          yield event;
-          continue;
         }
       }
       if (entry?.type === "runtime_exit") {
+        if (entry.status === "success") {
+          this.successfulRuntimeExit = true;
+          this.advance();
+          return;
+        }
         this.advance();
-        if (entry.status === "success") return;
-        const mismatch = new OpenCodeReplayMismatchError({
+        const mismatch = new OpenCode2ReplayMismatchError({
           scenario: this.transcript.scenario,
           cursor: this.cursor - 1,
           expected: { status: "success" },
@@ -214,11 +376,12 @@ export class OpenCodeReplayController {
     while (this.transcript.entries[this.cursor]?.type === "runtime_exit") {
       const exit = this.transcript.entries[this.cursor];
       if (exit?.type !== "runtime_exit" || exit.status !== "success") break;
-      this.cursor += 1;
+      this.successfulRuntimeExit = true;
+      this.advance();
     }
     this.throwFailure();
     if (this.cursor !== this.transcript.entries.length) {
-      throw new OpenCodeReplayIncompleteError({
+      throw new OpenCode2ReplayIncompleteError({
         scenario: this.transcript.scenario,
         cursor: this.cursor,
         remaining: this.transcript.entries.length - this.cursor,
@@ -226,16 +389,44 @@ export class OpenCodeReplayController {
     }
   }
 
+  /** Abort every pending replay consumer when its owning runtime scope closes. */
+  abort(): void {
+    this.abortController.abort();
+    this.notifyWaiters();
+  }
+
   private advance(): void {
     this.cursor += 1;
+    this.notifyWaiters();
+  }
+
+  private releaseEventClaim(cursor: number): void {
+    if (this.claimedEventCursor !== cursor) return;
+    this.claimedEventCursor = null;
+    this.notifyWaiters();
+  }
+
+  private releaseResponseClaim(cursor: number): void {
+    if (this.claimedResponseCursor !== cursor) return;
+    this.claimedResponseCursor = null;
+    this.notifyWaiters();
+  }
+
+  private notifyWaiters(): void {
     for (const waiter of this.waiters) waiter();
     this.waiters.clear();
   }
 
   private fail(cause: unknown): void {
-    this.failure = cause;
-    for (const waiter of this.waiters) waiter();
-    this.waiters.clear();
+    if (this.failure === null) this.failure = cause;
+    this.abortController.abort();
+    this.notifyWaiters();
+  }
+
+  private replaySignal(signal?: AbortSignal): AbortSignal {
+    return signal === undefined
+      ? this.abortController.signal
+      : AbortSignal.any([signal, this.abortController.signal]);
   }
 
   private throwFailure(): void {
@@ -243,111 +434,168 @@ export class OpenCodeReplayController {
   }
 
   private changed(signal?: AbortSignal): Promise<void> {
+    const replaySignal = this.replaySignal(signal);
+    if (replaySignal.aborted) return Promise.resolve();
     return new Promise((resolve) => {
-      let settled = false;
       const done = () => {
-        if (settled) return;
-        settled = true;
-        signal?.removeEventListener("abort", done);
+        replaySignal.removeEventListener("abort", done);
         this.waiters.delete(done);
         resolve();
       };
       this.waiters.add(done);
-      signal?.addEventListener("abort", done, { once: true });
-      if (signal?.aborted === true) done();
+      replaySignal.addEventListener("abort", done, { once: true });
     });
   }
 }
 
-function makeReplayClient(controller: OpenCodeReplayController): OpencodeClient {
-  const request = async (operation: string, input: unknown) => {
+export function makeReplayClient(controller: OpenCode2ReplayController): OpenCodeClient {
+  const request = async (operation: OpenCodeRuntimeOperation, input: unknown) => {
+    const startedAtEventEpoch = controller.eventEpoch();
     await controller.expectOutbound({ type: operation, input });
-    return { data: await controller.response(operation) };
+    return { data: { data: await controller.response(operation, startedAtEventEpoch) } };
+  };
+  /**
+   * Catalog probes may run at openSession/ensureThread before the transcript
+   * records them. Prefer the transcript when present; otherwise return canned
+   * data so event.subscribe stays first and fixtures do not deadlock.
+   */
+  const optionalCatalog = async (
+    operation: OpenCodeRuntimeOperation,
+    input: unknown,
+    canned: unknown,
+  ) => {
+    if (!(await controller.expectsOptionalOutbound(operation))) {
+      return { data: { data: canned } };
+    }
+    return request(operation, input);
   };
   return {
+    agent: {
+      list: (input: unknown) =>
+        optionalCatalog("agent.list", input, [{ id: "build" }, { id: "plan" }]),
+    },
     event: {
-      subscribe: async (_input?: unknown, options?: { readonly signal?: AbortSignal }) => {
-        await controller.expectOutbound({ type: "event.subscribe" });
-        return { stream: controller.events(options?.signal) };
+      subscribe: (options?: { readonly signal?: AbortSignal }) => {
+        const subscribed = controller.expectOutbound({ type: "event.subscribe" });
+        return {
+          async *[Symbol.asyncIterator]() {
+            await subscribed;
+            yield* controller.events(options?.signal);
+          },
+        };
       },
     },
-    session: {
-      create: (input: unknown) => request("session.create", input),
-      get: (input: unknown) => request("session.get", input),
-      update: (input: unknown) => request("session.update", input),
-      messages: (input: unknown) => request("session.messages", input),
-      promptAsync: (input: unknown) => request("session.promptAsync", input),
-      abort: (input: unknown) => request("session.abort", input),
-      revert: (input: unknown) => request("session.revert", input),
-      unrevert: (input: unknown) => request("session.unrevert", input),
-      fork: (input: unknown) => request("session.fork", input),
+    form: {
+      reply: (input: {
+        readonly sessionID: string;
+        readonly formID: string;
+        readonly answer: unknown;
+      }) => {
+        if (controller.expectsOutbound("session.question.reply")) {
+          const answers = P.isObject(input.answer) ? Object.values(input.answer) : [input.answer];
+          return request("session.question.reply", {
+            sessionID: input.sessionID,
+            requestID: input.formID,
+            questionV2Reply: { answers },
+          });
+        }
+        return request("session.form.reply", input);
+      },
     },
-    permission: {
-      reply: (input: unknown) => request("permission.reply", input),
-    },
-    question: {
-      reply: (input: unknown) => request("question.reply", input),
+    message: {
+      list: (input: unknown) => request("message.list", input),
     },
     mcp: {
-      add: (input: unknown) => request("mcp.add", input),
+      list: (input: unknown) => optionalCatalog("mcp.list", input, []),
     },
-  } as unknown as OpencodeClient;
+    model: {
+      list: (input: unknown) => optionalCatalog("model.list", input, []),
+    },
+    permission: {
+      reply: (input: unknown) => request("session.permission.reply", input),
+    },
+    session: {
+      context: (input: unknown) => request("session.context", input),
+      create: (input: unknown) => request("session.create", input),
+      fork: (input: { readonly sessionID: string; readonly boundary: unknown }) =>
+        request("session.fork", {
+          sessionID: input.sessionID,
+          $body_boundary: input.boundary,
+        }),
+      get: (input: unknown) => request("session.get", input),
+      inbox: {
+        list: (input: unknown) => request("session.pending.list", input),
+      },
+      instructions: {
+        entry: {
+          put: (input: unknown) => request("session.instructions.entry.put", input),
+        },
+      },
+      interrupt: (input: unknown) => request("session.interrupt", input),
+      prompt: (input: {
+        readonly sessionID: string;
+        readonly text: string;
+        readonly files?: unknown;
+        readonly delivery?: string;
+      }) => {
+        if (typeof input.text !== "string") {
+          throw new Error("Replay session.prompt must use a flat text body.");
+        }
+        const prompt = {
+          text: input.text,
+          ...(input.files === undefined ? {} : { files: input.files }),
+        };
+        return request("session.prompt", {
+          sessionID: input.sessionID,
+          prompt,
+          ...(typeof input.delivery === "string" ? { delivery: input.delivery } : {}),
+        });
+      },
+      remove: (input: unknown) => request("session.remove", input),
+      revert: {
+        commit: (input: unknown) => request("session.revert.commit", input),
+        stage: (input: unknown) => request("session.revert.stage", input),
+      },
+      switchAgent: (input: unknown) => request("session.switchAgent", input),
+      switchModel: (input: unknown) => request("session.switchModel", input),
+      wait: (input: unknown) => request("session.wait", input),
+    },
+    shell: {
+      list: (input: unknown) => request("shell.list", input),
+      output: (input: unknown) => request("shell.output", input),
+      remove: (input: unknown) => request("shell.remove", input),
+    },
+  } as unknown as OpenCodeClient;
 }
 
-function makeOpenCodeReplayRuntimeLayer(transcript: OpenCodeSdkReplayTranscript) {
+function makeOpenCode2ReplayRuntimeLayer(transcript: OpenCode2SdkReplayTranscript) {
   return Layer.effect(
     OpenCodeRuntime,
     Effect.gen(function* () {
-      const controller = new OpenCodeReplayController(transcript);
+      const controller = new OpenCode2ReplayController(transcript);
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
+          controller.abort();
           controller.assertComplete();
         }),
       );
       const client = makeReplayClient(controller);
       return OpenCodeRuntime.of({
-        startOpenCodeServerProcess: () =>
-          Effect.fail(
-            new OpenCodeRuntimeError({
-              operation: "startOpenCodeServerProcess",
-              detail: "OpenCode replay uses an external in-memory SDK boundary.",
-            }),
-          ),
         connectToOpenCodeServer: () =>
           Effect.succeed({
-            url: "replay://opencode",
+            url: "replay://opencode2",
+            password: "replay-password",
             exitCode: null,
             external: true,
           }),
-        runOpenCodeCommand: () =>
-          Effect.fail(
-            new OpenCodeRuntimeError({
-              operation: "runOpenCodeCommand",
-              detail: "OpenCode replay does not execute commands.",
-            }),
-          ),
         createOpenCodeSdkClient: () => client,
-        loadOpenCodeInventory: () =>
-          Effect.fail(
-            new OpenCodeRuntimeError({
-              operation: "loadOpenCodeInventory",
-              detail: "OpenCode replay does not load inventory.",
-            }),
-          ),
-        loadInventoryFromCli: () =>
-          Effect.fail(
-            new OpenCodeRuntimeError({
-              operation: "loadInventoryFromCli",
-              detail: "OpenCode replay does not load inventory.",
-            }),
-          ),
-      } satisfies OpenCodeRuntimeShape);
+      } satisfies OpenCodeRuntime["Service"]);
     }),
   );
 }
 
-export function makeOpenCodeProviderAdapterRegistryReplayLayer(
-  transcript: OpenCodeSdkReplayTranscript,
+export function makeOpenCode2ProviderAdapterRegistryReplayLayer(
+  transcript: OpenCode2SdkReplayTranscript,
 ) {
   const serverConfigLayer = Layer.effect(
     ServerConfig,
@@ -356,15 +604,18 @@ export function makeOpenCodeProviderAdapterRegistryReplayLayer(
   return makeProviderAdapterRegistryDriverLayer({
     drivers: [OpenCodeAdapterV2Driver],
     configMap: {
-      [OPENCODE_DEFAULT_INSTANCE_ID]: {
-        driver: OPENCODE_DRIVER_KIND,
-        config: { serverUrl: "replay://opencode" },
+      [OPENCODE2_REPLAY_INSTANCE_ID]: {
+        driver: OPENCODE_PROVIDER,
+        config: {
+          serverUrl: "replay://opencode2",
+          serverPassword: "replay-password",
+        },
       },
     },
   }).pipe(
     Layer.provide(
       Layer.mergeAll(
-        makeOpenCodeReplayRuntimeLayer(transcript),
+        makeOpenCode2ReplayRuntimeLayer(transcript),
         serverConfigLayer,
         NodeServices.layer,
         idAllocatorLayer,
@@ -376,26 +627,26 @@ export function makeOpenCodeProviderAdapterRegistryReplayLayer(
 
 function transcriptMetadata(transcript: ProviderReplayTranscript) {
   return {
-    provider: transcript.provider,
+    driver: transcript.provider,
     protocol: transcript.protocol,
     scenario: transcript.scenario,
   };
 }
 
 export const OpenCodeOrchestratorReplayHarness: OrchestratorV2ProviderReplayHarness<
-  OpenCodeSdkReplayTranscript,
+  OpenCode2SdkReplayTranscript,
   OpenCodeOrchestratorReplayHarnessError
 > = {
   driver: OPENCODE_PROVIDER,
   decodeTranscript: (transcript) =>
-    decodeOpenCodeSdkReplayTranscript(transcript).pipe(
+    decodeOpenCode2SdkReplayTranscript(transcript).pipe(
       Effect.mapError(
         (cause) =>
-          new OpenCodeReplayTranscriptDecodeError({
+          new OpenCode2ReplayTranscriptDecodeError({
             ...transcriptMetadata(transcript),
             cause,
           }),
       ),
     ),
-  makeProviderAdapterRegistryLayer: makeOpenCodeProviderAdapterRegistryReplayLayer,
+  makeProviderAdapterRegistryLayer: makeOpenCode2ProviderAdapterRegistryReplayLayer,
 };

@@ -34,9 +34,8 @@ import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
-import * as OpenCode2Runtime from "../opencode2Runtime.ts";
-import * as SpawnedProcessReaper from "../SpawnedProcessReaper.ts";
 import * as OpenCodeRuntime from "../opencodeRuntime.ts";
+import * as SpawnedProcessReaper from "../SpawnedProcessReaper.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./ProviderInstanceRegistryHydration.ts";
 import {
@@ -770,7 +769,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         );
       });
 
-      it("keeps OpenCode 1 capability carry-forward unchanged", () => {
+      it("clears stale OpenCode capabilities after a successful refresh", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("opencode"),
           driver: ProviderDriverKind.make("opencode"),
@@ -811,7 +810,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
 
         assert.deepStrictEqual(
           mergeProviderSnapshot(previousProvider, refreshedProvider).models,
-          previousProvider.models,
+          refreshedProvider.models,
         );
       });
 
@@ -1616,8 +1615,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 ProviderEventLoggers.NoOpProviderEventLoggers,
               ),
             ),
-            Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
-            Layer.provideMerge(OpenCode2Runtime.layer),
+            Layer.provideMerge(OpenCodeRuntime.layer),
             Layer.provideMerge(SpawnedProcessReaper.layer),
             Layer.provideMerge(BackgroundPolicyAlwaysRunLayer),
             // NO spawner mock — `ChildProcessSpawner` is supplied by the
@@ -1711,8 +1709,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 ProviderEventLoggers.NoOpProviderEventLoggers,
               ),
             ),
-            Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
-            Layer.provideMerge(OpenCode2Runtime.layer),
+            Layer.provideMerge(OpenCodeRuntime.layer),
             Layer.provideMerge(SpawnedProcessReaper.layer),
             Layer.updateService(ChildProcessSpawner.ChildProcessSpawner, (spawner) =>
               ChildProcessSpawner.make((command) => {
@@ -1835,8 +1832,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 ProviderEventLoggers.NoOpProviderEventLoggers,
               ),
             ),
-            Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
-            Layer.provideMerge(OpenCode2Runtime.layer),
+            Layer.provideMerge(OpenCodeRuntime.layer),
             Layer.provideMerge(SpawnedProcessReaper.layer),
             Layer.provideMerge(NodeServices.layer),
             Layer.provideMerge(BackgroundPolicyAlwaysRunLayer),
@@ -1899,8 +1895,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                   ProviderEventLoggers.NoOpProviderEventLoggers,
                 ),
               ),
-              Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
-              Layer.provideMerge(OpenCode2Runtime.layer),
+              Layer.provideMerge(OpenCodeRuntime.layer),
               Layer.provideMerge(SpawnedProcessReaper.layer),
               Layer.provideMerge(BackgroundPolicyAlwaysRunLayer),
               Layer.provideMerge(
@@ -1947,6 +1942,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 "cursor",
                 "grok",
                 "opencode",
+                "pi",
               ]);
               assert.strictEqual(cursorProvider?.enabled, false);
               assert.strictEqual(cursorProvider?.status, "disabled");

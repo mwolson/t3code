@@ -113,7 +113,9 @@ const mergeProviderModels = (
 
   const previousBySlug = new Map(previousModels.map((model) => [model.slug, model] as const));
   const shouldClearSuccessfulOpenCode2Capabilities =
-    provider.driver === ProviderDriverKind.make("opencode2") && !shouldRetainMissingModels;
+    (provider.driver === ProviderDriverKind.make("opencode") ||
+      provider.driver === ProviderDriverKind.make("opencode2")) &&
+    !shouldRetainMissingModels;
   const mergedModels = nextModels.map((model) => {
     const previousModel = previousBySlug.get(model.slug);
     if (

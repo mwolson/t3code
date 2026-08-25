@@ -53,21 +53,27 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
+  if (props.provider === "pi") {
+    const foreground = isDarkMode ? "#F5F5F5" : "#0F0F0F";
+    return (
+      <Svg width={size} height={size} viewBox="165.29 165.29 469.43 469.43" fill="none">
+        <Path
+          fill={foreground}
+          fillRule="evenodd"
+          d="M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65Z"
+        />
+        <Path fill={foreground} d="M517.36 400H634.72V634.72H517.36Z" />
+      </Svg>
+    );
+  }
+
   if (iconKind === "opencode" || iconKind === "opencode2") {
     const palette = providerIconPalette(iconKind, isDarkMode);
     const detailFill = palette === "dark" ? "#4B4646" : "#CFCECD";
     const frameFill = palette === "dark" ? "#F1ECEC" : "#211E1E";
     return (
       <Svg width={size} height={size} viewBox="0 0 32 40" fill="none">
-        {iconKind === "opencode2" ? (
-          <>
-            <Path fill="#2E6CE9" d="M24 32H8V8H24V32Z" />
-            <Path fill="#82C4FF" d="M24 11H8V8H24V11Z" />
-            <Path fill="#0A2055" d="M24 32H8V29H24V32Z" />
-          </>
-        ) : (
-          <Path fill={detailFill} d="M24 32H8V16H24V32Z" />
-        )}
+        <Path fill={detailFill} d="M24 32H8V16H24V32Z" />
         <Path fill={frameFill} d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" />
       </Svg>
     );

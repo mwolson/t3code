@@ -155,7 +155,7 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [CURSOR_DRIVER_KIND]: "auto",
   [GROK_DRIVER_KIND]: "grok-build",
   [ACP_REGISTRY_DRIVER_KIND]: "default",
-  [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
+  [OPENCODE_DRIVER_KIND]: "opencode/glm-5.2",
   [OPENCODE2_DRIVER_KIND]: "opencode/glm-5.2",
 };
 
@@ -166,7 +166,7 @@ export const DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
   [CODEX_DRIVER_KIND]: DEFAULT_TEXT_GENERATION_MODEL,
   [CLAUDE_DRIVER_KIND]: "claude-haiku-4-5",
   [CURSOR_DRIVER_KIND]: "composer-2",
-  [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
+  [OPENCODE_DRIVER_KIND]: "opencode/glm-5.2",
 };
 
 export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<

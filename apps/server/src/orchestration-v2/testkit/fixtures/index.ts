@@ -8,6 +8,8 @@ import { claudeLocalBashTaskInput } from "./claude_local_bash_task/input.ts";
 import { assertClaudeLocalBashTaskOutput } from "./claude_local_bash_task/output.ts";
 import { claudeResultIsErrorInput } from "./claude_result_is_error/input.ts";
 import { assertClaudeResultIsErrorOutput } from "./claude_result_is_error/output.ts";
+import { claudeSubagentEmptyPromptInput } from "./claude_subagent_empty_prompt/input.ts";
+import { assertClaudeSubagentEmptyPromptOutput } from "./claude_subagent_empty_prompt/output.ts";
 import { grokSubagentLineageInput } from "./grok_subagent_lineage/input.ts";
 import { assertGrokSubagentLineageOutput } from "./grok_subagent_lineage/output.ts";
 import { assertClaudeMessageSteeringOutput } from "./message_steering/claude_output.ts";
@@ -15,6 +17,8 @@ import { assertMessageSteeringOutput } from "./message_steering/codex_output.ts"
 import { assertCursorMessageSteeringOutput } from "./message_steering/cursor_output.ts";
 import { assertGrokMessageSteeringOutput } from "./message_steering/grok_output.ts";
 import { messageSteeringInput } from "./message_steering/input.ts";
+import { assertClaudeMessageSteeringMidToolOutput } from "./message_steering_mid_tool/claude_output.ts";
+import { messageSteeringMidToolInput } from "./message_steering_mid_tool/input.ts";
 import { assertMultiTurnClaudeOutput } from "./multi_turn/claude_output.ts";
 import { assertMultiTurnOutput } from "./multi_turn/codex_output.ts";
 import { multiTurnInput } from "./multi_turn/input.ts";
@@ -90,10 +94,7 @@ import { openCode2SubagentSupervisedInput } from "./opencode2_subagent_supervise
 import { assertOpenCode2SubagentSupervisedOutput } from "./opencode2_subagent_supervised/output.ts";
 import { openCode2ThreadDeleteInput } from "./opencode2_thread_delete/input.ts";
 import { assertOpenCode2ThreadDeleteOutput } from "./opencode2_thread_delete/output.ts";
-import { openCodeSubagentInput } from "./opencode_subagent/input.ts";
-import { assertOpenCodeSubagentOutput } from "./opencode_subagent/output.ts";
 import { assertPlanQuestionsOutput } from "./plan_questions/codex_output.ts";
-import { assertOpenCodePlanQuestionsOutput } from "./plan_questions/opencode_output.ts";
 import { planQuestionsInput } from "./plan_questions/input.ts";
 import { assertProposedPlanOutput } from "./proposed_plan/codex_output.ts";
 import { assertProposedPlanCursorOutput } from "./proposed_plan/cursor_output.ts";
@@ -152,7 +153,6 @@ import {
   CURSOR_MODEL_SELECTION,
   GROK_MODEL_SELECTION,
   OPENCODE2_MODEL_SELECTION,
-  OPENCODE_MODEL_SELECTION,
   READ_ONLY_NEVER_POLICY,
   READ_ONLY_ON_REQUEST_POLICY,
   RESTRICTED_GRANULAR_POLICY,
@@ -215,6 +215,21 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         modelSelection: CLAUDE_MODEL_SELECTION,
         assertOutput: assertClaudeResultIsErrorOutput,
+      },
+    ],
+  },
+  {
+    name: "claude_subagent_empty_prompt",
+    buildInput: claudeSubagentEmptyPromptInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        transcriptFile: new URL(
+          "./claude_subagent_empty_prompt/claude_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: CLAUDE_MODEL_SELECTION,
+        assertOutput: assertClaudeSubagentEmptyPromptOutput,
       },
     ],
   },
@@ -289,12 +304,6 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
       },
       {
         driver: ProviderDriverKind.make("opencode"),
-        transcriptFile: new URL("./simple/opencode_transcript.ndjson", import.meta.url),
-        modelSelection: OPENCODE_MODEL_SELECTION,
-        assertOutput: assertSimpleOutput,
-      },
-      {
-        driver: ProviderDriverKind.make("opencode2"),
         transcriptFile: new URL("./simple/opencode2_transcript.ndjson", import.meta.url),
         modelSelection: OPENCODE2_MODEL_SELECTION,
         assertOutput: assertSimpleOutput,
@@ -496,23 +505,11 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     ],
   },
   {
-    name: "opencode_subagent",
-    buildInput: openCodeSubagentInput,
-    providers: [
-      {
-        driver: ProviderDriverKind.make("opencode"),
-        transcriptFile: new URL("./opencode_subagent/opencode_transcript.ndjson", import.meta.url),
-        modelSelection: OPENCODE_MODEL_SELECTION,
-        assertOutput: assertOpenCodeSubagentOutput,
-      },
-    ],
-  },
-  {
     name: "opencode2_archive_then_delete",
     buildInput: openCode2ArchiveThenDeleteInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_archive_then_delete/opencode2_transcript.ndjson",
           import.meta.url,
@@ -527,7 +524,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2AuthorizationFailureInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_authorization_failure/opencode2_transcript.ndjson",
           import.meta.url,
@@ -545,7 +542,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2BackgroundStopInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_background_stop/opencode2_transcript.ndjson",
           import.meta.url,
@@ -560,7 +557,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2BackgroundChildStopInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_background_child_stop/opencode2_transcript.ndjson",
           import.meta.url,
@@ -575,7 +572,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2BackgroundChildStopRecoveryOrderInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_background_child_stop_recovery_order/opencode2_transcript.ndjson",
           import.meta.url,
@@ -590,7 +587,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2BackgroundChildStopRecoveryRaceInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_background_child_stop_recovery_race/opencode2_transcript.ndjson",
           import.meta.url,
@@ -605,7 +602,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2TwoBackgroundChildStopInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_two_background_child_stop/opencode2_transcript.ndjson",
           import.meta.url,
@@ -620,7 +617,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2TwoBackgroundChildReplayInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_two_background_child_replay/opencode2_transcript.ndjson",
           import.meta.url,
@@ -635,7 +632,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2SharedOrdinaryWakeReplayInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_shared_ordinary_wake_replay/opencode2_transcript.ndjson",
           import.meta.url,
@@ -650,7 +647,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2SharedExecutionReplayInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_shared_execution_replay/opencode2_transcript.ndjson",
           import.meta.url,
@@ -665,7 +662,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2AmbiguousExecutionWakesInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_ambiguous_execution_wakes/opencode2_transcript.ndjson",
           import.meta.url,
@@ -680,7 +677,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2RetiredSuppressWakeInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_retired_suppress_wake/opencode2_transcript.ndjson",
           import.meta.url,
@@ -695,7 +692,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2CompactionInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_compaction/opencode2_transcript.ndjson",
           import.meta.url,
@@ -710,7 +707,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2FormReplyWithoutEventInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_form_reply_without_event/opencode2_transcript.ndjson",
           import.meta.url,
@@ -725,7 +722,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2PermissionCancelInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_permission_cancel/opencode2_transcript.ndjson",
           import.meta.url,
@@ -741,7 +738,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2PermissionCompletedThenFailedInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_permission_completed_then_failed/opencode2_transcript.ndjson",
           import.meta.url,
@@ -757,7 +754,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2PermissionDeclineInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_permission_decline/opencode2_transcript.ndjson",
           import.meta.url,
@@ -773,7 +770,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2PermissionExternalSubagentInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_permission_external_subagent/opencode2_transcript.ndjson",
           import.meta.url,
@@ -788,7 +785,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2PermissionLocalSuccessThenFailureInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_permission_local_success_then_failure/opencode2_transcript.ndjson",
           import.meta.url,
@@ -804,7 +801,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2PermissionRejectRaceInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_permission_reject_race/opencode2_transcript.ndjson",
           import.meta.url,
@@ -820,7 +817,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2PermissionReplyFailureInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_permission_reply_failure/opencode2_transcript.ndjson",
           import.meta.url,
@@ -835,7 +832,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2PermissionReplyFailureAfterTerminalInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_permission_reply_failure_after_terminal/opencode2_transcript.ndjson",
           import.meta.url,
@@ -851,7 +848,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2PermissionSessionInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_permission_session/opencode2_transcript.ndjson",
           import.meta.url,
@@ -867,7 +864,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2PermissionTerminalWithoutReplyInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_permission_terminal_without_reply/opencode2_transcript.ndjson",
           import.meta.url,
@@ -883,7 +880,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2PermissionReplyFailureSubagentInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_permission_reply_failure_subagent/opencode2_transcript.ndjson",
           import.meta.url,
@@ -898,7 +895,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2QuestionLegacyInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_question_legacy/opencode2_transcript.ndjson",
           import.meta.url,
@@ -913,7 +910,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2RetryInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL("./opencode2_retry/opencode2_transcript.ndjson", import.meta.url),
         modelSelection: OPENCODE2_MODEL_SELECTION,
         assertOutput: assertOpenCode2RetryOutput,
@@ -925,7 +922,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2RetryUnknownFinishInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_retry_unknown_finish/opencode2_transcript.ndjson",
           import.meta.url,
@@ -940,7 +937,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2ShellProjectionInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_shell_projection/opencode2_transcript.ndjson",
           import.meta.url,
@@ -955,7 +952,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2SubagentBackgroundWakeInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_subagent_background_wake/opencode2_transcript.ndjson",
           import.meta.url,
@@ -970,7 +967,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2SubagentQueuedTurnInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_subagent_queued_turn/opencode2_transcript.ndjson",
           import.meta.url,
@@ -985,7 +982,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2SubagentRateLimitInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_subagent_rate_limit/opencode2_transcript.ndjson",
           import.meta.url,
@@ -1000,7 +997,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2SubagentSupervisedInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_subagent_supervised/opencode2_transcript.ndjson",
           import.meta.url,
@@ -1016,7 +1013,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2ShellTerminalsInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_shell_terminals/opencode2_transcript.ndjson",
           import.meta.url,
@@ -1031,7 +1028,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2ThreadDeleteInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_thread_delete/opencode2_transcript.ndjson",
           import.meta.url,
@@ -1046,7 +1043,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     buildInput: openCode2UnknownFinishIdleInput,
     providers: [
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL(
           "./opencode2_unknown_finish_idle/opencode2_transcript.ndjson",
           import.meta.url,
@@ -1091,7 +1088,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         assertOutput: assertMultiTurnOutput,
       },
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL("./multi_turn/opencode2_transcript.ndjson", import.meta.url),
         modelSelection: OPENCODE2_MODEL_SELECTION,
         assertOutput: assertMultiTurnOutput,
@@ -1159,7 +1156,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         assertOutput: assertQueuedTurnOutput,
       },
       {
-        driver: ProviderDriverKind.make("opencode2"),
+        driver: ProviderDriverKind.make("opencode"),
         transcriptFile: new URL("./queued_turn/opencode2_transcript.ndjson", import.meta.url),
         modelSelection: OPENCODE2_MODEL_SELECTION,
         assertOutput: assertQueuedTurnOutput,
@@ -1234,13 +1231,6 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         runtimePolicyOverride: READ_ONLY_NEVER_POLICY,
         assertOutput: assertPlanQuestionsOutput,
       },
-      {
-        driver: ProviderDriverKind.make("opencode"),
-        transcriptFile: new URL("./plan_questions/opencode_transcript.ndjson", import.meta.url),
-        modelSelection: OPENCODE_MODEL_SELECTION,
-        runtimePolicyOverride: READ_ONLY_NEVER_POLICY,
-        assertOutput: assertOpenCodePlanQuestionsOutput,
-      },
     ],
   },
   {
@@ -1300,6 +1290,21 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     ],
   },
   {
+    name: "message_steering_mid_tool",
+    buildInput: messageSteeringMidToolInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        transcriptFile: new URL(
+          "./message_steering_mid_tool/claude_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: CLAUDE_MODEL_SELECTION,
+        assertOutput: assertClaudeMessageSteeringMidToolOutput,
+      },
+    ],
+  },
+  {
     name: "turn_interrupt",
     buildInput: turnInterruptInput,
     providers: [
@@ -1328,13 +1333,6 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         driver: ProviderDriverKind.make("acpRegistry"),
         transcriptFile: new URL("./turn_interrupt/grok_transcript.ndjson", import.meta.url),
         modelSelection: ACP_REGISTRY_MODEL_SELECTION,
-        runtimePolicyOverride: WORKSPACE_NEVER_POLICY,
-        assertOutput: assertTurnInterruptOutput,
-      },
-      {
-        driver: ProviderDriverKind.make("opencode"),
-        transcriptFile: new URL("./turn_interrupt/opencode_transcript.ndjson", import.meta.url),
-        modelSelection: OPENCODE_MODEL_SELECTION,
         runtimePolicyOverride: WORKSPACE_NEVER_POLICY,
         assertOutput: assertTurnInterruptOutput,
       },
