@@ -559,9 +559,9 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
         };
       };
 
-      const readContextUsage = (turn: ActivePiTurn) =>
+      const readContextUsage = (fallbackUsedTokens: number | null) =>
         request({ type: "get_session_stats" }, 2_000).pipe(
-          Effect.map((stats) => contextUsageFromStats(stats, turn.latestCompactionAfterTokens)),
+          Effect.map((stats) => contextUsageFromStats(stats, fallbackUsedTokens)),
           // Usage is secondary telemetry. Bound the request and never fail
           // turn terminalization for a provider version without stats.
           Effect.orElseSucceed(() => undefined),
@@ -1271,7 +1271,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
       });
 
       const refreshContextUsageAfterTurn = (state: PiThreadState, turn: ActivePiTurn) =>
-        readContextUsage(turn).pipe(
+        readContextUsage(turn.latestCompactionAfterTokens).pipe(
           Effect.flatMap((contextUsage) => {
             const currentState = threadState;
             return contextUsage === undefined ||
@@ -2349,6 +2349,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             const entriesData = yield* request({ type: "get_entries" }).pipe(
               Effect.orElseSucceed(() => undefined),
             );
+            const contextUsage = yield* readContextUsage(null);
             const leafId = recordString(entriesData, "leafId") ?? null;
             lastKnownLeaf = leafId;
             // The fork re-baselined the tree, so the cursor is trustworthy
@@ -2356,6 +2357,9 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             leafCursorStale = entriesData === undefined;
             yield* updateProviderThread(state, {
               nativeConversationHeadRef: leafId === null ? null : providerRef(leafId),
+              // The fork changed the active branch. Never retain usage from
+              // the discarded branch when Pi cannot return fresh stats.
+              contextUsage: contextUsage ?? null,
             });
             return piThreadSnapshot(state.providerThread);
           }).pipe(
