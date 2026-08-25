@@ -294,6 +294,7 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
         eventSinkProvided,
         idAllocatorLayer,
         mcpSessionRegistryTestLayer,
+        providerEventIngestorProvided,
         storesLayer,
       ),
     ),
