@@ -44,6 +44,12 @@ const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512)
 const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(
   Schema.isMaxLength(256),
 ).annotate({ description: "Stable idempotency key to reuse when retrying this mutation." });
+const OrchestratorMcpProjectDirectory = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(4096),
+).annotate({
+  description:
+    "Optional path of a known T3 project workspace for a new top-level thread. Absolute paths and home-relative ~/ paths are accepted. Omit to inherit this thread's project. Unknown or relative paths are rejected.",
+});
 
 /**
  * OpenCode 1.15 has been observed serializing nested MCP union objects as JSON
@@ -256,6 +262,7 @@ export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
   target: Schema.optional(OrchestratorMcpTarget),
   runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),
   interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
+  projectDirectory: Schema.optional(OrchestratorMcpProjectDirectory),
 });
 export type OrchestratorMcpCreateThreadRequest = typeof OrchestratorMcpCreateThreadRequest.Type;
 
@@ -301,6 +308,7 @@ export const OrchestratorMcpThreadStartInput = Schema.Struct({
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
   runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),
   interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
+  projectDirectory: Schema.optional(OrchestratorMcpProjectDirectory),
 });
 export type OrchestratorMcpThreadStartInput = typeof OrchestratorMcpThreadStartInput.Type;
 

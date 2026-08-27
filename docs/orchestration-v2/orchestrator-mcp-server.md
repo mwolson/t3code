@@ -212,8 +212,9 @@ type DelegateTaskInput = {
 ```
 
 Provider, model, runtime mode, and interaction mode inherit from the parent
-when omitted. Selecting a different provider without a model uses that
-provider's first advertised model.
+when omitted. Delegated children always inherit the parent thread's project.
+Selecting a different provider without a model uses that provider's first
+advertised model.
 
 Delegation requires an active parent run owned by the MCP credential's
 provider session. The request becomes the V2 command
@@ -277,22 +278,26 @@ type CreateThreadsInput = {
     };
     runtimeMode?: "inherit" | "approval-required" | "auto-accept-edits" | "full-access";
     interactionMode?: "inherit" | "plan" | "default";
+    projectDirectory?: string;
   }>;
   clientRequestId?: string;
 };
 ```
 
-Each entry independently resolves provider, model, and modes. The new threads
-inherit the parent's project, branch, and worktree path, but they have no
-sub-agent lineage. Entries with a prompt immediately dispatch a run; entries
-without a prompt remain idle.
+Each entry independently resolves provider, model, modes, and optional project
+directory. `projectDirectory` may be an absolute path or a home-relative `~/`
+path of a project T3 already knows. Omit it to inherit the parent's project,
+branch, and worktree path. A resolved project starts at that project's root, not
+as a worktree. The new threads have no sub-agent lineage. Entries with a prompt
+immediately dispatch a run; entries without a prompt remain idle.
 
 ### `t3_thread_start`
 
 Creates one ordinary top-level thread and immediately dispatches its first
 prompt. It is the single-thread convenience form of `create_threads` and
 returns the created thread and run IDs. Use `clientRequestId` when a caller may
-retry the request.
+retry the request. Pass `projectDirectory` to start the thread in another known
+T3 project.
 
 ### `t3_thread_list`
 
@@ -385,9 +390,15 @@ falls back to a terminal-status message when no assistant text exists.
   mode. It may not escalate privileges.
 - A child interaction mode may stay equal to or narrow from `default` to
   `plan`. It may not escalate from `plan` to `default`.
-- General thread management is limited to the calling thread's project. Send
-  additionally enforces the same runtime and interaction privilege ceiling as
-  child creation.
+- `create_threads` and `t3_thread_start` inherit this thread's project unless
+  `projectDirectory` names another known T3 project workspace. Absolute paths
+  and home-relative `~/` paths are accepted. Unknown or relative paths are
+  rejected. Delegated subagents always inherit the parent project.
+- `t3_thread_list` stays in the calling thread's project. Read, send, wait, and
+  interrupt may follow a top-level thread this parent recorded creating, even
+  when that thread lives in another known project.
+- Send additionally enforces the same runtime and interaction privilege ceiling
+  as child creation.
 - Provider instances must be enabled, installed, available, authenticated, and
   backed by a V2 adapter.
 - A requested model must be advertised by the selected provider when the

@@ -52,6 +52,7 @@ import {
   type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
+import * as NodeOS from "node:os";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -59,6 +60,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { isBuiltInProviderAdapterDriverV2 } from "../orchestration-v2/builtInProviderAdapterDrivers.ts";
@@ -73,6 +75,7 @@ import {
   ThreadManagementService,
 } from "../orchestration-v2/ThreadManagementService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
@@ -159,6 +162,7 @@ export class OrchestratorMcpService extends Context.Service<
 >()("t3/mcp/OrchestratorMcpService") {}
 
 const isThreadManagementError = Schema.is(ThreadManagementError);
+const isProjectOperationError = Schema.is(ProjectService.ProjectOperationError);
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
   return new OrchestratorMcpFailure({ code, message });
@@ -209,6 +213,50 @@ export function orchestratorMcpThreadInterruptResultFor(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+interface ResolvedProjectCheckout {
+  readonly projectId: OrchestrationV2ThreadProjection["thread"]["projectId"];
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+}
+
+function expandedAbsoluteProjectDirectory(value: string, path: Path.Path): string | null {
+  const trimmed = value.trim();
+  if (trimmed === "~") {
+    return path.resolve(NodeOS.homedir());
+  }
+  if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return path.resolve(path.join(NodeOS.homedir(), trimmed.slice(2)));
+  }
+  if (!path.isAbsolute(trimmed)) {
+    return null;
+  }
+  return path.resolve(trimmed);
+}
+
+function unknownProjectDirectory(path: string): OrchestratorMcpFailure {
+  return failure("invalid_request", `Project directory '${path}' is not a known T3 project.`);
+}
+
+function isMissingWorkspaceRoot(error: ProjectService.ProjectOperationError): boolean {
+  if (error.operation !== "normalize-workspace") {
+    return false;
+  }
+  const cause = error.cause;
+  if (cause === null || typeof cause !== "object" || !("_tag" in cause)) {
+    return false;
+  }
+  return (
+    cause._tag === "WorkspaceRootNotExistsError" || cause._tag === "WorkspaceRootNotDirectoryError"
+  );
+}
+
+function projectDirectoryResolveFailure(absolute: string, error: unknown): OrchestratorMcpFailure {
+  if (isProjectOperationError(error) && !isMissingWorkspaceRoot(error)) {
+    return failure("orchestration_error", `Unable to resolve project directory '${absolute}'.`);
+  }
+  return unknownProjectDirectory(absolute);
 }
 
 /**
@@ -769,9 +817,11 @@ function timelineItem(input: {
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
+  const path = yield* Path.Path;
   const threadManagement = yield* ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry;
   const scheduledTasks = yield* ScheduledTaskService;
+  const projects = yield* ProjectService.ProjectService;
 
   const requireCapability = (scope: McpInvocationScope) =>
     scope.capabilities.has("orchestration")
@@ -807,11 +857,61 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       yield* requireCapability(scope);
       const parent = yield* loadProjection(scope.threadId);
-      const target =
-        threadId === scope.threadId
-          ? parent
-          : yield* loadProjectThread(parent.thread.projectId, threadId);
+      if (threadId === scope.threadId) {
+        return { parent, target: parent } as const;
+      }
+      const target = yield* loadProjection(threadId);
+      if (target.thread.deletedAt !== null) {
+        return yield* failure(
+          "thread_not_found",
+          `Thread ${threadId} was not found in this project.`,
+        );
+      }
+      if (target.thread.projectId === parent.thread.projectId) {
+        return { parent, target } as const;
+      }
+      const isRecordedThread = parent.turnItems.some(
+        (item) => item.type === "thread_created" && item.targetThreadId === threadId,
+      );
+      if (!isRecordedThread) {
+        return yield* failure(
+          "thread_not_found",
+          `Thread ${threadId} was not found in this project.`,
+        );
+      }
       return { parent, target } as const;
+    });
+
+  const resolveProjectDirectory = (
+    parent: OrchestrationV2ThreadProjection,
+    projectDirectory: string | undefined,
+  ): Effect.Effect<ResolvedProjectCheckout, OrchestratorMcpFailure> =>
+    Effect.gen(function* () {
+      if (projectDirectory === undefined) {
+        return {
+          projectId: parent.thread.projectId,
+          branch: parent.thread.branch,
+          worktreePath: parent.thread.worktreePath,
+        };
+      }
+      const absolute = expandedAbsoluteProjectDirectory(projectDirectory, path);
+      if (absolute === null) {
+        return yield* failure(
+          "invalid_request",
+          "projectDirectory must be an absolute path, or a home-relative ~/ path, to a known T3 project.",
+        );
+      }
+      const project = yield* projects
+        .getByWorkspaceRoot(absolute)
+        .pipe(Effect.mapError((error) => projectDirectoryResolveFailure(absolute, error)));
+      if (Option.isNone(project)) {
+        return yield* unknownProjectDirectory(absolute);
+      }
+      return {
+        projectId: project.value.id,
+        branch: null,
+        worktreePath: null,
+      };
     });
 
   const loadProviders = providerRegistry.getProviders;
@@ -1524,6 +1624,7 @@ const make = Effect.gen(function* () {
                 parent.thread.interactionMode,
                 request.interactionMode,
               );
+              const checkout = yield* resolveProjectDirectory(parent, request.projectDirectory);
               const threadId = stableThreadId({
                 scope,
                 requestKey: key,
@@ -1547,13 +1648,13 @@ const make = Effect.gen(function* () {
                     index,
                   }),
                   threadId,
-                  projectId: parent.thread.projectId,
+                  projectId: checkout.projectId,
                   title,
                   modelSelection: target.modelSelection,
                   runtimeMode,
                   interactionMode,
-                  branch: parent.thread.branch,
-                  worktreePath: parent.thread.worktreePath,
+                  branch: checkout.branch,
+                  worktreePath: checkout.worktreePath,
                 })
                 .pipe(
                   Effect.mapError((error) =>
@@ -1744,7 +1845,7 @@ const make = Effect.gen(function* () {
         });
         const result = yield* threadManagement
           .sendToThread({
-            projectId: parent.thread.projectId,
+            projectId: target.thread.projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
@@ -1778,10 +1879,10 @@ const make = Effect.gen(function* () {
       }),
     waitForThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { target } = yield* loadScopedThread(scope, input.threadId);
         const result = yield* threadManagement
           .waitForThread({
-            projectId: parent.thread.projectId,
+            projectId: target.thread.projectId,
             threadId: input.threadId,
             ...(input.runId === undefined ? {} : { runId: input.runId }),
             timeoutMs: Math.min(
@@ -1799,11 +1900,11 @@ const make = Effect.gen(function* () {
       }),
     interruptThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { target } = yield* loadScopedThread(scope, input.threadId);
         const key = yield* requestKey(input.clientRequestId);
         const result = yield* threadManagement
           .interruptThread({
-            projectId: parent.thread.projectId,
+            projectId: target.thread.projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
@@ -1831,5 +1932,10 @@ const make = Effect.gen(function* () {
 export const layer: Layer.Layer<
   OrchestratorMcpService,
   never,
-  Crypto.Crypto | ThreadManagementService | ProviderRegistry | ScheduledTaskService
+  | Crypto.Crypto
+  | Path.Path
+  | ThreadManagementService
+  | ProviderRegistry
+  | ScheduledTaskService
+  | ProjectService.ProjectService
 > = Layer.effect(OrchestratorMcpService, make);
