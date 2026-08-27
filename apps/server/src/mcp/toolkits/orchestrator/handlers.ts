@@ -75,6 +75,9 @@ const handlers = {
             ...(input.interactionMode === undefined
               ? {}
               : { interactionMode: input.interactionMode }),
+            ...(input.projectDirectory === undefined
+              ? {}
+              : { projectDirectory: input.projectDirectory }),
           },
         ],
       });
