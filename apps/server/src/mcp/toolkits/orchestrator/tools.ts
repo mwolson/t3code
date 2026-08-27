@@ -49,7 +49,7 @@ export const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities
 
 export const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Delegate one task to a T3-owned child agent/subagent of THIS thread and run it with only the supplied task prompt, without copying parent conversation history. Use this whenever the user asks for an agent, subagent, worker, delegated task, or parallel help—including cross-provider work. The childThreadId is backing storage, not an ordinary top-level thread. Provider, model, model options (see orchestrator_capabilities), runtime mode, and interaction mode inherit unless target overrides them. Prefer mode='async' for long work; mode='wait' blocks until completion or timeout. An async child's completion wakes this thread with a continuation message naming the task (queued behind any turn in progress), so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
+    "Delegate one task to a T3-owned child agent/subagent of THIS thread and run it with only the supplied task prompt, without copying parent conversation history. Use this whenever the user asks for an agent, subagent, worker, delegated task, or parallel help—including cross-provider work. The childThreadId is backing storage, not an ordinary top-level thread. Provider, model, model options (see orchestrator_capabilities), runtime mode, and interaction mode inherit unless target overrides them. Delegated children always inherit this thread's project. Prefer mode='async' for long work; mode='wait' blocks until completion or timeout. An async child's completion wakes this thread with a continuation message naming the task (queued behind any turn in progress), so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,
@@ -138,7 +138,7 @@ export const DeleteScheduledTaskTool = Tool.make("delete_scheduled_task", {
 
 export const CreateThreadsTool = Tool.make("create_threads", {
   description:
-    "Create one or more ORDINARY TOP-LEVEL T3 conversations. This is not delegation and does not create child agents/subagents. If the user asks for agents, subagents, workers, delegation, or parallel help, call delegate_task once per child instead—even when selecting different providers. Use create_threads only when the user explicitly asks for separate/new/top-level threads or conversations. Each entry may override provider, model, options, runtime mode, and interaction mode; omitted settings inherit.",
+    "Create one or more ORDINARY TOP-LEVEL T3 conversations. This is not delegation and does not create child agents/subagents. If the user asks for agents, subagents, workers, delegation, or parallel help, call delegate_task once per child instead—even when selecting different providers. Use create_threads only when the user explicitly asks for separate/new/top-level threads or conversations. Each entry may override provider, model, options, runtime mode, interaction mode, and projectDirectory; omitted settings inherit this thread's project. Unknown project directories are rejected.",
   parameters: OrchestratorMcpCreateThreadsInput,
   success: OrchestratorMcpCreateThreadsResult,
   failure: OrchestratorMcpFailure,
@@ -151,7 +151,7 @@ export const CreateThreadsTool = Tool.make("create_threads", {
 
 export const ThreadStartTool = Tool.make("t3_thread_start", {
   description:
-    "Create an ordinary TOP-LEVEL T3 conversation and immediately start its first turn. This is not a child agent/subagent; use delegate_task for delegated work. The new thread inherits this thread's project, checkout, provider, model, and runtime settings unless overridden. Use t3_thread_wait and t3_thread_read to collect its result.",
+    "Create an ordinary TOP-LEVEL T3 conversation and immediately start its first turn. This is not a child agent/subagent; use delegate_task for delegated work. The new thread inherits this thread's project, checkout, provider, model, and runtime settings unless overridden. Pass projectDirectory as an absolute or ~/ path to start it in another known T3 project workspace; unknown or relative paths are rejected. Use t3_thread_wait and t3_thread_read to collect its result.",
   parameters: OrchestratorMcpThreadStartInput,
   success: OrchestratorMcpCreatedThread,
   failure: OrchestratorMcpFailure,

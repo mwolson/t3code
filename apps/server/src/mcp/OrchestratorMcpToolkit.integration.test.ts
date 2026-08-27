@@ -36,6 +36,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -60,12 +61,15 @@ import {
 import { checkpointWorkspace } from "../orchestration-v2/testkit/ReplayFixtureWorkspace.ts";
 import { makeOrchestratorV2ReplayLayerWithRegistry } from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 
 const parentThreadId = ThreadId.make("thread:mcp-orchestrator-parent");
 const projectId = ProjectId.make("project:mcp-orchestrator");
+const otherProjectId = ProjectId.make("project:mcp-other");
+const otherProjectDirectory = "/workspace/mcp-other";
 const codexInstanceId = ProviderInstanceId.make("codex");
 const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
 const codexModel = "gpt-5.4";
@@ -575,6 +579,25 @@ describe("orchestrator MCP toolkit", () => {
             Layer.provideMerge(orchestrationLayer),
             Layer.provide(providerRegistryLayer),
             Layer.provide(scheduledTaskStubLayer),
+            Layer.provide(
+              Layer.mock(ProjectService.ProjectService)({
+                getByWorkspaceRoot: (workspaceRoot) =>
+                  Effect.succeed(
+                    workspaceRoot === otherProjectDirectory
+                      ? Option.some({
+                          id: otherProjectId,
+                          title: "Other",
+                          workspaceRoot: otherProjectDirectory,
+                          defaultModelSelection: null,
+                          scripts: [],
+                          createdAt: "2026-01-01T00:00:00.000Z",
+                          updatedAt: "2026-01-01T00:00:00.000Z",
+                          deletedAt: null,
+                        })
+                      : Option.none(),
+                  ),
+              }),
+            ),
             Layer.provide(NodeServices.layer),
           );
 
@@ -1504,6 +1527,62 @@ describe("orchestrator MCP toolkit", () => {
               message: expect.stringContaining("more than once"),
             });
 
+            const unknownProjectCall = yield* invoke("t3_thread_start", {
+              prompt: createdThreadPrompt,
+              projectDirectory: "/definitely-not-a-t3-project",
+              clientRequestId: "start-unknown-project-1",
+            });
+            expect(unknownProjectCall.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+              code: "invalid_request",
+              message: expect.stringContaining("not a known T3 project"),
+            });
+
+            const knownProjectCall = yield* invoke("t3_thread_start", {
+              prompt: createdThreadPrompt,
+              projectDirectory: otherProjectDirectory,
+              clientRequestId: "start-known-project-1",
+            });
+            expect(knownProjectCall.isError).toBe(false);
+            const knownProjectThread = yield* decodeCreatedThread(
+              knownProjectCall.structuredContent,
+            ).pipe(Effect.orDie);
+            const knownProjectChild = yield* orchestrator.getThreadProjection(
+              knownProjectThread.threadId,
+            );
+            expect(knownProjectChild.thread.projectId).toBe(otherProjectId);
+            expect(knownProjectChild.thread.worktreePath).toBeNull();
+
+            const knownReadCall = yield* invoke("t3_thread_read", {
+              threadId: knownProjectThread.threadId,
+              view: "messages",
+            });
+            expect(knownReadCall.isError).toBe(false);
+            const knownRead = yield* decodeThreadReadResult(knownReadCall.structuredContent).pipe(
+              Effect.orDie,
+            );
+            expect(knownRead.thread.projectId).toBe(otherProjectId);
+            expect(knownRead.thread.worktreePath).toBeNull();
+
+            const knownWaitCall = yield* invoke("t3_thread_wait", {
+              threadId: knownProjectThread.threadId,
+            });
+            expect(knownWaitCall.isError).toBe(false);
+
+            const knownSendCall = yield* invoke("t3_thread_send", {
+              threadId: knownProjectThread.threadId,
+              message: "Confirm the other workspace.",
+              mode: "queue",
+              clientRequestId: "send-known-project-1",
+            });
+            expect(knownSendCall.isError).toBe(false);
+
+            const knownInterruptCall = yield* invoke("t3_thread_interrupt", {
+              threadId: knownProjectThread.threadId,
+              clientRequestId: "interrupt-known-project-1",
+            });
+            expect(knownInterruptCall.isError).toBe(false);
+
             const cancellableCall = yield* invoke("delegate_task", {
               task: cancellationPrompt,
               target: {
@@ -1634,6 +1713,13 @@ describe("orchestrator MCP toolkit", () => {
                 model: item.targetModel,
               })),
             ).toEqual([
+              {
+                targetThreadId: knownProjectThread.threadId,
+                targetRunId: knownProjectThread.runId,
+                title: knownProjectThread.title,
+                providerInstanceId: codexInstanceId,
+                model: codexModel,
+              },
               {
                 targetThreadId: emptyThread.threadId,
                 targetRunId: null,

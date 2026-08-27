@@ -4896,13 +4896,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Parent node ${command.parentNodeId} is not the root of run ${command.parentRunId}.`,
         });
       }
-      if (parentProjection.thread.projectId !== targetProjection.thread.projectId) {
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: `Target thread ${command.targetThreadId} belongs to another project.`,
-        });
-      }
       if (
         command.targetRunId !== null &&
         !targetProjection.runs.some((candidate) => candidate.id === command.targetRunId)

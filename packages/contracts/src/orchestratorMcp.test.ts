@@ -122,6 +122,32 @@ describe("orchestrator MCP contracts", () => {
     expect(request.threads[1]?.target?.driverKind).toBe("claudeAgent");
   });
 
+  it("decodes an optional project directory only on top-level thread tools", () => {
+    expect(
+      decodeDelegateTaskInput({
+        task: "Inspect the other workspace.",
+        projectDirectory: "/workspace/other",
+      }).projectDirectory,
+    ).toBeUndefined();
+    expect(
+      decodeCreateThreadsInput({
+        threads: [{ prompt: "Review the API.", projectDirectory: "/workspace/other" }],
+      }).threads[0]?.projectDirectory,
+    ).toBe("/workspace/other");
+    expect(
+      decodeThreadStartInput({
+        prompt: "Run the first loop iteration.",
+        projectDirectory: "/workspace/other",
+      }).projectDirectory,
+    ).toBe("/workspace/other");
+    expect(() =>
+      decodeThreadStartInput({
+        prompt: "Run the first loop iteration.",
+        projectDirectory: "   ",
+      }),
+    ).toThrow();
+  });
+
   it("decodes project-scoped thread orchestration requests", () => {
     expect(
       decodeThreadStartInput({
