@@ -619,7 +619,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       latestRunId: latestRun?.runId ?? null,
       workingStepLabel,
     }),
-    [activeTurnInProgress, isRevertingCheckpoint, isWorking, latestRun?.runId, workingStepLabel],
+    [isRevertingCheckpoint, isWorking, latestRun?.runId, workingStepLabel],
   );
   const listHeader = useMemo(() => {
     const leadingContent =

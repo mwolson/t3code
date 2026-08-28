@@ -2316,7 +2316,6 @@ describe("MessagesTimeline", () => {
       <MessagesTimeline
         {...buildProps()}
         isWorking
-        activeTurnInProgress
         activeTurnStartedAt="2026-03-17T19:12:28.000Z"
         workingStepLabel="Resolve triage instances"
         timelineEntries={[]}
