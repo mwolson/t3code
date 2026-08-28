@@ -1,3 +1,4 @@
+import { TurnId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -124,6 +125,7 @@ function makeShell(input: {
   readonly pending?: "approval" | "user-input";
 }): SettledThreadView {
   return {
+    createdAt: NOW,
     latestRun:
       input.activityAt === null
         ? null
@@ -517,7 +519,7 @@ describe("canSettle", () => {
     expect(
       effectiveSettled(
         { ...waiting, settledOverride: "settled", settledAt: NOW },
-        { now: NOW, autoSettleAfterDays: 3 },
+        { now: NOW, autoSettleAfterDays: 3, autoSettleMode: "inactivity" },
       ),
     ).toBe(false);
     const drained = makeShell({
