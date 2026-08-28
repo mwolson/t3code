@@ -978,9 +978,10 @@ describe("deriveMessagesTimelineRows", () => {
     expect(
       expandedRows.find((row) => row.kind === "turn-fold" && row.expanded === true),
     ).toBeDefined();
+    // The status-less tool entry is neutral (no success/failure signal) and
+    // stays hidden; the info-tone recovery row renders as a plain work row.
     const expandedWork = expandedRows.find((row) => row.kind === "work");
     expect(expandedWork?.kind === "work" ? expandedWork.groupedEntries : []).toEqual([
-      expect.objectContaining({ id: "work-1" }),
       expect.objectContaining({ id: "provider-recovered" }),
     ]);
   });
@@ -1197,11 +1198,12 @@ describe("deriveMessagesTimelineRows", () => {
       ...common,
       expandedAttemptIds: new Set([supersededAttemptId]),
     });
+    // The superseded tool entry carries no lifecycle status, so it stays
+    // hidden as a neutral row even when the attempt fold is expanded.
     expect(expandedRows.map((row) => row.id)).toEqual([
       "initial-user-entry",
       `attempt-fold:${supersededAttemptId}`,
       "superseded-assistant-entry",
-      "superseded-work-entry",
       "superseded-thread-created-entry",
       "steer-user-entry",
       "active-assistant-entry",
@@ -1408,7 +1410,9 @@ describe("deriveMessagesTimelineRows", () => {
       revertTurnCountByUserMessageId: new Map(),
     });
 
-    expect(rows.map((row) => row.id)).toEqual(["work-entry", "interrupt-result"]);
+    // The status-less tool entry is neutral and hidden; the interrupt result
+    // stays as the terminal marker.
+    expect(rows.map((row) => row.id)).toEqual(["interrupt-result"]);
     expect(rows.some((row) => row.kind === "turn-fold")).toBe(false);
   });
 
@@ -1507,7 +1511,9 @@ describe("deriveMessagesTimelineRows", () => {
             createdAt: "2026-01-01T00:00:08Z",
             runId: "turn-1" as never,
             label: "Ran command",
+            command: "vp test run",
             tone: "tool" as const,
+            toolLifecycleStatus: "inProgress" as const,
           },
         },
       ],
@@ -1526,9 +1532,11 @@ describe("deriveMessagesTimelineRows", () => {
     expect(rows.some((row) => row.kind === "turn-fold")).toBe(false);
     expect(rows.map((row) => row.id)).toEqual([
       "assistant-thought-entry",
-      "work-entry-1",
+      "work-live:work-entry-1",
       "working-indicator-row",
     ]);
+    const liveRow = rows.find((row) => row.kind === "work-live");
+    expect(liveRow?.kind === "work-live" ? liveRow.entry.id : null).toBe("work-1");
   });
 
   it("only shows assistant metadata on the terminal assistant message", () => {
@@ -1618,7 +1626,7 @@ describe("deriveMessagesTimelineRows", () => {
     expect(rows.at(-1)).toMatchObject({ kind: "thinking" });
   });
 
-  it("groups contiguous work log entries into one timeline row", () => {
+  it("collapses contiguous settled tool entries behind a summary toggle", () => {
     const timelineEntries = [
       {
         id: "work-entry-1",
@@ -1630,6 +1638,8 @@ describe("deriveMessagesTimelineRows", () => {
           label: "read",
           detail: "Reading package.json",
           tone: "tool" as const,
+          itemType: "command_execution" as const,
+          toolLifecycleStatus: "completed" as const,
         },
       },
       {
@@ -1642,6 +1652,9 @@ describe("deriveMessagesTimelineRows", () => {
           label: "edit",
           detail: "Editing MessagesTimeline.tsx",
           tone: "tool" as const,
+          itemType: "file_change" as const,
+          changedFiles: ["apps/web/src/components/chat/MessagesTimeline.tsx"],
+          toolLifecycleStatus: "completed" as const,
         },
       },
       {
@@ -1654,6 +1667,8 @@ describe("deriveMessagesTimelineRows", () => {
           label: "test",
           detail: "Running tests",
           tone: "tool" as const,
+          itemType: "command_execution" as const,
+          toolLifecycleStatus: "completed" as const,
         },
       },
     ];
@@ -1669,13 +1684,36 @@ describe("deriveMessagesTimelineRows", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
+      kind: "work-toggle",
+      id: "work-toggle:work-entry-1",
+      groupId: "work-group:work-entry-1",
+      hiddenCount: 3,
+      expanded: false,
+      onlyToolEntries: true,
+      summary: "Ran 2 commands and changed 1 file",
+      summaryKind: "mixed",
+      hasFailure: false,
+    });
+
+    const expandedRows = deriveMessagesTimelineRows({
+      ...baseInput,
+      expandedWorkGroupIds: new Set(["work-group:work-entry-1"]),
+    });
+    expect(expandedRows.map((row) => row.id)).toEqual([
+      "work-toggle:work-entry-1",
+      "work-1",
+      "work-2",
+      "work-3",
+    ]);
+    expect(expandedRows[1]).toMatchObject({
       kind: "work",
-      id: "work-entry-1",
-      groupedEntries: [
-        expect.objectContaining({ id: "work-1" }),
-        expect.objectContaining({ id: "work-2" }),
-        expect.objectContaining({ id: "work-3" }),
-      ],
+      isExpandedToolGroupEntry: true,
+      isLastExpandedToolGroupEntry: false,
+    });
+    expect(expandedRows[3]).toMatchObject({
+      kind: "work",
+      isExpandedToolGroupEntry: true,
+      isLastExpandedToolGroupEntry: true,
     });
   });
 });
@@ -1788,6 +1826,7 @@ describe("computeStableMessagesTimelineRows", () => {
       label: "thinking",
       detail: "Inspecting repository state",
       tone: "thinking" as const,
+      toolLifecycleStatus: "completed" as const,
     };
     const secondWorkEntry = {
       id: "work-2",
@@ -1795,6 +1834,7 @@ describe("computeStableMessagesTimelineRows", () => {
       label: "read",
       detail: "Reading package.json",
       tone: "tool" as const,
+      toolLifecycleStatus: "completed" as const,
     };
 
     const createRows = () =>
@@ -1813,6 +1853,7 @@ describe("computeStableMessagesTimelineRows", () => {
             entry: secondWorkEntry,
           },
         ],
+        expandedWorkGroupIds: new Set(["work-group:entry-work-1"]),
         isWorking: false,
         activeTurnStartedAt: null,
         turnDiffSummaryByAssistantMessageId: new Map(),
