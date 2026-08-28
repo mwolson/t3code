@@ -18,7 +18,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { AppState } from "react-native";
 
 import { runtime } from "../../lib/runtime";
 import { appAtomRegistry } from "../../state/atom-registry";
@@ -32,12 +31,6 @@ import {
   setAgentAwarenessRelayTokenProvider,
   unregisterAgentAwarenessDeviceForCurrentUser,
 } from "../agent-awareness/remoteRegistration";
-import {
-  CLERK_LOAD_TIMEOUT_MS,
-  type ClerkLoadRecoveryEvent,
-  initialClerkLoadRecoveryState,
-  reduceClerkLoadRecovery,
-} from "./clerkLoadRecovery";
 import { clearConnectOnboardingRequest, requestConnectOnboarding } from "./connectOnboarding";
 import { resolveCloudPublicConfig, resolveRelayClerkTokenOptions } from "./publicConfig";
 import { removeCloudEnvironments } from "./cloud-drafts";
@@ -218,13 +211,11 @@ function CloudAuthBridge(props: {
 }
 
 export interface CloudAuthLoadState {
-  readonly remount: (reason: "auto" | "manual") => void;
-  readonly timedOut: boolean;
+  readonly remount: () => void;
 }
 
 const idleCloudAuthLoadState: CloudAuthLoadState = {
   remount: () => undefined,
-  timedOut: false,
 };
 
 const CloudAuthLoadContext = createContext<CloudAuthLoadState>(idleCloudAuthLoadState);
@@ -233,44 +224,11 @@ export function useCloudAuthLoadState(): CloudAuthLoadState {
   return useContext(CloudAuthLoadContext);
 }
 
-function CloudAuthLoadWatchdog(props: {
-  readonly onEvent: (event: ClerkLoadRecoveryEvent) => void;
-  readonly onLoadedChange: (isLoaded: boolean) => void;
-  readonly resumeEpoch: number;
-}) {
-  const { isLoaded } = useAuth({ treatPendingAsSignedOut: false });
-  const isLoadedRef = useRef(isLoaded);
-  isLoadedRef.current = isLoaded;
-
-  useEffect(() => {
-    props.onLoadedChange(isLoaded);
-  }, [isLoaded, props.onLoadedChange]);
-
-  useEffect(() => {
-    if (isLoaded) {
-      props.onEvent({ type: "loaded" });
-      return;
-    }
-    const handle = setTimeout(() => {
-      props.onEvent({
-        type: "timeout",
-        isActive: AppState.currentState === "active",
-        isLoaded: isLoadedRef.current,
-      });
-    }, CLERK_LOAD_TIMEOUT_MS);
-    return () => clearTimeout(handle);
-  }, [isLoaded, props.onEvent, props.resumeEpoch]);
-
-  return null;
-}
-
 export function CloudAuthProvider(props: { readonly children: ReactNode }) {
   const config = resolveCloudPublicConfig();
   const publishableKey = config.clerk.publishableKey;
   const relayUrl = config.relay.url;
-  const [recovery, setRecovery] = useState(initialClerkLoadRecoveryState);
-  const [resumeEpoch, setResumeEpoch] = useState(0);
-  const isLoadedRef = useRef(false);
+  const [generation, setGeneration] = useState(0);
   const previousTokenProviderRef = useRef<CloudRelayAccountProvider | null>(null);
   const observedAccountRef = useRef<string | null | undefined>(undefined);
   const accountTransitionRef = useRef<Promise<void> | null>(null);
@@ -289,44 +247,15 @@ export function CloudAuthProvider(props: { readonly children: ReactNode }) {
     [],
   );
 
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active" && !isLoadedRef.current) {
-        setResumeEpoch((current) => current + 1);
-      }
-    });
-    return () => subscription.remove();
-  }, []);
-
-  const applyRecoveryEvent = useCallback((event: ClerkLoadRecoveryEvent) => {
-    setRecovery((current) => reduceClerkLoadRecovery(current, event));
-  }, []);
-
-  const remount = useCallback(
-    (reason: "auto" | "manual") => {
-      if (reason === "manual") {
-        applyRecoveryEvent({ type: "manual-remount" });
-        return;
-      }
-      applyRecoveryEvent({
-        type: "timeout",
-        isActive: true,
-        isLoaded: false,
-      });
-    },
-    [applyRecoveryEvent],
-  );
-
-  const markLoadedChange = useCallback((isLoaded: boolean) => {
-    isLoadedRef.current = isLoaded;
+  const remount = useCallback(() => {
+    setGeneration((current) => current + 1);
   }, []);
 
   const loadState = useMemo(
     () => ({
       remount,
-      timedOut: recovery.timedOut,
     }),
-    [recovery.timedOut, remount],
+    [remount],
   );
 
   if (!publishableKey || !relayUrl) {
@@ -335,16 +264,7 @@ export function CloudAuthProvider(props: { readonly children: ReactNode }) {
 
   return (
     <CloudAuthLoadContext.Provider value={loadState}>
-      <ClerkProvider
-        key={recovery.generation}
-        publishableKey={publishableKey}
-        tokenCache={tokenCache}
-      >
-        <CloudAuthLoadWatchdog
-          onEvent={applyRecoveryEvent}
-          onLoadedChange={markLoadedChange}
-          resumeEpoch={resumeEpoch}
-        />
+      <ClerkProvider key={generation} publishableKey={publishableKey} tokenCache={tokenCache}>
         <CloudAuthBridge
           previousTokenProviderRef={previousTokenProviderRef}
           observedAccountRef={observedAccountRef}

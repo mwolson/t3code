@@ -23,7 +23,7 @@ export function SettingsAuthRouteScreen() {
 
 function ConfiguredSettingsAuthRouteScreen() {
   const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
-  const { remount, timedOut } = useCloudAuthLoadState();
+  const { remount } = useCloudAuthLoadState();
   const navigation = useNavigation();
   const handleHostBack = useCallback(
     () => navigation.dispatch(StackActions.popTo("SettingsContent")),
@@ -49,25 +49,23 @@ function ConfiguredSettingsAuthRouteScreen() {
           <AuthView isDismissible={false} onHostBack={handleHostBack} />
         )
       ) : (
-        <ClerkLoadPendingView onRetry={() => remount("manual")} timedOut={timedOut} />
+        <ClerkLoadPendingView onRetry={remount} />
       )}
     </View>
   );
 }
 
-function ClerkLoadPendingView(props: { readonly onRetry: () => void; readonly timedOut: boolean }) {
+function ClerkLoadPendingView(props: { readonly onRetry: () => void }) {
   const iconColor = useThemeColor("--color-icon");
 
   return (
     <View collapsable={false} className="flex-1 items-center justify-center gap-4 px-8">
       <ActivityIndicator color={iconColor} />
       <Text className="text-center text-base font-t3-bold text-foreground">
-        {props.timedOut ? "T3 Account is taking too long" : "Checking T3 Account"}
+        Checking T3 Account
       </Text>
       <Text className="text-center text-sm leading-normal text-foreground-muted">
-        {props.timedOut
-          ? "T3 Account did not finish loading. Retry without clearing app data."
-          : "T3 Account is still loading."}
+        T3 Account is still loading. Retry without clearing app data.
       </Text>
       <Pressable
         accessibilityRole="button"
