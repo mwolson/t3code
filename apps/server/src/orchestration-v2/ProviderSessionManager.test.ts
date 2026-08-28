@@ -341,7 +341,7 @@ function makeTestLayer(input: {
   readonly failReleaseEventWrites?: boolean;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hangSessionScopeClose?: boolean;
-  readonly serverSettingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService, unknown>;
+  readonly serverSettingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService, never>;
 }) {
   const configuredEventSinkLayer = input.failReleaseEventWrites
     ? FailingReleaseEventSinkLayer
