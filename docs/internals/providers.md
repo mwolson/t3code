@@ -176,7 +176,6 @@ when a request opens (approval) or user input is requested, via
 [cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts
 [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
 [opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
-
 [pi]: ../../apps/server/src/provider/Drivers/PiDriver.ts
 [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
 [instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts

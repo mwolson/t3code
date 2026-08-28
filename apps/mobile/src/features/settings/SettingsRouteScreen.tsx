@@ -553,6 +553,12 @@ function GeneralSettingsSection() {
         onValueChange={(value) => savePreferences({ autoSettleOnMerge: value })}
       />
       <SettingsRow icon="chart.bar.xaxis" label="Usage" target="SettingsUsage" />
+      <SettingsSwitchRow
+        icon="speaker.wave.2"
+        label="Completion Sound"
+        value={completionSoundEnabled}
+        onValueChange={(value) => savePreferences({ completionSoundEnabled: value })}
+      />
     </SettingsSection>
   );
 }

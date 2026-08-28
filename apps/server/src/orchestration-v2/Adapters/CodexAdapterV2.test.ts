@@ -3601,32 +3601,36 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             "orphaned wait terminalization must precede turn.terminal",
           );
 
-          const completedWaitStatuses = harness.events.flatMap((event) =>
-            event.type === "turn_item.updated" &&
-            event.turnItem.type === "dynamic_tool" &&
-            event.turnItem.nativeItemRef?.nativeId === COMPLETED_WAIT_ITEM
-              ? [event.turnItem.status]
-              : [],
+          const completedWaitStatuses = new Set(
+            harness.events.flatMap((event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "dynamic_tool" &&
+              event.turnItem.nativeItemRef?.nativeId === COMPLETED_WAIT_ITEM
+                ? [event.turnItem.status]
+                : [],
+            ),
           );
           assert.isTrue(
-            completedWaitStatuses.includes("completed"),
+            completedWaitStatuses.has("completed"),
             "the wait that received item/completed must stay completed",
           );
           assert.isFalse(
-            completedWaitStatuses.includes("cancelled"),
+            completedWaitStatuses.has("cancelled"),
             "a completed wait must not be rewritten as cancelled",
           );
 
-          const persistentMonitorStatuses = harness.events.flatMap((event) =>
-            event.type === "turn_item.updated" &&
-            event.turnItem.type === "dynamic_tool" &&
-            event.turnItem.nativeItemRef?.nativeId === PERSISTENT_MONITOR_ITEM
-              ? [event.turnItem.status]
-              : [],
+          const persistentMonitorStatuses = new Set(
+            harness.events.flatMap((event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "dynamic_tool" &&
+              event.turnItem.nativeItemRef?.nativeId === PERSISTENT_MONITOR_ITEM
+                ? [event.turnItem.status]
+                : [],
+            ),
           );
-          assert.isTrue(persistentMonitorStatuses.includes("running"));
+          assert.isTrue(persistentMonitorStatuses.has("running"));
           assert.isFalse(
-            persistentMonitorStatuses.includes("cancelled"),
+            persistentMonitorStatuses.has("cancelled"),
             "persistent monitors must remain running after the root turn completes",
           );
           assert.isTrue(

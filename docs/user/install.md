@@ -110,7 +110,6 @@ For multi-account setups, see [Codex](./providers-codex.md) and [Claude](./provi
 For Grok reasoning controls, see [Grok Build](./providers-grok.md).
 For Pi, see [Pi](./providers-pi.md).
 
-
 ## Next Steps
 
 - [Permission modes](./permission-modes.md): how much T3 Code asks before acting

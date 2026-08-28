@@ -5,7 +5,6 @@ import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { ActivityIndicator, Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
-import { useThemeColor } from "../../lib/useThemeColor";
 import { useCloudAuthLoadState } from "../cloud/CloudAuthProvider";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 
@@ -56,11 +55,9 @@ function ConfiguredSettingsAuthRouteScreen() {
 }
 
 function ClerkLoadPendingView(props: { readonly onRetry: () => void }) {
-  const iconColor = useThemeColor("--color-icon");
-
   return (
     <View collapsable={false} className="flex-1 items-center justify-center gap-4 px-8">
-      <ActivityIndicator color={iconColor} />
+      <ActivityIndicator />
       <Text className="text-center text-base font-t3-bold text-foreground">
         Checking T3 Account
       </Text>
