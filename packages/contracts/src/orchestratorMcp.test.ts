@@ -197,11 +197,12 @@ describe("orchestrator MCP contracts", () => {
 
   it("decodes an optional project directory only on top-level thread tools", () => {
     expect(
-      decodeDelegateTaskInput({
-        task: "Inspect the other workspace.",
-        projectDirectory: "/workspace/other",
-      }).projectDirectory,
-    ).toBeUndefined();
+      "projectDirectory" in
+        decodeDelegateTaskInput({
+          task: "Inspect the other workspace.",
+          projectDirectory: "/workspace/other",
+        }),
+    ).toBe(false);
     expect(
       decodeCreateThreadsInput({
         threads: [{ prompt: "Review the API.", projectDirectory: "/workspace/other" }],
