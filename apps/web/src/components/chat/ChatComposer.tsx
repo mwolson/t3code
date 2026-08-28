@@ -235,10 +235,7 @@ import type {
   PendingUserInput,
 } from "../../session-logic";
 import { resolveComposerDispatchMode, type ComposerDispatchMode } from "./composerDispatch";
-import {
-  deriveLatestContextWindowSnapshot,
-  formatProviderDisplayName,
-} from "../../lib/contextWindow";
+import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
 import { formatProviderSkillDisplayName } from "@t3tools/client-runtime/providerSkills";
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";

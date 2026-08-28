@@ -23,8 +23,9 @@ install, preserving its skills, context files, custom models, auth, extensions, 
 owns native extension discovery. T3 explicitly injects only its namespaced MCP bridge. The shared
 `delegate_task` tool owns durable child threads, while results from Pi's installed example
 `subagent` extension are projected without synthetic child sessions. Extension UI dialogs surface
-as orchestration runtime requests, and optional Pi session statistics feed the shared context window
-meter after turn terminalization. Pi 0.80.5 is the minimum supported protocol version.
+as orchestration runtime requests, and optional Pi session statistics ride on the settled provider
+turn as `tokenUsage`, which feeds the shared context window meter. Pi 0.80.5 is the minimum
+supported protocol version.
 
 Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
 adapter in a child scope. Adapter implementations live beside them in
