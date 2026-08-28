@@ -1,7 +1,6 @@
 import type {
   EnvironmentId,
   ModelSelection,
-
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
   ProviderInteractionMode,
@@ -724,7 +723,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     forceExpandedOnMobile,
     projectSelectionRequired,
     phase,
-    hasInterruptibleProviderNativeBackgroundWork,
+    hasInterruptibleProviderNativeBackgroundWork: _hasInterruptibleProviderNativeBackgroundWork,
     isConnecting,
     isSendBusy,
     sendDisabledReason: externalSendDisabledReason,
@@ -980,7 +979,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Older threads can contain a mode their current provider no longer offers.
   // Display the provider's first supported mode, which is also its safe legacy
   // fallback, without mutating persisted state until the user makes a choice.
-  const compatibleRuntimeMode = compatibleRuntimeModeOptions.some(
+  const _compatibleRuntimeMode = compatibleRuntimeModeOptions.some(
     (option) => option.mode === runtimeMode,
   )
     ? runtimeMode
