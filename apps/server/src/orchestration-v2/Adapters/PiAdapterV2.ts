@@ -39,12 +39,12 @@ import {
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
+  type OrchestrationV2ProviderTurnTokenUsage,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2TurnItem,
   type OrchestrationV2UserInputQuestion,
   type ProviderApprovalDecision,
   type ProviderInstanceId,
-  type ThreadTokenUsageSnapshot,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -482,16 +482,12 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
       // explicitly.
       let baselineModel: { provider: string; modelId: string } | null = null;
       let baselineThinking: string | null = null;
-      let autoCompactionEnabled: boolean | undefined;
       // Prompt responses carry no id. Keep their session-wide send order and
       // owner so a late ack from a settled turn cannot affect the next turn.
       const pendingPromptResponses: Array<{
         readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
         readonly kind: "turn_start" | "steer";
       }> = [];
-      // Invalidates optional post-turn stats reads when rollback changes the
-      // active branch before an older read completes.
-      let contextUsageGeneration = 0;
 
       const emit = (event: ProviderAdapterV2Event) =>
         Queue.offer(events, event).pipe(Effect.asVoid);
@@ -546,10 +542,11 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
         return value === undefined ? undefined : Math.max(0, Math.trunc(value));
       };
 
-      const contextUsageFromStats = (
+      const tokenUsageFromStats = (
         stats: unknown,
         fallbackUsedTokens: number | null,
-      ): ThreadTokenUsageSnapshot | undefined => {
+        updatedAt: DateTime.Utc,
+      ): OrchestrationV2ProviderTurnTokenUsage | undefined => {
         const contextUsage = recordField(stats, "contextUsage");
         const maxTokens = nonNegativeInteger(contextUsage, "contextWindow");
         const usedTokens =
@@ -558,30 +555,29 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
           return undefined;
 
         const totals = recordField(stats, "tokens");
-        const totalProcessedTokens = nonNegativeInteger(totals, "total");
         const inputTokens = nonNegativeInteger(totals, "input");
         const cachedInputTokens = nonNegativeInteger(totals, "cacheRead");
         const outputTokens = nonNegativeInteger(totals, "output");
-        const toolUses = nonNegativeInteger(stats, "toolCalls");
         return {
           usedTokens,
           maxTokens,
-          ...(totalProcessedTokens === undefined ? {} : { totalProcessedTokens }),
           ...(inputTokens === undefined ? {} : { inputTokens }),
           ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
           ...(outputTokens === undefined ? {} : { outputTokens }),
-          ...(toolUses === undefined ? {} : { toolUses }),
-          ...(autoCompactionEnabled === undefined
-            ? {}
-            : { compactsAutomatically: autoCompactionEnabled }),
+          updatedAt: DateTime.formatIso(updatedAt),
         };
       };
 
-      const readContextUsage = (fallbackUsedTokens: number | null) =>
+      /**
+       * Pi only reports context usage through `get_session_stats`, so the
+       * settled turn carries it on the base's per-turn `tokenUsage` (#8144).
+       * Usage is secondary telemetry: the request is bounded and a provider
+       * version without stats simply leaves the turn without a report, which
+       * keeps the meter on the last turn that had one.
+       */
+      const readTokenUsage = (fallbackUsedTokens: number | null, updatedAt: DateTime.Utc) =>
         request({ type: "get_session_stats" }, 2_000).pipe(
-          Effect.map((stats) => contextUsageFromStats(stats, fallbackUsedTokens)),
-          // Usage is secondary telemetry. Bound the request and never fail
-          // turn terminalization for a provider version without stats.
+          Effect.map((stats) => tokenUsageFromStats(stats, fallbackUsedTokens, updatedAt)),
           Effect.orElseSucceed(() => undefined),
         );
 
@@ -1288,26 +1284,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
         };
       });
 
-      const refreshContextUsageAfterTurn = (state: PiThreadState, turn: ActivePiTurn) => {
-        const generation = ++contextUsageGeneration;
-        return readContextUsage(turn.latestCompactionAfterTokens).pipe(
-          Effect.flatMap((contextUsage) => {
-            const currentState = threadState;
-            return contextUsage === undefined ||
-              generation !== contextUsageGeneration ||
-              currentState === null ||
-              currentState.providerThread.id !== state.providerThread.id
-              ? Effect.void
-              : updateProviderThread(currentState, { contextUsage });
-          }),
-          Effect.forkIn(scope),
-        );
-      };
-
-      const finalizeTurn = Effect.fnUntraced(function* (
-        state: PiThreadState,
-        refreshContextUsage = true,
-      ) {
+      const finalizeTurn = Effect.fnUntraced(function* (state: PiThreadState, readUsage = true) {
         const turn = state.activeTurn;
         if (turn === null) return;
         state.activeTurn = null;
@@ -1333,6 +1310,9 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
         }
         yield* cancelPendingPrompts(completedAt);
         const treeRefs = yield* captureTurnTreeRefs();
+        const tokenUsage = readUsage
+          ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
+          : undefined;
         const failure = turn.interrupted ? null : turn.failure;
         yield* emit({
           type: "provider_turn.updated",
@@ -1345,6 +1325,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
               : { nativeTurnRef: providerRef(treeRefs.turnStartEntryId) }),
             status: turn.interrupted ? "interrupted" : failure !== null ? "failed" : "completed",
             completedAt,
+            ...(tokenUsage === undefined ? {} : { tokenUsage }),
           },
         });
         yield* updateProviderThread(state, {
@@ -1409,9 +1390,6 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             threadDisposition: "reusable",
           });
         }
-        // Session statistics are optional telemetry. Terminalize first, then
-        // refresh the shared context meter without delaying the visible turn.
-        if (refreshContextUsage) yield* refreshContextUsageAfterTurn(state, turn);
       });
 
       // ── event pump ────────────────────────────────────────
@@ -1882,9 +1860,6 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
           baselineThinking = null;
         }
         const stateData = yield* request({ type: "get_state" });
-        const reportedAutoCompaction = recordField(stateData, "autoCompactionEnabled");
-        autoCompactionEnabled =
-          typeof reportedAutoCompaction === "boolean" ? reportedAutoCompaction : undefined;
         // Each baseline is captured independently, and only while nothing has
         // been applied yet, so a `get_state` that arrives after our own
         // selection cannot record that selection as Pi's default.
@@ -2438,7 +2413,6 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             if (forkEntryId === undefined) {
               return yield* protocolError("Pi rollback target has no captured session-tree entry");
             }
-            contextUsageGeneration += 1;
             const forkData = yield* request({ type: "fork", entryId: forkEntryId });
             if (recordField(forkData, "cancelled") === true) {
               return yield* protocolError("A Pi extension cancelled the session fork");
@@ -2446,7 +2420,6 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             const entriesData = yield* request({ type: "get_entries" }).pipe(
               Effect.orElseSucceed(() => undefined),
             );
-            const contextUsage = yield* readContextUsage(null);
             const leafId = recordString(entriesData, "leafId") ?? null;
             lastKnownLeaf = leafId;
             // The fork re-baselined the tree, so the cursor is trustworthy
@@ -2454,9 +2427,6 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             leafCursorStale = entriesData === undefined;
             yield* updateProviderThread(state, {
               nativeConversationHeadRef: leafId === null ? null : providerRef(leafId),
-              // The fork changed the active branch. Never retain usage from
-              // the discarded branch when Pi cannot return fresh stats.
-              contextUsage: contextUsage ?? null,
             });
             return piThreadSnapshot(state.providerThread);
           }).pipe(

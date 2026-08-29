@@ -27,4 +27,26 @@ describe("thinkingCapabilitiesForPiModel", () => {
       ],
     );
   });
+
+  it("clamps Pi's default to each model's supported levels", () => {
+    const capabilities = thinkingCapabilitiesForPiModel(
+      {
+        reasoning: true,
+        thinkingLevelMap: { xhigh: "extra_high", max: null },
+      },
+      "max",
+    );
+    const thinking = capabilities.optionDescriptors?.[0];
+    assert.equal(thinking?.type, "select");
+    if (thinking?.type !== "select") return;
+    assert.deepInclude(thinking.options, {
+      id: "xhigh",
+      label: "Extra High",
+      isDefault: true,
+    });
+    assert.notInclude(
+      thinking.options.map((option) => option.id),
+      "max",
+    );
+  });
 });
