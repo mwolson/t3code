@@ -206,6 +206,26 @@ export interface AcpAdapterV2Flavor {
     Crypto.Crypto | Scope.Scope
   >;
   readonly resolveModelId?: (selection: ModelSelection) => string | undefined;
+  /**
+   * Selection option ids applied through `session/set_model` `_meta` instead
+   * of `session/set_config_option`.
+   */
+  readonly sessionModelOptionIds?: ReadonlyArray<string>;
+  /** Resolve provider-specific metadata applied with `session/set_model`. */
+  readonly resolveSessionModelMeta?: (
+    selection: ModelSelection,
+  ) => Readonly<Record<string, unknown>> | undefined;
+  /**
+   * Apply model and session-model options (for example Grok reasoning `_meta`).
+   * When present, `sessionModelOptionIds` are treated as consumed by this hook.
+   */
+  readonly applySessionModel?: (input: {
+    readonly runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "setSessionModel">;
+    readonly startResult: AcpSessionRuntimeStartResult;
+    readonly modelSelection: ModelSelection;
+    readonly requestedModelId: string | undefined;
+    readonly currentModelId: string | undefined;
+  }) => Effect.Effect<void, ProviderAdapterProtocolError>;
   readonly registerExtensions?: (
     context: AcpAdapterV2ExtensionContext,
   ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
@@ -4727,27 +4747,57 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
           runtimePolicy: ProviderAdapterV2RuntimePolicy,
         ) {
           const requestedModel = flavor.resolveModelId?.(modelSelection) ?? modelSelection.model;
-          if (
-            requestedModel.length > 0 &&
-            requestedModel !== "auto" &&
-            requestedModel !== "default"
-          ) {
-            const currentModel = startResult.sessionSetupResult.models?.currentModelId;
-            if (currentModel !== requestedModel) {
-              if (startResult.sessionSetupResult.models != null) {
-                yield* runtime.setSessionModel(requestedModel);
-              } else if (
-                startResult.sessionSetupResult.configOptions?.some(
-                  (option) => option.category === "model",
-                ) === true
-              ) {
-                yield* runtime.setModel(requestedModel);
-              }
+          const currentModel = startResult.sessionSetupResult.models?.currentModelId;
+          const sessionModelOptionIdSet = new Set(flavor.sessionModelOptionIds ?? []);
+          const sessionModelMeta = flavor.resolveSessionModelMeta?.(modelSelection);
+          const hasConcreteRequestedModel =
+            requestedModel.length > 0 && requestedModel !== "auto" && requestedModel !== "default";
+          const targetModel = hasConcreteRequestedModel ? requestedModel : currentModel;
+          const modelChanged = targetModel !== undefined && targetModel !== currentModel;
+          const requestedModelId = hasConcreteRequestedModel ? requestedModel : undefined;
+          if (flavor.applySessionModel !== undefined) {
+            yield* flavor.applySessionModel({
+              runtime,
+              startResult,
+              modelSelection,
+              requestedModelId,
+              currentModelId: currentModel,
+            });
+          } else if (modelChanged || sessionModelMeta !== undefined) {
+            if (targetModel === undefined) {
+              return yield* new ProviderAdapterProtocolError({
+                driver,
+                detail: `ACP session ${startResult.sessionId} does not expose session model metadata support.`,
+              });
+            }
+            if (startResult.sessionSetupResult.models != null) {
+              yield* runtime.setSessionModel(targetModel, sessionModelMeta);
+            } else if (
+              sessionModelMeta === undefined &&
+              startResult.sessionSetupResult.configOptions?.some(
+                (option) => option.category === "model",
+              ) === true
+            ) {
+              yield* runtime.setModel(targetModel);
+            } else if (sessionModelMeta !== undefined) {
+              return yield* new ProviderAdapterProtocolError({
+                driver,
+                detail: `ACP session ${startResult.sessionId} does not expose session model metadata support.`,
+              });
             }
           }
           const configOptions = yield* runtime.getConfigOptions;
           const availableConfigIds = new Set(configOptions.map((option) => option.id));
-          const unsupportedConfigIds = (modelSelection.options ?? [])
+          const sessionModelIdsConsumed = flavor.applySessionModel !== undefined;
+          const sessionConfigSelections = (modelSelection.options ?? []).filter((selection) => {
+            if (!sessionModelOptionIdSet.has(selection.id)) return true;
+            if (sessionModelIdsConsumed) return false;
+            if (sessionModelMeta !== undefined && Object.hasOwn(sessionModelMeta, selection.id)) {
+              return false;
+            }
+            return true;
+          });
+          const unsupportedConfigIds = sessionConfigSelections
             .map((selection) => selection.id)
             .filter((id) => !availableConfigIds.has(id));
           if (unsupportedConfigIds.length > 0) {
@@ -4756,7 +4806,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               detail: `ACP session ${startResult.sessionId} does not expose requested configuration option(s): ${unsupportedConfigIds.join(", ")}`,
             });
           }
-          for (const selection of modelSelection.options ?? []) {
+          for (const selection of sessionConfigSelections) {
             yield* runtime.setConfigOption(selection.id, selection.value);
           }
           const modeState = yield* runtime.getModeState;

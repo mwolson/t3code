@@ -238,6 +238,8 @@ describe("GrokAdapterV2 capabilities", () => {
     // session; the cancelled work backgrounds and the model decides its fate.
     assert.isUndefined(flavor.restartRuntimeOnEveryInterrupt);
     assert.isTrue(flavor.preserveRuntimeOnSettledInterrupt);
+    assert.deepEqual(flavor.sessionModelOptionIds, ["reasoningEffort"]);
+    assert.isFunction(flavor.applySessionModel);
   });
 
   it("terminalizes only foreground tools under the actual Grok flavor", () => {

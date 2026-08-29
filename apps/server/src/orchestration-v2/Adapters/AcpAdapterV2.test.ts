@@ -1370,6 +1370,127 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
+  it.effect("applies session-model option ids without ACP config-option support", () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const idAllocator = yield* IdAllocatorV2;
+      const path = yield* Path.Path;
+      const serverConfig = yield* ServerConfig;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const protocolEvents = yield* Queue.bounded<EffectAcpProtocol.AcpProtocolLogEvent>(256);
+      const instanceId = ProviderInstanceId.make("acp-test");
+      const adapter = makeAcpAdapterV2({
+        crypto: yield* Crypto.Crypto,
+        instanceId,
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          makeRuntime: makeMockRuntime({ childProcessSpawner, mockAgentPath, protocolEvents }),
+          sessionModelOptionIds: ["reasoningEffort"],
+          resolveSessionModelMeta: () => ({ reasoningEffort: "low" }),
+        },
+        fileSystem,
+        idAllocator,
+        serverConfig,
+      });
+      const threadId = ThreadId.make("thread-acp-session-model-option");
+      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("provider-session-acp-session-model-option"),
+        modelSelection: {
+          instanceId,
+          model: "default",
+          options: [{ id: "reasoningEffort", value: "low" }],
+        },
+        runtimePolicy,
+      });
+      const events = Array.from(yield* Queue.takeAll(protocolEvents));
+      const setModelRequests = events.filter(
+        (event) =>
+          event.direction === "outgoing" && rawProtocolMethod(event) === "session/set_model",
+      );
+      assert.lengthOf(setModelRequests, 1);
+      const setModelRequest = rawProtocolRequest(setModelRequests[0]!);
+      const setModelParams =
+        typeof setModelRequest?.params === "object" && setModelRequest.params !== null
+          ? (setModelRequest.params as {
+              readonly _meta?: { readonly reasoningEffort?: unknown };
+            })
+          : undefined;
+      assert.equal(setModelParams?._meta?.reasoningEffort, "low");
+      const configOptionIds = events.flatMap((event) => {
+        if (
+          event.direction !== "outgoing" ||
+          rawProtocolMethod(event) !== "session/set_config_option"
+        ) {
+          return [];
+        }
+        const params = rawProtocolRequest(event)?.params;
+        if (typeof params !== "object" || params === null) return [];
+        const configId = (params as { readonly configId?: unknown }).configId;
+        return typeof configId === "string" ? [configId] : [];
+      });
+      assert.notInclude(configOptionIds, "reasoningEffort");
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("rejects session-model option ids that were not applied as session model meta", () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const idAllocator = yield* IdAllocatorV2;
+      const path = yield* Path.Path;
+      const serverConfig = yield* ServerConfig;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const instanceId = ProviderInstanceId.make("acp-test");
+      const adapter = makeAcpAdapterV2({
+        crypto: yield* Crypto.Crypto,
+        instanceId,
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          makeRuntime: makeMockRuntime({ childProcessSpawner, mockAgentPath }),
+          sessionModelOptionIds: ["reasoningEffort"],
+        },
+        fileSystem,
+        idAllocator,
+        serverConfig,
+      });
+      const error = yield* adapter
+        .openSession({
+          threadId: ThreadId.make("thread-acp-unconsumed-session-model-option"),
+          providerSessionId: ProviderSessionId.make(
+            "provider-session-acp-unconsumed-session-model-option",
+          ),
+          modelSelection: {
+            instanceId,
+            model: "default",
+            options: [{ id: "reasoningEffort", value: "low" }],
+          },
+          runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: process.cwd(),
+          }),
+        })
+        .pipe(Effect.flip);
+
+      assert.equal(error._tag, "ProviderAdapterOpenSessionError");
+      assert.include(String(error.cause), "does not expose requested configuration option(s)");
+      assert.include(String(error.cause), "reasoningEffort");
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
   it.effect("reconfigures a loaded ACP session from its own active setup metadata", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;

@@ -1,4 +1,5 @@
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import {
   defaultInstanceIdForDriver,
   GrokSettings,
@@ -17,6 +18,9 @@ import type * as EffectAcpErrors from "effect-acp/errors";
 import { ServerConfig } from "../../config.ts";
 import { makeAcpNativeLoggerFactory } from "../../provider/acp/AcpNativeLogging.ts";
 import {
+  GROK_REASONING_EFFORT_OPTION_ID,
+  applyGrokAcpModelSelection,
+  currentGrokReasoningEffortFromSessionSetup,
   makeGrokAcpRuntime,
   resolveGrokAcpBaseModelId,
 } from "../../provider/acp/GrokAcpSupport.ts";
@@ -45,7 +49,7 @@ import * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
 import { ProviderEventLoggers } from "../../provider/Layers/ProviderEventLoggers.ts";
 import { IdAllocatorV2 } from "../IdAllocator.ts";
 import { ProviderContinuationRequests } from "../ProviderContinuationRequests.ts";
-import { ProviderAdapterV2 } from "../ProviderAdapter.ts";
+import { ProviderAdapterProtocolError, ProviderAdapterV2 } from "../ProviderAdapter.ts";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
@@ -222,6 +226,34 @@ export function makeGrokAcpAdapterFlavor(options: GrokAdapterV2Options): AcpAdap
     // still accepts image content blocks (verified with real screenshots).
     supportsImagePrompts: true,
     resolveModelId: (selection) => resolveGrokAcpBaseModelId(selection.model),
+    // Grok applies reasoning through session/set_model `_meta`, not ACP config
+    // options. Sending reasoningEffort as set_config_option fails session open.
+    sessionModelOptionIds: [GROK_REASONING_EFFORT_OPTION_ID],
+    applySessionModel: ({
+      runtime,
+      startResult,
+      modelSelection,
+      requestedModelId,
+      currentModelId,
+    }) =>
+      applyGrokAcpModelSelection({
+        runtime,
+        currentModelId,
+        currentReasoningEffort: currentGrokReasoningEffortFromSessionSetup(
+          startResult.sessionSetupResult,
+        ),
+        requestedModelId,
+        requestedReasoningEffort: getModelSelectionStringOptionValue(
+          modelSelection,
+          GROK_REASONING_EFFORT_OPTION_ID,
+        ),
+        mapError: (cause) =>
+          new ProviderAdapterProtocolError({
+            driver: GROK_PROVIDER,
+            detail: "Failed to apply Grok session model selection.",
+            payload: cause,
+          }),
+      }).pipe(Effect.asVoid),
     makeRuntime:
       options.makeRuntime ??
       ((input) =>
