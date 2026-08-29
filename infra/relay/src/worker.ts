@@ -224,7 +224,7 @@ export const ApiLive = Api.make(
       Layer.provideMerge(RelayTokens.layer),
       Layer.provideMerge(
         RelayDb.RelayTransactions.layer.pipe(
-          Layer.provideMerge(Layer.succeed(RelayDb.RelayDb, db)),
+          Layer.provideMerge(Layer.succeed(RelayDb.RelayDb, db as never)),
         ),
       ),
       Layer.provideMerge(Layer.effect(RelayConfiguration.RelayConfiguration, loadSettings)),
