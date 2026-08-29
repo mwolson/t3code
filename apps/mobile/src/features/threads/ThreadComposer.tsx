@@ -652,16 +652,6 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
         props.onUpdateModelSelection(withRememberedModelOptions(option.selection)),
       optionDescriptors: providerOptionDescriptors,
       onUpdateOptionSelections: (options) => {
-        const optionsLocked =
-          props.optionChangeBlocked === true &&
-          props.optionChangeBlockedInstanceId === currentModelSelection.instanceId;
-        if (optionsLocked) {
-          Alert.alert(
-            "Start a new chat to change options",
-            "This provider applies these options when a conversation starts.",
-          );
-          return;
-        }
         rememberModelOptions(
           currentModelSelection.instanceId,
           currentModelSelection.model,
