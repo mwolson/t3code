@@ -84,6 +84,7 @@ function makeTestAdapter(input: {
   readonly capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>;
   readonly failResume?: boolean;
   readonly failedRunOrdinals?: ReadonlySet<number>;
+  readonly interruptedRunOrdinals?: ReadonlySet<number>;
 }): ProviderAdapterV2Shape {
   return {
     instanceId: input.instanceId,
@@ -159,6 +160,38 @@ function makeTestAdapter(input: {
               const providerTurnId = ProviderTurnId.make(
                 `provider-turn:${input.driver}:${turnInput.threadId}:${turnInput.runOrdinal}`,
               );
+              if (input.interruptedRunOrdinals?.has(turnInput.runOrdinal) === true) {
+                yield* PubSub.publish(events, {
+                  type: "provider_turn.updated",
+                  driver: input.driver,
+                  providerTurn: {
+                    id: providerTurnId,
+                    providerThreadId: turnInput.providerThread.id,
+                    nodeId: turnInput.rootNodeId,
+                    runAttemptId: turnInput.attemptId,
+                    nativeTurnRef: {
+                      driver: input.driver,
+                      nativeId: `native-turn:${turnInput.threadId}:${turnInput.runOrdinal}`,
+                      strength: "strong",
+                    },
+                    ordinal: turnInput.runOrdinal,
+                    status: "interrupted",
+                    startedAt: eventTime,
+                    completedAt: eventTime,
+                  },
+                });
+                yield* PubSub.publish(events, {
+                  type: "turn.terminal",
+                  driver: input.driver,
+                  providerThreadId: turnInput.providerThread.id,
+                  providerTurnId,
+                  runOrdinal: turnInput.runOrdinal,
+                  status: "interrupted",
+                  failure: null,
+                  threadDisposition: "reusable",
+                });
+                return;
+              }
               if (input.failedRunOrdinals?.has(turnInput.runOrdinal) === true) {
                 yield* PubSub.publish(events, {
                   type: "provider_turn.updated",
@@ -501,22 +534,19 @@ describe("orchestration v2 provider switching", () => {
           ],
         );
         assert.deepEqual(
-          projection.contextHandoffs.map((handoff) => [
-            handoff.targetRunId,
-            handoff.strategy,
-            handoff.status,
-          ]),
+          projection.contextHandoffs.map((handoff) => [handoff.strategy, handoff.status]),
           [
-            [projection.runs[0]?.id, "manual_context", "ready"],
-            [projection.runs[1]?.id, "manual_context", "ready"],
+            ["manual_context", "ready"],
+            ["full_thread_summary", "ready"],
           ],
         );
         assert.equal(projection.runs[1]?.contextHandoffId, projection.contextHandoffs[1]?.id);
-        assert.include(turns[1]?.text ?? "", "Context handoff (manual_context):");
+        assert.include(turns[1]?.text ?? "", "Context handoff (full_thread_summary):");
+        assert.notInclude(turns[1]?.text ?? "", "Context handoff (manual_context):");
         assert.include(turns[1]?.text ?? "", "imported release marker is violet");
         assert.include(turns[1]?.text ?? "", "I will remember violet.");
         assert.include(turns[1]?.text ?? "", recoveryPrompt);
-        assert.notInclude(turns[1]?.text ?? "", failedPrompt);
+        assert.include(turns[1]?.text ?? "", failedPrompt);
       }),
     ),
   );
@@ -682,6 +712,268 @@ describe("orchestration v2 provider switching", () => {
         assert.include(turns[2]?.text ?? "", "claude switched response");
         assert.include(turns[2]?.text ?? "", returnPrompt);
         assert.notInclude(turns[2]?.text ?? "", "codex before switch");
+        assert.equal(turns[0]?.providerThreadId, turns[2]?.providerThreadId);
+      }),
+    ),
+  );
+
+  it.live("hands failed away-run context back when returning to the previous provider", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("provider-switch-failed-return");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const missedPrompt = "Remember the missed marker MISSED_HANDOFF_MARKER";
+        const registryLayer = makeProviderAdapterRegistryLayer([
+          makeTestAdapter({
+            instanceId: ProviderInstanceId.make("codex"),
+            driver: CODEX_DRIVER,
+            capabilities: CodexProviderCapabilitiesV2,
+            modelSelection: CODEX_MODEL_SELECTION,
+            responseByRunOrdinal: {
+              1: "codex before switch",
+              3: "codex after return",
+            },
+            capturedTurns,
+          }),
+          makeTestAdapter({
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 2: "claude should not finish" },
+            capturedTurns,
+            failedRunOrdinals: new Set([2]),
+          }),
+        ]);
+        const commands = [
+          {
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:provider-switch-failed-return:create"),
+            threadId,
+            projectId,
+            title: "Provider switch failed return",
+            modelSelection: CODEX_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          },
+          {
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:provider-switch-failed-return:codex"),
+            threadId,
+            messageId: MessageId.make("message:provider-switch-failed-return:codex"),
+            text: firstPrompt,
+            attachments: [],
+            modelSelection: CODEX_MODEL_SELECTION,
+            dispatchMode: { type: "start_immediately" },
+          },
+          {
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:provider-switch-failed-return:claude"),
+            threadId,
+            messageId: MessageId.make("message:provider-switch-failed-return:claude"),
+            text: missedPrompt,
+            attachments: [],
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            dispatchMode: { type: "start_immediately" },
+          },
+          {
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:provider-switch-failed-return:return"),
+            threadId,
+            messageId: MessageId.make("message:provider-switch-failed-return:return"),
+            text: returnPrompt,
+            attachments: [],
+            modelSelection: CODEX_MODEL_SELECTION,
+            dispatchMode: { type: "start_immediately" },
+          },
+        ] satisfies ReadonlyArray<OrchestrationV2Command>;
+
+        const projection = yield* Effect.gen(function* () {
+          const orchestrator = yield* OrchestratorV2;
+          yield* orchestrator.dispatch(commands[0]!);
+          yield* orchestrator.dispatch(commands[1]!);
+          yield* waitForIdle(threadId);
+          yield* orchestrator.dispatch(commands[2]!);
+          yield* waitForIdle(threadId);
+          yield* orchestrator.dispatch(commands[3]!);
+          return yield* waitForIdle(threadId);
+        }).pipe(
+          Effect.provide(
+            makeOrchestratorV2ReplayLayerWithRegistry(
+              {
+                name: "provider-switch-failed-return",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              registryLayer,
+            ),
+          ),
+        );
+        const turns = yield* Ref.get(capturedTurns);
+
+        assert.deepEqual(
+          projection.runs.map((run) => [run.providerInstanceId, run.status]),
+          [
+            ["codex", "completed"],
+            ["claudeAgent", "failed"],
+            ["codex", "completed"],
+          ],
+        );
+        assert.deepEqual(
+          projection.contextHandoffs.map((handoff) => handoff.strategy),
+          ["full_thread_summary", "delta_since_target_last_seen"],
+        );
+        assert.include(turns[2]?.text ?? "", "Context handoff (delta_since_target_last_seen):");
+        assert.include(turns[2]?.text ?? "", missedPrompt);
+        assert.include(turns[2]?.text ?? "", returnPrompt);
+        assert.equal(turns[0]?.providerThreadId, turns[2]?.providerThreadId);
+      }),
+    ),
+  );
+
+  it.live("hands interrupted away-run context back when returning to the previous provider", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("provider-switch-interrupted-return");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const missedPrompt = "Remember the interrupted marker INTERRUPTED_HANDOFF_MARKER";
+        const registryLayer = makeProviderAdapterRegistryLayer([
+          makeTestAdapter({
+            instanceId: ProviderInstanceId.make("codex"),
+            driver: CODEX_DRIVER,
+            capabilities: CodexProviderCapabilitiesV2,
+            modelSelection: CODEX_MODEL_SELECTION,
+            responseByRunOrdinal: {
+              1: "codex before switch",
+              3: "codex after return",
+            },
+            capturedTurns,
+          }),
+          makeTestAdapter({
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            driver: CLAUDE_DRIVER,
+            capabilities: ClaudeProviderCapabilitiesV2,
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            responseByRunOrdinal: { 2: "claude should not finish" },
+            capturedTurns,
+            interruptedRunOrdinals: new Set([2]),
+          }),
+        ]);
+        const commands = [
+          {
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:provider-switch-interrupted-return:create"),
+            threadId,
+            projectId,
+            title: "Provider switch interrupted return",
+            modelSelection: CODEX_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          },
+          {
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:provider-switch-interrupted-return:codex"),
+            threadId,
+            messageId: MessageId.make("message:provider-switch-interrupted-return:codex"),
+            text: firstPrompt,
+            attachments: [],
+            modelSelection: CODEX_MODEL_SELECTION,
+            dispatchMode: { type: "start_immediately" },
+          },
+          {
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:provider-switch-interrupted-return:claude"),
+            threadId,
+            messageId: MessageId.make("message:provider-switch-interrupted-return:claude"),
+            text: missedPrompt,
+            attachments: [],
+            modelSelection: CLAUDE_MODEL_SELECTION,
+            dispatchMode: { type: "start_immediately" },
+          },
+          {
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:provider-switch-interrupted-return:return"),
+            threadId,
+            messageId: MessageId.make("message:provider-switch-interrupted-return:return"),
+            text: returnPrompt,
+            attachments: [],
+            modelSelection: CODEX_MODEL_SELECTION,
+            dispatchMode: { type: "start_immediately" },
+          },
+        ] satisfies ReadonlyArray<OrchestrationV2Command>;
+
+        const projection = yield* Effect.gen(function* () {
+          const orchestrator = yield* OrchestratorV2;
+          yield* orchestrator.dispatch(commands[0]!);
+          yield* orchestrator.dispatch(commands[1]!);
+          yield* waitForIdle(threadId);
+          yield* orchestrator.dispatch(commands[2]!);
+          yield* waitForIdle(threadId);
+          yield* orchestrator.dispatch(commands[3]!);
+          return yield* waitForIdle(threadId);
+        }).pipe(
+          Effect.provide(
+            makeOrchestratorV2ReplayLayerWithRegistry(
+              {
+                name: "provider-switch-interrupted-return",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: {
+                    type: "readOnly",
+                    access: { type: "fullAccess" },
+                    networkAccess: false,
+                  },
+                },
+              },
+              registryLayer,
+            ),
+          ),
+        );
+        const turns = yield* Ref.get(capturedTurns);
+
+        assert.deepEqual(
+          projection.runs.map((run) => [run.providerInstanceId, run.status]),
+          [
+            ["codex", "completed"],
+            ["claudeAgent", "interrupted"],
+            ["codex", "completed"],
+          ],
+        );
+        assert.deepEqual(
+          projection.contextHandoffs.map((handoff) => handoff.strategy),
+          ["full_thread_summary", "delta_since_target_last_seen"],
+        );
+        assert.include(turns[2]?.text ?? "", "Context handoff (delta_since_target_last_seen):");
+        assert.include(turns[2]?.text ?? "", missedPrompt);
+        assert.include(turns[2]?.text ?? "", returnPrompt);
         assert.equal(turns[0]?.providerThreadId, turns[2]?.providerThreadId);
       }),
     ),
