@@ -51,26 +51,15 @@ orchestration, contract, or client change is required for the common case.
 
 ## OpenCode server ownership and catalog
 
-Each OpenCode provider instance owns one lazy local server for catalog discovery and
-text-generation helpers through [`OpenCodeServerOwner.ts`][opencode-server-owner]. Concurrent
-borrowers share startup. The server closes 30 seconds after the last borrower releases it, or
-when the provider instance closes. A failed or exited process can be started again on the next
-use. An externally configured OpenCode server remains externally owned.
+The built-in OpenCode identity runs the OpenCode 2 HTTP/SSE stack. `connectToOpenCodeServer`
+attaches to a live host `service.json` or starts the user daemon with `service start`. T3 does
+not keep a leftover isolate process or a separate `opencode2` driver. An explicit provider URL
+and password still win over the host ledger.
 
-The local server and its SDK clients use one resolved password. An explicit provider password
-overrides `OPENCODE_SERVER_PASSWORD` in the spawned environment. Without an explicit password,
-the client uses the password from the environment that the process inherits. External servers use
-only their explicit provider password and never inherit the host's local password.
-
-Every server connection must pass the authenticated `/global/health` check before inventory or
-session operations start. The response must contain a valid version at or above 1.14.19. Local
-owners cache this result for the lifetime of the spawned process. External actions check once when
-they create their server connection, not for each model or SDK request.
-
-Chat adapters keep their own server per thread. They register a thread-specific `t3-code` MCP
-connection, while OpenCode stores MCP connections by directory. Sharing these chat servers
-without changing MCP routing would let two threads in one directory replace each other's
-connection.
+SDK clients send `x-opencode-directory` and, when a password is present, the Basic
+`opencode:<password>` header. Chat adapters open one connection per thread so each thread can
+register its own `t3-code` MCP server. OpenCode keys MCP connections by directory, so sharing one
+chat server across threads in the same directory would let them replace each other's connection.
 
 OpenCode loads its catalog through the HTTP API when an enabled provider instance starts. The
 provider registry keeps the snapshot in memory and persists it in the existing per-instance cache.

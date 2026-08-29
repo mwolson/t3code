@@ -253,6 +253,8 @@ describe("GrokAdapterV2 capabilities", () => {
               answers: null,
             };
           }),
+        captureProposedPlan: () => Effect.void,
+        lastProposedPlanMarkdown: Effect.succeed(undefined),
       });
 
       assert.isDefined(requestHandler);
