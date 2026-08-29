@@ -288,6 +288,15 @@ function isBlockingRun(run: OrchestrationV2Run): boolean {
   );
 }
 
+function isProviderSwitchCoverageRun(run: OrchestrationV2Run): boolean {
+  return (
+    run.status === "completed" ||
+    run.status === "interrupted" ||
+    run.status === "failed" ||
+    run.status === "cancelled"
+  );
+}
+
 /**
  * A parent thread is "live" for wake purposes while a run is still producing
  * agent output. A run parked at "waiting" is post-terminal drain, so its agent
@@ -3269,6 +3278,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const ordinal = nextRunOrdinal(projection);
       const runId = idAllocator.derive.run({ threadId: command.threadId, ordinal });
       const latestCompletedRun = projection.runs.findLast((run) => run.status === "completed");
+      const latestSwitchCoverageRun = projection.runs.findLast(isProviderSwitchCoverageRun);
       const legacyImportItems =
         projection.thread.historyOrigin === "v1_import"
           ? projection.turnItems.filter((item) => item.runId === null)
@@ -3798,16 +3808,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const requiresFullProviderSwitchContext =
         isProviderSwitch && pendingMergeBackTransfer !== undefined;
       const providerSwitchCoveredRuns =
-        !isProviderSwitch || latestCompletedRun === undefined
+        !isProviderSwitch || latestSwitchCoverageRun === undefined
           ? []
           : projection.runs.filter(
               (run) =>
-                run.status === "completed" &&
+                isProviderSwitchCoverageRun(run) &&
                 run.ordinal >
                   (requiresFullProviderSwitchContext
                     ? 0
                     : (targetProviderThread?.lastRunOrdinal ?? 0)) &&
-                run.ordinal <= latestCompletedRun.ordinal,
+                run.ordinal <= latestSwitchCoverageRun.ordinal,
             );
       const providerSwitchItems =
         providerSwitchCoveredRuns.length === 0
@@ -3823,7 +3833,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ),
             ];
       const providerSwitchTransferId =
-        providerSwitchCoveredRuns.length === 0 || latestCompletedRun === undefined
+        providerSwitchCoveredRuns.length === 0 || latestSwitchCoverageRun === undefined
           ? null
           : yield* mapDispatchError(command)(
               idAllocator.allocate.contextTransfer({
@@ -3847,7 +3857,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
       }
       const providerSwitchHandoff =
-        providerSwitchTransferId === null || latestCompletedRun === undefined
+        providerSwitchTransferId === null || latestSwitchCoverageRun === undefined
           ? null
           : yield* contextHandoffService
               .prepareProviderHandoff({
@@ -3862,7 +3872,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   ),
                 ),
                 toProviderThreadId: ensuredProviderThread.id,
-                fromProviderInstanceId: latestCompletedRun.providerInstanceId,
+                fromProviderInstanceId: latestSwitchCoverageRun.providerInstanceId,
                 toProviderInstanceId: modelSelection.instanceId,
                 coveredRunOrdinals: {
                   from: providerSwitchCoveredRuns[0]!.ordinal,
@@ -3886,7 +3896,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 ),
               );
       const legacyImportRecoveryHandoff =
-        isProviderSwitch && latestCompletedRun === undefined && legacyImportItems.length > 0
+        isProviderSwitch &&
+        providerSwitchHandoff === null &&
+        latestCompletedRun === undefined &&
+        legacyImportItems.length > 0
           ? yield* contextHandoffService
               .prepareLegacyImport({
                 threadId: command.threadId,
@@ -4271,14 +4284,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         providerSwitchTransferId !== null &&
         providerSwitchHandoff !== null &&
-        latestCompletedRun !== undefined
+        latestSwitchCoverageRun !== undefined
       ) {
         const transfer: OrchestrationV2ContextTransfer = {
           id: providerSwitchTransferId,
           type: "provider_handoff",
           sourceThreadId: command.threadId,
           targetThreadId: command.threadId,
-          sourcePoint: contextSourcePointForRun(projection, latestCompletedRun),
+          sourcePoint: contextSourcePointForRun(projection, latestSwitchCoverageRun),
           basePoint:
             requiresFullProviderSwitchContext ||
             targetProviderThread?.lastRunOrdinal === null ||
@@ -4292,7 +4305,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     ? null
                     : contextSourcePointForRun(projection, baseRun);
                 })(),
-          sourceProviderInstanceId: latestCompletedRun.providerInstanceId,
+          sourceProviderInstanceId: latestSwitchCoverageRun.providerInstanceId,
           targetProviderInstanceId: modelSelection.instanceId,
           targetRunId: runId,
           status: "consumed",
