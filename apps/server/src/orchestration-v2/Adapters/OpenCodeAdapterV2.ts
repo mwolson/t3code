@@ -2331,7 +2331,6 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
         const sessionID = nativeThreadId(input.providerThread);
         const connection = yield* runtime.connectToOpenCodeServer({
           binaryPath: options.settings.binaryPath,
-          directory: cwd,
           serverUrl: options.settings.serverUrl,
           serverPassword: options.settings.serverPassword,
           environment: options.environment,

@@ -203,11 +203,7 @@ export class OpenCodeRuntime extends Context.Service<
       readonly serverUrl?: string | null;
       readonly serverPassword?: string | null;
       readonly environment?: NodeJS.ProcessEnv;
-    }) => Effect.Effect<
-      OpenCodeServerConnection,
-      OpenCodeRuntimeError,
-      ChildProcessSpawner.ChildProcessSpawner
-    >;
+    }) => Effect.Effect<OpenCodeServerConnection, OpenCodeRuntimeError>;
     readonly createOpenCodeSdkClient: (input: {
       readonly baseUrl: string;
       readonly directory: string;
@@ -339,9 +335,13 @@ export function normalizeOpenCodeVariant(variant: string | undefined): string | 
  */
 export const OPENCODE_AUTO_AGENT = "auto";
 
-export const make = Effect.sync(() => {
+export const make = Effect.gen(function* () {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const resolveCommand = (command: string, args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv) =>
     resolveSpawnCommand(command, args, env ? { env } : {});
+  const withSpawner = <A, E, R>(
+    effect: Effect.Effect<A, E, R | ChildProcessSpawner.ChildProcessSpawner>,
+  ) => effect.pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
 
   const connectToOpenCodeServer: OpenCodeRuntime["Service"]["connectToOpenCodeServer"] = (
     input,
@@ -440,6 +440,7 @@ export const make = Effect.sync(() => {
     args: ReadonlyArray<string>,
     environment: NodeJS.ProcessEnv,
   ) =>
+    withSpawner(
     Effect.gen(function* () {
       const spawnCommand = yield* resolveCommand(binaryPath, args, environment).pipe(
         Effect.mapError(
@@ -468,7 +469,8 @@ export const make = Effect.sync(() => {
             }),
         ),
       );
-    });
+    }),
+    );
 
   const createOpenCodeSdkClient: OpenCodeRuntime["Service"]["createOpenCodeSdkClient"] = (input) =>
     OpenCode.make({

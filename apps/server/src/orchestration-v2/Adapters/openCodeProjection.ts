@@ -162,7 +162,7 @@ export function openCodePermissionRules(
   // Task sessions initially inherit only parent deny rules. Seed explicit
   // denies before the effective ask/allow overrides so a child is safe during
   // the short interval before emitSubagent installs its complete policy.
-  const rules: PermissionRuleset = [
+  const rules: Array<PermissionRuleset[number]> = [
     { permission: "*", pattern: "*", action: "deny" },
     ...OPENCODE_RESTRICTED_PERMISSIONS.map((permission) => ({
       permission,
