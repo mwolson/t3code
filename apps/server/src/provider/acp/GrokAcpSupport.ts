@@ -134,6 +134,8 @@ export function resolveGrokAcpBaseModelId(model: string | null | undefined): str
   return normalizeModelSlug(base, GROK_DRIVER_KIND) ?? GROK_DEFAULT_MODEL_SLUG;
 }
 
+export const GROK_REASONING_EFFORT_OPTION_ID = "reasoningEffort";
+
 const GROK_REASONING_EFFORT_TOKEN = /^[a-z0-9][a-z0-9._-]{0,31}$/i;
 
 export function isValidGrokReasoningEffortToken(value: string): boolean {
