@@ -4,7 +4,7 @@ import { ChevronDownIcon, XIcon } from "lucide-react";
 import type { ComponentProps } from "react";
 
 import { cn } from "~/lib/utils";
-import { Button } from "../ui/button";
+import { Button, buttonVariants } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
 
 export type ComposerBannerVariant = "default" | "error" | "info" | "success" | "warning";
@@ -108,7 +108,7 @@ function Attachment({ className, ...props }: ComponentProps<"div">) {
     <div
       data-slot="composer-banner-attachment"
       className={cn(
-        "mx-auto -mb-[calc(1rem+1px)] w-[calc(100%-2*var(--chat-composer-drawer-inset))]",
+        "mx-auto -mb-[calc(1rem+1px)] w-[calc(100%-2.75rem)] max-w-[45.25rem]",
         // Adjacent attachments share their outline, including notices outside the form.
         "[&+[data-slot=composer-banner-attachment]_[data-composer-banner-surface=attached]]:before:rounded-none [&+[data-slot=composer-banner-attachment]_[data-composer-banner-surface=attached]]:before:border-t-0",
         "[&+:has([data-chat-composer-form])_[data-chat-composer-form]>[data-slot=composer-banner-attachment]:first-child_[data-composer-banner-surface=attached]]:before:rounded-none [&+:has([data-chat-composer-form])_[data-chat-composer-form]>[data-slot=composer-banner-attachment]:first-child_[data-composer-banner-surface=attached]]:before:border-t-0",
@@ -122,24 +122,7 @@ function Attachment({ className, ...props }: ComponentProps<"div">) {
 function Dock({ className, ...props }: ComponentProps<"div">) {
   return (
     <Attachment
-      className={cn(
-        "flex items-end gap-1 not-has-data-[composer-banner-surface=attached]:hidden",
-        className,
-      )}
-      {...props}
-    />
-  );
-}
-
-/** Attachments share a column while neighboring tabs keep their own surface. */
-function Column({ className, ...props }: ComponentProps<"div">) {
-  return (
-    <div
-      className={cn(
-        "flex min-w-0 flex-1 flex-col empty:hidden",
-        "[&>[data-slot=composer-banner-attachment]]:w-full [&>[data-slot=composer-banner-attachment]:last-child]:mb-0",
-        className,
-      )}
+      className={cn("flex items-end gap-1 *:data-[composer-banner-width=fill]:flex-1", className)}
       {...props}
     />
   );
@@ -279,17 +262,17 @@ function Children({ className, render, ...props }: useRender.ComponentProps<"div
 }
 
 /** Bounded banner content uses the app's scroll area and fades only overflowing edges. */
-function Scroll({ className, children, ...props }: ComponentProps<typeof ScrollArea>) {
+function Scroll({ className, ...props }: ComponentProps<typeof ScrollArea>) {
   return (
     <ScrollArea
       radius="none"
       scrollFade
-      className={cn("h-auto max-h-[min(24rem,40dvh)]", className)}
+      className={cn(
+        "h-auto max-h-[min(24rem,40dvh)] [&>[data-slot=scroll-area-viewport][data-has-overflow-y]]:pe-2",
+        className,
+      )}
       {...props}
-    >
-      {/* Clears the overlay scrollbar only once there is something to scroll. */}
-      <div className="[[data-has-overflow-y]>&]:pe-2">{children}</div>
-    </ScrollArea>
+    />
   );
 }
 
@@ -323,18 +306,14 @@ function Dot({ className, ...props }: ComponentProps<"span">) {
   );
 }
 
-// Decorative: the row itself is the control, so this only matches Dismiss's box.
-function ToggleIcon({ expanded }: { expanded: boolean }) {
+function ToggleIcon({ expanded, className }: { expanded: boolean; className?: string }) {
   return (
-    <Button
-      render={<span aria-hidden />}
-      size="icon-xs"
-      variant="ghost"
-      tabIndex={-1}
-      className="pointer-events-none"
+    <span
+      aria-hidden
+      className={cn(buttonVariants({ size: "icon-xs", variant: "ghost" }), className)}
     >
       <ChevronDownIcon className={cn("size-3.5", !expanded && "rotate-180")} />
-    </Button>
+    </span>
   );
 }
 
@@ -351,7 +330,6 @@ export const ComposerBanner = {
   Peek,
   Attachment,
   Dock,
-  Column,
   Root,
   Row,
   Icon,
