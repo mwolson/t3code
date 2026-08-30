@@ -1,6 +1,12 @@
 import { CommandId, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
+import {
+  backgroundCommandWakeCount,
+  isBackgroundCommandWakeMessage,
+  joinWakePromptTexts,
+} from "@t3tools/shared/wakePromptPresentation";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import { IdAllocatorV2 } from "./IdAllocator.ts";
@@ -8,9 +14,18 @@ import {
   type ProviderContinuationRequest,
   ProviderContinuationRequests,
 } from "./ProviderContinuationRequests.ts";
+import { queuedBackgroundCommandWakeRuns } from "./QueuedRunOrder.ts";
 import { ThreadManagementService } from "./ThreadManagementService.ts";
 
 const CONTINUATION_MESSAGE_TEXT = "Background task completed.";
+function isOrchestratorDispatchError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "_tag" in error &&
+    error._tag === "OrchestratorDispatchError"
+  );
+}
 
 function delegatedCompletionText(taskIds: ReadonlyArray<string>): string {
   const taskList = taskIds.join(", ");
@@ -134,6 +149,78 @@ export const workerLive = Layer.effectDiscard(
           yield* clearRetryAttempt(retryKey);
           return;
         }
+        const incomingText =
+          request.messageText ?? request.detail ?? PROVIDER_CONTINUATION_MESSAGE_TEXT;
+        const incomingWake = {
+          createdBy: "agent" as const,
+          creationSource: "provider" as const,
+          text: incomingText,
+          ...(request.providerWake === undefined ? {} : { providerWake: request.providerWake }),
+        };
+        const isCommandWake =
+          request.delivery !== "message_text" && isBackgroundCommandWakeMessage(incomingWake);
+        const commandWakeCount = isCommandWake
+          ? Math.max(1, backgroundCommandWakeCount(incomingWake))
+          : undefined;
+        let providerWake: ProviderContinuationRequest["providerWake"];
+        if (request.delivery === "message_text") {
+          providerWake = undefined;
+        } else if (request.providerWake !== undefined) {
+          providerWake = request.providerWake;
+        } else if (commandWakeCount !== undefined) {
+          providerWake = { kind: "background_command", count: commandWakeCount };
+        } else {
+          providerWake = { kind: "background_task", count: 1 };
+        }
+        let offerGuardConsumed = false;
+        if (isCommandWake && commandWakeCount !== undefined) {
+          const queuedWake = queuedBackgroundCommandWakeRuns(projection)[0];
+          const queuedMessage =
+            queuedWake === undefined
+              ? undefined
+              : projection.messages.find((message) => message.id === queuedWake.userMessageId);
+          if (queuedWake !== undefined && queuedMessage !== undefined) {
+            const mergedText = joinWakePromptTexts([queuedMessage.text, incomingText]);
+            if (mergedText !== queuedMessage.text) {
+              const commandId = yield* ids.allocate.command({
+                fixtureName: "provider-continuation",
+                commandName: "coalesce",
+              });
+              const edit = threads.dispatch({
+                type: "queued-run.edit",
+                commandId,
+                threadId: request.threadId,
+                runId: queuedWake.id,
+                text: mergedText,
+                providerWake: {
+                  kind: "background_command",
+                  count: backgroundCommandWakeCount(queuedMessage) + commandWakeCount,
+                },
+              });
+              const recoveredEdit = edit.pipe(
+                Effect.as("coalesced" as const),
+                Effect.catchIf(isOrchestratorDispatchError, () =>
+                  Effect.succeed("promoted" as const),
+                ),
+              );
+              let outcome: "coalesced" | "promoted" | "dropped";
+              if (request.dispatchIfCurrent === undefined) {
+                outcome = yield* recoveredEdit;
+              } else {
+                offerGuardConsumed = true;
+                outcome = Option.match(yield* request.dispatchIfCurrent(recoveredEdit), {
+                  onNone: () => "dropped" as const,
+                  onSome: (value) => value,
+                });
+              }
+              if (outcome === "dropped" || outcome === "coalesced") {
+                return;
+              }
+            } else {
+              return;
+            }
+          }
+        }
         // The ordinal is display metadata only: allocate.message appends a
         // random UUID, so a stale projection read here cannot collide ids.
         const messageId = yield* ids.allocate.message({
@@ -147,6 +234,7 @@ export const workerLive = Layer.effectDiscard(
           threadId: request.threadId,
           messageId,
           text: request.detail ?? CONTINUATION_MESSAGE_TEXT,
+          text: incomingText,
           attachments: [],
           dispatchMode: { type: "queue_after_active" },
           createdBy: "agent",
@@ -155,8 +243,9 @@ export const workerLive = Layer.effectDiscard(
           // message_text wake has no buffered output, so it must not carry that
           // marker or the turn settles immediately having prompted nothing.
           creationSource: request.delivery === "message_text" ? "server" : "provider",
+          ...(providerWake === undefined ? {} : { providerWake }),
         });
-        if (request.dispatchIfCurrent === undefined) {
+        if (request.dispatchIfCurrent === undefined || offerGuardConsumed) {
           yield* dispatch;
           return;
         }

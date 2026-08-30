@@ -4324,6 +4324,17 @@ export function makeClaudeAdapterV2(
             providerThreadId: route.providerThreadId,
             driver: CLAUDE_PROVIDER,
             detail,
+=======
+            messageText: PROVIDER_CONTINUATION_MESSAGE_TEXT,
+            providerWake: { kind: "background_task", count: 1 },
+            clearIfCurrent: clearContinuationIfCurrent,
+            dispatchIfCurrent: dispatchContinuationIfCurrent,
+            failIfCurrent: failContinuationIfCurrent,
+            messageText: PROVIDER_CONTINUATION_MESSAGE_TEXT,
+            providerWake: { kind: "background_task", count: 1 },
+            clearIfCurrent: clearContinuationIfCurrent,
+            dispatchIfCurrent: dispatchContinuationIfCurrent,
+            failIfCurrent: failContinuationIfCurrent,
           });
         });
 

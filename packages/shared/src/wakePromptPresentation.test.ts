@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  backgroundCommandWakeCount,
   delegatedTaskPreviewLabel,
+  isBackgroundCommandWakeMessage,
   isWakePromptMessage,
+  joinWakePromptTexts,
+  mergedBackgroundCommandWake,
   PROVIDER_BUFFERED_CONTINUATION_TEXT,
   resolveWakePromptPresentation,
 } from "./wakePromptPresentation.ts";
@@ -70,6 +74,106 @@ describe("wakePromptPresentation", () => {
     ).toBe(false);
   });
 
+  it("does not treat header-shaped text as a wake without agent plus provider attribution", () => {
+    expect(
+      isWakePromptMessage({
+        text: "Background command completed (exit 0): sleep 1",
+      }),
+    ).toBe(false);
+    expect(
+      isWakePromptMessage({
+        createdBy: "agent",
+        creationSource: "mcp",
+        text: "Background command completed (exit 0): sleep 1",
+      }),
+    ).toBe(false);
+    expect(
+      isBackgroundCommandWakeMessage({
+        createdBy: "agent",
+        creationSource: "mcp",
+        text: "Background command completed (exit 0): sleep 1",
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts providerWake metadata without the T3-authored header", () => {
+    expect(
+      isBackgroundCommandWakeMessage({
+        createdBy: "agent",
+        creationSource: "provider",
+        text: "custom wake",
+        providerWake: { kind: "background_command", count: 2 },
+      }),
+    ).toBe(true);
+    expect(
+      isWakePromptMessage({
+        createdBy: "agent",
+        creationSource: "provider",
+        text: "custom wake",
+        providerWake: { kind: "background_task", count: 1 },
+      }),
+    ).toBe(true);
+    expect(
+      isBackgroundCommandWakeMessage({
+        createdBy: "agent",
+        creationSource: "provider",
+        text: "custom wake",
+        providerWake: { kind: "background_task", count: 1 },
+      }),
+    ).toBe(false);
+    expect(
+      resolveWakePromptPresentation({
+        createdBy: "agent",
+        creationSource: "provider",
+        text: "custom wake",
+        providerWake: { kind: "background_command", count: 2 },
+      }),
+    ).toEqual({
+      kind: "background",
+      heading: "2 background tasks finished",
+      preview: null,
+    });
+    expect(
+      backgroundCommandWakeCount({
+        createdBy: "agent",
+        creationSource: "provider",
+        text: "Background command completed (exit 0): sleep 1",
+        providerWake: { kind: "background_command", count: 2 },
+      }),
+    ).toBe(2);
+    expect(
+      mergedBackgroundCommandWake([
+        {
+          createdBy: "agent",
+          creationSource: "provider",
+          text: "custom",
+          providerWake: { kind: "background_command", count: 1 },
+        },
+        {
+          createdBy: "agent",
+          creationSource: "provider",
+          text: "Background command completed (exit 0): sleep 1",
+        },
+      ]),
+    ).toEqual({ kind: "background_command", count: 2 });
+  });
+
+  it("prefers delegated metadata when both wake kinds are present", () => {
+    expect(
+      resolveWakePromptPresentation({
+        createdBy: "agent",
+        creationSource: "provider",
+        text: "custom wake",
+        delegatedCompletion: { parentRunId: "run-1" },
+        providerWake: { kind: "background_task", count: 1 },
+      }),
+    ).toEqual({
+      kind: "delegated",
+      heading: "Delegated task finished",
+      preview: null,
+    });
+  });
+
   it("accepts delegatedCompletion metadata without the canned prompt text", () => {
     expect(
       isWakePromptMessage({
@@ -123,6 +227,62 @@ describe("wakePromptPresentation", () => {
     ).toEqual({
       kind: "background",
       heading: "Background task finished",
+      preview: null,
+    });
+    expect(
+      isWakePromptMessage({
+        createdBy: "agent",
+        creationSource: "provider",
+        text: "Background command completed (exit 1): sleep 15; echo CODEX_BG_FAIL; exit 1\n\nOutput tail:\nCODEX_BG_FAIL",
+      }),
+    ).toBe(true);
+  });
+
+  it("distinguishes Codex command wakes from Claude canned background text", () => {
+    expect(
+      isBackgroundCommandWakeMessage({
+        createdBy: "agent",
+        creationSource: "provider",
+        text: "Background command completed (exit 1): sleep 15; echo CODEX_BG_A; exit 1",
+      }),
+    ).toBe(true);
+    expect(
+      isBackgroundCommandWakeMessage({
+        createdBy: "agent",
+        creationSource: "provider",
+        text: PROVIDER_BUFFERED_CONTINUATION_TEXT,
+      }),
+    ).toBe(false);
+    expect(
+      isBackgroundCommandWakeMessage({
+        createdBy: "user",
+        creationSource: "web",
+        text: "Background command completed: sleep 20",
+      }),
+    ).toBe(false);
+  });
+
+  it("joins Codex command wakes without inventing a Claude canned line", () => {
+    expect(
+      joinWakePromptTexts([
+        "Background command completed (exit 1): sleep 12; echo CODEX_BG_A; exit 1\n\nOutput tail:\nCODEX_BG_A",
+        "Background command completed (exit 0): sleep 18; echo CODEX_BG_B\n\nOutput tail:\nCODEX_BG_B",
+      ]),
+    ).toBe(
+      "Background command completed (exit 1): sleep 12; echo CODEX_BG_A; exit 1\n\nOutput tail:\nCODEX_BG_A\n\nBackground command completed (exit 0): sleep 18; echo CODEX_BG_B\n\nOutput tail:\nCODEX_BG_B",
+    );
+    expect(
+      resolveWakePromptPresentation({
+        createdBy: "agent",
+        creationSource: "provider",
+        text: joinWakePromptTexts([
+          "Background command completed (exit 1): sleep 12",
+          "Background command completed (exit 0): sleep 18",
+        ]),
+      }),
+    ).toEqual({
+      kind: "background",
+      heading: "2 background tasks finished",
       preview: null,
     });
   });

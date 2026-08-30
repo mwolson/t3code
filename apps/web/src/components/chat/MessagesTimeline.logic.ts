@@ -330,6 +330,23 @@ export type MessagesTimelineRow =
       turnPlan: TurnPlanEntry;
     };
 
+export function timelineRowAnchorMessageId(row: MessagesTimelineRow): MessageId | null {
+  if (row.kind === "message") {
+    return row.message.id;
+  }
+  const entries = row.kind === "work" || row.kind === "work-live" ? row.groupedEntries : undefined;
+  if (entries === undefined) {
+    return null;
+  }
+  for (const entry of entries) {
+    const item = entry.projectedItem?.item ?? entry.structuredPayload;
+    if (item?.type === "user_message") {
+      return item.messageId;
+    }
+  }
+  return null;
+}
+
 export interface StableMessagesTimelineRowsState {
   byId: Map<string, MessagesTimelineRow>;
   result: MessagesTimelineRow[];

@@ -5,6 +5,7 @@ import type {
   OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import { copySorted } from "@t3tools/shared/Array";
+import { isWakePromptMessage } from "@t3tools/shared/wakePromptPresentation";
 
 type Projection = OrchestrationV2ThreadProjection;
 type Run = Projection["runs"][number];
@@ -17,7 +18,6 @@ const MERGE_BACK_BLOCKING_RUN_STATUSES = new Set<Run["status"]>([
   "starting",
   "running",
 ]);
-
 export interface QueuedThreadRun {
   readonly run: Run;
   readonly text: string;
@@ -96,11 +96,8 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
     projection.messages
       .filter((message) => message.delegatedCompletion !== undefined)
       .map((message) => message.id),
-  );
-  const queuedRuns = copySorted(
-    projection.runs.filter(
-      (run) => run.status === "queued" && !automaticCompletionMessageIds.has(run.userMessageId),
-    ),
+  );  const queuedRuns = copySorted(
+    projection.runs.filter((run) => run.status === "queued"),
     (left, right) =>
       (left.queuePosition ?? left.ordinal) - (right.queuePosition ?? right.ordinal) ||
       left.ordinal - right.ordinal,
@@ -111,6 +108,17 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
       text: message?.text ?? "Queued message",
       attachments: message?.attachments ?? [],
     };
+  ).flatMap((run) => {
+    const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+    if (message !== undefined && isWakePromptMessage(message)) {
+      return [];
+    }
+    return [
+      {
+        run,
+        text: message?.text ?? "Queued message",
+      },
+    ];
   });
 
   return {

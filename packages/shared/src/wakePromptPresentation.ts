@@ -2,11 +2,19 @@ export const PROVIDER_BUFFERED_CONTINUATION_TEXT = "Background task completed.";
 
 export type WakePromptKind = "background" | "delegated";
 
+export type ProviderWakeKind = "background_command" | "background_task";
+
+export interface ProviderWake {
+  readonly kind: ProviderWakeKind;
+  readonly count: number;
+}
+
 export interface WakePromptMessage {
   readonly text: string;
   readonly createdBy?: string | undefined;
   readonly creationSource?: string | undefined;
   readonly delegatedCompletion?: unknown;
+  readonly providerWake?: unknown;
 }
 
 export interface WakePromptPresentation {
@@ -23,28 +31,81 @@ export function isWakePromptMessage(message: WakePromptMessage): boolean {
   return resolveWakePromptPresentation(message) !== null;
 }
 
+export function isBackgroundCommandWakeMessage(message: WakePromptMessage): boolean {
+  if (message.createdBy !== "agent" || message.creationSource !== "provider") {
+    return false;
+  }
+  const wake = providerWakeFromMetadata(message.providerWake);
+  if (wake !== undefined) {
+    return wake.kind === "background_command";
+  }
+  return countMatches(BACKGROUND_COMMAND_COMPLETED, message.text) > 0;
+}
+
+export function backgroundCommandWakeCount(message: WakePromptMessage): number {
+  const wake = providerWakeFromMetadata(message.providerWake);
+  if (wake?.kind === "background_command") {
+    return wake.count;
+  }
+  if (wake?.kind === "background_task") {
+    return 0;
+  }
+  return countMatches(BACKGROUND_COMMAND_COMPLETED, message.text);
+}
+
+export function mergedBackgroundCommandWake(
+  messages: ReadonlyArray<WakePromptMessage>,
+): ProviderWake | undefined {
+  let count = 0;
+  for (const message of messages) {
+    count += backgroundCommandWakeCount(message);
+  }
+  if (count < 1) {
+    return undefined;
+  }
+  return { kind: "background_command", count };
+}
+
+export function joinWakePromptTexts(texts: ReadonlyArray<string>): string {
+  const parts: string[] = [];
+  for (const text of texts) {
+    const trimmed = text.trimEnd();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    parts.push(trimmed);
+  }
+  return parts.join("\n\n");
+}
+
 export function resolveWakePromptPresentation(
   message: WakePromptMessage,
 ): WakePromptPresentation | null {
-  const metadataTaskIds = taskIdsFromMetadata(message.delegatedCompletion);
-  const parsedTaskIds = collectDelegatedTaskIds(message.text);
-  const taskIds = uniqueStrings([...metadataTaskIds, ...parsedTaskIds]);
-  const backgroundTaskCount = countMatches(BACKGROUND_TASK_COMPLETED, message.text);
-  const backgroundCommandCount = countMatches(BACKGROUND_COMMAND_COMPLETED, message.text);
-  const backgroundCount = backgroundTaskCount + backgroundCommandCount;
   const hasDelegatedMetadata =
     message.delegatedCompletion !== undefined && message.delegatedCompletion !== null;
-  const hasDelegated =
-    hasDelegatedMetadata ||
-    (message.createdBy === "agent" && message.creationSource === "server" && taskIds.length > 0);
-  const hasBackground =
-    message.createdBy === "agent" && message.creationSource === "provider" && backgroundCount > 0;
-
-  if (!hasDelegated && !hasBackground) {
+  const providerWake = providerWakeFromMetadata(message.providerWake);
+  const canBeDelegatedText = message.createdBy === "agent" && message.creationSource === "server";
+  const canBeBackgroundText =
+    message.createdBy === "agent" && message.creationSource === "provider";
+  if (
+    !hasDelegatedMetadata &&
+    providerWake === undefined &&
+    !canBeDelegatedText &&
+    !canBeBackgroundText
+  ) {
     return null;
   }
 
-  if (hasDelegated && backgroundCount === 0) {
+  const metadataTaskIds = taskIdsFromMetadata(message.delegatedCompletion);
+  const parsedTaskIds =
+    hasDelegatedMetadata || canBeDelegatedText ? collectDelegatedTaskIds(message.text) : [];
+  const taskIds = uniqueStrings([...metadataTaskIds, ...parsedTaskIds]);
+  const backgroundCounts = backgroundWakeCounts(message.text, providerWake, canBeBackgroundText);
+  const backgroundCount = backgroundCounts.task + backgroundCounts.command;
+  const hasDelegated = hasDelegatedMetadata || (canBeDelegatedText && taskIds.length > 0);
+  const hasBackground = canBeBackgroundText && backgroundCount > 0;
+
+  if (hasDelegated) {
     return {
       kind: "delegated",
       heading:
@@ -55,7 +116,7 @@ export function resolveWakePromptPresentation(
     };
   }
 
-  if (!hasDelegated && hasBackground) {
+  if (hasBackground) {
     return {
       kind: "background",
       heading:
@@ -65,12 +126,7 @@ export function resolveWakePromptPresentation(
       preview: null,
     };
   }
-
-  return {
-    kind: "delegated",
-    heading: `${taskIds.length + backgroundCount} tasks finished`,
-    preview: formatDelegatedWakePreview(taskIds),
-  };
+  return null;
 }
 
 function collectDelegatedTaskIds(text: string): string[] {
@@ -103,6 +159,41 @@ function taskIdsFromMetadata(delegatedCompletion: unknown): string[] {
       (taskId): taskId is string => typeof taskId === "string" && taskId.trim().length > 0,
     ),
   );
+}
+
+function backgroundWakeCounts(
+  text: string,
+  providerWake: ProviderWake | undefined,
+  canBeBackgroundText: boolean,
+): { readonly task: number; readonly command: number } {
+  if (providerWake?.kind === "background_task") {
+    return { task: providerWake.count, command: 0 };
+  }
+  if (providerWake?.kind === "background_command") {
+    return { task: 0, command: providerWake.count };
+  }
+  if (!canBeBackgroundText) {
+    return { task: 0, command: 0 };
+  }
+  return {
+    task: countMatches(BACKGROUND_TASK_COMPLETED, text),
+    command: countMatches(BACKGROUND_COMMAND_COMPLETED, text),
+  };
+}
+
+function providerWakeFromMetadata(value: unknown): ProviderWake | undefined {
+  if (value === null || typeof value !== "object") {
+    return undefined;
+  }
+  const kind = Reflect.get(value, "kind");
+  const count = Reflect.get(value, "count");
+  if (kind !== "background_command" && kind !== "background_task") {
+    return undefined;
+  }
+  if (typeof count !== "number" || !Number.isInteger(count) || count < 1) {
+    return undefined;
+  }
+  return { kind, count };
 }
 
 function countMatches(pattern: RegExp, text: string): number {

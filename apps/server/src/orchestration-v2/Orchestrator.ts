@@ -31,6 +31,10 @@ import {
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import {
+  joinWakePromptTexts,
+  mergedBackgroundCommandWake,
+} from "@t3tools/shared/wakePromptPresentation";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -59,7 +63,11 @@ import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
 import { ProviderContinuationRequests } from "./ProviderContinuationRequests.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { ProviderSwitchServiceV2 } from "./ProviderSwitchService.ts";
-import { isAutomaticCompletionRun, queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
+import {
+  isAutomaticCompletionRun,
+  queuedBackgroundCommandWakeRuns,
+  queuedRunsInDeliveryOrder,
+} from "./QueuedRunOrder.ts";
 import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
 import {
   makeSubagentChildThread,
@@ -911,6 +919,91 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
       const commandId = CommandId.make(`command:system:start-queued:${queuedRun.id}`);
       const now = yield* DateTime.now;
+      const wakeRunsToCoalesce = queuedBackgroundCommandWakeRuns(projection);
+      const extraWakeRuns =
+        wakeRunsToCoalesce[0]?.id === queuedRun.id ? wakeRunsToCoalesce.slice(1) : [];
+      const extraWakeMessages = extraWakeRuns.flatMap((run) => {
+        const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+        return message === undefined ? [] : [message];
+      });
+      let queuedMessageText = queuedMessage.text;
+      let coalescedProviderWake = queuedMessage.providerWake;
+      const coalesceEvents: Array<Omit<OrchestrationV2DomainEvent, "id">> = [];
+      if (extraWakeRuns.length > 0) {
+        queuedMessageText = joinWakePromptTexts([
+          queuedMessage.text,
+          ...extraWakeMessages.map((message) => message.text),
+        ]);
+        coalescedProviderWake = mergedBackgroundCommandWake([queuedMessage, ...extraWakeMessages]);
+        coalesceEvents.push({
+          type: "message.updated",
+          threadId,
+          runId: queuedRun.id,
+          nodeId: rootNodeId,
+          providerInstanceId: queuedRun.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            ...queuedMessage,
+            text: queuedMessageText,
+            ...(coalescedProviderWake === undefined ? {} : { providerWake: coalescedProviderWake }),
+            updatedAt: now,
+          },
+        });
+        for (const extra of extraWakeRuns) {
+          const extraRootNode =
+            extra.rootNodeId === null
+              ? undefined
+              : projection.nodes.find((candidate) => candidate.id === extra.rootNodeId);
+          const extraAttempt =
+            extra.activeAttemptId === null
+              ? undefined
+              : projection.attempts.find((candidate) => candidate.id === extra.activeAttemptId);
+          coalesceEvents.push({
+            type: "run.updated",
+            threadId,
+            runId: extra.id,
+            ...(extra.rootNodeId === null ? {} : { nodeId: extra.rootNodeId }),
+            providerInstanceId: extra.providerInstanceId,
+            occurredAt: now,
+            payload: {
+              ...extra,
+              status: "cancelled",
+              queuePosition: null,
+              completedAt: now,
+            },
+          });
+          if (extraAttempt !== undefined && extraRootNode !== undefined) {
+            coalesceEvents.push({
+              type: "run-attempt.updated",
+              threadId,
+              runId: extra.id,
+              nodeId: extraRootNode.id,
+              providerInstanceId: extra.providerInstanceId,
+              occurredAt: now,
+              payload: {
+                ...extraAttempt,
+                status: "cancelled",
+                completedAt: now,
+              },
+            });
+          }
+          if (extraRootNode !== undefined) {
+            coalesceEvents.push({
+              type: "node.updated",
+              threadId,
+              runId: extra.id,
+              nodeId: extraRootNode.id,
+              providerInstanceId: extra.providerInstanceId,
+              occurredAt: now,
+              payload: {
+                ...extraRootNode,
+                status: "cancelled",
+                completedAt: now,
+              },
+            });
+          }
+        }
+      }
       const checkpointScope =
         storedCheckpointScope ??
         (yield* runtimePolicy
@@ -983,11 +1076,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           title: null,
           type: "user_message",
           messageId: queuedMessage.id,
-          text: queuedMessage.text,
+          text: queuedMessageText,
           attachments: queuedMessage.attachments,
           createdBy: queuedMessage.createdBy,
           creationSource: queuedMessage.creationSource,
+          ...(queuedMessage.providerWake === undefined
+            ? {}
+            : { providerWake: queuedMessage.providerWake }),
         }),
+        text: queuedMessageText,
+        ...(coalescedProviderWake === undefined ? {} : { providerWake: coalescedProviderWake }),
         inputIntent: "queued_turn",
         startedAt: now,
         completedAt: now,
@@ -1018,6 +1116,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : [];
       yield* writeSystemEvents(
         [
+          ...coalesceEvents,
           ...checkpointEvents,
           {
             type: "provider-thread.updated",
@@ -3237,6 +3336,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           taskIds: delivery.taskIds,
         };
       }
+      const providerWake =
+        delegatedCompletion === undefined &&
+        command.providerWake !== undefined &&
+        command.createdBy === "agent" &&
+        command.creationSource === "provider"
+          ? command.providerWake
+          : undefined;
       const dispatchText =
         delegatedCompletion === undefined
           ? command.text
@@ -3463,6 +3569,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           createdAt: now,
           updatedAt: now,
           ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
+          ...(providerWake === undefined ? {} : { providerWake }),
         };
         const emitEvent = emit(events, command);
         yield* emitEvent({
@@ -3717,6 +3824,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           createdAt: now,
           updatedAt: now,
           ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
+          ...(providerWake === undefined ? {} : { providerWake }),
         };
         const turnItem: OrchestrationV2TurnItem = {
           createdBy: command.createdBy,
@@ -3740,6 +3848,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           inputIntent: "turn_start",
           text: dispatchText,
           attachments: command.attachments,
+          ...(providerWake === undefined ? {} : { providerWake }),
         };
         const preparationTurnItem: OrchestrationV2TurnItem | null =
           dispatchMode.type === "defer_start"
@@ -4379,6 +4488,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         createdAt: now,
         updatedAt: now,
         ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
+        ...(providerWake === undefined ? {} : { providerWake }),
       };
       const turnItem: OrchestrationV2TurnItem = {
         createdBy: command.createdBy,
@@ -4402,6 +4512,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         inputIntent: "turn_start",
         text: dispatchText,
         attachments: command.attachments,
+        ...(providerWake === undefined ? {} : { providerWake }),
       };
       const activeHandoff = portableForkHandoff ?? mergeBackHandoff ?? providerSwitchHandoff;
       const handoffSourceRuns =
@@ -5705,6 +5816,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...queuedMessage,
           text: command.text,
           ...editedAttachments,
+          ...(command.providerWake === undefined && queuedMessage.providerWake === undefined
+            ? {}
+            : {
+                providerWake: command.providerWake ?? queuedMessage.providerWake,
+              }),
           updatedAt: now,
         },
       });
@@ -5720,6 +5836,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...queuedTurnItem,
             text: command.text,
             ...editedAttachments,
+            ...(command.providerWake === undefined && queuedMessage.providerWake === undefined
+              ? {}
+              : {
+                  providerWake: command.providerWake ?? queuedMessage.providerWake,
+                }),
             updatedAt: now,
           },
         });

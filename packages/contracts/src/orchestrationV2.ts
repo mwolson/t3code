@@ -704,6 +704,18 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
 });
 export type OrchestrationV2RuntimeRequest = typeof OrchestrationV2RuntimeRequest.Type;
 
+export const OrchestrationV2ProviderWakeKind = Schema.Literals([
+  "background_command",
+  "background_task",
+]);
+export type OrchestrationV2ProviderWakeKind = typeof OrchestrationV2ProviderWakeKind.Type;
+
+export const OrchestrationV2ProviderWake = Schema.Struct({
+  kind: OrchestrationV2ProviderWakeKind,
+  count: PositiveInt,
+});
+export type OrchestrationV2ProviderWake = typeof OrchestrationV2ProviderWake.Type;
+
 export const OrchestrationV2ConversationMessage = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: MessageId,
@@ -723,6 +735,7 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
       taskIds: Schema.Array(NodeId),
     }),
   ),
+  providerWake: Schema.optional(OrchestrationV2ProviderWake),
 });
 export type OrchestrationV2ConversationMessage = typeof OrchestrationV2ConversationMessage.Type;
 
@@ -919,6 +932,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     inputIntent: OrchestrationV2UserMessageInputIntent,
     text: Schema.String,
     attachments: Schema.Array(ChatAttachment),
+    providerWake: Schema.optional(OrchestrationV2ProviderWake),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -1613,6 +1627,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     inputIntent: OrchestrationV2UserMessageInputIntent,
     text: Schema.String,
     attachments: Schema.Array(ChatAttachment),
+    providerWake: Schema.optional(OrchestrationV2ProviderWake),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -2186,6 +2201,7 @@ export const OrchestrationV2Command = Schema.Union([
         taskIds: Schema.Array(NodeId),
       }),
     ),
+    providerWake: Schema.optional(OrchestrationV2ProviderWake),
     dispatchMode: Schema.Union([
       Schema.Struct({ type: Schema.Literal("defer_start") }),
       Schema.Struct({ type: Schema.Literal("steer_active"), targetRunId: RunId }),
@@ -2250,6 +2266,7 @@ export const OrchestrationV2Command = Schema.Union([
     // Full replacement list. Absent = leave the message's attachments as-is,
     // so pre-attachment clients editing text keep the original attachments.
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
+    providerWake: Schema.optional(OrchestrationV2ProviderWake),
   }),
   Schema.Struct({
     type: Schema.Literal("runtime-request.respond"),

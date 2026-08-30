@@ -99,6 +99,7 @@ import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
   normalizeCompactToolLabel,
+  timelineRowAnchorMessageId,
   resolveTimelineToolPresentation,
   resolveAssistantMessageCopyState,
   resolveTimelineIsAtEnd,
@@ -522,8 +523,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [anchorMessageId, onAnchorSizeChanged],
   );
   const anchoredEndSpace = useMemo(() => {
-    const config = resolveChatListAnchoredEndSpace(rows, anchorMessageId, (row) =>
-      row.kind === "message" && row.message.role === "user" ? row.message.id : null,
+    const config = resolveChatListAnchoredEndSpace(
+      rows,
+      anchorMessageId,
+      timelineRowAnchorMessageId,
     );
     return config
       ? { ...config, onReady: handleAnchorReady, onSizeChanged: handleAnchorSizeChanged }

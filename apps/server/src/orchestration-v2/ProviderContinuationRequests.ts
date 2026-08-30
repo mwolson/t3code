@@ -26,6 +26,10 @@ export interface ProviderContinuationRequest {
     readonly generation: number;
     readonly messageId: MessageId;
   };
+  readonly providerWake?: {
+    readonly kind: "background_command" | "background_task";
+    readonly count: number;
+  };
   /**
    * How the continuation turn gets its content.
    *
