@@ -142,6 +142,10 @@ import {
   deriveMessagesTimelineRowsWithState,
   type MessagesTimelineRowsProjection,
   liveWorkEntryLabel,
+  deriveMessagesTimelineRows,
+  normalizeCompactToolLabel,
+  timelineRowAnchorMessageId,
+  resolveTimelineToolPresentation,
   resolveAssistantMessageCopyState,
   resolveTimelineIsAtEnd,
   resolveTimelineMinimapHasPersistentGutter,
@@ -653,7 +657,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const config = resolveChatListAnchoredEndSpace(
       rows,
       anchorMessageId,
-      (row) => (row.kind === "message" && row.message.role === "user" ? row.message.id : null),
+      timelineRowAnchorMessageId,
       { anchorOffset: CHAT_TIMELINE_ANCHOR_OFFSET },
     );
     return config

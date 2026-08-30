@@ -1,4 +1,5 @@
 import type { OrchestrationV2Run, OrchestrationV2ThreadProjection } from "@t3tools/contracts";
+import { isBackgroundCommandWakeMessage } from "@t3tools/shared/wakePromptPresentation";
 
 export function isAutomaticCompletionRun(
   projection: OrchestrationV2ThreadProjection,
@@ -29,4 +30,13 @@ export function queuedRunsInDeliveryOrder(
         left.ordinal - right.ordinal
       );
     });
+}
+
+export function queuedBackgroundCommandWakeRuns(
+  projection: OrchestrationV2ThreadProjection,
+): ReadonlyArray<OrchestrationV2Run> {
+  return queuedRunsInDeliveryOrder(projection).filter((run) => {
+    const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+    return message !== undefined && isBackgroundCommandWakeMessage(message);
+  });
 }
