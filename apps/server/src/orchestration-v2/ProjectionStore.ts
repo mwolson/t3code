@@ -1855,27 +1855,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 }
                 break;
               }
-          case "provider-turn.updated": {
-            const existingRows =
-              event.payload.tokenUsage === undefined
-                ? yield* sql<PayloadRow>`
+              case "provider-turn.updated": {
+                const existingRows =
+                  event.payload.tokenUsage === undefined
+                    ? yield* sql<PayloadRow>`
                     SELECT payload_json
                     FROM orchestration_v2_projection_provider_turns
                     WHERE provider_turn_id = ${event.payload.id}
                     LIMIT 1
                   `
-                : [];
-            const existing = existingRows[0];
-            const providerTurn =
-              existing === undefined
-                ? event.payload
-                : upsertProviderTurn(
-                    [yield* decodeProviderTurnPayload(existing.payload_json)],
-                    event.payload,
-                  )[0]!;
-            const payloadJson = yield* encodeProviderTurnPayload(providerTurn);
-            const payload = parseEncodedPayload(payloadJson);
-            yield* sql`              INSERT INTO orchestration_v2_projection_provider_turns (
+                    : [];
+                const existing = existingRows[0];
+                const providerTurn =
+                  existing === undefined
+                    ? event.payload
+                    : upsertProviderTurn(
+                        [yield* decodeProviderTurnPayload(existing.payload_json)],
+                        event.payload,
+                      )[0]!;
+                const payloadJson = yield* encodeProviderTurnPayload(providerTurn);
+                const payload = parseEncodedPayload(payloadJson);
+                yield* sql`              INSERT INTO orchestration_v2_projection_provider_turns (
                 provider_turn_id,
                 thread_id,
                 provider_thread_id,
@@ -3693,41 +3693,42 @@ export const layerMemoryWithOptions = (
               projection,
             };
           }),
-      getThreadSnapshotWindow: (threadId, options) =>
-        service.getThreadSnapshot(threadId).pipe(
-          Effect.map((snapshot) => {
-            const anchorIndex =
-              options.anchorItemId === undefined
-                ? snapshot.projection.visibleTurnItems.length
-                : snapshot.projection.visibleTurnItems.findIndex(
-                    (row) => row.sourceItemId === options.anchorItemId,
-                  ) + 1;
-            const visibleTurnItems = snapshot.projection.visibleTurnItems.slice(
-              Math.max(0, anchorIndex - options.rowLimit),
-              anchorIndex,
-            );
-            return {
-              ...snapshot,
-              projection: { ...snapshot.projection, visibleTurnItems },
-            };
+        getThreadSnapshotWindow: (threadId, options) =>
+          service.getThreadSnapshot(threadId).pipe(
+            Effect.map((snapshot) => {
+              const anchorIndex =
+                options.anchorItemId === undefined
+                  ? snapshot.projection.visibleTurnItems.length
+                  : snapshot.projection.visibleTurnItems.findIndex(
+                      (row) => row.sourceItemId === options.anchorItemId,
+                    ) + 1;
+              const visibleTurnItems = snapshot.projection.visibleTurnItems.slice(
+                Math.max(0, anchorIndex - options.rowLimit),
+                anchorIndex,
+              );
+              return {
+                ...snapshot,
+                projection: { ...snapshot.projection, visibleTurnItems },
+              };
+            }),
+          ),
+        getProviderSessionsByIds: (_threadId, providerSessionIds) =>
+          Effect.gen(function* () {
+            if (providerSessionIds.length === 0) {
+              return [];
+            }
+            const retained = (yield* Ref.get(replayState)).retainedProviderSessions;
+            const wanted = new Set(providerSessionIds);
+            return [...retained.values()]
+              .filter((session) => wanted.has(session.id))
+              .toSorted(
+                (left, right) =>
+                  DateTime.toEpochMillis(left.updatedAt) -
+                    DateTime.toEpochMillis(right.updatedAt) ||
+                  String(left.id).localeCompare(String(right.id)),
+              );
           }),
-        ),
-      getProviderSessionsByIds: (_threadId, providerSessionIds) =>
-        Effect.gen(function* () {
-          if (providerSessionIds.length === 0) {
-            return [];
-          }
-          const retained = (yield* Ref.get(replayState)).retainedProviderSessions;
-          const wanted = new Set(providerSessionIds);
-          return [...retained.values()]
-            .filter((session) => wanted.has(session.id))
-            .toSorted(
-              (left, right) =>
-                DateTime.toEpochMillis(left.updatedAt) - DateTime.toEpochMillis(right.updatedAt) ||
-                String(left.id).localeCompare(String(right.id)),
-            );
-        }),
-    };
+      };
       return service;
     }),
   );

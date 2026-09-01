@@ -1828,7 +1828,9 @@ function ChatViewContent(props: ChatViewProps) {
     planModeEnabled: settings.planModeEnabled,
     composerInteractionMode,
     threadInteractionMode: activeThread?.interactionMode,
-  });  const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;  const canCheckoutPullRequestIntoThread = isLocalDraftThread;
+  });
+  const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
+  const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
   // Prefer the larger of turn-item-committed ids and projection messages so
   // env lock does not unlock while turn items lag projection hydration.

@@ -134,7 +134,8 @@ function CloudAuthBridge(props: {
       const previousTransition = accountTransitionRef.current ?? Promise.resolve();
       accountTransitionRef.current = previousTransition
         .catch(() => {})
-        .then(() => cleanUpAccount(previous, previousObservedAccount ?? null));      return accountTransitionRef.current;
+        .then(() => cleanUpAccount(previous, previousObservedAccount ?? null));
+      return accountTransitionRef.current;
     };
 
     if (!isSignedIn || !userId) {

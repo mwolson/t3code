@@ -3248,10 +3248,7 @@ export function makeClaudeAdapterV2(
           // A task_progress frame can register a subagent before any frame
           // carries its prompt, so the opening message waits for the first
           // prompt that actually has text instead of being tied to isNew.
-          if (
-            hasSubagentPromptText(task.prompt) &&
-            !hasSubagentPromptText(priorTask?.prompt)
-          ) {
+          if (hasSubagentPromptText(task.prompt) && !hasSubagentPromptText(priorTask?.prompt)) {
             const promptNativeItemId = `${nativeItemId}:prompt`;
             const promptArtifacts = makeSubagentConversationArtifacts({
               messageId: idAllocator.derive.messageFromProviderItem({

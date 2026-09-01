@@ -23,7 +23,8 @@ import { assertMultiTurnClaudeOutput } from "./multi_turn/claude_output.ts";
 import { assertMultiTurnOutput } from "./multi_turn/codex_output.ts";
 import { multiTurnInput } from "./multi_turn/input.ts";
 import { openCodeChildApprovalInput } from "./opencode_child_approval/input.ts";
-import { assertOpenCodeChildApprovalOutput } from "./opencode_child_approval/output.ts";import { openCode2ArchiveThenDeleteInput } from "./opencode2_archive_then_delete/input.ts";
+import { assertOpenCodeChildApprovalOutput } from "./opencode_child_approval/output.ts";
+import { openCode2ArchiveThenDeleteInput } from "./opencode2_archive_then_delete/input.ts";
 import { assertOpenCode2ArchiveThenDeleteOutput } from "./opencode2_archive_then_delete/output.ts";
 import { openCode2AuthorizationFailureInput } from "./opencode2_authorization_failure/input.ts";
 import { assertOpenCode2AuthorizationFailureOutput } from "./opencode2_authorization_failure/output.ts";
@@ -532,7 +533,8 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
       },
     ],
   },
-  {    name: "opencode2_archive_then_delete",
+  {
+    name: "opencode2_archive_then_delete",
     buildInput: openCode2ArchiveThenDeleteInput,
     providers: [
       {

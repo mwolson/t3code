@@ -607,41 +607,40 @@ function toFeedActivity(
   row: OrchestrationV2ProjectedTurnItem,
   attemptId: RunAttemptId | null,
 ): ThreadFeedActivity {
-
-function toWakePromptFeedActivity(row: OrchestrationV2ProjectedTurnItem): ThreadFeedActivity {
-  const item = row.item;
-  const presentation = resolveWakePromptPresentation(
-    item.type === "user_message" ? item : { text: "" },
-  );
-  const summary = presentation?.heading ?? "Background task finished";
-  const detail = presentation?.preview ?? null;
-  const fullText = item.type === "user_message" ? item.text : summary;
-  const getFullDetail = memoizeValue(() => fullText);
-  const getCopyText = memoizeValue(() =>
-    [summary, detail, fullText]
-      .filter(
-        (value, index, values): value is string =>
-          Boolean(value) && values.indexOf(value) === index,
-      )
-      .join("\n"),
-  );
-  return {
-    id: `${row.visibility}:${row.sourceThreadId}:${row.sourceItemId}`,
-    createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
-    runId: item.runId,
-    summary,
-    detail,
-    canExpand: true,
-    getFullDetail,
-    getCopyText,
-    icon: presentation?.kind === "delegated" ? "agent" : "zap",
-    logo: null,
-    toolLike: true,
-    prominent: false,
-    status: "success",
-    projectedItem: row,
-  };
-}
+  function toWakePromptFeedActivity(row: OrchestrationV2ProjectedTurnItem): ThreadFeedActivity {
+    const item = row.item;
+    const presentation = resolveWakePromptPresentation(
+      item.type === "user_message" ? item : { text: "" },
+    );
+    const summary = presentation?.heading ?? "Background task finished";
+    const detail = presentation?.preview ?? null;
+    const fullText = item.type === "user_message" ? item.text : summary;
+    const getFullDetail = memoizeValue(() => fullText);
+    const getCopyText = memoizeValue(() =>
+      [summary, detail, fullText]
+        .filter(
+          (value, index, values): value is string =>
+            Boolean(value) && values.indexOf(value) === index,
+        )
+        .join("\n"),
+    );
+    return {
+      id: `${row.visibility}:${row.sourceThreadId}:${row.sourceItemId}`,
+      createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
+      runId: item.runId,
+      summary,
+      detail,
+      canExpand: true,
+      getFullDetail,
+      getCopyText,
+      icon: presentation?.kind === "delegated" ? "agent" : "zap",
+      logo: null,
+      toolLike: true,
+      prominent: false,
+      status: "success",
+      projectedItem: row,
+    };
+  }
 
   const item = row.item;
   const toolPresentation = itemToolPresentation(item);

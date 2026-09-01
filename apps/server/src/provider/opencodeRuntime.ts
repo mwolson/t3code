@@ -441,35 +441,35 @@ export const make = Effect.gen(function* () {
     environment: NodeJS.ProcessEnv,
   ) =>
     withSpawner(
-    Effect.gen(function* () {
-      const spawnCommand = yield* resolveCommand(binaryPath, args, environment).pipe(
-        Effect.mapError(
-          (cause) =>
-            new OpenCodeRuntimeError({
-              operation,
-              category: openCode2ExecutableErrorCategoryFromText(cause),
-              cause,
-            }),
-        ),
-      );
-      return yield* spawnAndCollect(
-        binaryPath,
-        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-          env: environment,
-          extendEnv: false,
-          shell: spawnCommand.shell,
-        }),
-      ).pipe(
-        Effect.mapError(
-          (cause) =>
-            new OpenCodeRuntimeError({
-              operation,
-              category: openCode2ExecutableErrorCategoryFromText(cause),
-              cause,
-            }),
-        ),
-      );
-    }),
+      Effect.gen(function* () {
+        const spawnCommand = yield* resolveCommand(binaryPath, args, environment).pipe(
+          Effect.mapError(
+            (cause) =>
+              new OpenCodeRuntimeError({
+                operation,
+                category: openCode2ExecutableErrorCategoryFromText(cause),
+                cause,
+              }),
+          ),
+        );
+        return yield* spawnAndCollect(
+          binaryPath,
+          ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+            env: environment,
+            extendEnv: false,
+            shell: spawnCommand.shell,
+          }),
+        ).pipe(
+          Effect.mapError(
+            (cause) =>
+              new OpenCodeRuntimeError({
+                operation,
+                category: openCode2ExecutableErrorCategoryFromText(cause),
+                cause,
+              }),
+          ),
+        );
+      }),
     );
 
   const createOpenCodeSdkClient: OpenCodeRuntime["Service"]["createOpenCodeSdkClient"] = (input) =>

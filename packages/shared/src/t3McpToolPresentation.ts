@@ -104,8 +104,9 @@ function resolveT3McpToolName(value: string): string | null {
 export function extractOpenCode2ExecuteT3McpToolName(code: string): string | null {
   const dot = /tools\s*\[\s*["']t3-code["']\s*\]\s*\.\s*([A-Za-z0-9_]+)\s*\(/.exec(code);
   if (dot?.[1]) return dot[1];
-  const bracket =
-    /tools\s*\[\s*["']t3-code["']\s*\]\s*\[\s*["']([A-Za-z0-9_]+)["']\s*\]\s*\(/.exec(code);
+  const bracket = /tools\s*\[\s*["']t3-code["']\s*\]\s*\[\s*["']([A-Za-z0-9_]+)["']\s*\]\s*\(/.exec(
+    code,
+  );
   if (bracket?.[1]) return bracket[1];
   return null;
 }
