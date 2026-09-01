@@ -142,7 +142,6 @@ describe("thread workflows", () => {
     ]);
   });
 
-=======
   it("hides provider-buffered automatic continuations from the visible queue", () => {
     const state = deriveThreadQueueWorkflowState({
       thread: { id: "thread", activeProviderThreadId: null },

@@ -233,7 +233,6 @@ export const workerLive = Layer.effectDiscard(
           commandId,
           threadId: request.threadId,
           messageId,
-          text: request.detail ?? CONTINUATION_MESSAGE_TEXT,
           text: incomingText,
           attachments: [],
           dispatchMode: { type: "queue_after_active" },

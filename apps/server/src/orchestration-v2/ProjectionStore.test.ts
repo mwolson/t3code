@@ -34,9 +34,9 @@ import {
   makeProjectionReplayState,
   ProjectionStoreV2,
   layer as projectionStoreLayer,
-=======
   threadShellFromProjection,
-  visibleTurnItemsThroughRun,} from "./ProjectionStore.ts";
+  visibleTurnItemsThroughRun,
+} from "./ProjectionStore.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,

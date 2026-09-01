@@ -96,18 +96,12 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
     projection.messages
       .filter((message) => message.delegatedCompletion !== undefined)
       .map((message) => message.id),
-  );  const queuedRuns = copySorted(
+  );
+  const queuedRuns = copySorted(
     projection.runs.filter((run) => run.status === "queued"),
     (left, right) =>
       (left.queuePosition ?? left.ordinal) - (right.queuePosition ?? right.ordinal) ||
       left.ordinal - right.ordinal,
-  ).map((run) => {
-    const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
-    return {
-      run,
-      text: message?.text ?? "Queued message",
-      attachments: message?.attachments ?? [],
-    };
   ).flatMap((run) => {
     const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
     if (message !== undefined && isWakePromptMessage(message)) {
@@ -117,6 +111,7 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
       {
         run,
         text: message?.text ?? "Queued message",
+        attachments: message?.attachments ?? [],
       },
     ];
   });

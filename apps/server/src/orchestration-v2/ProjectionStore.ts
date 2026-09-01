@@ -1855,9 +1855,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 }
                 break;
               }
-            }
-            break;
-          }
           case "provider-turn.updated": {
             const existingRows =
               event.payload.tokenUsage === undefined
@@ -3695,25 +3692,7 @@ export const layerMemoryWithOptions = (
               snapshotSequence: existing.sequence,
               projection,
             };
-          };
-          const projection = readProjection(threadId, new Set());
-          if (!projection) {
-            return yield* new ProjectionStoreThreadNotFoundError({ threadId });
-          }
-          return projection;
-        }),
-      getThreadSnapshot: (threadId) =>
-        service.getThreadProjection(threadId).pipe(
-          Effect.flatMap((projection) =>
-            Ref.get(sequence).pipe(
-              Effect.map((snapshotSequence) => ({
-                schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
-                snapshotSequence,
-                projection,
-              })),
-            ),
-          ),
-        ),
+          }),
       getThreadSnapshotWindow: (threadId, options) =>
         service.getThreadSnapshot(threadId).pipe(
           Effect.map((snapshot) => {

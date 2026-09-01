@@ -397,6 +397,45 @@ describe("V2 session presentation", () => {
       id: TurnItemId.make("item-failed-command"),
       threadId: ThreadId.make("thread-1"),
       runId: RunId.make("run-1"),
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "failed" as const,
+      title: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: DateTime.nowUnsafe(),
+      type: "command_execution" as const,
+      input: "ssh host true",
+      output: "connection refused",
+      exitCode: 255,
+    } satisfies OrchestrationV2TurnItem;
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [
+        {
+          position: 0,
+          visibility: "local" as const,
+          sourceThreadId: ThreadId.make("thread-1"),
+          sourceItemId: failedCommand.id,
+          item: failedCommand,
+        } as never,
+      ],
+      optimisticMessages: [],
+    });
+    const entry = entries[0];
+    expect(entry?.kind).toBe("work");
+    if (entry?.kind === "work") {
+      // An exit-code failure is still an ordinary tool row: the failed
+      // lifecycle status carries the marker, and an "error" tone here would
+      // knock the whole group out of the "Ran N commands" summary.
+      expect(entry.entry.tone).toBe("tool");
+      expect(entry.entry.toolLifecycleStatus).toBe("failed");
+    }
+  });
+
   it("renders delegated and background wake prompts as work-log rows", () => {
     const now = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
     const threadId = ThreadId.make("thread-wake");
@@ -483,78 +522,6 @@ describe("V2 session presentation", () => {
     expect(peerEntry?.kind).toBe("message");
     if (peerEntry?.kind === "message") {
       expect(peerEntry.message.text).toBe("Review this area");
-    }
-  });
-
-  it("renders two glued delegated wake sentences as one work-log row", () => {
-    const now = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
-    const threadId = ThreadId.make("thread-wake-glued");
-    const runId = RunId.make("run-wake-glued");
-    const item = {
-      id: TurnItemId.make("item-glued-wake"),
-      threadId,
-      runId,
-      nodeId: null,
-      providerThreadId: null,
-      providerTurnId: null,
-      nativeItemRef: null,
-      parentItemId: null,
-      ordinal: 0,
-      status: "failed" as const,
-      title: null,
-      startedAt: null,
-      completedAt: null,
-      updatedAt: DateTime.nowUnsafe(),
-      type: "command_execution" as const,
-      input: "ssh host true",
-      output: "connection refused",
-      exitCode: 255,
-      status: "completed" as const,
-      title: null,
-      startedAt: now,
-      completedAt: now,
-      updatedAt: now,
-      type: "user_message" as const,
-      messageId: MessageId.make("message-glued-wake"),
-      inputIntent: "turn_start" as const,
-      text: "Delegated task task-a reached a terminal state. Use task_status with taskId task-a to read the result.Delegated task task-b reached a terminal state. Use task_status with taskId task-b to read the result.",
-      attachments: [],
-      createdBy: "agent" as const,
-      creationSource: "server" as const,
-    } satisfies OrchestrationV2TurnItem;
-    const entries = deriveTimelineEntriesFromVisibleTurnItems({
-      visibleTurnItems: [
-        {
-          position: 0,
-          visibility: "local" as const,
-          sourceThreadId: ThreadId.make("thread-1"),
-          sourceItemId: failedCommand.id,
-          item: failedCommand,
-        } as never,
-      ],
-      optimisticMessages: [],
-    });
-    const entry = entries[0];
-    expect(entry?.kind).toBe("work");
-    if (entry?.kind === "work") {
-      // An exit-code failure is still an ordinary tool row: the failed
-      // lifecycle status carries the marker, and an "error" tone here would
-      // knock the whole group out of the "Ran N commands" summary.
-      expect(entry.entry.tone).toBe("tool");
-      expect(entry.entry.toolLifecycleStatus).toBe("failed");
-          visibility: "local",
-          sourceThreadId: threadId,
-          sourceItemId: item.id,
-          item,
-        },
-      ],
-      optimisticMessages: [],
-    });
-    expect(entries).toHaveLength(1);
-    expect(entries[0]?.kind).toBe("work");
-    if (entries[0]?.kind === "work") {
-      expect(entries[0].entry.label).toBe("2 delegated tasks finished");
-      expect(entries[0].entry.detail).toBe("task-a, task-b");
     }
   });
 

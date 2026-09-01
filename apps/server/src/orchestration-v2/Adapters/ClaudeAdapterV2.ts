@@ -62,7 +62,6 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -123,7 +122,6 @@ import {
   ProviderContinuationRequests,
 } from "../ProviderContinuationRequests.ts";
 import {
-  hasSubagentPromptText,
   makeSubagentChildThread,
   makeSubagentConversationArtifacts,
   subagentThreadTitle,
@@ -1569,14 +1567,6 @@ type ClaudeNativeToolOutput =
 
 const NO_CLAUDE_NATIVE_TOOL_OUTPUT = { type: "none" } satisfies ClaudeNativeToolOutput;
 
-// How long a turn stays alive on a steer handoff result before settling anyway.
-// The CLI opens the steered native turn within a second or two, so this only
-// fires when it never opens one at all.
-const CLAUDE_STEERING_HANDOFF_TIMEOUT = Duration.seconds(60);
-// Give a same-thread background notification time to attach its summary
-// before stranded assistant text requests a continuation on its own.
-const CLAUDE_STRANDED_OUTPUT_FALLBACK_TIMEOUT = Duration.seconds(2);
-
 function claudeNativeToolOutputFromToolResult(
   toolResult: ClaudeToolResultContentBlock,
 ): ClaudeNativeToolOutput {
@@ -1986,34 +1976,8 @@ function terminalStatusFromResult(
   return "failed";
 }
 
-// The CLI ends the native turn to take a steer and answers it in the next one,
-// so that first result hands off rather than ending the T3 turn. Recorded
-// shapes: mid-stream it aborts the stream and reports `aborted_streaming` on an
-// error result, mid-tool it aborts the tools and reports `aborted_tools` on a
-// clean success whose text is empty.
-//
-// A turn that ends normally with nothing to say also counts: it has not
-// answered the steer either. Both extra conditions are deliberate. A result
-// carrying text has answered something, so it terminalizes the turn rather than
-// holding the run open until the handoff bound expires. And `completed` (or an
-// older CLI that omits the field) is the only non-abort reason that means "this
-// turn ended cleanly"; `max_turns`, `background_requested`, `tool_deferred` and
-// the hook reasons are real terminals even when they arrive as a success.
-//
-// The two aborted reasons hand off unless a clean success carries non-empty
-// text. Error subtypes have no result field and stay handoffs, which preserves
-// the recorded `aborted_streaming` shape.
-function isClaudeSteeringHandoffResult(message: SDKResultMessage): boolean {
-  if (
-    message.terminal_reason === "aborted_streaming" ||
-    message.terminal_reason === "aborted_tools"
-  ) {
-    return message.subtype !== "success" || message.is_error || message.result.trim().length === 0;
-  }
-  if (message.terminal_reason !== undefined && message.terminal_reason !== "completed") {
-    return false;
-  }
-  return message.subtype === "success" && !message.is_error && message.result.trim().length === 0;
+function isClaudeActiveSteeringAbortResult(message: SDKResultMessage): boolean {
+  return message.terminal_reason === "aborted_streaming";
 }
 
 function isClaudeProviderContinuationTurn(input: ProviderAdapterV2TurnInput): boolean {
@@ -2180,7 +2144,6 @@ interface ActiveClaudeProviderRetry {
 
 interface ActiveClaudeSubagent {
   task: OrchestrationV2Subagent;
-  readonly nativeThreadId: string | null;
   readonly childThreadId: ThreadId;
   readonly childRootNodeId: OrchestrationV2ExecutionNode["id"];
   readonly turnItemId: OrchestrationV2TurnItem["id"];
@@ -2384,16 +2347,7 @@ export function makeClaudeAdapterV2(
         const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
-        // Steers awaiting a handoff result, counted per provider turn: each
-        // accepted steer ends one native turn, so each one swallows exactly one
-        // result before the turn can terminalize again.
-        const steeredTurns = yield* Ref.make(new Map<OrchestrationV2ProviderTurn["id"], number>());
-        // Frames seen per provider turn, so a swallowed handoff can tell "the
-        // steered turn started" from "the CLI went silent".
-        const turnFrameCounts = yield* Ref.make(
-          new Map<OrchestrationV2ProviderTurn["id"], number>(),
-        );
-        const finalizingTurnIds = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
+        const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         const openedNativeThreads = yield* Ref.make(new Set<string>());
         const itemOrdinals = yield* Ref.make(new Map<string, number>());
@@ -2458,7 +2412,6 @@ export function makeClaudeAdapterV2(
           >(),
         );
         const requestedContinuations = yield* Ref.make(new Set<string>());
-        const strandedOutputFallbackTokens = yield* Ref.make(new Map<string, object>());
         const runtimeContext = yield* Effect.context<never>();
         const runPromise = Effect.runPromiseWith(runtimeContext);
 
@@ -2623,27 +2576,6 @@ export function makeClaudeAdapterV2(
             );
           });
 
-        const hasWakeEligibleBackgroundWorkOnNativeThread = Effect.fnUntraced(function* (
-          nativeThreadId: string,
-        ) {
-          const opaqueTasks = taskIdSetForNativeThread(
-            yield* Ref.get(wakeEligibleBackgroundTasksByNativeThread),
-            nativeThreadId,
-          );
-          if (opaqueTasks.size > 0) {
-            return true;
-          }
-          const nativeThreadState = (yield* Ref.get(sessionSubagents)).byNativeThreadId.get(
-            nativeThreadId,
-          );
-          for (const subagent of nativeThreadState?.subagentsByTaskId.values() ?? []) {
-            if (subagent.task.status === "running") {
-              return true;
-            }
-          }
-          return false;
-        });
-
         // Admit onto wake eligibility only. Replay tombstones are created when
         // the first idle notification is buffered, not at task start.
         const markWakeEligibleOpaqueBackgroundTasks = (
@@ -2796,14 +2728,6 @@ export function makeClaudeAdapterV2(
               updated.delete(nativeThreadId);
               return updated;
             });
-            yield* Ref.update(strandedOutputFallbackTokens, (current) => {
-              if (!current.has(nativeThreadId)) {
-                return current;
-              }
-              const updated = new Map(current);
-              updated.delete(nativeThreadId);
-              return updated;
-            });
           });
 
         // Process-scoped level: SDK emits nothing at CLI start, so both the
@@ -2944,7 +2868,7 @@ export function makeClaudeAdapterV2(
           readonly output: ClaudeNativeToolOutput;
           readonly status: Extract<
             OrchestrationV2TurnItem["status"],
-            "running" | "completed" | "failed" | "interrupted"
+            "running" | "completed" | "failed"
           >;
           readonly startedAt: DateTime.Utc;
           readonly updatedAt: DateTime.Utc;
@@ -3206,10 +3130,6 @@ export function makeClaudeAdapterV2(
           } satisfies OrchestrationV2Subagent;
           const subagent = {
             task,
-            nativeThreadId:
-              existingSubagent?.nativeThreadId ??
-              input.context.input.providerThread.nativeThreadRef?.nativeId ??
-              null,
             childThreadId,
             childRootNodeId,
             turnItemId:
@@ -3245,135 +3165,8 @@ export function makeClaudeAdapterV2(
             ) {
               return current;
             }
-            const isNew = registered === undefined;
-            const lifecycleChanged =
-              isNew ||
-              registered.task.status !== input.status ||
-              (input.reopen === true && input.status === "running");
-            const childThreadId = registered?.childThreadId ?? derivedChildThreadId;
-            const childRootNodeId = registered?.childRootNodeId ?? derivedChildRootNodeId;
-            const priorTask =
-              registered === undefined
-                ? undefined
-                : isReopen
-                  ? (({ progress: _staleProgress, ...rest }) => ({ ...rest, result: null }))(
-                      registered.task,
-                    )
-                  : registered.task;
-            const task = {
-              ...(priorTask ?? {
-                id: derivedNodeId,
-                threadId: input.context.input.threadId,
-                runId: input.context.input.runId,
-                parentNodeId: input.context.input.rootNodeId,
-                origin: "provider_native" as const,
-                createdBy: "agent" as const,
-                driver: CLAUDE_PROVIDER,
-                providerInstanceId: input.context.input.modelSelection.instanceId,
-                providerThreadId: null,
-                childThreadId,
-                nativeTaskRef: {
-                  driver: CLAUDE_PROVIDER,
-                  nativeId: input.taskId,
-                  strength: "strong" as const,
-                },
-                prompt: input.prompt ?? "",
-                title: input.title ?? null,
-                model: input.context.input.modelSelection.model,
-                result: null,
-                startedAt: now,
-              }),
-              status: input.status,
-              ...(isReopen ? { runId: input.context.input.runId } : {}),
-              ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
-              ...(input.title === undefined ? {} : { title: input.title }),
-              ...(input.progress === undefined ? {} : { progress: input.progress }),
-              ...(input.result === undefined ? {} : { result: input.result }),
-              completedAt: input.status === "running" ? null : now,
-              updatedAt: now,
-            } satisfies OrchestrationV2Subagent;
-            // A task_progress frame can register a subagent before any frame
-            // carries its prompt, so the opening message waits for the first
-            // prompt that actually has text instead of being tied to isNew.
-            const emitPromptMessage =
-              hasSubagentPromptText(task.prompt) && !hasSubagentPromptText(priorTask?.prompt);
-            const subagent = {
-              ...(registered ?? {
-                childThreadId,
-                childRootNodeId,
-                nativeThreadId: input.context.nativeThreadId,
-                turnItemId: idAllocator.derive.turnItemFromProviderItem({
-                  driver: CLAUDE_PROVIDER,
-                  nativeItemId: `${nativeItemId}:subagent`,
-                }),
-                turnItemOrdinal: derivedTurnItemOrdinal,
-                providerThreadId: input.context.input.providerThread.id,
-                providerTurnId: input.context.providerTurnId,
-                launchToolUseId: input.toolUseId ?? null,
-                nextChildItemOrdinal: 100,
-                childItemOrdinalsByNativeItemId: new Map<string, number>(),
-                activeToolCallsByNativeItemId: new Map<string, ActiveClaudeToolCall>(),
-                progressItemOrdinal: null,
-                progressStartedAt: null,
-                resultItemOrdinal: null,
-                emittedTextNativeItemIds: new Set<string>(),
-                emittedTerminalResultNativeItemIds: new Set<string>(),
-                generation: 0,
-                streamedTexts: [],
-                terminalResultTexts: [],
-              }),
-              task,
-              providerThreadId: input.context.input.providerThread.id,
-              providerTurnId: input.context.providerTurnId,
-              ...(isReopen
-                ? { activeToolCallsByNativeItemId: new Map<string, ActiveClaudeToolCall>() }
-                : {}),
-              ...(terminalNativeItemId === undefined
-                ? {}
-                : {
-                    emittedTerminalResultNativeItemIds: addToBoundedSet(
-                      registered?.emittedTerminalResultNativeItemIds ?? new Set<string>(),
-                      terminalNativeItemId,
-                      MAX_CLAUDE_SUBAGENT_TERMINAL_NATIVE_ITEM_IDS,
-                    ),
-                  }),
-              ...(isReopen
-                ? {
-                    resultItemOrdinal: null,
-                    generation: (registered?.generation ?? 0) + 1,
-                    streamedTexts: [],
-                    terminalResultTexts: [],
-                  }
-                : {}),
-            } satisfies ActiveClaudeSubagent;
-            const subagentsByTaskId = new Map(nativeThreadState.subagentsByTaskId);
-            subagentsByTaskId.set(input.taskId, subagent);
-            const taskIdByToolUseId = new Map(nativeThreadState.taskIdByToolUseId);
-            if (input.toolUseId !== undefined) {
-              taskIdByToolUseId.set(input.toolUseId, input.taskId);
-            }
-            const pendingResumeTaskIds = new Set(nativeThreadState.pendingResumeTaskIds);
-            pendingResumeTaskIds.delete(input.taskId);
-            const byNativeThreadId = new Map(state.byNativeThreadId);
-            byNativeThreadId.set(input.context.nativeThreadId, {
-              ...nativeThreadState,
-              subagentsByTaskId,
-              taskIdByToolUseId,
-              pendingResumeTaskIds,
-            });
-            return [
-              { subagent, isNew, lifecycleChanged, terminalNativeItemId, emitPromptMessage },
-              { byNativeThreadId },
-            ] as const;
+            return new Map(current).set(input.taskId, subagent);
           });
-          if (installation === undefined) {
-            return;
-          }
-          const { subagent, isNew, lifecycleChanged, emitPromptMessage } = installation;
-          const task = subagent.task;
-          const nodeId = task.id;
-          const childRootNodeId = subagent.childRootNodeId;
-          const childThreadId = subagent.childThreadId;
 
           if (existingSubagent === undefined) {
             const childThread = makeSubagentChildThread({
@@ -3451,7 +3244,7 @@ export function makeClaudeAdapterV2(
               },
             });
           }
-          if (emitPromptMessage) {
+          if (existingSubagent === undefined) {
             const promptNativeItemId = `${nativeItemId}:prompt`;
             const promptArtifacts = makeSubagentConversationArtifacts({
               messageId: idAllocator.derive.messageFromProviderItem({
@@ -3912,292 +3705,203 @@ export function makeClaudeAdapterV2(
           readonly failure?: OrchestrationV2ProviderFailure;
           readonly threadDisposition?: "reusable" | "broken";
         }) {
-          // Claim the turn before emitting anything. The handoff bound runs on
-          // its own fiber, so without this a frame handler and the bound can
-          // both finalize the same turn and emit two terminals for it.
-          const claimed = yield* Ref.modify(activeTurn, (current) => {
-            if (current?.providerTurnId !== input.context.providerTurnId) {
-              return [false, current] as const;
-            }
-            return [true, null] as const;
-          });
-          if (!claimed) {
-            return;
-          }
-          yield* Ref.update(finalizingTurnIds, (current) => {
-            const next = new Set(current);
-            next.add(input.context.providerTurnId);
-            return next;
-          });
-
-          yield* Effect.gen(function* () {
-            for (const toolCall of input.context.toolCalls.values()) {
-              if (toolCall.runId === null) {
-                continue;
-              }
-              const artifacts = buildToolCallArtifacts({
-                context: input.context,
-                nativeItemId: toolCall.nativeItemId,
-                toolName: toolCall.toolName,
-                classification: toolCall.classification,
-                toolInput: toolCall.input,
-                threadId: toolCall.threadId,
-                runId: toolCall.runId,
-                rootNodeId: toolCall.rootNodeId,
-                parentNodeId: toolCall.parentNodeId,
-                ordinal: toolCall.ordinal,
-                output: NO_CLAUDE_NATIVE_TOOL_OUTPUT,
-                status: "failed",
-                startedAt: toolCall.startedAt,
-                updatedAt: input.completedAt,
-              });
-              yield* emitToolCallArtifacts(artifacts);
-            }
-            input.context.toolCalls.clear();
-
-            if (
-              input.context.assistant.emittedNativeItemIds.size === 0 &&
-              input.context.assistant.fallbackText.length > 0
-            ) {
-              const ordinal = yield* resolveItemOrdinal(
-                input.context,
-                input.context.assistant.fallbackNativeItemId,
-              );
-              const artifacts = buildAssistantArtifacts({
-                idAllocator,
-                turnInput: input.context.input,
-                providerTurnId: input.context.providerTurnId,
-                nativeItemId: input.context.assistant.fallbackNativeItemId,
-                text: input.context.assistant.fallbackText,
-                ordinal,
-                startedAt: input.context.startedAt,
-                completedAt: input.completedAt,
-              });
-              yield* Effect.all(
-                [
-                  emitProviderEvent({
-                    type: "node.updated",
-                    driver: CLAUDE_PROVIDER,
-                    node: artifacts.node,
-                  }),
-                  emitProviderEvent({
-                    type: "message.updated",
-                    driver: CLAUDE_PROVIDER,
-                    message: artifacts.message,
-                  }),
-                  emitProviderEvent({
-                    type: "turn_item.updated",
-                    driver: CLAUDE_PROVIDER,
-                    turnItem: artifacts.turnItem,
-                  }),
-                ],
-                { concurrency: 1 },
-              );
-            }
-
-            const providerRetry = yield* Ref.modify(providerRetries, (current) => {
-              const retry = current.get(input.context.providerTurnId);
-              if (retry === undefined) {
-                return [undefined, current] as const;
-              }
-              const updated = new Map(current);
-              updated.delete(input.context.providerTurnId);
-              return [retry, updated] as const;
+          for (const toolCall of input.context.toolCalls.values()) {
+            const artifacts = buildToolCallArtifacts({
+              context: input.context,
+              nativeItemId: toolCall.nativeItemId,
+              toolName: toolCall.toolName,
+              classification: toolCall.classification,
+              toolInput: toolCall.input,
+              threadId: toolCall.threadId,
+              runId: toolCall.runId,
+              rootNodeId: toolCall.rootNodeId,
+              parentNodeId: toolCall.parentNodeId,
+              ordinal: toolCall.ordinal,
+              output: NO_CLAUDE_NATIVE_TOOL_OUTPUT,
+              status: "failed",
+              startedAt: toolCall.startedAt,
+              updatedAt: input.completedAt,
             });
-            if (providerRetry !== undefined && input.status !== "failed") {
-              yield* emitProviderEvent({
-                type: "turn_item.updated",
-                driver: CLAUDE_PROVIDER,
-                turnItem: makeProviderRetryTurnItem({
-                  idAllocator,
-                  driver: CLAUDE_PROVIDER,
-                  threadId: input.context.input.threadId,
-                  runId: input.context.input.runId,
-                  nodeId: input.context.input.rootNodeId,
-                  providerThreadId: input.context.input.providerThread.id,
-                  providerTurnId: input.context.providerTurnId,
-                  itemOrdinal: providerRetry.itemOrdinal,
-                  failure: providerRetry.failure,
-                  retry: providerRetry.retry,
-                  status: input.status,
-                  startedAt: providerRetry.startedAt,
-                  updatedAt: input.completedAt,
-                }),
-              });
-            }
+            yield* emitToolCallArtifacts(artifacts);
+          }
+          input.context.toolCalls.clear();
 
-            const threadDisposition = input.threadDisposition ?? "reusable";
-            const terminalEvent: ProviderAdapterV2Event =
-              input.status === "failed"
-                ? {
-                    type: "turn.terminal",
-                    driver: CLAUDE_PROVIDER,
-                    providerThreadId: input.context.input.providerThread.id,
-                    providerTurnId: input.context.providerTurnId,
-                    runOrdinal: input.context.input.runOrdinal,
-                    failureItemOrdinal: yield* resolveItemOrdinal(
-                      input.context,
-                      `terminal-failure:${input.context.providerTurnId}`,
-                    ),
-                    status: input.status,
-                    failure: input.failure ?? makeProviderFailure({ class: "provider_error" }),
-                    ...(providerRetry === undefined
-                      ? {}
-                      : {
-                          retry: providerRetry.retry,
-                          retryStartedAt: providerRetry.startedAt,
-                        }),
-                    threadDisposition,
-                  }
-                : {
-                    type: "turn.terminal",
-                    driver: CLAUDE_PROVIDER,
-                    providerThreadId: input.context.input.providerThread.id,
-                    providerTurnId: input.context.providerTurnId,
-                    runOrdinal: input.context.input.runOrdinal,
-                    status: input.status,
-                    failure: null,
-                    threadDisposition,
-                  };
+          if (
+            input.context.assistant.emittedNativeItemIds.size === 0 &&
+            input.context.assistant.fallbackText.length > 0
+          ) {
+            const ordinal = yield* resolveItemOrdinal(
+              input.context,
+              input.context.assistant.fallbackNativeItemId,
+            );
+            const artifacts = buildAssistantArtifacts({
+              idAllocator,
+              turnInput: input.context.input,
+              providerTurnId: input.context.providerTurnId,
+              nativeItemId: input.context.assistant.fallbackNativeItemId,
+              text: input.context.assistant.fallbackText,
+              ordinal,
+              startedAt: input.context.startedAt,
+              completedAt: input.completedAt,
+            });
             yield* Effect.all(
               [
                 emitProviderEvent({
-                  type: "provider_turn.updated",
+                  type: "node.updated",
                   driver: CLAUDE_PROVIDER,
-                  providerTurn: providerTurnPayload({
-                    context: input.context,
-                    status: input.status,
-                    completedAt: input.completedAt,
-                  }),
+                  node: artifacts.node,
                 }),
-                // Surface this native thread's roster before the root turn
-                // terminals so writeFinalRunEvents preserves it. Failed or
-                // interrupted turns drop only this thread's roster so sibling
-                // native threads keep their Waiting state.
-                Effect.gen(function* () {
-                  const nativeThreadId =
-                    input.context.input.providerThread.nativeThreadRef?.nativeId ?? null;
-                  if (nativeThreadId !== null) {
-                    if (input.status !== "completed") {
-                      yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
-                      yield* clearNativeThreadTaskIdSet(
-                        wakeEligibleBackgroundTasksByNativeThread,
-                        nativeThreadId,
-                      );
-                      yield* clearNativeThreadTaskIdSet(
-                        opaqueBackgroundTaskReplayTombstonesByNativeThread,
-                        nativeThreadId,
-                      );
-                    }
-                  }
-                  const roster =
-                    nativeThreadId === null
-                      ? new Map<string, OrchestrationV2PendingBackgroundTask>()
-                      : rosterForNativeThread(
-                          yield* Ref.get(pendingBackgroundTasksByNativeThread),
-                          nativeThreadId,
-                        );
-                  const clearConversationHead =
-                    input.status === "completed" &&
-                    input.context.input.providerThread.nativeConversationHeadRef !== null;
-                  const providerThread: OrchestrationV2ProviderThread = {
-                    ...input.context.input.providerThread,
-                    providerSessionId: session.id,
-                    ...(clearConversationHead ? { nativeConversationHeadRef: null } : {}),
-                    firstRunOrdinal:
-                      input.context.input.providerThread.firstRunOrdinal ??
-                      input.context.input.runOrdinal,
-                    lastRunOrdinal: input.context.input.runOrdinal,
-                    pendingBackgroundTasks: claudePendingBackgroundTasksFromRoster(roster),
-                    status: input.status === "completed" ? "active" : "idle",
-                    updatedAt: input.completedAt,
-                  };
-                  yield* rememberProviderThread(providerThread);
-                  yield* emitProviderEvent({
-                    type: "provider_thread.updated" as const,
-                    driver: CLAUDE_PROVIDER,
-                    providerThread,
-                  });
+                emitProviderEvent({
+                  type: "message.updated",
+                  driver: CLAUDE_PROVIDER,
+                  message: artifacts.message,
                 }),
-                emitProviderEvent(terminalEvent),
+                emitProviderEvent({
+                  type: "turn_item.updated",
+                  driver: CLAUDE_PROVIDER,
+                  turnItem: artifacts.turnItem,
+                }),
               ],
               { concurrency: 1 },
             );
-            yield* Ref.update(interruptedTurns, (current) => {
-              const next = new Set(current);
-              next.delete(input.context.providerTurnId);
-              return next;
-            });
-            yield* Ref.update(steeredTurns, (current) => {
-              const next = new Map(current);
-              next.delete(input.context.providerTurnId);
-              return next;
-            });
-            yield* Ref.update(turnFrameCounts, (current) => {
-              const next = new Map(current);
-              next.delete(input.context.providerTurnId);
-              return next;
-            });
-          }).pipe(
-            Effect.ensuring(
-              Ref.update(finalizingTurnIds, (current) => {
-                const next = new Set(current);
-                next.delete(input.context.providerTurnId);
-                return next;
-              }),
-            ),
-          );
-        });
+          }
 
-        // A steer handoff keeps the T3 turn alive so the steered work still
-        // attaches to it, which leaves the turn depending on a native turn that
-        // the CLI has not opened yet. Bound that wait: if no further frame
-        // reaches this turn, settle it rather than leaving the run running.
-        const boundSteeringHandoff = Effect.fnUntraced(function* (
-          context: ActiveClaudeTurnContext,
-        ) {
-          const framesAtHandoff =
-            (yield* Ref.get(turnFrameCounts)).get(context.providerTurnId) ?? 0;
-          yield* Effect.gen(function* () {
-            yield* Effect.sleep(CLAUDE_STEERING_HANDOFF_TIMEOUT);
-            const current = yield* Ref.get(activeTurn);
-            if (current?.providerTurnId !== context.providerTurnId) {
-              return;
+          const providerRetry = yield* Ref.modify(providerRetries, (current) => {
+            const retry = current.get(input.context.providerTurnId);
+            if (retry === undefined) {
+              return [undefined, current] as const;
             }
-            // Claim the settle in one update, so overlapping bounds from
-            // several steers on the same turn cannot both finalize it.
-            const claimed = yield* Ref.modify(turnFrameCounts, (counts) => {
-              const framesNow = counts.get(context.providerTurnId) ?? 0;
-              if (framesNow !== framesAtHandoff) {
-                return [false, counts] as const;
-              }
-              const next = new Map(counts);
-              next.delete(context.providerTurnId);
-              return [true, next] as const;
-            });
-            if (!claimed) {
-              return;
-            }
-            yield* Effect.logWarning("orchestration-v2.claude-steer-handoff-timeout", {
-              providerSessionId: input.providerSessionId,
-              providerThreadId: context.input.providerThread.id,
-              providerTurnId: context.providerTurnId,
-            });
-            // Settle as a failure, not a quiet completion. The steer was
-            // accepted and never answered, which is the silence this whole
-            // path exists to stop the user from having to guess at.
-            const completedAt = yield* DateTime.now;
-            yield* finalizeActiveTurn({
-              context,
-              status: "failed",
-              completedAt,
-              failure: makeProviderFailure({
-                message: "Claude accepted the steer but never opened a turn to answer it.",
-                code: "steer_handoff_timeout",
-                class: "transport_error",
+            const updated = new Map(current);
+            updated.delete(input.context.providerTurnId);
+            return [retry, updated] as const;
+          });
+          if (providerRetry !== undefined && input.status !== "failed") {
+            yield* emitProviderEvent({
+              type: "turn_item.updated",
+              driver: CLAUDE_PROVIDER,
+              turnItem: makeProviderRetryTurnItem({
+                idAllocator,
+                driver: CLAUDE_PROVIDER,
+                threadId: input.context.input.threadId,
+                runId: input.context.input.runId,
+                nodeId: input.context.input.rootNodeId,
+                providerThreadId: input.context.input.providerThread.id,
+                providerTurnId: input.context.providerTurnId,
+                itemOrdinal: providerRetry.itemOrdinal,
+                failure: providerRetry.failure,
+                retry: providerRetry.retry,
+                status: input.status,
+                startedAt: providerRetry.startedAt,
+                updatedAt: input.completedAt,
               }),
             });
-          }).pipe(Effect.forkIn(sessionScope));
+          }
+
+          const threadDisposition = input.threadDisposition ?? "reusable";
+          const terminalEvent: ProviderAdapterV2Event =
+            input.status === "failed"
+              ? {
+                  type: "turn.terminal",
+                  driver: CLAUDE_PROVIDER,
+                  providerThreadId: input.context.input.providerThread.id,
+                  providerTurnId: input.context.providerTurnId,
+                  runOrdinal: input.context.input.runOrdinal,
+                  failureItemOrdinal: yield* resolveItemOrdinal(
+                    input.context,
+                    `terminal-failure:${input.context.providerTurnId}`,
+                  ),
+                  status: input.status,
+                  failure: input.failure ?? makeProviderFailure({ class: "provider_error" }),
+                  ...(providerRetry === undefined
+                    ? {}
+                    : {
+                        retry: providerRetry.retry,
+                        retryStartedAt: providerRetry.startedAt,
+                      }),
+                  threadDisposition,
+                }
+              : {
+                  type: "turn.terminal",
+                  driver: CLAUDE_PROVIDER,
+                  providerThreadId: input.context.input.providerThread.id,
+                  providerTurnId: input.context.providerTurnId,
+                  runOrdinal: input.context.input.runOrdinal,
+                  status: input.status,
+                  failure: null,
+                  threadDisposition,
+                };
+          yield* Effect.all(
+            [
+              emitProviderEvent({
+                type: "provider_turn.updated",
+                driver: CLAUDE_PROVIDER,
+                providerTurn: providerTurnPayload({
+                  context: input.context,
+                  status: input.status,
+                  completedAt: input.completedAt,
+                }),
+              }),
+              // Surface this native thread's roster before the root turn
+              // terminals so writeFinalRunEvents preserves it. Failed or
+              // interrupted turns drop only this thread's roster so sibling
+              // native threads keep their Waiting state.
+              Effect.gen(function* () {
+                const nativeThreadId =
+                  input.context.input.providerThread.nativeThreadRef?.nativeId ?? null;
+                if (nativeThreadId !== null) {
+                  if (input.status !== "completed") {
+                    yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
+                    yield* clearNativeThreadTaskIdSet(
+                      wakeEligibleBackgroundTasksByNativeThread,
+                      nativeThreadId,
+                    );
+                    yield* clearNativeThreadTaskIdSet(
+                      opaqueBackgroundTaskReplayTombstonesByNativeThread,
+                      nativeThreadId,
+                    );
+                  }
+                }
+                const roster =
+                  nativeThreadId === null
+                    ? new Map<string, OrchestrationV2PendingBackgroundTask>()
+                    : rosterForNativeThread(
+                        yield* Ref.get(pendingBackgroundTasksByNativeThread),
+                        nativeThreadId,
+                      );
+                const clearConversationHead =
+                  input.status === "completed" &&
+                  input.context.input.providerThread.nativeConversationHeadRef !== null;
+                const providerThread: OrchestrationV2ProviderThread = {
+                  ...input.context.input.providerThread,
+                  providerSessionId: session.id,
+                  ...(clearConversationHead ? { nativeConversationHeadRef: null } : {}),
+                  firstRunOrdinal:
+                    input.context.input.providerThread.firstRunOrdinal ??
+                    input.context.input.runOrdinal,
+                  lastRunOrdinal: input.context.input.runOrdinal,
+                  pendingBackgroundTasks: claudePendingBackgroundTasksFromRoster(roster),
+                  status: input.status === "completed" ? "active" : "idle",
+                  updatedAt: input.completedAt,
+                };
+                yield* rememberProviderThread(providerThread);
+                yield* emitProviderEvent({
+                  type: "provider_thread.updated" as const,
+                  driver: CLAUDE_PROVIDER,
+                  providerThread,
+                });
+              }),
+              emitProviderEvent(terminalEvent),
+            ],
+            { concurrency: 1 },
+          );
+          yield* Ref.update(activeTurn, (current) =>
+            current?.providerTurnId === input.context.providerTurnId ? null : current,
+          );
+          yield* Ref.update(interruptedTurns, (current) => {
+            const next = new Set(current);
+            next.delete(input.context.providerTurnId);
+            return next;
+          });
         });
 
         const emitAssistantTextArtifacts = Effect.fnUntraced(function* (input: {
@@ -4280,175 +3984,11 @@ export function makeClaudeAdapterV2(
           }
         });
 
-        const clearStrandedOutputFallback = (nativeThreadId: string) =>
-          Ref.update(strandedOutputFallbackTokens, (current) => {
-            if (!current.has(nativeThreadId)) {
-              return current;
-            }
-            const updated = new Map(current);
-            updated.delete(nativeThreadId);
-            return updated;
-          });
-
-        const offerBufferedContinuation = Effect.fnUntraced(function* (nativeThreadId: string) {
-          const route = (yield* Ref.get(lastTurnRouteByNativeThread)).get(nativeThreadId);
-          if (route === undefined) {
-            yield* clearStrandedOutputFallback(nativeThreadId);
-            yield* Effect.logWarning("orchestration-v2.claude-wake-turn-unroutable", {
-              providerSessionId: input.providerSessionId,
-              nativeThreadId,
-            });
-            return;
-          }
-          const shouldOffer = yield* Ref.modify(requestedContinuations, (current) => {
-            if (current.has(nativeThreadId)) {
-              return [false, current] as const;
-            }
-            const updated = new Set(current);
-            updated.add(nativeThreadId);
-            return [true, updated] as const;
-          });
-          if (!shouldOffer) {
-            yield* clearStrandedOutputFallback(nativeThreadId);
-            return;
-          }
-          yield* clearStrandedOutputFallback(nativeThreadId);
-          const detail = (yield* Ref.get(wakeBuffers)).get(nativeThreadId)?.detail ?? null;
-          yield* Effect.logInfo("orchestration-v2.claude-wake-turn-detected", {
-            providerSessionId: input.providerSessionId,
-            threadId: route.threadId,
-            providerThreadId: route.providerThreadId,
-          });
-          yield* continuationRequests.offer({
-            threadId: route.threadId,
-            providerThreadId: route.providerThreadId,
-            driver: CLAUDE_PROVIDER,
-            detail,
-=======
-            messageText: PROVIDER_CONTINUATION_MESSAGE_TEXT,
-            providerWake: { kind: "background_task", count: 1 },
-            clearIfCurrent: clearContinuationIfCurrent,
-            dispatchIfCurrent: dispatchContinuationIfCurrent,
-            failIfCurrent: failContinuationIfCurrent,
-            messageText: PROVIDER_CONTINUATION_MESSAGE_TEXT,
-            providerWake: { kind: "background_task", count: 1 },
-            clearIfCurrent: clearContinuationIfCurrent,
-            dispatchIfCurrent: dispatchContinuationIfCurrent,
-            failIfCurrent: failContinuationIfCurrent,
-          });
-        });
-
-        const scheduleStrandedOutputFallback = Effect.fnUntraced(function* (
-          nativeThreadId: string,
-        ) {
-          const token = {};
-          const shouldSchedule = yield* Ref.modify(strandedOutputFallbackTokens, (current) => {
-            if (current.has(nativeThreadId)) {
-              return [false, current] as const;
-            }
-            return [true, new Map(current).set(nativeThreadId, token)] as const;
-          });
-          if (!shouldSchedule) {
-            return;
-          }
-          yield* Effect.gen(function* () {
-            yield* Effect.sleep(CLAUDE_STRANDED_OUTPUT_FALLBACK_TIMEOUT);
-            const ownsFallback = yield* Ref.modify(strandedOutputFallbackTokens, (current) => {
-              if (current.get(nativeThreadId) !== token) {
-                return [false, current] as const;
-              }
-              const updated = new Map(current);
-              updated.delete(nativeThreadId);
-              return [true, updated] as const;
-            });
-            if (!ownsFallback) {
-              return;
-            }
-            const buffered = (yield* Ref.get(wakeBuffers)).get(nativeThreadId);
-            const stillHasStrandedOutput =
-              buffered?.messages.some(
-                (entry) => (assistantTextFromSdkMessage(entry)?.text.length ?? 0) > 0,
-              ) ?? false;
-            if (!stillHasStrandedOutput) {
-              return;
-            }
-            yield* offerBufferedContinuation(nativeThreadId);
-          }).pipe(Effect.forkIn(sessionScope));
-        });
-
         const bufferWakeMessage = Effect.fnUntraced(function* (wakeInput: {
           readonly nativeThreadId: string;
           readonly message: SDKMessage;
         }) {
           const message = wakeInput.message;
-          const failedWakeTaskIds = (yield* Ref.get(failedWakeDrainByNativeThread)).get(
-            wakeInput.nativeThreadId,
-          );
-          if (failedWakeTaskIds !== undefined) {
-            const messageTaskId =
-              message.type === "system" &&
-              (message.subtype === "task_started" ||
-                message.subtype === "task_progress" ||
-                message.subtype === "task_notification")
-                ? message.task_id
-                : undefined;
-            const attributedParentToolUseId = parentToolUseIdFromSdkMessage(message);
-            const attributedSubagent =
-              attributedParentToolUseId === null
-                ? undefined
-                : yield* resolveSessionSubagent({
-                    nativeThreadId: wakeInput.nativeThreadId,
-                    toolUseId: attributedParentToolUseId,
-                  });
-            const resultTaskId = claudeToolResultEntriesFromMessage(message)
-              .map(({ output }) => claudeSubagentTaskIdFromToolOutput(output))
-              .find((taskId) => taskId !== undefined);
-            const attributedTaskId = messageTaskId ?? attributedSubagent?.taskId ?? resultTaskId;
-            const nativeThreadSubagents = (yield* Ref.get(sessionSubagents)).byNativeThreadId.get(
-              wakeInput.nativeThreadId,
-            );
-            const registered =
-              attributedTaskId === undefined
-                ? undefined
-                : nativeThreadSubagents?.subagentsByTaskId.get(attributedTaskId);
-            const isPendingBackgroundTask =
-              attributedTaskId !== undefined &&
-              (yield* isKnownOpaqueBackgroundTaskOnNativeThread(
-                wakeInput.nativeThreadId,
-                attributedTaskId,
-              ));
-            const isKnownSubagentTask =
-              registered?.task.status === "running" ||
-              (attributedTaskId !== undefined &&
-                nativeThreadSubagents?.pendingResumeTaskIds.has(attributedTaskId) === true) ||
-              (registered !== undefined &&
-                message.type === "system" &&
-                message.subtype === "task_started");
-            const isKnownSuccessorTask =
-              attributedTaskId !== undefined &&
-              !failedWakeTaskIds.has(attributedTaskId) &&
-              (isKnownSubagentTask || isPendingBackgroundTask);
-            const isUnattributedOpaqueWakeFrame =
-              attributedTaskId === undefined &&
-              (message.type === "assistant" || message.type === "user");
-            if (!isKnownSuccessorTask && !isUnattributedOpaqueWakeFrame) {
-              if (
-                attributedTaskId !== undefined &&
-                failedWakeTaskIds.has(attributedTaskId) &&
-                message.type === "system" &&
-                message.subtype === "task_notification"
-              ) {
-                if (registered?.task.status === "running") {
-                  yield* failClaudeSubagentWakeDelivery({
-                    nativeThreadId: wakeInput.nativeThreadId,
-                    taskId: attributedTaskId,
-                  });
-                }
-                yield* clearPendingBackgroundTask(wakeInput.nativeThreadId, attributedTaskId);
-              }
-              return;
-            }
-          }
           const isNotification =
             message.type === "system" && message.subtype === "task_notification";
           // Only notifications for tracked tasks count as wake evidence: a
@@ -4546,45 +4086,47 @@ export function makeClaudeAdapterV2(
             buffered?.messages.some(
               (entry) => entry.type === "system" && entry.subtype === "task_notification",
             ) ?? false;
-          const hasBufferedStrandedOutput =
-            buffered?.messages.some(
-              (entry) => (assistantTextFromSdkMessage(entry)?.text.length ?? 0) > 0,
-            ) ?? false;
           const isNativeOpaqueWakeFrame =
             hasBufferedNotification && (message.type === "assistant" || message.type === "user");
-          // Assistant text with no active turn is the other exception: an early
-          // terminal settled the run while the query kept working. Without an
-          // offer those frames sit in the buffer until the session recycles
-          // and are never projected. When same-thread background work is still
-          // wake-eligible, wait briefly for its notification to contribute the
-          // continuation detail before using the bounded text fallback.
-          //
-          // Only text qualifies. A tool_use or tool_result frame is the model
-          // working rather than speaking, and the notification or result that
-          // follows it carries the wake detail; offering on those would open
-          // the continuation early and strip that detail from it.
-          const isStrandedNativeOutput =
-            (assistantTextFromSdkMessage(message)?.text.length ?? 0) > 0;
-          const isNotificationForBufferedOutput =
-            isPendingTaskNotification && hasBufferedStrandedOutput;
           if (
             !isPendingSubagentNotification &&
-            !isNotificationForBufferedOutput &&
             !isNativeOpaqueWakeFrame &&
-            !isStrandedNativeOutput &&
             message.type !== "result"
           ) {
             return;
           }
-          if (
-            isStrandedNativeOutput &&
-            !hasBufferedNotification &&
-            (yield* hasWakeEligibleBackgroundWorkOnNativeThread(wakeInput.nativeThreadId))
-          ) {
-            yield* scheduleStrandedOutputFallback(wakeInput.nativeThreadId);
+          const route = (yield* Ref.get(lastTurnRouteByNativeThread)).get(wakeInput.nativeThreadId);
+          if (route === undefined) {
+            yield* Effect.logWarning("orchestration-v2.claude-wake-turn-unroutable", {
+              providerSessionId: input.providerSessionId,
+              nativeThreadId: wakeInput.nativeThreadId,
+            });
             return;
           }
-          yield* offerBufferedContinuation(wakeInput.nativeThreadId);
+          const shouldOffer = yield* Ref.modify(requestedContinuations, (current) => {
+            if (current.has(wakeInput.nativeThreadId)) {
+              return [false, current] as const;
+            }
+            const updated = new Set(current);
+            updated.add(wakeInput.nativeThreadId);
+            return [true, updated] as const;
+          });
+          if (!shouldOffer) {
+            return;
+          }
+          const detail =
+            (yield* Ref.get(wakeBuffers)).get(wakeInput.nativeThreadId)?.detail ?? null;
+          yield* Effect.logInfo("orchestration-v2.claude-wake-turn-detected", {
+            providerSessionId: input.providerSessionId,
+            threadId: route.threadId,
+            providerThreadId: route.providerThreadId,
+          });
+          yield* continuationRequests.offer({
+            threadId: route.threadId,
+            providerThreadId: route.providerThreadId,
+            driver: CLAUDE_PROVIDER,
+            detail,
+          });
         });
 
         const applyBackgroundTaskRosterMessage = Effect.fnUntraced(function* (input: {
@@ -4701,14 +4243,6 @@ export function makeClaudeAdapterV2(
               yield* bufferWakeMessage({ nativeThreadId: liveQuery.nativeThreadId, message });
             }
             return;
-          }
-
-          if (message.type === "assistant" || message.type === "result") {
-            yield* Ref.update(turnFrameCounts, (current) => {
-              const updated = new Map(current);
-              updated.set(context.providerTurnId, (updated.get(context.providerTurnId) ?? 0) + 1);
-              return updated;
-            });
           }
 
           if (message.type === "assistant") {
@@ -4933,83 +4467,8 @@ export function makeClaudeAdapterV2(
             });
           }
 
-          for (const {
-            message: toolResultMessage,
-            toolResult,
-            output,
-          } of claudeToolResultEntriesFromMessage(message)) {
-            const resultTaskId = claudeSubagentTaskIdFromToolOutput(output);
-            const existingToolCall = context.toolCalls.get(toolResult.tool_use_id);
-            let resolvedSubagent = yield* resolveSessionSubagent({
-              nativeThreadId: context.nativeThreadId,
-              toolUseId: toolResult.tool_use_id,
-            });
-            const outputTaskId =
-              existingToolCall?.subagentTaskId === null ? undefined : resultTaskId;
-            const isKnownAgentLaunch = yield* isSessionSubagentLaunchToolUseId({
-              nativeThreadId: context.nativeThreadId,
-              toolUseId: toolResult.tool_use_id,
-            });
-            const registeredByTaskId =
-              resultTaskId === undefined
-                ? undefined
-                : yield* resolveSessionSubagent({
-                    nativeThreadId: context.nativeThreadId,
-                    taskId: resultTaskId,
-                  });
-            if (
-              resultTaskId !== undefined &&
-              failedWakeTaskIds?.has(resultTaskId) === true &&
-              (isKnownAgentLaunch ||
-                existingToolCall?.subagentTaskId != null ||
-                registeredByTaskId?.subagent.launchToolUseId === toolResult.tool_use_id)
-            ) {
-              continue;
-            }
-            if (resolvedSubagent === undefined && outputTaskId !== undefined) {
-              const resolvedByTaskId = yield* resolveSessionSubagent({
-                nativeThreadId: context.nativeThreadId,
-                taskId: outputTaskId,
-              });
-              if (resolvedByTaskId !== undefined && isKnownAgentLaunch) {
-                yield* registerSessionSubagentToolUseAlias({
-                  nativeThreadId: context.nativeThreadId,
-                  taskId: outputTaskId,
-                  toolUseId: toolResult.tool_use_id,
-                });
-                resolvedSubagent = yield* resolveSessionSubagent({
-                  nativeThreadId: context.nativeThreadId,
-                  toolUseId: toolResult.tool_use_id,
-                });
-              } else {
-                resolvedSubagent = resolvedByTaskId;
-              }
-            }
-            const isUnresolvedAgentLaunch =
-              resolvedSubagent === undefined && (outputTaskId !== undefined || isKnownAgentLaunch);
-            if (isUnresolvedAgentLaunch) {
-              if (isClaudeSubagentAsyncLaunchAck(output)) {
-                continue;
-              }
-              const buffered = yield* bufferPendingSubagentMessage({
-                nativeThreadId: context.nativeThreadId,
-                parentToolUseId: toolResult.tool_use_id,
-                ...(outputTaskId === undefined ? {} : { taskId: outputTaskId }),
-                message: toolResultMessage,
-              });
-              if (!buffered) {
-                yield* Effect.logWarning(
-                  "orchestration-v2.claude-subagent-launch-result-buffer-full",
-                  {
-                    providerTurnId: context.providerTurnId,
-                    toolUseId: toolResult.tool_use_id,
-                    ...(outputTaskId === undefined ? {} : { taskId: outputTaskId }),
-                  },
-                );
-              }
-              continue;
-            }
-            const subagent = resolvedSubagent?.subagent;
+          for (const { toolResult, output } of claudeToolResultEntriesFromMessage(message)) {
+            const subagent = context.subagentsByToolUseId.get(toolResult.tool_use_id);
             // A resume task_started reuses the resuming tool call's
             // tool_use_id (e.g. SendMessage), whose tool_result only
             // acknowledges delivery. Only the Agent launch's tool_result may
@@ -5126,49 +4585,6 @@ export function makeClaudeAdapterV2(
             });
           }
 
-          // Decide the steer handoff before anything reads this result: a
-          // handoff belongs to the native turn that was cut short, so it must
-          // not seed this turn's fallback assistant text either.
-          if (message.type === "result") {
-            const interrupted = (yield* Ref.get(interruptedTurns)).has(context.providerTurnId);
-            const pendingSteers = (yield* Ref.get(steeredTurns)).get(context.providerTurnId) ?? 0;
-            if (!interrupted && pendingSteers > 0 && isClaudeSteeringHandoffResult(message)) {
-              yield* Ref.update(steeredTurns, (current) => {
-                const next = new Map(current);
-                const currentPendingSteers = current.get(context.providerTurnId) ?? 0;
-                if (currentPendingSteers <= 1) {
-                  next.delete(context.providerTurnId);
-                } else {
-                  next.set(context.providerTurnId, currentPendingSteers - 1);
-                }
-                return next;
-              });
-              const handoffCompletedAt = yield* DateTime.now;
-              for (const toolCall of context.toolCalls.values()) {
-                const artifacts = buildToolCallArtifacts({
-                  context,
-                  nativeItemId: toolCall.nativeItemId,
-                  toolName: toolCall.toolName,
-                  classification: toolCall.classification,
-                  toolInput: toolCall.input,
-                  threadId: toolCall.threadId,
-                  runId: toolCall.runId,
-                  rootNodeId: toolCall.rootNodeId,
-                  parentNodeId: toolCall.parentNodeId,
-                  ordinal: toolCall.ordinal,
-                  output: NO_CLAUDE_NATIVE_TOOL_OUTPUT,
-                  status: "interrupted",
-                  startedAt: toolCall.startedAt,
-                  updatedAt: handoffCompletedAt,
-                });
-                yield* emitToolCallArtifacts(artifacts);
-              }
-              context.toolCalls.clear();
-              yield* boundSteeringHandoff(context);
-              return;
-            }
-          }
-
           // An is_error result's text is the error message; it belongs on the
           // terminal-failure item, not on a synthetic assistant message.
           const resultText =
@@ -5188,8 +4604,12 @@ export function makeClaudeAdapterV2(
           if (message.type === "result") {
             const completedAt = yield* DateTime.now;
             const interrupted = (yield* Ref.get(interruptedTurns)).has(context.providerTurnId);
+            const wasSteered = (yield* Ref.get(steeredTurns)).has(context.providerTurnId);
+            if (!interrupted && wasSteered && isClaudeActiveSteeringAbortResult(message)) {
+              return;
+            }
             yield* Ref.update(steeredTurns, (current) => {
-              const next = new Map(current);
+              const next = new Set(current);
               next.delete(context.providerTurnId);
               return next;
             });
@@ -5557,6 +4977,7 @@ export function makeClaudeAdapterV2(
                 // native-session reset events.
                 closedExistingNativeThreadId === nativeThreadId
                   ? Effect.gen(function* () {
+                      yield* clearWakeStateForNativeThread(nativeThreadId);
                       yield* resetBackgroundTaskStateForNativeThreadProcess(nativeThreadId, {
                         status: "idle",
                       });
@@ -5630,13 +5051,6 @@ export function makeClaudeAdapterV2(
               return yield* new ProviderAdapterProtocolError({
                 driver: CLAUDE_PROVIDER,
                 detail: `Claude provider turn ${currentTurn.providerTurnId} is still active.`,
-              });
-            }
-            const finalizing = yield* Ref.get(finalizingTurnIds);
-            if (finalizing.size > 0) {
-              return yield* new ProviderAdapterProtocolError({
-                driver: CLAUDE_PROVIDER,
-                detail: "Claude provider turn is still finalizing.",
               });
             }
             yield* Ref.update(lastTurnRouteByNativeThread, (current) => {
@@ -5856,30 +5270,12 @@ export function makeClaudeAdapterV2(
               attachmentsDir,
               fileSystem,
             });
-            // Count the steer before offering it, so a handoff result that
-            // races back cannot terminalize the turn, and roll the count back
-            // if the offer never reached the CLI.
             yield* Ref.update(steeredTurns, (current) => {
-              const next = new Map(current);
-              next.set(turnInput.providerTurnId, (next.get(turnInput.providerTurnId) ?? 0) + 1);
+              const next = new Set(current);
+              next.add(turnInput.providerTurnId);
               return next;
             });
-            yield* existing.query.offer(userMessage).pipe(
-              Effect.onExit((exit) =>
-                Exit.isSuccess(exit)
-                  ? Effect.void
-                  : Ref.update(steeredTurns, (current) => {
-                      const pending = current.get(turnInput.providerTurnId) ?? 0;
-                      const next = new Map(current);
-                      if (pending <= 1) {
-                        next.delete(turnInput.providerTurnId);
-                      } else {
-                        next.set(turnInput.providerTurnId, pending - 1);
-                      }
-                      return next;
-                    }),
-              ),
-            );
+            yield* existing.query.offer(userMessage);
           },
           (effect, turnInput) =>
             effect.pipe(
