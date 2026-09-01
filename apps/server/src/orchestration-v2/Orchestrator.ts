@@ -345,24 +345,6 @@ function isTerminalDelegatedTaskStatus(status: OrchestrationV2Subagent["status"]
   );
 }
 
-function hasNonTerminalDelegatedCohortTask(
-  projection: OrchestrationV2ThreadProjection,
-  parentRunId: RunId,
-  updatedTask?: OrchestrationV2Subagent,
-): boolean {
-  return projection.subagents.some((task) => {
-    if (
-      task.origin !== "app_owned" ||
-      task.runId !== parentRunId ||
-      task.completionDelivery?.state === "disposed"
-    ) {
-      return false;
-    }
-    const status = task.id === updatedTask?.id ? updatedTask.status : task.status;
-    return !isTerminalDelegatedTaskStatus(status);
-  });
-}
-
 /**
  * Settle-only guard: queued work is as blocked-on-progress as a live run for
  * the settle action (mirrors client canSettle / hasQueuedTurnStart), but other
@@ -750,7 +732,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         delivery === null ||
         delivery === undefined ||
         delivery.taskIds.length === 0 ||
-        (delivery.generation > 1 && hasNonTerminalDelegatedCohortTask(projection, parentRunId)) ||
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
         completionDeliveryMessage(projection, delivery) !== undefined
@@ -6731,29 +6712,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const delivery = cohort?.delivery ?? null;
     const deliveryRun = completionDeliveryRun(input.parentProjection, delivery);
     // Delivered ownership has already settled through a completed wake run.
-    // A later wake-policy upgrade must not re-claim the task. If its terminal
-    // transition is the last outstanding sibling, it may still release an
-    // already-reserved successor for the rest of the cohort.
+    // A later wake-policy upgrade must not re-claim the task or offer again.
     if (
       taskDelivery?.state === "acknowledged" ||
       taskDelivery?.state === "delivered" ||
       taskDelivery?.state === "disposed"
     ) {
-      const offerReservedSuccessor =
-        input.parentRun !== undefined &&
-        delivery !== null &&
-        deliveryRun === undefined &&
-        (cohort?.settledDeliveryCount ?? 0) > 0 &&
-        !hasNonTerminalDelegatedCohortTask(
-          input.parentProjection,
-          input.parentRun.id,
-          input.updatedTask,
-        );
       return {
         task: input.updatedTask,
-        parentRun: offerReservedSuccessor ? input.parentRun : undefined,
+        parentRun: undefined,
         message: undefined,
-        offer: offerReservedSuccessor,
+        offer: false,
       };
     }
     if (
@@ -6842,8 +6811,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       if (deliveryRun !== undefined) {
         // The terminal-run listener owns reconciliation of a completed wake.
-        // A sibling that wins the parent lock first remains pending for its
-        // one successor rather than creating a competing delivery.
+        // A sibling that arrives while that wake is still draining stays
+        // pending and joins the follow-up offer after this run settles.
         return {
           task: {
             ...input.updatedTask,
@@ -6865,13 +6834,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           taskIds,
         },
       };
-      const offer =
-        (cohort?.settledDeliveryCount ?? 0) === 0 ||
-        !hasNonTerminalDelegatedCohortTask(
-          input.parentProjection,
-          input.parentRun.id,
-          input.updatedTask,
-        );
       return {
         task: {
           ...input.updatedTask,
@@ -6885,28 +6847,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           delegatedCompletion: nextCohort,
         },
         message: undefined,
-        offer,
+        // Already reserved or offered. Fold the sibling in and let the
+        // existing queue_after_active wake carry it.
+        offer: false,
       };
     }
 
     const settledDeliveryCount = cohort?.settledDeliveryCount ?? 0;
-    if (settledDeliveryCount >= 2) {
-      // A cohort permits one initial delivery and one successor. Keep the
-      // result pending and inspectable instead of recursively re-arming the
-      // parent for every child that finishes after that bounded handoff.
-      return {
-        task: {
-          ...input.updatedTask,
-          completionDelivery: {
-            state: "pending" as const,
-            observedByRunId: null,
-          },
-        },
-        parentRun: undefined,
-        message: undefined,
-        offer: false,
-      };
-    }
     const generation = cohort?.nextGeneration ?? 1;
     const messageId = yield* mapDelegatedCompletionError(
       idAllocator.allocate.message({
@@ -6937,13 +6884,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         delegatedCompletion: nextCohort,
       },
       message: undefined,
-      offer:
-        settledDeliveryCount === 0 ||
-        !hasNonTerminalDelegatedCohortTask(
-          input.parentProjection,
-          input.parentRun.id,
-          input.updatedTask,
-        ),
+      offer: true,
     };
   });
 
@@ -7266,7 +7207,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cohort.disposition === "open" &&
         projection.thread.archivedAt === null &&
         projection.thread.deletedAt === null &&
-        settledDeliveryCount < 2 &&
+        deliveryRun.status !== "cancelled" &&
         pendingTaskIds.length > 0;
       const nextDelivery = canReserveFollowUp
         ? {
@@ -7331,7 +7272,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           payload: updatedParentRun,
         },
       ]);
-      if (nextDelivery !== null && !hasNonTerminalDelegatedCohortTask(projection, parentRun.id)) {
+      if (nextDelivery !== null) {
         yield* offerDelegatedCompletionDelivery(threadId, parentRun.id);
       }
     });
