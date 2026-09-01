@@ -771,9 +771,7 @@ it.layer(TestLayer)("delegated completion delivery repairs", (it) => {
       const parentRunId = RunId.make("run:delegated-delivery-cancel-replan:parent");
       const deliveryRunId = RunId.make("run:delegated-delivery-cancel-replan:delivery");
       const parentRootNodeId = NodeId.make("node:delegated-delivery-cancel-replan:parent-root");
-      const deliveryRootNodeId = NodeId.make(
-        "node:delegated-delivery-cancel-replan:delivery-root",
-      );
+      const deliveryRootNodeId = NodeId.make("node:delegated-delivery-cancel-replan:delivery-root");
       const taskId = NodeId.make("node:delegated-delivery-cancel-replan:task");
       const messageId = MessageId.make(`message:delegated-delivery:${threadId}`);
 
@@ -874,7 +872,7 @@ it.layer(TestLayer)("delegated completion delivery repairs", (it) => {
         commandId: CommandId.make("command:delegated-delivery-cancel-replan:wake-policy"),
         parentThreadId: threadId,
         taskId,
-        completionWake: "always",
+        completionWake: "settled_only",
       });
 
       const afterReplan = yield* orchestrator.getThreadProjection(threadId);
