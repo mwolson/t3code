@@ -57,6 +57,7 @@ export function workEntryIsVisibleInGroup(
     workEntryShouldRenderInWorkLog(entry)
   );
 }
+export const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
 export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
 export const TIMELINE_MINIMAP_MIN_ITEMS = 2;
 export const TIMELINE_MINIMAP_MAX_HEIGHT_CSS = "calc(100vh - 18rem)";

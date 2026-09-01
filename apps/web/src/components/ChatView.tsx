@@ -7401,7 +7401,6 @@ function ChatViewContent(props: ChatViewProps) {
         <ThreadErrorBanner
           error={visibleThreadError}
           onDismiss={() => {
-            dismissThreadError();
             dismissThreadErrorBannerForSession(threadErrorBannerKey);
             setThreadErrorBannerDismissTick((tick) => tick + 1);
           }}
@@ -7447,6 +7446,7 @@ function ChatViewContent(props: ChatViewProps) {
               <MessagesTimeline
                 key={activeThread.id}
                 isWorking={isWorking}
+                activeTurnInProgress={isWorking || !latestRunSettled}
                 activeTurnStartedAt={activeWorkStartedAt}
                 isPreparingWorktree={isPreparingWorktree || activeRunPreparing}
                 listRef={legendListRef}

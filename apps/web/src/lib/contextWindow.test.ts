@@ -33,7 +33,7 @@ describe("V2 context window presentation", () => {
   });
 
   it("prefers the provider thread's live context snapshot", () => {
-    const snapshot = deriveLatestContextWindowSnapshot([], {
+    const snapshot = deriveLatestContextWindowSnapshot([], null, {
       contextUsage: {
         usedTokens: 20_000,
         totalProcessedTokens: 42_000,

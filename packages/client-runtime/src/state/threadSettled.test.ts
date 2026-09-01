@@ -519,7 +519,7 @@ describe("canSettle", () => {
     expect(
       effectiveSettled(
         { ...waiting, settledOverride: "settled", settledAt: NOW },
-        { now: NOW, autoSettleAfterDays: 3, autoSettleMode: "inactivity" },
+        { now: NOW, autoSettleAfterDays: 3 },
       ),
     ).toBe(false);
     const drained = makeShell({

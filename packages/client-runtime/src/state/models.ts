@@ -153,8 +153,7 @@ function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary 
   return {
     status,
     activeRunId: thread.activeRunId,
-    hasInterruptibleProviderNativeBackgroundWork:
-      thread.hasInterruptibleProviderNativeBackgroundWork === true,
+    hasInterruptibleProviderNativeBackgroundWork: hasPendingBackgroundTasks,
     providerInstanceId: thread.providerInstanceId,
     providerName: null,
     lastError: thread.lastError ?? null,

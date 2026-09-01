@@ -696,20 +696,12 @@ export const interruptThreadTurn = Effect.fn("EnvironmentCommands.interruptThrea
         run.status === "running" ||
         (!hasProviderNativeBackgroundWork && run.status === "waiting"),
     )?.id;
-    if (runId === undefined && !hasProviderNativeBackgroundWork) return { sequence: 0 };
+    if (runId === undefined) return { sequence: 0 };
   }
-  const commandId = yield* allocateCommandId(input);
-  if (runId === undefined) {
-    return yield* dispatch({
-      type: "run.interrupt",
-      commandId,
-      threadId: input.threadId,
-      intent: "provider_native_only",
-    });
-  }
+  if (runId === undefined) return { sequence: 0 };
   return yield* dispatch({
     type: "run.interrupt",
-    commandId,
+    commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
     runId,
   });
