@@ -430,7 +430,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   onRuntimeModeChange: (mode: RuntimeMode) => void;
 }) {
   const runtimeModeOption =
-    runtimeModeOptions.find((option) => option.mode === props.runtimeMode) ??
+    props.runtimeModeOptions.find((option) => option.mode === props.runtimeMode) ??
     supervisedRuntimeModeOption;
   const RuntimeModeIcon = runtimeModeOption.icon;
   const interactionModeTooltip =
