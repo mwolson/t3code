@@ -291,6 +291,7 @@ export function releasedProviderSession(input: {
       status: releaseStatusFor(input.reason),
       updatedAt: input.now,
       lastError: input.detail ?? "Provider runtime failed.",
+      lastErrorAt: input.now,
     };
   }
   return {

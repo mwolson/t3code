@@ -4676,6 +4676,7 @@ it("releasedProviderSession keeps lastError when the live process is reaped", ()
   });
   assert.equal(failed.status, "error");
   assert.equal(failed.lastError, "process exited");
+  assert.deepStrictEqual(failed.lastErrorAt, later);
 });
 
 it.effect("ProviderSessionManagerV2 keeps a projected lastError across idle release", () =>
