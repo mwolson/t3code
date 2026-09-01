@@ -5,7 +5,10 @@ import {
 } from "@t3tools/shared/t3McpToolPresentation";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 
-import { classifyMarkdownImageSource, markdownImageSourceFragment } from "../markdownImages.js";
+import {
+  classifyMarkdownImageSource,
+  markdownImageSourceFragment,
+} from "@t3tools/client-runtime/markdown-images";
 
 import {
   summarizeT3ToolCalls,
