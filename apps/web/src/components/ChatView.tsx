@@ -1935,7 +1935,7 @@ export default function ChatView(props: ChatViewProps) {
   const runtimeErrorKey = threadRuntimeErrorDismissalKey({
     localError: localServerError,
     runtimeError,
-    runtimeErrorAt: serverRuntime?.lastErrorAt ?? serverRuntime?.updatedAt ?? null,
+    runtimeErrorAt: serverRuntime?.lastErrorAt ?? null,
   });
   const threadError = isServerThread
     ? resolveThreadErrorBannerMessage({
