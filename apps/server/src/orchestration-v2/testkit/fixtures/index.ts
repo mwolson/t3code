@@ -154,6 +154,7 @@ import {
   CODEX_MODEL_SELECTION,
   CURSOR_MODEL_SELECTION,
   GROK_MODEL_SELECTION,
+  OPENCODE_MODEL_SELECTION,
   OPENCODE2_MODEL_SELECTION,
   READ_ONLY_NEVER_POLICY,
   READ_ONLY_ON_REQUEST_POLICY,
@@ -503,18 +504,6 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./subagent_v2_nested/codex_transcript.ndjson", import.meta.url),
         modelSelection: CODEX_MODEL_SELECTION,
         assertOutput: assertSubagentV2NestedOutput,
-      },
-    ],
-  },
-  {
-    name: "opencode_subagent",
-    buildInput: openCodeSubagentInput,
-    providers: [
-      {
-        driver: ProviderDriverKind.make("opencode"),
-        transcriptFile: new URL("./opencode_subagent/opencode_transcript.ndjson", import.meta.url),
-        modelSelection: OPENCODE_MODEL_SELECTION,
-        assertOutput: assertOpenCodeSubagentOutput,
       },
     ],
   },

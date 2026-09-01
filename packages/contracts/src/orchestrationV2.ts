@@ -685,6 +685,20 @@ export const OrchestrationV2ProviderTurn = Schema.Struct({
 });
 export type OrchestrationV2ProviderTurn = typeof OrchestrationV2ProviderTurn.Type;
 
+export const OrchestrationV2ProviderTurnInterruptRequested = Schema.Struct({
+  targetThreadId: ThreadId,
+  providerThreadId: ProviderThreadId,
+  providerTurnId: ProviderTurnId,
+  reason: Schema.NullOr(Schema.String),
+});
+export type OrchestrationV2ProviderTurnInterruptRequested =
+  typeof OrchestrationV2ProviderTurnInterruptRequested.Type;
+
+export const OrchestrationV2RunInterruptNoop = Schema.Struct({
+  reason: Schema.String,
+});
+export type OrchestrationV2RunInterruptNoop = typeof OrchestrationV2RunInterruptNoop.Type;
+
 export const OrchestrationV2RuntimeRequest = Schema.Struct({
   id: RuntimeRequestId,
   nodeId: NodeId,
@@ -1228,6 +1242,16 @@ export const OrchestrationV2DomainEvent = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("provider-turn.interrupt-requested"),
+    payload: OrchestrationV2ProviderTurnInterruptRequested,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("run.interrupt-noop"),
+    payload: OrchestrationV2RunInterruptNoop,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("runtime-request.updated"),
     payload: OrchestrationV2RuntimeRequest,
   }),
@@ -1359,6 +1383,11 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   // Empty when the latest root run is still active or no pending work remains.
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  // True when Stop can target provider-native background turns even though
+  // the latest root run has already settled.
+  hasInterruptibleProviderNativeBackgroundWork: Schema.optional(Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   itemCount: NonNegativeInt,
   visibleItemCount: NonNegativeInt,
@@ -1987,6 +2016,16 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("provider-turn.interrupt-requested"),
+    payload: OrchestrationV2ProviderTurnInterruptRequested,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("run.interrupt-noop"),
+    payload: OrchestrationV2RunInterruptNoop,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("runtime-request.updated"),
     payload: OrchestrationV2RuntimeRequestJson,
   }),
@@ -2235,6 +2274,15 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     runId: RunId,
+    intent: Schema.optional(Schema.Literal("provider_native_only")),
+    reason: Schema.optional(Schema.String),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("run.interrupt"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: Schema.optional(RunId),
+    intent: Schema.Literal("provider_native_only"),
     reason: Schema.optional(Schema.String),
   }),
   Schema.Struct({

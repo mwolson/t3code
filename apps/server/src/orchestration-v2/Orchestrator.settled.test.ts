@@ -24,10 +24,13 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 import { ServerConfig } from "../config.ts";
 import { layer as mcpSessionRegistryTestLayer } from "../mcp/McpSessionRegistry.testkit.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -93,6 +96,13 @@ const CheckpointStoreTestLayer = CheckpointStore.layer.pipe(
   Layer.provide(VcsDriverRegistryTestLayer),
 );
 
+const GitWorkflowTestLayer = Layer.mock(GitWorkflow.GitWorkflowService)({
+  pruneWorktrees: () => Effect.void,
+  createWorktree: () => Effect.succeed({} as never),
+});
+const ProjectServiceTestLayer = Layer.mock(ProjectService.ProjectService)({
+  getById: () => Effect.succeed(Option.none()),
+});
 const TestLayer = Layer.merge(OrchestrationV2LayerLive, OrchestrationV2EventSinkLayerLive).pipe(
   Layer.provide(mcpSessionRegistryTestLayer),
   Layer.provideMerge(SqlitePersistenceMemory),
@@ -100,6 +110,8 @@ const TestLayer = Layer.merge(OrchestrationV2LayerLive, OrchestrationV2EventSink
   Layer.provide(ServerConfigLayer),
   Layer.provide(ServerSettingsService.layerTest()),
   Layer.provide(TestProviderInstanceRegistry),
+  Layer.provide(GitWorkflowTestLayer),
+  Layer.provide(ProjectServiceTestLayer),
   Layer.provide(NodeServices.layer),
 );
 

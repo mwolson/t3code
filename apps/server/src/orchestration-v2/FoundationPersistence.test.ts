@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CheckpointId,
@@ -37,7 +38,9 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import { CheckpointRollbackServiceV2 } from "./CheckpointRollbackService.ts";
 import { CommandReceiptStoreV2, layer as commandReceiptStoreLayer } from "./CommandReceiptStore.ts";
@@ -86,6 +89,13 @@ const commandReceiptStoreProvided = commandReceiptStoreLayer.pipe(Layer.provide(
 const projectionMaintenanceProvided = projectionMaintenanceLayer.pipe(
   Layer.provide(storesProvided),
 );
+const GitWorkflowTestLayer = Layer.mock(GitWorkflow.GitWorkflowService)({
+  pruneWorktrees: () => Effect.void,
+  createWorktree: () => Effect.succeed({} as never),
+});
+const ProjectServiceTestLayer = Layer.mock(ProjectService.ProjectService)({
+  getById: () => Effect.succeed(Option.none()),
+});
 const TestLayer = Layer.mergeAll(
   storesProvided,
   eventSinkProvided,
@@ -93,6 +103,9 @@ const TestLayer = Layer.mergeAll(
   commandReceiptStoreProvided,
   idAllocatorLayer,
   projectionMaintenanceProvided,
+  GitWorkflowTestLayer,
+  ProjectServiceTestLayer,
+  NodeServices.layer,
 );
 
 const providerInstanceId = ProviderInstanceId.make("codex");

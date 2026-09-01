@@ -149,8 +149,7 @@ export const workerLive = Layer.effectDiscard(
           yield* clearRetryAttempt(retryKey);
           return;
         }
-        const incomingText =
-          request.messageText ?? request.detail ?? PROVIDER_CONTINUATION_MESSAGE_TEXT;
+        const incomingText = request.detail ?? CONTINUATION_MESSAGE_TEXT;
         const incomingWake = {
           createdBy: "agent" as const,
           creationSource: "provider" as const,

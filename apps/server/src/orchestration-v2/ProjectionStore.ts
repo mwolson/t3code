@@ -3717,7 +3717,7 @@ export const layerMemoryWithOptions = (
             if (providerSessionIds.length === 0) {
               return [];
             }
-            const retained = (yield* Ref.get(replayState)).retainedProviderSessions;
+            const retained = (yield* Ref.get(state)).replayState.retainedProviderSessions;
             const wanted = new Set(providerSessionIds);
             return [...retained.values()]
               .filter((session) => wanted.has(session.id))

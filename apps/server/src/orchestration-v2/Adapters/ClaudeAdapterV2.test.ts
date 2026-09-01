@@ -40,6 +40,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { Tool } from "effect/unstable/ai";
 import { formatClaudeResumeCompactionQuestion } from "@t3tools/shared/claudeCompaction";
 
@@ -1079,7 +1080,9 @@ describe("ClaudeAdapterV2 resume compaction", () => {
           ),
           { behavior: "cancelled" },
         );
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 });
@@ -1219,7 +1222,9 @@ describe("ClaudeAdapterV2 attachments", () => {
           },
           expectedImageBlock,
         ]);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -1297,7 +1302,9 @@ describe("ClaudeAdapterV2 attachments", () => {
         assert.equal(error._tag, "ProviderAdapterTurnStartError");
         assert.include(String(error.cause), "Unsupported Claude image attachment type");
         assert.equal(openCount, 0);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 });
@@ -1478,7 +1485,9 @@ describe("ClaudeAdapterV2 native fork", () => {
 
         assert.equal(openedQueries[0]?.options.resume, "forked-native-session");
         assert.equal(openedQueries[0]?.options.sessionId, undefined);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 });
@@ -1543,7 +1552,9 @@ describe("ClaudeAdapterV2 native session identity", () => {
           }),
         );
         return openedQueries;
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     );
 
   it.effect("creates the native session on the first provider turn", () =>
@@ -1990,7 +2001,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         const proposedPlan = [...plans.values()].find((plan) => plan.kind === "proposed_plan");
         assert.equal(proposedPlan?.status, "active");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -2064,7 +2077,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "recovered Claude turn");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -2118,7 +2133,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         });
         assert.isDefined(terminal.retryStartedAt);
         assert.equal(terminal.failure.code, "api_error_529");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -2175,7 +2192,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             },
           ]);
           assert.isTrue(yield* harness.hasPendingBackgroundWork);
-        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+        }).pipe(
+          Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+        ),
       ),
   );
 
@@ -2228,7 +2247,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             "empty roster clear",
           );
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
-        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+        }).pipe(
+          Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+        ),
       ),
   );
 
@@ -2285,7 +2306,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         const afterFailure = providerThreadRosterEvents(harness.events).at(-1);
         assert.deepEqual(afterFailure?.providerThread.pendingBackgroundTasks ?? [], []);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -2387,7 +2410,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         const afterInterrupt = providerThreadRosterEvents(events).at(-1);
         assert.deepEqual(afterInterrupt?.providerThread.pendingBackgroundTasks ?? [], []);
         assert.isFalse(yield* runtime.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -2640,7 +2665,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadA));
           assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadB));
           assert.isFalse(yield* hasPendingBackgroundWork);
-        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+        }).pipe(
+          Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+        ),
       ),
   );
 
@@ -2686,7 +2713,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.lengthOf(harness.continuationRequests, 1);
         assert.lengthOf(harness.terminalEvents(), 1);
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -2737,7 +2766,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         assert.equal(harness.terminalEvents()[1]?.status, "completed");
         assert.lengthOf(harness.offeredMessages, 1);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -2799,7 +2830,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         );
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -2890,7 +2923,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         );
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -2952,7 +2987,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 2, "queued turn terminal");
         assert.equal(harness.terminalEvents()[1]?.status, "completed");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -2990,7 +3027,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             (event) => event.type === "message.updated" && event.message.text === fallbackText,
           ),
         );
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3084,7 +3123,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
         assert.isTrue(hasMessageText(recoveryAssistantText));
         assert.isFalse(hasMessageText(staleResultText));
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3134,7 +3175,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
         assert.equal(harness.terminalEvents()[1]?.status, "completed");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3193,7 +3236,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.isTrue(terminalized);
           assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
           assert.lengthOf(harness.terminalEvents(), 1);
-        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+        }).pipe(
+          Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+        ),
       ),
   );
 
@@ -3252,7 +3297,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             (event) => event.type === "message.updated" && event.message.text === staleText,
           ),
         );
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3286,7 +3333,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "failed terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "failed");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3368,7 +3417,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               event.type === "message.updated" && event.message.text === "Reporting now, as asked.",
           ),
         );
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3422,7 +3473,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "steered turn terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3475,7 +3528,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "steered turn terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3528,7 +3583,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "steered turn terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3601,7 +3658,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         let lateYields = 0;
         yield* awaitUntil(() => lateYields++ >= 50, "late result to be handled");
         assert.lengthOf(harness.terminalEvents(), 1);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3666,7 +3725,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             "stranded output projected",
           );
           assert.lengthOf(harness.offeredMessages, 1);
-        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+        }).pipe(
+          Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+        ),
       ),
   );
 
@@ -3733,7 +3794,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         yield* Queue.offer(harness.sdkMessages, wakeResult);
         yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3775,7 +3838,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
         yield* TestClock.adjust("2 seconds");
         assert.lengthOf(harness.continuationRequests, 1);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3852,7 +3917,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         let duplicateYields = 0;
         yield* awaitUntil(() => duplicateYields++ >= 50, "second text frame to buffer");
         assert.lengthOf(harness.continuationRequests, 1);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3902,7 +3969,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         );
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3959,7 +4028,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
         assert.equal(harness.terminalEvents()[1]?.status, "completed");
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -3985,7 +4056,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "spurious terminal");
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
         assert.lengthOf(harness.offeredMessages, 0);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -4136,7 +4209,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.equal(finalSubagentNode?.status, "completed");
         assert.equal(finalSubagentNode?.runId, subagentNodeEvents[0]?.node.runId);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -4205,7 +4280,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "early model turn terminal");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -4286,7 +4363,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -4375,7 +4454,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
         assert.equal(subagentEvents().at(-1)?.subagent.status, "cancelled");
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -4661,7 +4742,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.equal(subagentEvents().at(-1)?.subagent.status, "completed");
         assert.equal(subagentEvents().at(-1)?.subagent.result, SECOND_SUMMARY);
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -4893,7 +4976,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         // The completion keeps the resuming run's attribution.
         assert.equal(finalSubagent?.runId, "run-attempt-claude-wake-9c");
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -5041,7 +5126,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ),
           );
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
-        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+        }).pipe(
+          Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+        ),
       ),
   );
 
@@ -5219,7 +5306,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           () => events.filter((event) => event.type === "turn.terminal").length === 2,
           "second turn terminal",
         );
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -5318,7 +5407,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* Queue.offer(harness.sdkMessages, turnOneResult);
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 
@@ -5501,7 +5592,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ),
           );
           assert.isFalse(yield* hasPendingBackgroundWork);
-        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+        }).pipe(
+          Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+        ),
       ),
   );
 
@@ -5740,7 +5833,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           assert.equal(subagentNodeEvents.at(-1)?.node.status, "completed");
           assert.isFalse(yield* hasPendingBackgroundWork);
-        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+        }).pipe(
+          Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+        ),
       ),
   );
 
@@ -5872,7 +5967,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             "roster cleared after failed same-thread replacement open",
           );
           assert.isFalse(yield* hasPendingBackgroundWork);
-        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+        }).pipe(
+          Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+        ),
       ),
   );
 
@@ -6096,7 +6193,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             "continuation request after retry",
           );
           assert.equal(continuationRequests[1]?.detail, "Retry build completed successfully");
-        }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+        }).pipe(
+          Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+        ),
       ),
   );
 
@@ -6168,7 +6267,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.isTrue(Exit.isFailure(failedStart));
         // No live process ever existed: do not emit a fabricated empty roster.
         assert.lengthOf(providerThreadRosterEvents(events), 0);
-      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+      }).pipe(
+        Effect.provide(Layer.mergeAll(idAllocatorLayer, NodeServices.layer, TestClock.layer())),
+      ),
     ),
   );
 });
