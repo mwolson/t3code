@@ -14,7 +14,10 @@ import {
 } from "@t3tools/shared/t3McpToolPresentation";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 
-import { classifyMarkdownImageSource } from "../markdownImages.ts";
+import {
+  classifyMarkdownImageSource,
+  markdownImageSourceFragment,
+} from "@t3tools/client-runtime/markdown-images";
 import { resolveMediaSource } from "../mediaSource.ts";
 
 import {
