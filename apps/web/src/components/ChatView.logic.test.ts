@@ -315,6 +315,16 @@ describe("threadRuntimeErrorDismissalKey", () => {
       }),
     ).toBe('["2026-08-11T12:00:00Z","event stream stalled"]');
   });
+
+  it("does not invent an occurrence when the runtime has no error timestamp", () => {
+    expect(
+      threadRuntimeErrorDismissalKey({
+        localError: null,
+        runtimeError: "event stream stalled",
+        runtimeErrorAt: null,
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("shouldShowComposerContextStrip", () => {
