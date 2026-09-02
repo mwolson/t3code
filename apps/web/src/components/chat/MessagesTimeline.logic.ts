@@ -15,6 +15,7 @@ export {
   normalizeCompactToolLabel,
   toolGroupAction,
 } from "@t3tools/client-runtime/work-log/presentation";
+import { unwrapSoleMarkdownFence } from "../../markdown-clipboard";
 import {
   deriveRevertTurnCountByUserMessageId,
   formatDuration,
@@ -487,7 +488,11 @@ export function resolveAssistantMessageCopyState({
   const hasText = text !== null && text.trim().length > 0;
   const visible = showCopyButton && hasText && !streaming;
   return {
-    text: hasText ? (visible ? renderCodexDirectivesForCopy(text) : text) : null,
+    text: hasText
+      ? visible
+        ? unwrapSoleMarkdownFence(renderCodexDirectivesForCopy(text))
+        : text
+      : null,
     visible,
   };
 }

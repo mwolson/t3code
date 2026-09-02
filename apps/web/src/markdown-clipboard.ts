@@ -340,6 +340,22 @@ export function serializeRenderedMarkdownFragment(container: Node): string {
   return tidyMarkdown(serializeChildren(container));
 }
 
+const SOLE_MARKDOWN_FENCE =
+  /^(?<fence>`{3,}|~{3,})[^\n]*\r?\n(?<body>[\s\S]*?)\r?\n\k<fence>[ \t]*$/;
+
+/**
+ * Message copy uses the markdown source, so a reply that is only a fenced
+ * code block would paste the fences. Unwrap that case so it matches a
+ * selection inside the rendered block.
+ */
+export function unwrapSoleMarkdownFence(markdown: string): string {
+  const trimmed = markdown.trim();
+  if (!trimmed) return markdown;
+  const body = SOLE_MARKDOWN_FENCE.exec(trimmed)?.groups?.body;
+  if (body === undefined) return markdown;
+  return body.replace(/\n$/, "");
+}
+
 export function serializeTableElementToMarkdown(table: Element): string {
   return serializeTable(table).trim();
 }
