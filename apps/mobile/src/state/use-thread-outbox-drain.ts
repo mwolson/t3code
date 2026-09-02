@@ -1056,13 +1056,11 @@ export function useThreadOutboxDrain(): void {
             appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
             nextQueuedMessage,
           );
-          const liveThreadBusy = threadRuntimeIsActive(liveThread?.runtime);
           const liveDeliveryAction = resolveThreadOutboxDeliveryAction({
             isCreation: creation !== undefined,
             threadExists: liveThread !== undefined,
             shellStatus,
             environmentConnected: environment?.connectionState === "connected",
-            threadBusy: liveThreadBusy,
           });
           if (liveDeliveryAction !== "send") {
             return true;
