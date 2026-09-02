@@ -95,9 +95,9 @@ export function useNewThreadHandler() {
       const routeChangedSinceRequest = () => router.state.location.href !== requestingRouteHref;
       const currentRouteTarget = getCurrentRouteTarget();
       // A new thread carries the user's working mode from the thread being
-      // viewed. The target project's configured model still wins; interaction
-      // mode carries independently. Permissions, branch, worktree, and env mode
-      // come from configured defaults unless the caller passes them explicitly.
+      // viewed. Interaction mode carries independently. Permissions, branch,
+      // worktree, and env mode come from configured defaults unless the caller
+      // passes them explicitly.
       const carrySourceShell =
         currentRouteTarget?.kind === "server"
           ? readThreadShell(currentRouteTarget.threadRef)
@@ -142,14 +142,20 @@ export function useNewThreadHandler() {
         projectSettings.sources.defaultThreadEnvMode === "project"
           ? projectSettings.settings.defaultThreadEnvMode
           : undefined;
-      const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
-        resolveNewThreadModelSelectionOverride({
+      const resolveModelSelectionOverride = (destinationDraftId: DraftId) => {
+        const { stickyActiveProvider, stickyModelSelectionByProvider } =
+          useComposerDraftStore.getState();
+        return resolveNewThreadModelSelectionOverride({
           projectDefaultSelection: projectDefaultModelSelection ?? null,
+          stickySelection: stickyActiveProvider
+            ? (stickyModelSelectionByProvider[stickyActiveProvider] ?? null)
+            : null,
           carrySelection: carryModelSelection,
           carrySourceDraftId:
             currentRouteTarget?.kind === "draft" ? currentRouteTarget.draftId : null,
           destinationDraftId,
         });
+      };
       // The shared resolver owns the priority order. The t3.json read is
       // skipped entirely when a higher-priority source decides, and its
       // query atom caches per project after the first call.
@@ -272,9 +278,9 @@ export function useNewThreadHandler() {
             });
           }
           // Model intent: an explicit human pick always stands. Seeds and
-          // legacy entries alike re-resolve here — sticky first, mirroring
-          // the mint-fresh path, then the project default or carried
-          // selection on top. This runs even when the draft is already open:
+          // legacy entries alike re-resolve here from the current thread,
+          // then the app-wide sticky choice, then the project default. This
+          // runs even when the draft is already open:
           // without it, a changed pin could never reach the draft the user
           // is looking at, because explicit picks are the only thing the
           // flag protects.
@@ -423,8 +429,8 @@ export function useNewThreadHandler() {
         applyStickyState(draftId);
         const modelSelectionOverride = resolveModelSelectionOverride(draftId);
         if (modelSelectionOverride) {
-          // Project defaults and carried selections both outrank global sticky
-          // state. The project default wins when both are present.
+          // The current thread wins over global sticky state. Project defaults
+          // only fill in when neither user-wide source has a selection.
           setModelSelection(draftId, modelSelectionOverride, { replaceOptions: true });
         }
         await router.navigate({
