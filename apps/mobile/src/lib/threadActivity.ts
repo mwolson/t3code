@@ -603,12 +603,10 @@ function toWorkLogEntry(
   }
 }
 
-function toFeedActivity(
+function toWakePromptFeedActivity(
   row: OrchestrationV2ProjectedTurnItem,
   attemptId: RunAttemptId | null,
 ): ThreadFeedActivity {
-
-function toWakePromptFeedActivity(row: OrchestrationV2ProjectedTurnItem): ThreadFeedActivity {
   const item = row.item;
   const presentation = resolveWakePromptPresentation(
     item.type === "user_message" ? item : { text: "" },
@@ -616,6 +614,7 @@ function toWakePromptFeedActivity(row: OrchestrationV2ProjectedTurnItem): Thread
   const summary = presentation?.heading ?? "Background task finished";
   const detail = presentation?.preview ?? null;
   const fullText = item.type === "user_message" ? item.text : summary;
+  const createdAt = DateTime.formatIso(item.startedAt ?? item.updatedAt);
   const getFullDetail = memoizeValue(() => fullText);
   const getCopyText = memoizeValue(() =>
     [summary, detail, fullText]
@@ -627,8 +626,9 @@ function toWakePromptFeedActivity(row: OrchestrationV2ProjectedTurnItem): Thread
   );
   return {
     id: `${row.visibility}:${row.sourceThreadId}:${row.sourceItemId}`,
-    createdAt: DateTime.formatIso(item.startedAt ?? item.updatedAt),
+    createdAt,
     runId: item.runId,
+    attemptId,
     summary,
     detail,
     canExpand: true,
@@ -639,10 +639,16 @@ function toWakePromptFeedActivity(row: OrchestrationV2ProjectedTurnItem): Thread
     toolLike: true,
     prominent: false,
     status: "success",
+    lifecycleStatus: itemLifecycleStatus(item),
+    workEntry: toWorkLogEntry(item, createdAt, summary, detail),
     projectedItem: row,
   };
 }
 
+function toFeedActivity(
+  row: OrchestrationV2ProjectedTurnItem,
+  attemptId: RunAttemptId | null,
+): ThreadFeedActivity {
   const item = row.item;
   const toolPresentation = itemToolPresentation(item);
   const summary = itemSummary(item, toolPresentation);
@@ -1384,7 +1390,7 @@ export function buildThreadFeed(
     }
     const createdAt = DateTime.formatIso(item.startedAt ?? item.updatedAt);
     if (item.type === "user_message" && isWakePromptMessage(item)) {
-      const activity = toWakePromptFeedActivity(row);
+      const activity = toWakePromptFeedActivity(row, resolveAttemptId(item));
       entries.push({
         type: "activity",
         id: activity.id,
