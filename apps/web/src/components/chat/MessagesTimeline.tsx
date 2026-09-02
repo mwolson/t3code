@@ -173,6 +173,7 @@ import {
   type AssistantCitationTarget,
 } from "./AssistantCitationSource";
 import { useAssistantCitationTarget, type CitationHistoryPage } from "./useAssistantCitationTarget";
+import { unwrapSoleMarkdownFence } from "../../markdown-clipboard";
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRowsWithState,
@@ -2212,9 +2213,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                 text={
                   contextClipboardFragment
                     ? resolvedContext.text
-                    : replaceComposerContextReferences(
-                        resolvedContext.text,
-                        (reference) => reference.label,
+                    : unwrapSoleMarkdownFence(
+                        replaceComposerContextReferences(
+                          resolvedContext.text,
+                          (reference) => reference.label,
+                        ),
                       )
                 }
                 {...(contextClipboardFragment
