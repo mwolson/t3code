@@ -2332,6 +2332,23 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       ),
     [expandedTurnIds, expandedWorkGroups, props.activeWorkStartedAt, props.feed, props.latestRun],
   );
+  const stableFeedRef = useRef<{
+    readonly threadKey: string;
+    readonly state: StableThreadFeedEntriesState;
+  }>({
+    threadKey: feedThreadKey,
+    state: { byId: new Map(), result: [] },
+  });
+  const presentedFeed = useMemo(() => {
+    const previous =
+      stableFeedRef.current.threadKey === feedThreadKey
+        ? stableFeedRef.current.state
+        : { byId: new Map<string, ThreadFeedEntry>(), result: [] };
+    const state = computeStableThreadFeedEntries(derivedFeed, previous);
+    stableFeedRef.current = { threadKey: feedThreadKey, state };
+    return state.result;
+  }, [derivedFeed, feedThreadKey]);
+
   const disclosureEnteringEntryIds = useMemo(() => {
     const anchorKey = disclosureAnchorKeyRef.current;
     const previousPresentedFeed = previousPresentedFeedRef.current;
@@ -2358,22 +2375,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   useLayoutEffect(() => {
     previousPresentedFeedRef.current = presentedFeed;
   }, [presentedFeed]);
-  const stableFeedRef = useRef<{
-    readonly threadKey: string;
-    readonly state: StableThreadFeedEntriesState;
-  }>({
-    threadKey: feedThreadKey,
-    state: { byId: new Map(), result: [] },
-  });
-  const presentedFeed = useMemo(() => {
-    const previous =
-      stableFeedRef.current.threadKey === feedThreadKey
-        ? stableFeedRef.current.state
-        : { byId: new Map<string, ThreadFeedEntry>(), result: [] };
-    const state = computeStableThreadFeedEntries(derivedFeed, previous);
-    stableFeedRef.current = { threadKey: feedThreadKey, state };
-    return state.result;
-  }, [derivedFeed, feedThreadKey]);
 
   // The empty↔filled key below remounts the list, which resets its imperative
   // content-inset override — and useKeyboardChatComposerInset (mounted above
