@@ -95,6 +95,7 @@ import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
 import { shouldAutoExpandChangedFiles } from "./changedFilesPresentation";
 import { MessageCopyButton } from "./MessageCopyButton";
+import { unwrapSoleMarkdownFence } from "../../markdown-clipboard";
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
@@ -1367,7 +1368,10 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           <div className="flex items-center gap-0.5">
             {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
             {displayedUserMessage.copyText && (
-              <MessageCopyButton text={displayedUserMessage.copyText} variant="ghost" />
+              <MessageCopyButton
+                text={unwrapSoleMarkdownFence(displayedUserMessage.copyText)}
+                variant="ghost"
+              />
             )}
           </div>
         </div>

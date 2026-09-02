@@ -607,6 +607,19 @@ describe("resolveAssistantMessageCopyState", () => {
     });
   });
 
+  it("copies a sole fenced code block without the fences", () => {
+    expect(
+      resolveAssistantMessageCopyState({
+        showCopyButton: true,
+        text: "```\nLorem ipsum dolor sit amet.\n```",
+        streaming: false,
+      }),
+    ).toEqual({
+      text: "Lorem ipsum dolor sit amet.",
+      visible: true,
+    });
+  });
+
   it("copies the rendered representation of Codex directives", () => {
     expect(
       resolveAssistantMessageCopyState({

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { serializeRenderedMarkdownFragment } from "./markdown-clipboard";
+import { serializeRenderedMarkdownFragment, unwrapSoleMarkdownFence } from "./markdown-clipboard";
 
 const TEXT_NODE = 3;
 const ELEMENT_NODE = 1;
@@ -230,5 +230,22 @@ describe("serializeRenderedMarkdownFragment", () => {
     expect(serializeRenderedMarkdownFragment(asNode(container))).toBe(
       "Hello World (Document template)",
     );
+  });
+});
+
+describe("unwrapSoleMarkdownFence", () => {
+  it("copies a message that is only a fenced code block without the fences", () => {
+    expect(
+      unwrapSoleMarkdownFence("```\nLorem ipsum dolor sit amet, consectetur adipiscing elit.\n```"),
+    ).toBe("Lorem ipsum dolor sit amet, consectetur adipiscing elit.");
+  });
+
+  it("strips an info string from a sole fenced block", () => {
+    expect(unwrapSoleMarkdownFence("```text\nprintf hello\n```")).toBe("printf hello");
+  });
+
+  it("keeps fences when the message has prose around the code block", () => {
+    const markdown = "Run this:\n\n```\ngh workflow run Deploy\n```";
+    expect(unwrapSoleMarkdownFence(markdown)).toBe(markdown);
   });
 });
