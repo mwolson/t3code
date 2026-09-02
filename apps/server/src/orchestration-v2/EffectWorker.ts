@@ -66,6 +66,10 @@ export interface OrchestrationEffectExecutorV2Shape {
   readonly execute: (
     effect: OrchestrationEffectV2,
   ) => Effect.Effect<void, OrchestrationEffectExecutionError>;
+  readonly compensateDeadLetter: (
+    effect: OrchestrationEffectV2,
+    error: string,
+  ) => Effect.Effect<void>;
 }
 
 export class OrchestrationEffectExecutorV2 extends Context.Service<
@@ -312,6 +316,29 @@ export const executorLayer: Layer.Layer<
               );
         }
       },
+      compensateDeadLetter: (effect, error) => {
+        switch (effect.request.type) {
+          case "provider-turn.start":
+          case "provider-turn.restart":
+            return providerTurnStart
+              .failFromDeadLetter({
+                threadId: effect.threadId,
+                runId: effect.request.runId,
+                error,
+              })
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logError("Failed to fail the run for a dead-lettered turn start", {
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    error: Cause.pretty(cause),
+                  }),
+                ),
+              );
+          default:
+            return Effect.void;
+        }
+      },
     });
   }),
 );
@@ -532,9 +559,12 @@ export const layerWithOptions = (
               .succeed({ effectId: effect.id, workerId })
               .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
           : effect.attemptCount >= maxAttempts
-            ? yield* outbox
-                .fail({ effectId: effect.id, workerId, error })
-                .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
+            ? yield* Effect.uninterruptible(
+                executor.compensateDeadLetter(effect, error).pipe(
+                  Effect.andThen(outbox.fail({ effectId: effect.id, workerId, error })),
+                  Effect.onError((cause) => terminalizeClaim(effect, cause)),
+                ),
+              )
             : yield* outbox
                 .retry({
                   effectId: effect.id,

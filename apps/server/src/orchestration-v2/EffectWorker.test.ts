@@ -130,6 +130,7 @@ function makeExecutorLayer(input: {
               });
             }
           }),
+        failFromDeadLetter: () => Effect.void,
       }),
     ),
     Layer.succeed(
@@ -233,6 +234,7 @@ it.effect("requeues a claim when a pre-execution worker check fails", () =>
     const executorLayer = Layer.succeed(
       OrchestrationEffectExecutorV2,
       OrchestrationEffectExecutorV2.of({
+        compensateDeadLetter: () => Effect.void,
         execute: () => Ref.update(executionCount, (count) => count + 1),
       }),
     );
@@ -306,6 +308,7 @@ it.effect("arms cancellation before the durable pre-execution check", () =>
     const executorLayer = Layer.succeed(
       OrchestrationEffectExecutorV2,
       OrchestrationEffectExecutorV2.of({
+        compensateDeadLetter: () => Effect.void,
         execute: () =>
           Effect.yieldNow.pipe(Effect.andThen(Ref.update(executionCount, (count) => count + 1))),
       }),
@@ -374,6 +377,7 @@ it.effect("terminalizes a process-bound claim when success settlement fails", ()
     const executorLayer = Layer.succeed(
       OrchestrationEffectExecutorV2,
       OrchestrationEffectExecutorV2.of({
+        compensateDeadLetter: () => Effect.void,
         execute: () => Ref.update(executionCount, (count) => count + 1),
       }),
     );
@@ -437,7 +441,10 @@ it.effect("requeues a replay-safe claim when success settlement fails", () =>
     });
     const executorLayer = Layer.succeed(
       OrchestrationEffectExecutorV2,
-      OrchestrationEffectExecutorV2.of({ execute: () => Effect.void }),
+      OrchestrationEffectExecutorV2.of({
+        compensateDeadLetter: () => Effect.void,
+        execute: () => Effect.void,
+      }),
     );
     const workerLayer = effectWorkerLayerWithOptions({ workerId }).pipe(
       Layer.provide(Layer.merge(outboxLayer, executorLayer)),
@@ -504,6 +511,7 @@ it.effect("keeps a process-bound executor failure retryable when retry settlemen
     const executorLayer = Layer.succeed(
       OrchestrationEffectExecutorV2,
       OrchestrationEffectExecutorV2.of({
+        compensateDeadLetter: () => Effect.void,
         execute: () =>
           Effect.fail(
             new OrchestrationEffectExecutionError({
@@ -576,6 +584,7 @@ it.effect("keeps a max-attempt replay-safe failure terminal when fail settlement
     const executorLayer = Layer.succeed(
       OrchestrationEffectExecutorV2,
       OrchestrationEffectExecutorV2.of({
+        compensateDeadLetter: () => Effect.void,
         execute: () =>
           Effect.fail(
             new OrchestrationEffectExecutionError({

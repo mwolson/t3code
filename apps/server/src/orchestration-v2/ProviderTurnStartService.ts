@@ -49,6 +49,11 @@ export interface ProviderTurnStartServiceV2Shape {
     readonly threadId: ThreadId;
     readonly runId: RunId;
   }) => Effect.Effect<void, ProviderTurnStartError>;
+  readonly failFromDeadLetter: (input: {
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+    readonly error: string;
+  }) => Effect.Effect<void, ProviderTurnStartError>;
 }
 
 export class ProviderTurnStartServiceV2 extends Context.Service<
@@ -983,6 +988,14 @@ export const layer: Layer.Layer<
     return ProviderTurnStartServiceV2.of({
       start: (input) =>
         start(input).pipe(
+          Effect.mapError((cause) =>
+            isProviderTurnStartError(cause)
+              ? cause
+              : new ProviderTurnStartError({ runId: input.runId, cause }),
+          ),
+        ),
+      failFromDeadLetter: (input) =>
+        failFromDeadLetter(input).pipe(
           Effect.mapError((cause) =>
             isProviderTurnStartError(cause)
               ? cause

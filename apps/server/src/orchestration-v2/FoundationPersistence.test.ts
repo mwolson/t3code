@@ -703,6 +703,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       const executorLayer = Layer.succeed(
         OrchestrationEffectExecutorV2,
         OrchestrationEffectExecutorV2.of({
+          compensateDeadLetter: () => Effect.void,
           execute: () => Ref.update(executionCount, (count) => count + 1),
         }),
       );
@@ -1173,6 +1174,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       const executorLayer = Layer.succeed(
         OrchestrationEffectExecutorV2,
         OrchestrationEffectExecutorV2.of({
+          compensateDeadLetter: () => Effect.void,
           execute: () =>
             Deferred.succeed(started, undefined).pipe(
               Effect.andThen(Effect.never),
@@ -1318,7 +1320,10 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       });
       const executorLayer = Layer.succeed(
         OrchestrationEffectExecutorV2,
-        OrchestrationEffectExecutorV2.of({ execute: () => Effect.void }),
+        OrchestrationEffectExecutorV2.of({
+          compensateDeadLetter: () => Effect.void,
+          execute: () => Effect.void,
+        }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
         workerId: "settlement-race-worker",
@@ -1373,6 +1378,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       const executorLayer = Layer.succeed(
         OrchestrationEffectExecutorV2,
         OrchestrationEffectExecutorV2.of({
+          compensateDeadLetter: () => Effect.void,
           execute: () => Ref.update(executionCount, (count) => count + 1),
         }),
       );
@@ -1697,6 +1703,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       const executorLayer = Layer.succeed(
         OrchestrationEffectExecutorV2,
         OrchestrationEffectExecutorV2.of({
+          compensateDeadLetter: () => Effect.void,
           execute: () =>
             Effect.gen(function* () {
               const attempt = yield* Ref.updateAndGet(executions, (count) => count + 1);
@@ -1772,6 +1779,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       const executorLayer = Layer.succeed(
         OrchestrationEffectExecutorV2,
         OrchestrationEffectExecutorV2.of({
+          compensateDeadLetter: () => Effect.void,
           execute: (effect) => {
             const gate = gates.get(effect.id);
             if (gate === undefined) return Effect.die(`Missing gate for ${effect.id}`);
@@ -1868,6 +1876,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       const executorLayer = Layer.succeed(
         OrchestrationEffectExecutorV2,
         OrchestrationEffectExecutorV2.of({
+          compensateDeadLetter: () => Effect.void,
           execute: (effect) =>
             Ref.update(executions, (current) => [...current, effect.id]).pipe(
               Effect.andThen(
@@ -2197,6 +2206,7 @@ it.live("keeps claiming new work after repeated idle periods", () =>
     const executorLayer = Layer.succeed(
       OrchestrationEffectExecutorV2,
       OrchestrationEffectExecutorV2.of({
+        compensateDeadLetter: () => Effect.void,
         execute: (effect) => {
           const completion = completed.get(effect.id);
           return completion === undefined
