@@ -1,5 +1,4 @@
 import { useAtomValue } from "@effect/atom-react";
-import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
 import {
   deriveThreadActivityRun,
   deriveThreadRuntime,
@@ -297,7 +296,6 @@ export function useThreadComposerState() {
     );
   }, [selectedThreadActivityRun, selectedThreadSessionActivity, selectedThreadShell]);
 
-  const activeThreadBusy = threadRuntimeIsActive(selectedThreadRuntime);
   const interruptibleRunId = threadRuntimeHasInterruptibleRun(selectedThreadRuntime)
     ? (selectedThreadRuntime?.activeRunId ?? null)
     : null;
@@ -633,7 +631,6 @@ export function useThreadComposerState() {
     modelSelection,
     runtimeMode,
     interactionMode,
-    activeThreadBusy,
     interruptibleRunId,
     onChangeDraftMessage,
     onPickDraftMedia,
