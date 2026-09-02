@@ -447,18 +447,18 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     () =>
       buildModelOptions(
         selectedEnvironmentServerConfig,
-        draftModelSelection ?? projectDefaultModelSelection ?? stickyModelSelection,
+        draftModelSelection ?? stickyModelSelection ?? projectDefaultModelSelection,
       ),
     [
       selectedEnvironmentServerConfig,
       draftModelSelection,
-      projectDefaultModelSelection,
       stickyModelSelection,
+      projectDefaultModelSelection,
     ],
   );
 
-  // An unsent draft keeps its explicit pick. Fresh drafts resolve the project
-  // default before the last manual app-wide selection and provider default.
+  // An unsent draft keeps its explicit pick. Fresh drafts resolve the
+  // last manual app-wide selection before the project and provider defaults.
   const selectedModel = resolveNewTaskModelSelection({
     draftSelection: draftModelSelection,
     projectDefaultSelection: projectDefaultModelSelection,
