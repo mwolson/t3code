@@ -207,8 +207,8 @@ function threadFeedEntryIsUnchanged(a: ThreadFeedEntry, b: ThreadFeedEntry): boo
         currentMessage.creationSource === nextMessage.creationSource &&
         currentMessage.visibility === nextMessage.visibility &&
         currentMessage.sourceThreadId === nextMessage.sourceThreadId &&
-        currentMessage.projectedItem.sourceItemId === nextMessage.projectedItem.sourceItemId &&
-        currentMessage.projectedItem.item.status === nextMessage.projectedItem.item.status &&
+        currentMessage.projectedItem?.sourceItemId === nextMessage.projectedItem?.sourceItemId &&
+        currentMessage.projectedItem?.item.status === nextMessage.projectedItem?.item.status &&
         currentMessage.createdAt === nextMessage.createdAt &&
         currentMessage.updatedAt === nextMessage.updatedAt &&
         chatAttachmentsAreUnchanged(currentMessage.attachments, nextMessage.attachments)

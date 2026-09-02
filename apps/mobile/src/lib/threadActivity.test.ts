@@ -768,6 +768,32 @@ describe("computeStableThreadFeedEntries", () => {
     expect(repeated.result).toBe(initial.result);
   });
 
+  it("does not throw when a local or anchored message has no projected item", () => {
+    const local = {
+      type: "message" as const,
+      id: "optimistic-user",
+      createdAt: "2026-08-29T00:00:00.000Z",
+      message: {
+        id: MessageId.make("optimistic-user"),
+        role: "user" as const,
+        text: "optimistic-user",
+        attachments: [],
+        runId: null,
+        streaming: false,
+        visibility: "local" as const,
+        sourceThreadId: threadId,
+        createdAt: "2026-08-29T00:00:00.000Z",
+        updatedAt: "2026-08-29T00:00:00.000Z",
+      },
+    };
+    const previous = computeStableThreadFeedEntries([local], {
+      byId: new Map(),
+      result: [],
+    });
+    expect(() => computeStableThreadFeedEntries([local], previous)).not.toThrow();
+    expect(computeStableThreadFeedEntries([local], previous).result[0]).toBe(previous.result[0]);
+  });
+
   it("replaces only the streaming message whose content changed", () => {
     const initialFeed = buildThreadFeed([
       projected(userMessage(), 0),
