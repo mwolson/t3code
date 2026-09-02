@@ -1593,7 +1593,7 @@ describe("deriveMessagesTimelineRows", () => {
       "assistant-final-entry",
       "user-followup-entry",
       "working-indicator-row",
-      "thinking-indicator-row",
+      "live-activity-row",
     ]);
     const finalRow = rows.find((row) => row.id === "assistant-final-entry");
     expect(finalRow?.kind === "message" && finalRow.showAssistantMeta).toBe(true);
@@ -1631,14 +1631,15 @@ describe("deriveMessagesTimelineRows", () => {
       revertTurnCountByUserMessageId: new Map(),
     });
 
-    // The settled tool stays visible in past tense instead of vanishing, and
-    // the thinking indicator marks that the turn itself is still running.
-    expect(rows.map((row) => row.kind)).toEqual(["working", "work-live", "thinking"]);
+    // A successfully settled command keeps the shared live-activity row alive
+    // between actions (#9098) instead of dropping to past tense, so no extra
+    // thinking row appears while the turn is still running.
+    expect(rows.map((row) => row.kind)).toEqual(["working", "work-live"]);
     expect(rows.find((row) => row.kind === "work-live")).toMatchObject({
-      active: false,
+      active: true,
+      id: "live-activity-row",
       entry: { id: "work-1" },
     });
-    expect(rows.at(-1)).toMatchObject({ kind: "thinking" });
   });
 
   it("does not fold the active in-progress turn", () => {
@@ -1688,7 +1689,7 @@ describe("deriveMessagesTimelineRows", () => {
     expect(rows.map((row) => row.id)).toEqual([
       "working-indicator-row",
       "assistant-thought-entry",
-      "work-live:work-entry-1",
+      "live-activity-row",
     ]);
     const liveRow = rows.find((row) => row.kind === "work-live");
     expect(liveRow?.kind === "work-live" ? liveRow.entry.id : null).toBe("work-1");
@@ -1961,8 +1962,8 @@ describe("computeStableMessagesTimelineRows", () => {
       initial,
     );
 
-    const initialThinking = initial.byId.get("thinking-indicator-row");
-    const updatedThinking = updated.byId.get("thinking-indicator-row");
+    const initialThinking = initial.byId.get("live-activity-row");
+    const updatedThinking = updated.byId.get("live-activity-row");
     expect(initialThinking).toMatchObject({ kind: "thinking" });
     expect(updatedThinking).toBe(initialThinking);
     expect(updated.result.at(-1)).toBe(updatedThinking);
