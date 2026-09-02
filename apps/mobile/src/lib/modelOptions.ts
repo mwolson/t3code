@@ -143,8 +143,8 @@ export function resolveNewTaskModelSelection(input: {
 }): ModelSelection | null {
   return (
     input.draftSelection ??
-    input.projectDefaultSelection ??
     input.stickySelection ??
+    input.projectDefaultSelection ??
     input.modelOptions.find((option) => option.isDefault && !option.isUnavailable)?.selection ??
     input.modelOptions.find((option) => !option.isUnavailable)?.selection ??
     null

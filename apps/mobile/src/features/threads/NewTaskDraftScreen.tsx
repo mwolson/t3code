@@ -1060,7 +1060,7 @@ export function NewTaskDraftScreen(props: {
       flow.finishEditingPendingTask();
     } else {
       // Drop draft-local model/workspace selections with the content. The
-      // next task re-resolves project defaults before sticky app defaults.
+      // next task re-resolves sticky app defaults before project defaults.
       // The queued message owns the attachments now, so the sweep is deferred
       // until the write confirms it.
       clearComposerDraftContent(draftKey, {
