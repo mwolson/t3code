@@ -166,18 +166,36 @@ export function NativeStackScreenOptions(props: {
       ) as NativeStackNavigationOptions)
     : undefined;
 
-  useLayoutEffect(() => {
-    if (!navigation || !stableOptions) {
+  const applyOptionsIfFocused = () => {
+    if (!navigation || !stableOptions || !navigation.isFocused()) {
       return;
     }
     const signature = optionsSignature([stableOptions, props.optionsVersion]);
     // Avoid re-entering navigation state when semantically equal options are
     // reapplied every layout (common when callers pass unstable object literals).
+    // Re-entering during a native push/pop is what produces
+    // "Unbalanced calls to begin/end appearance transitions" and a Home
+    // list that still paints but no longer receives taps.
     if (lastAppliedOptionsSignatureRef.current === signature) {
       return;
     }
     lastAppliedOptionsSignatureRef.current = signature;
     navigation.setOptions(stableOptions);
+  };
+
+  useLayoutEffect(() => {
+    applyOptionsIfFocused();
+  }, [navigation, props.optionsVersion, stableOptions]);
+
+  useEffect(() => {
+    if (!navigation) {
+      return;
+    }
+    const unsubscribe = navigation.addListener("focus", () => {
+      lastAppliedOptionsSignatureRef.current = undefined;
+      applyOptionsIfFocused();
+    });
+    return unsubscribe;
   }, [navigation, props.optionsVersion, stableOptions]);
 
   useEffect(() => {
