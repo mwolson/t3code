@@ -868,13 +868,7 @@ it.effect(
       Layer.provide(
         Layer.mergeAll(
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
-            getShellSnapshot: () =>
-              Effect.succeed({
-                schemaVersion: 2,
-                snapshotSequence: 0,
-                threads: [{ id: threadId }],
-                archivedThreads: [],
-              } as never),
+            getRecoveryThreadIds: () => Effect.succeed([threadId]),
             getThreadProjection: () => Effect.succeed(projection),
           }),
           Layer.mock(EventSink.EventSinkV2)({

@@ -1212,7 +1212,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       return yield* Effect.die(`Timed out waiting for ${label}.`);
     });
 
-  const makeCodexReplayHarness = (transcript: CodexReplay.CodexAppServerReplayTranscript) =>
+  const makeCodexReplayHarness = (
+    transcript: CodexReplay.CodexAppServerReplayTranscript,
+    onEvent: (event: ProviderAdapterV2Event) => Effect.Effect<unknown> = () => Effect.void,
+  ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const idAllocator = yield* IdAllocatorV2;
@@ -1273,6 +1276,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 ? Deferred.succeed(firstTerminal, undefined)
                 : Effect.void,
             ),
+            Effect.andThen(onEvent(event)),
           ),
         ),
         Effect.forkScoped,
@@ -3958,7 +3962,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     () =>
       Effect.scoped(
         Effect.gen(function* () {
-          const harness = yield* makeCodexReplayHarness(orphanedDynamicToolTranscript);
+          const monitorCompleted = yield* Deferred.make<void>();
+          const harness = yield* makeCodexReplayHarness(orphanedDynamicToolTranscript, (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "dynamic_tool" &&
+            event.turnItem.nativeItemRef?.nativeId === PERSISTENT_MONITOR_ITEM &&
+            event.turnItem.status === "completed"
+              ? Deferred.succeed(monitorCompleted, undefined)
+              : Effect.void,
+          );
           const now = yield* DateTime.now;
 
           yield* harness.runtime.startTurn(
@@ -3970,7 +3982,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               text: ORPHAN_WAIT_PROMPT,
             }),
           );
-          yield* awaitUntil(() => harness.terminalEvents().length === 1, "completed terminal");
+          yield* harness.firstTerminal;
           assert.equal(harness.terminalEvents()[0]?.status, "completed");
 
           const terminalIndex = harness.events.findIndex((event) => event.type === "turn.terminal");
@@ -3989,32 +4001,36 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             "orphaned wait terminalization must precede turn.terminal",
           );
 
-          const completedWaitStatuses = harness.events.flatMap((event) =>
-            event.type === "turn_item.updated" &&
-            event.turnItem.type === "dynamic_tool" &&
-            event.turnItem.nativeItemRef?.nativeId === COMPLETED_WAIT_ITEM
-              ? [event.turnItem.status]
-              : [],
+          const completedWaitStatuses = new Set(
+            harness.events.flatMap((event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "dynamic_tool" &&
+              event.turnItem.nativeItemRef?.nativeId === COMPLETED_WAIT_ITEM
+                ? [event.turnItem.status]
+                : [],
+            ),
           );
           assert.isTrue(
-            completedWaitStatuses.includes("completed"),
+            completedWaitStatuses.has("completed"),
             "the wait that received item/completed must stay completed",
           );
           assert.isFalse(
-            completedWaitStatuses.includes("cancelled"),
+            completedWaitStatuses.has("cancelled"),
             "a completed wait must not be rewritten as cancelled",
           );
 
-          const persistentMonitorStatuses = harness.events.flatMap((event) =>
-            event.type === "turn_item.updated" &&
-            event.turnItem.type === "dynamic_tool" &&
-            event.turnItem.nativeItemRef?.nativeId === PERSISTENT_MONITOR_ITEM
-              ? [event.turnItem.status]
-              : [],
+          const persistentMonitorStatuses = new Set(
+            harness.events.flatMap((event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "dynamic_tool" &&
+              event.turnItem.nativeItemRef?.nativeId === PERSISTENT_MONITOR_ITEM
+                ? [event.turnItem.status]
+                : [],
+            ),
           );
-          assert.isTrue(persistentMonitorStatuses.includes("running"));
+          assert.isTrue(persistentMonitorStatuses.has("running"));
           assert.isFalse(
-            persistentMonitorStatuses.includes("cancelled"),
+            persistentMonitorStatuses.has("cancelled"),
             "persistent monitors must remain running after the root turn completes",
           );
           assert.isTrue(
@@ -4023,18 +4039,19 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           );
 
           yield* TestClock.adjust("30 seconds");
-          const lateMonitorUpdateIndex = () =>
-            harness.events.findIndex(
-              (event, index) =>
-                index > terminalIndex &&
-                event.type === "turn_item.updated" &&
-                event.turnItem.type === "dynamic_tool" &&
-                event.turnItem.nativeItemRef?.nativeId === PERSISTENT_MONITOR_ITEM &&
-                event.turnItem.status === "completed",
-            );
-          yield* awaitUntil(
-            () => lateMonitorUpdateIndex() > terminalIndex,
-            "post-settle persistent tool completion",
+          yield* Deferred.await(monitorCompleted);
+          const lateMonitorUpdateIndex = harness.events.findIndex(
+            (event, index) =>
+              index > terminalIndex &&
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "dynamic_tool" &&
+              event.turnItem.nativeItemRef?.nativeId === PERSISTENT_MONITOR_ITEM &&
+              event.turnItem.status === "completed",
+          );
+          assert.isAbove(
+            lateMonitorUpdateIndex,
+            terminalIndex,
+            "persistent tool completion must follow turn.terminal",
           );
           assert.lengthOf(harness.terminalEvents(), 1);
           assert.isFalse(yield* harness.hasPendingBackgroundWork);
