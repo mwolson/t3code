@@ -1803,6 +1803,21 @@ describe("openCode2 interrupt and event-stream recovery helpers", () => {
     );
   });
 
+  it("passes through 18999 TUI and snapshot events as no-ops", () => {
+    assert.strictEqual(normalizeOpenCode2WireType("session.viewed"), "session.viewed");
+    assert.strictEqual(
+      normalizeOpenCode2WireType("session.step.streamed"),
+      "session.step.streamed",
+    );
+    assert.strictEqual(
+      normalizeOpenCode2WireType("session.message.content.updated"),
+      "session.message.content.updated",
+    );
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("session.viewed"));
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("session.step.streamed"));
+    assert.isFalse(openCode2EventSettlesHeldExecutionFailure("session.message.content.updated"));
+  });
+
   it("passes through live retry events", () => {
     assert.strictEqual(
       normalizeOpenCode2WireType("session.retry.scheduled"),

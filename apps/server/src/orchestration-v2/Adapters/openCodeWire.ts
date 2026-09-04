@@ -1,6 +1,6 @@
 /**
  * OpenCode 2 wire helpers. Maps runtime type strings onto the adapter switch's
- * internal names. The pinned 17823 wire uses short step/text names,
+ * internal names. The pinned 18999 wire still uses short step/text names,
  * `session.inbox.*` admission, and first-class `session.execution.*`.
  */
 
@@ -38,6 +38,9 @@ export type OpenCode2CanonicalEventType =
   | "session.execution.failed"
   | "session.execution.interrupted"
   | "session.idle"
+  | "session.viewed"
+  | "session.step.streamed"
+  | "session.message.content.updated"
   | "session.error"
   | "permission.v2.asked"
   | "permission.v2.replied"
@@ -56,7 +59,7 @@ export type OpenCode2CanonicalEventType =
   | "unknown";
 
 /**
- * Lifecycle renames on the pinned 17823 wire. Internal switch cases keep
+ * Lifecycle renames on the pinned 18999 wire. Internal switch cases keep
  * short canonical names.
  */
 const WIRE_TYPE_ALIASES: Readonly<Record<string, OpenCode2CanonicalEventType>> = {
@@ -83,6 +86,9 @@ const PASSTHROUGH_TYPES = new Set<string>([
   "session.execution.started",
   "session.execution.succeeded",
   "session.idle",
+  "session.viewed",
+  "session.step.streamed",
+  "session.message.content.updated",
   "session.retry.scheduled",
   "session.input.admitted",
   "session.error",
@@ -223,7 +229,7 @@ export function openCode2WireSession(event: {
 
 export function openCode2WireCallID(event: { readonly data?: unknown }): string | undefined {
   const data = openCode2WireData(event);
-  // 17823 tool events key the call with `id` and put the tool name on `name`.
+  // 18999 tool events still key the call with `id` and put the tool name on `name`.
   // `callID` / `callId` remain accepted when present.
   const value = data.callID ?? data.callId ?? data.id;
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -238,7 +244,7 @@ export function openCode2WireToolName(event: { readonly data?: unknown }): strin
   return undefined;
 }
 
-/** Normalize tool result metadata across the 17823 wire shapes. */
+/** Normalize tool result metadata across the 18999 wire shapes. */
 export function openCode2WireToolMetadata(event: {
   readonly data?: unknown;
 }): Record<string, unknown> | undefined {
