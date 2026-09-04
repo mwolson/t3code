@@ -186,14 +186,14 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   childNodeId: NodeId,
   status: OrchestratorMcpDelegatedTaskStatus,
   hasPendingChildRuns: Schema.Boolean,
-  providerInstanceId: ProviderInstanceId,
-  model: Schema.NullOr(Schema.String),
-  summary: Schema.NullOr(Schema.String),
-  resultContextTransferId: Schema.NullOr(ContextTransferId),
   latestTerminalRunId: Schema.NullOr(RunId),
   latestTerminalStatus: Schema.NullOr(OrchestratorMcpTerminalDelegatedTaskStatus),
   latestTerminalSummary: Schema.NullOr(Schema.String),
   latestTerminalResultContextTransferId: Schema.NullOr(ContextTransferId),
+  providerInstanceId: ProviderInstanceId,
+  model: Schema.NullOr(Schema.String),
+  summary: Schema.NullOr(Schema.String),
+  resultContextTransferId: Schema.NullOr(ContextTransferId),
   waitTimedOut: Schema.Boolean,
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;

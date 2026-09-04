@@ -224,9 +224,9 @@ result.
 
 ### `task_cancel`
 
-Interrupts the active child run through the normal V2 `run.interrupt` command.
-It is idempotent for terminal tasks and accepts an optional cancellation
-reason.
+Interrupts the original delegated run through the normal V2 `run.interrupt`
+command. It is idempotent for terminal tasks and accepts an optional cancellation
+reason. Use `t3_thread_interrupt` to interrupt a later follow-up run.
 
 ### `create_threads`
 
