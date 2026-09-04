@@ -82,6 +82,11 @@ export interface GitStatusDetails {
   aheadOfDefaultCount: number;
 }
 
+export interface GitLocalStatusOptions {
+  /** Skip revision walks and return zero divergence counts for local-only consumers. */
+  readonly includeDivergence?: boolean;
+}
+
 export interface GitRemoteStatusDetails {
   isRepo: boolean;
   defaultBranch: string | null;
@@ -295,7 +300,10 @@ export class GitVcsDriver extends Context.Service<
     readonly execute: (input: ExecuteGitInput) => Effect.Effect<ExecuteGitResult, GitCommandError>;
     readonly status: (input: VcsStatusInput) => Effect.Effect<VcsStatusResult, GitCommandError>;
     readonly statusDetails: (cwd: string) => Effect.Effect<GitStatusDetails, GitCommandError>;
-    readonly statusDetailsLocal: (cwd: string) => Effect.Effect<GitStatusDetails, GitCommandError>;
+    readonly statusDetailsLocal: (
+      cwd: string,
+      options?: GitLocalStatusOptions,
+    ) => Effect.Effect<GitStatusDetails, GitCommandError>;
     readonly statusDetailsRemote: (
       cwd: string,
       options?: GitRemoteStatusOptions,
