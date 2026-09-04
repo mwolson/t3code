@@ -946,7 +946,7 @@ export function openCode2ProviderRetryIsScheduled(
 }
 
 /**
- * 17823 emits `session.step.failed` before `session.retry.scheduled` for a
+ * OpenCode 2 emits `session.step.failed` before `session.retry.scheduled` for a
  * still-retryable unknown finish. Hold that failure until a retry is
  * announced. Only idle or another execution.failed prove OpenCode stopped.
  * Stop and session.error keep their own handlers. Trailing usage or text
@@ -5964,6 +5964,21 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
                 active.turn.interrupted ? "interrupted" : "completed",
               );
               if (!isReplay) active.state.activeExecution = null;
+              return;
+            }
+            // TUI unread tracking. Calling session.view from T3 would fake a
+            // user looking at the session; ignore the event.
+            case "session.viewed": {
+              return;
+            }
+            // Stream heartbeat with assistantMessageID. execution.started and
+            // text.started already open the turn; acting here would duplicate.
+            case "session.step.streamed": {
+              return;
+            }
+            // Full assistant-content snapshot. text.delta / tool events already
+            // apply the same parts. Handling both would double-write the row.
+            case "session.message.content.updated": {
               return;
             }
             case "session.error": {
