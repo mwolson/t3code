@@ -79,9 +79,11 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string
   const toolPresentation = resolveWorkEntryToolPresentation(entry);
   if (toolPresentation) return toolPresentation.displayName;
   if (entry.command) return entry.command;
-  // v2 provider error items carry the retry progress in the label; the
-  // failure message is the detail behind the expander.
-  if (entry.detail && entry.itemType !== "error") return entry.detail;
+  // Retrying providers keep their progress label; other diagnostics expose
+  // the retained message instead of a generic error heading.
+  const providerRetry =
+    entry.projectedItem?.item.type === "error" && entry.projectedItem.item.retry !== undefined;
+  if (entry.detail && !providerRetry) return entry.detail;
   const [firstPath] = entry.changedFiles ?? [];
   if (firstPath) {
     const path = formatWorkspaceRelativePath(firstPath, workspaceRoot);
@@ -998,6 +1000,7 @@ export function deriveMessagesTimelineRows(input: {
       if (
         entry.kind !== "work" ||
         entry.entry.tone === "error" ||
+        entry.entry.sourceActivityKind === "runtime.error" ||
         entry.entry.itemType === "system_notice" ||
         entry.entry.runId == null ||
         !activeVisualResponseRunIds.has(entry.entry.runId) ||
@@ -1161,6 +1164,7 @@ export function deriveMessagesTimelineRows(input: {
     if (timelineEntry.kind === "work") {
       if (
         timelineEntry.entry.tone === "error" ||
+        timelineEntry.entry.sourceActivityKind === "runtime.error" ||
         timelineEntry.entry.itemType === "system_notice"
       ) {
         nextRows.push({
@@ -1181,6 +1185,7 @@ export function deriveMessagesTimelineRows(input: {
           nextEntry.kind !== "work" ||
           nextEntry.entry.sourceActivityKind === "context-compaction" ||
           nextEntry.entry.tone === "error" ||
+          nextEntry.entry.sourceActivityKind === "runtime.error" ||
           nextEntry.entry.itemType === "system_notice" ||
           activeWorkEntryIds.has(nextEntry.id) ||
           collapsedEntryIds.has(nextEntry.id) ||

@@ -296,9 +296,8 @@ describe("providerMaintenanceRunner", () => {
     "keeps a successful update when the binary is present but its version is unreadable",
     () => {
       return Effect.gen(function* () {
-        const { registry, providersRef } = yield* makeRegistry(baseCursorProvider);
-        // Cursor's `agent about` probe can fail right after an update while the
-        // new binary is perfectly fine.
+        const { registry, providersRef } = yield* makeRegistry(baseNativeCliProvider);
+        // A native CLI version probe can fail immediately after a successful update.
         const updater = yield* makeTestRunner({
           ...registry,
           refreshInstance: () =>
@@ -307,7 +306,7 @@ describe("providerMaintenanceRunner", () => {
             ),
         });
 
-        const result = yield* updater.updateProvider(CURSOR_DRIVER);
+        const result = yield* updater.updateProvider(NATIVE_CLI_DRIVER);
         assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
       }).pipe(
         Effect.provide(
