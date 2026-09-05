@@ -52,6 +52,8 @@ import { DiffWorkerPoolProvider } from "../DiffWorkerPoolProvider";
 import {
   type TimelineEntry,
   providerErrorPresentation,
+  createMessageAttachmentPreviewProjector,
+  selectMessageImageResources,
   workEntryDisplayIndicatesToolFailure,
   workEntrySignalsSevereFailure,
   workLogEntryIsToolLike,
@@ -104,7 +106,7 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { Button } from "../ui/button";
-import { useAssetUrlRefresh, useAssetUrlState } from "../../assets/assetUrls";
+import { useAssetUrlRefresh, useAssetUrls, useAssetUrlState } from "../../assets/assetUrls";
 import { MediaVideoPlayer } from "../media/MediaVideoPlayer";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
 import {
@@ -114,7 +116,6 @@ import {
 } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
-import { shouldAutoExpandChangedFiles } from "./changedFilesPresentation";
 import { MessageCopyButton } from "./MessageCopyButton";
 import { unwrapSoleMarkdownFence } from "../../markdown-clipboard";
 import { PierreEntryIcon } from "./PierreEntryIcon";
@@ -1506,9 +1507,24 @@ function UserVideoAttachment({ file }: { readonly file: ChatFileAttachment }) {
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
+  const resources = useMemo(
+    () => selectMessageImageResources(row.message.attachments),
+    [row.message.attachments],
+  );
+  const previewUrls = useAssetUrls(ctx.activeThreadEnvironmentId, resources);
+  const [projectPreviews] = useState(createMessageAttachmentPreviewProjector);
+  const messageWithPreviews = useMemo(() => {
+    const urlsById = new Map(
+      resources.flatMap((resource, index) => {
+        const url = previewUrls[index];
+        return url ? [[resource.attachmentId, url] as const] : [];
+      }),
+    );
+    return projectPreviews(row.message, (attachment) => urlsById.get(attachment.id));
+  }, [previewUrls, projectPreviews, resources, row.message]);
   // The attachment union has an open member, so guards (not literal type
   // comparisons) split it. Unknown types render as inert rows below the files.
-  const userImages = (row.message.attachments ?? []).filter(isImageAttachment);
+  const userImages = (messageWithPreviews.attachments ?? []).filter(isImageAttachment);
   const userFiles = (row.message.attachments ?? []).filter(isFileAttachment);
   const userVideos = userFiles.filter(isVideoAttachment);
   const otherUserFiles = userFiles.filter((file) => !isVideoAttachment(file));
@@ -2613,11 +2629,13 @@ function LiveActivityRow({
   iconName,
   toolIcon,
   failed = false,
+  active = false,
 }: {
   label: string;
   iconName?: WorkEntryIconName;
   toolIcon?: ToolActivityIcon | undefined;
   failed?: boolean;
+  active?: boolean;
 }) {
   return (
     <div className="min-h-6 w-fit max-w-full min-w-0 overflow-hidden rounded-md text-sm leading-relaxed">
@@ -2627,6 +2645,7 @@ function LiveActivityRow({
         toolIcon={toolIcon}
         failed={failed}
         announceFailure={failed}
+        active={active}
       />
     </div>
   );
@@ -2638,12 +2657,14 @@ function LiveActivityContent({
   toolIcon,
   failed = false,
   announceFailure = false,
+  active = false,
 }: {
   label: string;
   iconName: WorkEntryIconName | undefined;
   toolIcon?: ToolActivityIcon | undefined;
   failed?: boolean;
   announceFailure?: boolean;
+  active?: boolean;
 }) {
   const showTrailingFailureMark =
     failed && iconName !== undefined && !toolIconAcceptsTint(iconName, toolIcon);
@@ -2673,7 +2694,7 @@ function LiveActivityContent({
           />
         </span>
       ) : null}
-      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span className={cn("min-w-0 flex-1 truncate", active && "live-tool-shine")}>{label}</span>
       {showTrailingFailureMark ? (
         <XIcon aria-hidden className={cn("size-3 shrink-0", failedToolIconClassName)} />
       ) : null}
@@ -2699,6 +2720,7 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
         iconName={workEntryIconName(row.entry)}
         toolIcon={row.entry.toolIcon ?? row.entry.toolSource?.icon}
         failed={failed}
+        active={row.active}
       />
     </button>
   );
@@ -2806,28 +2828,21 @@ function AssistantChangedFilesSectionInner({
   resolvedTheme: "light" | "dark";
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
 }) {
-  const activity = use(TimelineRowActivityCtx);
-  const isLatestRun = activity.latestRunId === turnSummary.runId;
   const persistedExpanded = useUiStateStore(
     (store) => store.threadChangedFilesExpandedById[routeThreadKey]?.[turnSummary.runId],
   );
   const setExpanded = useUiStateStore((store) => store.setThreadChangedFilesExpanded);
-  const [autoExpanded] = useState(() => shouldAutoExpandChangedFiles(checkpointFiles, isLatestRun));
-  const [allDirectoriesExpanded, setAllDirectoriesExpanded] = useState(autoExpanded);
-  const expanded = persistedExpanded ?? (isLatestRun && autoExpanded);
+  const allDirectoriesExpanded = persistedExpanded ?? false;
 
   return (
     <ChangedFilesCard
       runId={turnSummary.runId}
       files={checkpointFiles}
-      expanded={expanded}
-      showCompactPreview={isLatestRun}
       allDirectoriesExpanded={allDirectoriesExpanded}
       resolvedTheme={resolvedTheme}
-      onExpandedChange={(nextExpanded) =>
-        setExpanded(routeThreadKey, turnSummary.runId, nextExpanded)
+      onToggleAllDirectories={() =>
+        setExpanded(routeThreadKey, turnSummary.runId, !allDirectoriesExpanded)
       }
-      onToggleAllDirectories={() => setAllDirectoriesExpanded((current) => !current)}
       onOpenTurnDiff={onOpenTurnDiff}
     />
   );
@@ -3693,8 +3708,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     setExpanded(next);
   };
   const iconConfig = workToneIcon(workEntry.tone);
-  // v2 has no runtime.warning activity; error items carry the "error" tone.
-  const showWarningIndicator = false;
+  const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
   const showFailedIndicator = workEntryDisplayIndicatesToolFailure(workEntry);
   const showDestructiveRowStyle =
     showFailedIndicator &&
@@ -3803,7 +3817,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
               <span
                 className={cn(
                   "min-w-0 flex-1",
-                  expanded || (commandMatchesVisibleLabel && !canExpand)
+                  showWarningIndicator || expanded || (commandMatchesVisibleLabel && !canExpand)
                     ? "whitespace-pre-wrap break-words select-text"
                     : "truncate",
                   headingClass,

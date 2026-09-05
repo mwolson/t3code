@@ -75,6 +75,7 @@ function singleToolCallLabel(entry: WorkLogEntry): string {
 }
 
 export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string | undefined) {
+  if (entry.itemType === "system_notice") return entry.label;
   const toolPresentation = resolveWorkEntryToolPresentation(entry);
   if (toolPresentation) return toolPresentation.displayName;
   if (entry.command) return entry.command;
@@ -582,7 +583,8 @@ function deriveSupersededAttemptFolds(
     if (
       entry.attempt?.status !== "superseded" ||
       (entry.kind === "message" && entry.message.role === "user") ||
-      timelineEntryIsPersistentResourceCard(entry)
+      timelineEntryIsPersistentResourceCard(entry) ||
+      (entry.kind === "work" && entry.entry.itemType === "system_notice")
     ) {
       continue;
     }
@@ -631,6 +633,7 @@ function deriveUnsettledRunId(
 }
 
 function timelineEntryFoldRunId(entry: TimelineEntry): RunId | null {
+  if (entry.kind === "work" && entry.entry.itemType === "system_notice") return null;
   if (entry.kind === "message" && entry.message.role === "assistant") {
     return entry.message.runId ?? null;
   }
@@ -682,8 +685,8 @@ function deriveActiveVisualResponseRunIds(input: {
 
 /**
  * Settled turns fold activity before their terminal assistant message behind
- * a "Worked for ..." row. Work that lands after that message stays visible so
- * failed or interrupted turns do not hide their trailing tool-call summary.
+ * a "Worked for ..." row. A single ordinary activity after that message joins
+ * the fold, while larger groups and failures stay visible as a trailing summary.
  */
 function deriveTurnFolds(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
@@ -770,7 +773,11 @@ function deriveTurnFolds(input: {
       }
       const isCompaction =
         entry.kind === "work" && entry.entry.sourceActivityKind === "context-compaction";
-      if (!isCompaction && index > terminalEntryIndex) {
+      const isSingleTrailingActivity =
+        group.entries.length === terminalEntryIndex + 2 &&
+        entry.kind === "work" &&
+        !workEntryDisplayIndicatesToolFailure(entry.entry);
+      if (!isCompaction && index > terminalEntryIndex && !isSingleTrailingActivity) {
         continue;
       }
       // Linked resources can outlive their launching run and stay visible
@@ -991,6 +998,7 @@ export function deriveMessagesTimelineRows(input: {
       if (
         entry.kind !== "work" ||
         entry.entry.tone === "error" ||
+        entry.entry.itemType === "system_notice" ||
         entry.entry.runId == null ||
         !activeVisualResponseRunIds.has(entry.entry.runId) ||
         entry.entry.sourceActivityKind === "context-compaction" ||
@@ -1151,7 +1159,10 @@ export function deriveMessagesTimelineRows(input: {
     }
 
     if (timelineEntry.kind === "work") {
-      if (timelineEntry.entry.tone === "error") {
+      if (
+        timelineEntry.entry.tone === "error" ||
+        timelineEntry.entry.itemType === "system_notice"
+      ) {
         nextRows.push({
           kind: "work",
           id: timelineEntry.id,
@@ -1170,6 +1181,7 @@ export function deriveMessagesTimelineRows(input: {
           nextEntry.kind !== "work" ||
           nextEntry.entry.sourceActivityKind === "context-compaction" ||
           nextEntry.entry.tone === "error" ||
+          nextEntry.entry.itemType === "system_notice" ||
           activeWorkEntryIds.has(nextEntry.id) ||
           collapsedEntryIds.has(nextEntry.id) ||
           collapsedSupersededEntryIds.has(nextEntry.id) ||

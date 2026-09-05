@@ -264,9 +264,6 @@ export const ClientSettingsSchema = Schema.Struct({
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadUnpin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  continueThreadsAfterServerUpdate: Schema.Boolean.pipe(
-    Schema.withDecodingDefault(Effect.succeed(false)),
-  ),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -568,7 +565,7 @@ export const CursorSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
-    customModels: Schema.Array(Schema.String).pipe(
+    customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
@@ -679,7 +676,7 @@ export const AntigravitySettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "Automatic", clearWhenEmpty: "persist" },
       }),
     ),
-    customModels: Schema.Array(Schema.String).pipe(
+    customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
@@ -1001,6 +998,10 @@ export const ServerSettings = Schema.Struct({
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  /** Exact model IDs, applied to past and future usage on this environment. */
+  usagePriceOverrides: Schema.Record(TrimmedNonEmptyString, UsageModelPriceOverride).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -1125,7 +1126,7 @@ const ClaudeSettingsPatch = Schema.Struct({
 
 const CursorSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
-  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+  customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
 
 const GrokSettingsPatch = Schema.Struct({
@@ -1141,7 +1142,7 @@ const AntigravitySettingsPatch = Schema.Struct({
   gcpProject: Schema.optionalKey(TrimmedString),
   gcpLocation: Schema.optionalKey(TrimmedString),
   binaryPath: Schema.optionalKey(TrimmedString),
-  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+  customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
 
 const OpenCodeSettingsPatch = Schema.Struct({
@@ -1239,6 +1240,10 @@ export const ServerSettingsPatch = Schema.Struct({
   usageLimitSources: Schema.optionalKey(
     Schema.Record(UsageLimitSourceId, Schema.NullOr(UsageLimitSourceConfig)),
   ),
+  /** Each entry replaces one model's rates; `null` restores automatic pricing. */
+  usagePriceOverrides: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString, Schema.NullOr(UsageModelPriceOverride)),
+  ),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
@@ -1257,7 +1262,6 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),
-  continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffLayout: Schema.optionalKey(DiffLayout),
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
