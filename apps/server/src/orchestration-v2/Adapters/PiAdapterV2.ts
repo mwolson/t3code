@@ -2273,6 +2273,11 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
                 }),
             ),
           ),
+        compactThread: (turnInput) =>
+          runtime.startTurn({
+            ...turnInput,
+            message: { ...turnInput.message, text: "/compact" },
+          }),
         steerTurn: (steerInput: ProviderAdapterV2SteerInput) =>
           Effect.gen(function* () {
             const turn = threadState?.activeTurn ?? null;

@@ -2,6 +2,7 @@ import {
   ModelSelection,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProviderSession,
+  OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
   ProviderInstanceId,
   ProviderSessionId,
@@ -166,6 +167,11 @@ export interface ProviderSessionManagerV2Shape {
      * potential re-attach.
      */
     readonly revokeMcpCredential?: boolean;
+    /** True only when the application thread is permanently deleted. */
+    readonly deleteProviderThread?: boolean;
+    readonly providerInstanceId?: ProviderInstanceId;
+    readonly providerSession?: OrchestrationV2ProviderSession;
+    readonly providerThreads?: ReadonlyArray<OrchestrationV2ProviderThread>;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
 }
 
@@ -1632,6 +1638,39 @@ export const layerWithOptions = (
         release: releaseEntry,
         detach: (input) =>
           Effect.gen(function* () {
+            if (input.deleteProviderThread === true) {
+              const providerThreads = input.providerThreads ?? [];
+              const providerSession = input.providerSession;
+              if (
+                input.providerInstanceId !== undefined &&
+                providerSession !== undefined &&
+                providerThreads.length > 0
+              ) {
+                const adapter = yield* registry.get(input.providerInstanceId).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderSessionLookupError({
+                        providerSessionId: input.providerSessionId,
+                        cause,
+                      }),
+                  ),
+                );
+                const deleteDetachedThread = adapter.deleteDetachedThread;
+                if (deleteDetachedThread !== undefined) {
+                  yield* Effect.scoped(
+                    Effect.forEach(
+                      providerThreads,
+                      (providerThread) =>
+                        deleteDetachedThread({
+                          providerSession,
+                          providerThread,
+                        }),
+                      { concurrency: 1, discard: true },
+                    ),
+                  );
+                }
+              }
+            }
             const key = sessionKey(input.providerSessionId);
             const currentEntry = (yield* Ref.get(sessions)).get(key);
             if (currentEntry?.supportsMultipleProviderThreads === true) {

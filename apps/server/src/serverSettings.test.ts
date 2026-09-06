@@ -949,6 +949,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(next.providers.opencode, {
         // OpenCode is disabled by default; this update only touches paths.
         enabled: false,
+        backgroundSubagents: true,
         binaryPath: "/opt/homebrew/bin/opencode",
         serverUrl: "http://127.0.0.1:4096",
         serverPassword: "secret-password",

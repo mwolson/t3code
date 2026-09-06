@@ -22,7 +22,10 @@ import {
   ThreadCommandExecutor,
   layer as threadCommandExecutorLayer,
 } from "../orchestration-v2/ThreadCommandExecutor.ts";
-import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
+import {
+  historicalProviderSessionIds,
+  planThreadDeletion,
+} from "../orchestration-v2/ThreadDeletion.ts";
 import * as ProjectionProjects from "../persistence/Services/ProjectionProjects.ts";
 import { ProjectEnrichmentService, type ProjectEnrichment } from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -423,7 +426,21 @@ export const make = Effect.gen(function* () {
                   threadId: thread.id,
                 };
                 const now = yield* DateTime.now;
-                const plan = yield* planThreadDeletion({ command, projection, now, idAllocator });
+                const historicalIds = historicalProviderSessionIds(projection);
+                const historicalProviderSessions =
+                  historicalIds.length === 0
+                    ? []
+                    : yield* threadProjections.getProviderSessionsByIds(
+                        command.threadId,
+                        historicalIds,
+                      );
+                const plan = yield* planThreadDeletion({
+                  command,
+                  projection,
+                  now,
+                  idAllocator,
+                  historicalProviderSessions,
+                });
                 const committed = yield* threadEvents.commitCommand({
                   commandId: command.commandId,
                   commandType: command.type,

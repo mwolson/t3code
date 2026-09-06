@@ -3,6 +3,7 @@ import type {
   OrchestrationV2ConversationMessage,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProjectedTurnItem,
+  OrchestrationV2ProviderSession,
   OrchestrationV2ProviderTurn,
   OrchestrationV2Run,
   OrchestrationV2Subagent,
@@ -198,6 +199,11 @@ export interface ProjectionStoreV2Shape {
   readonly getThreadShell: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadShell | null, ProjectionStoreV2Error>;
+  /** Read retained session rows without restoring them to the live projection. */
+  readonly getProviderSessionsByIds: (
+    threadId: ThreadId,
+    providerSessionIds: ReadonlyArray<ProviderSessionId>,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationV2ProviderSession>, ProjectionStoreV2Error>;
   readonly getThread: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2AppThread, ProjectionStoreV2Error>;
@@ -528,6 +534,8 @@ export function applyToProjection(
         checkpoints: upsertById(base.checkpoints, event.payload),
       };
     case "checkpoint.rollback-requested":
+    case "provider-turn.interrupt-requested":
+    case "run.interrupt-noop":
       return base;
     case "context-handoff.updated":
       return {
@@ -555,12 +563,14 @@ export function applyToProjection(
 export interface ProjectionReplayState {
   readonly projections: Map<ThreadId, OrchestrationV2ThreadProjection>;
   readonly providerSessionThreadIds: Map<ProviderSessionId, ReadonlySet<ThreadId>>;
+  readonly retainedProviderSessions: Map<ProviderSessionId, OrchestrationV2ProviderSession>;
 }
 
 export function makeProjectionReplayState(): ProjectionReplayState {
   return {
     projections: new Map(),
     providerSessionThreadIds: new Map(),
+    retainedProviderSessions: new Map(),
   };
 }
 
@@ -591,6 +601,7 @@ export function applyToProjectionReplayState(
 
   switch (event.type) {
     case "provider-session.attached": {
+      state.retainedProviderSessions.set(event.payload.id, event.payload);
       const boundThreadIds = new Set(state.providerSessionThreadIds.get(event.payload.id) ?? []);
       boundThreadIds.add(event.threadId);
       state.providerSessionThreadIds.set(event.payload.id, boundThreadIds);
@@ -606,6 +617,7 @@ export function applyToProjectionReplayState(
       break;
     }
     case "provider-session.updated": {
+      state.retainedProviderSessions.set(event.payload.id, event.payload);
       const boundThreadIds = state.providerSessionThreadIds.get(event.payload.id) ?? [];
       for (const threadId of boundThreadIds) {
         if (threadId === event.threadId) continue;
@@ -2096,6 +2108,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             break;
           }
           case "checkpoint.rollback-requested":
+          case "provider-turn.interrupt-requested":
+          case "run.interrupt-noop":
             break;
           case "context-handoff.updated": {
             const payloadJson = yield* encodeContextHandoffPayload(event.payload);
@@ -3945,6 +3959,62 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
 
+    const getProviderSessionsByIds: ProjectionStoreV2Shape["getProviderSessionsByIds"] = (
+      threadId,
+      providerSessionIds,
+    ) =>
+      Effect.gen(function* () {
+        if (providerSessionIds.length === 0) {
+          return [];
+        }
+        const rows = yield* sql<PayloadRow>`
+          SELECT sessions.payload_json
+          FROM orchestration_v2_projection_provider_sessions sessions
+          WHERE sessions.provider_session_id IN ${sql.in(providerSessionIds)}
+            AND (
+              EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_session_bindings binding
+                WHERE binding.provider_session_id = sessions.provider_session_id
+                  AND binding.thread_id = ${threadId}
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM orchestration_v2_projection_provider_threads provider_thread
+                WHERE provider_thread.provider_session_id = sessions.provider_session_id
+                  AND (
+                    provider_thread.thread_id = ${threadId}
+                    OR provider_thread.owner_node_id IN (
+                      SELECT node_id
+                      FROM orchestration_v2_projection_nodes
+                      WHERE thread_id = ${threadId}
+                    )
+                    OR provider_thread.provider_thread_id IN (
+                      SELECT provider_thread_id
+                      FROM orchestration_v2_projection_subagents
+                      WHERE thread_id = ${threadId}
+                        AND provider_thread_id IS NOT NULL
+                    )
+                  )
+              )
+            )
+          ORDER BY sessions.updated_at ASC, sessions.provider_session_id ASC
+        `;
+        const sessions: Array<OrchestrationV2ProviderSession> = [];
+        for (const row of rows) {
+          sessions.push(yield* decodeProviderSessionPayload(row.payload_json));
+        }
+        return sessions;
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProjectionStoreReadError({
+              threadId,
+              cause,
+            }),
+        ),
+      );
+
     return {
       apply,
       getShellSnapshot,
@@ -3960,6 +4030,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getUnreadableThreadIds,
       getThreadSnapshot,
       getThreadSnapshotWindow,
+      getProviderSessionsByIds,
     } satisfies ProjectionStoreV2Shape;
   }),
 );
@@ -3977,6 +4048,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             const next: ProjectionReplayState = {
               projections: new Map(existing.projections),
               providerSessionThreadIds: new Map(existing.providerSessionThreadIds),
+              retainedProviderSessions: new Map(existing.retainedProviderSessions),
             };
             if (!applyToProjectionReplayState(next, event)) {
               return [
@@ -4212,6 +4284,21 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             };
           }),
         ),
+      getProviderSessionsByIds: (_threadId, providerSessionIds) =>
+        Effect.gen(function* () {
+          if (providerSessionIds.length === 0) {
+            return [];
+          }
+          const retained = (yield* Ref.get(replayState)).retainedProviderSessions;
+          const wanted = new Set(providerSessionIds);
+          return [...retained.values()]
+            .filter((session) => wanted.has(session.id))
+            .toSorted(
+              (left, right) =>
+                DateTime.toEpochMillis(left.updatedAt) - DateTime.toEpochMillis(right.updatedAt) ||
+                String(left.id).localeCompare(String(right.id)),
+            );
+        }),
     };
 
     return service;

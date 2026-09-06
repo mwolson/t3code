@@ -240,6 +240,7 @@ it.effect(
           getUnreadableThreadIds: () => Effect.die("unused getUnreadableThreadIds"),
           getThreadSnapshot: () => Effect.die("unused getThreadSnapshot"),
           getThreadSnapshotWindow: () => Effect.die("unused getThreadSnapshotWindow"),
+          getProviderSessionsByIds: () => Effect.succeed([]),
         }),
       );
       const sessionManagerLayer = Layer.succeed(

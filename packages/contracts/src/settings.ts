@@ -863,6 +863,18 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
+    backgroundSubagents: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({
+        title: "Background subagents (experimental)",
+        description:
+          "Enables model-initiated background subagents for T3-managed servers. External servers must set OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS themselves.",
+        providerSettingsForm: {
+          control: "switch",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     binaryPath: makeBinaryPathSetting("opencode").pipe(
       Schema.annotateKey({
         title: "Binary path",
@@ -902,10 +914,12 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "serverUrl", "serverPassword"],
+    order: ["binaryPath", "backgroundSubagents", "serverUrl", "serverPassword"],
   },
 );
 export type OpenCodeSettings = typeof OpenCodeSettings.Type;
+export const OpenCode2Settings = OpenCodeSettings;
+export type OpenCode2Settings = OpenCodeSettings;
 
 /**
  * A read-only quota source outside this environment's provider CLIs. The
@@ -1282,6 +1296,7 @@ const PiSettingsPatch = Schema.Struct({
 
 const OpenCodeSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
+  backgroundSubagents: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
   serverUrl: Schema.optionalKey(TrimmedString),
   serverPassword: Schema.optionalKey(TrimmedString),

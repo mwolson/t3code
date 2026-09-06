@@ -77,6 +77,12 @@ export type OrchestratorV2ScenarioStep =
       readonly key: string;
     }
   | {
+      readonly type: "await_subagent_status";
+      readonly threadId: ThreadId;
+      readonly status: OrchestrationV2Subagent["status"];
+      readonly subagentId?: OrchestrationV2Subagent["id"];
+    }
+  | {
       readonly type: "respond_to_next_runtime_request";
       readonly threadId: ThreadId;
       readonly commandId: CommandId;
@@ -589,6 +595,9 @@ export function runOrchestratorV2Scenario(
             break;
           case "capture_shell_snapshot":
             capturedShellSnapshots.set(step.key, yield* orchestrator.getShellSnapshot());
+            break;
+          case "await_subagent_status":
+            yield* waitForSubagentStatus(step.threadId, step.status, step.subagentId);
             break;
           case "respond_to_next_runtime_request": {
             const request = yield* waitForPendingRuntimeRequest(step.threadId);

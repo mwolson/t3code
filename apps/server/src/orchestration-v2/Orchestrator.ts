@@ -81,7 +81,7 @@ import {
   subagentThreadTitle,
 } from "./SubagentProjection.ts";
 import { ThreadForkServiceV2 } from "./ThreadForkService.ts";
-import { planThreadDeletion } from "./ThreadDeletion.ts";
+import { historicalProviderSessionIds, planThreadDeletion } from "./ThreadDeletion.ts";
 
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
@@ -6307,6 +6307,92 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     });
 
+  const providerNativeInterruptTargets = (projection: OrchestrationV2ThreadProjection) =>
+    Effect.gen(function* () {
+      const targetThreads: Array<{
+        readonly childThreadId: ThreadId;
+        readonly providerThreadId: OrchestrationV2ProviderThread["id"];
+      }> = [];
+      const isProviderNativeChild =
+        projection.thread.creationSource === "provider" &&
+        projection.thread.lineage.relationshipToParent === "subagent";
+      const ownProviderThreadId = isProviderNativeChild
+        ? projection.thread.activeProviderThreadId
+        : null;
+      const ownTurnIsRunning =
+        ownProviderThreadId !== null &&
+        projection.providerTurns.some(
+          (candidate) =>
+            candidate.providerThreadId === ownProviderThreadId && candidate.status === "running",
+        );
+      if (ownProviderThreadId !== null && ownTurnIsRunning) {
+        targetThreads.push({
+          childThreadId: projection.thread.id,
+          providerThreadId: ownProviderThreadId,
+        });
+      } else {
+        for (const subagent of projection.subagents) {
+          if (
+            subagent.threadId !== projection.thread.id ||
+            subagent.origin !== "provider_native" ||
+            subagent.status !== "running" ||
+            subagent.childThreadId === null
+          ) {
+            continue;
+          }
+          const providerThreadId = subagent.providerThreadId;
+          if (providerThreadId === null) continue;
+          targetThreads.push({
+            childThreadId: subagent.childThreadId,
+            providerThreadId,
+          });
+        }
+      }
+      const targets = new Map<
+        string,
+        {
+          readonly threadId: ThreadId;
+          readonly providerThread: OrchestrationV2ProviderThread;
+          readonly providerTurn: OrchestrationV2ProviderTurn;
+        }
+      >();
+      for (const targetThread of targetThreads) {
+        const childProjection = yield* projectionStore
+          .getThreadProjection(targetThread.childThreadId)
+          .pipe(
+            Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.succeed(null)),
+            Effect.mapError(
+              (cause) =>
+                new OrchestratorProjectionError({
+                  threadId: targetThread.childThreadId,
+                  cause,
+                }),
+            ),
+          );
+        if (childProjection === null) continue;
+        const providerTurn = childProjection.providerTurns
+          .filter(
+            (candidate) =>
+              candidate.providerThreadId === targetThread.providerThreadId &&
+              candidate.status === "running",
+          )
+          .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+        if (providerTurn === undefined) continue;
+        const providerThread = childProjection.providerThreads.find(
+          (candidate) =>
+            candidate.id === targetThread.providerThreadId &&
+            candidate.appThreadId === childProjection.thread.id,
+        );
+        if (providerThread === undefined || providerThread.providerSessionId === null) continue;
+        targets.set(String(providerTurn.id), {
+          threadId: childProjection.thread.id,
+          providerThread,
+          providerTurn,
+        });
+      }
+      return Array.from(targets.values());
+    });
+
   const dispatchRunInterrupt = (
     command: Extract<OrchestrationV2Command, { readonly type: "run.interrupt" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -6314,6 +6400,88 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       const projection = yield* loadProjectionForCommand(command);
+      const providerNativeOnly = command.intent === "provider_native_only";
+      if (providerNativeOnly) {
+        const targets = yield* providerNativeInterruptTargets(projection);
+        const now = yield* DateTime.now;
+        const emitEvent = emit(events, command);
+        if (targets.length === 0) {
+          yield* emitEvent({
+            type: "run.interrupt-noop",
+            threadId: command.threadId,
+            occurredAt: now,
+            payload: {
+              reason:
+                "All provider-native background targets completed before interruption dispatch.",
+            },
+          });
+          return undefined;
+        }
+        const authorizedTargets = yield* Effect.forEach(targets, (target) =>
+          Effect.gen(function* () {
+            const providerSessionId = target.providerThread.providerSessionId;
+            if (providerSessionId === null) {
+              return yield* new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause: `Provider turn ${target.providerTurn.id} has no provider session target.`,
+              });
+            }
+            const capabilities = yield* providerAdapters
+              .get(target.providerThread.providerInstanceId)
+              .pipe(
+                Effect.flatMap((adapter) => adapter.getCapabilities()),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestratorProviderAdapterError({
+                      commandId: command.commandId,
+                      providerInstanceId: target.providerThread.providerInstanceId,
+                      cause,
+                    }),
+                ),
+              );
+            yield* enforceCommandPolicy(command)(
+              commandPolicy.ensureInterrupt({
+                commandId: command.commandId,
+                threadId: command.threadId,
+                providerInstanceId: target.providerThread.providerInstanceId,
+                capabilities,
+              }),
+            );
+            return { target, providerSessionId };
+          }),
+        );
+        for (const { target, providerSessionId } of authorizedTargets) {
+          yield* emitEvent({
+            type: "provider-turn.interrupt-requested",
+            threadId: command.threadId,
+            driver: target.providerThread.driver,
+            providerInstanceId: target.providerThread.providerInstanceId,
+            occurredAt: now,
+            payload: {
+              targetThreadId: target.threadId,
+              providerThreadId: target.providerThread.id,
+              providerTurnId: target.providerTurn.id,
+              reason: command.reason ?? null,
+            },
+          });
+          yield* Ref.update(effects, (existing) => [
+            ...existing,
+            {
+              id: `effect:${command.commandId}:provider-turn.interrupt:${target.providerTurn.id}`,
+              commandId: command.commandId,
+              threadId: target.threadId,
+              request: {
+                type: "provider-turn.interrupt",
+                providerSessionId,
+                providerThreadId: target.providerThread.id,
+                providerTurnId: target.providerTurn.id,
+              },
+            } satisfies PendingOrchestrationEffectV2,
+          ]);
+        }
+        return undefined;
+      }
       const run = projection.runs.find((candidate) => candidate.id === command.runId);
       const rootNode =
         run?.rootNodeId === null
@@ -7392,8 +7560,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
             ),
           );
+        const historicalIds = historicalProviderSessionIds(projection);
+        const historicalProviderSessions =
+          historicalIds.length === 0
+            ? []
+            : yield* projectionStore
+                .getProviderSessionsByIds(command.threadId, historicalIds)
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+                  ),
+                );
         return yield* mapDispatchError(command)(
-          planThreadDeletion({ command, projection, now: yield* DateTime.now, idAllocator }),
+          planThreadDeletion({
+            command,
+            projection,
+            now: yield* DateTime.now,
+            idAllocator,
+            historicalProviderSessions,
+          }),
         );
       }
       case "thread.archive":

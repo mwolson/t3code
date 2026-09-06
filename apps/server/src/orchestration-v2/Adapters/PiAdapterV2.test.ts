@@ -1401,6 +1401,43 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("exposes compactThread for CTM native compaction dispatch", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      assert.isDefined(runtime.compactThread);
+      const appThread = yield* makeAppThread("default");
+      const runId = RunId.make(`run:${THREAD_ID}:compact-dispatch`);
+      yield* runtime.compactThread!({
+        appThread,
+        threadId: THREAD_ID,
+        runId,
+        runOrdinal: 1,
+        providerTurnOrdinal: 1,
+        attemptId: RunAttemptId.make(`run-attempt:${runId}:1`),
+        rootNodeId: NodeId.make(`node:${runId}:root`),
+        providerThread,
+        message: {
+          messageId: `message:${THREAD_ID}:compact-dispatch` as never,
+          text: "/compact keep the auth rewrite",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      const compact = yield* fake.takeRequest("compact");
+      assert.equal(compact["type"], "compact");
+      assert.isFalse(fake.allRequests().some((request) => request["type"] === "prompt"));
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("leaves /compacted as an ordinary prompt", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

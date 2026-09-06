@@ -134,6 +134,7 @@ const makeGrokConfig = (overrides: Partial<GrokSettings>): GrokSettings => ({
 
 const makeOpenCodeConfig = (overrides: Partial<OpenCodeSettings>): OpenCodeSettings => ({
   enabled: false,
+  backgroundSubagents: true,
   binaryPath: "opencode",
   serverUrl: "",
   serverPassword: "",

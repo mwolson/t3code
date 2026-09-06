@@ -126,15 +126,47 @@ function resolveT3McpToolName(value: string): string | null {
   return Object.hasOwn(T3_MCP_TOOLS, label) ? label : null;
 }
 
+export function extractOpenCode2ExecuteT3McpToolName(code: string): string | null {
+  const dot = /tools\s*\[\s*["']t3-code["']\s*\]\s*\.\s*([A-Za-z0-9_]+)\s*\(/.exec(code);
+  if (dot?.[1]) return dot[1];
+  const bracket = /tools\s*\[\s*["']t3-code["']\s*\]\s*\[\s*["']([A-Za-z0-9_]+)["']\s*\]\s*\(/.exec(
+    code,
+  );
+  if (bracket?.[1]) return bracket[1];
+  return null;
+}
+
+function codeFromToolInput(input: unknown): string | null {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) return null;
+  const code = (input as { readonly code?: unknown }).code;
+  return typeof code === "string" && code.length > 0 ? code : null;
+}
+
 export function resolveT3McpToolPresentation(
   toolName: string | null | undefined,
+  options?: { readonly toolInput?: unknown },
 ): T3McpToolPresentation | null {
   const resolvedToolName =
     toolName === undefined || toolName === null ? null : resolveT3McpToolName(toolName);
-  if (resolvedToolName === null) {
+  if (resolvedToolName !== null) {
+    const displayName = T3_MCP_TOOLS[resolvedToolName]?.displayName;
+    if (displayName === undefined) {
+      return null;
+    }
+    return {
+      displayName,
+      logo: "t3-code",
+    };
+  }
+  const code = codeFromToolInput(options?.toolInput);
+  if (code === null) {
     return null;
   }
-  const displayName = T3_MCP_TOOLS[resolvedToolName]?.displayName;
+  const embedded = extractOpenCode2ExecuteT3McpToolName(code);
+  if (embedded === null) {
+    return null;
+  }
+  const displayName = T3_MCP_TOOLS[embedded]?.displayName;
   if (displayName === undefined) {
     return null;
   }

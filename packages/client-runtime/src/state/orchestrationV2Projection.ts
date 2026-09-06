@@ -249,6 +249,8 @@ export function applyOrchestrationV2ProjectionEvent(
     case "checkpoint.captured":
       return { ...base, checkpoints: upsertEntity(base.checkpoints, event.payload) };
     case "checkpoint.rollback-requested":
+    case "provider-turn.interrupt-requested":
+    case "run.interrupt-noop":
       return base;
     case "context-handoff.updated":
       return { ...base, contextHandoffs: upsertEntity(base.contextHandoffs, event.payload) };

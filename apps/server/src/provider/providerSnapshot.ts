@@ -153,6 +153,23 @@ export function parseGenericCliVersion(output: string): string | null {
  * declares its own capabilities keeps them; a bare slug gets the driver's
  * default set. Slugs that collide with a built-in are dropped.
  */
+export function inferOpenCodeDefaultVariant(
+  providerID: string,
+  variants: ReadonlyArray<string>,
+): string | undefined {
+  if (variants.length === 1) {
+    return variants[0];
+  }
+  if (providerID === "anthropic" || providerID.startsWith("google")) {
+    return variants.includes("high") ? "high" : undefined;
+  }
+  if (providerID === "openai" || providerID === "opencode") {
+    if (variants.includes("medium")) return "medium";
+    if (variants.includes("high")) return "high";
+  }
+  return undefined;
+}
+
 export function providerModelsFromSettings(
   builtInModels: ReadonlyArray<ServerProviderModel>,
   customModels: ReadonlyArray<CustomModelSetting>,
