@@ -23,7 +23,7 @@ export interface SpawnedProcessReaperEntry {
   readonly platform: SpawnedProcessReaperPlatform;
 }
 
-export class SpawnedProcessReaperError extends Schema.TaggedErrorClass<SpawnedProcessReaperError>()(
+export class SpawnedProcessReaperError extends Schema.TaggedError<SpawnedProcessReaperError>()(
   "SpawnedProcessReaperError",
   {
     cause: Schema.Defect(),

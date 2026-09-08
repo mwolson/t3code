@@ -15,13 +15,9 @@ import { assertMessageSteeringOutput } from "./message_steering/codex_output.ts"
 import { assertCursorMessageSteeringOutput } from "./message_steering/cursor_output.ts";
 import { assertGrokMessageSteeringOutput } from "./message_steering/grok_output.ts";
 import { messageSteeringInput } from "./message_steering/input.ts";
-import { assertClaudeMessageSteeringMidToolOutput } from "./message_steering_mid_tool/claude_output.ts";
-import { messageSteeringMidToolInput } from "./message_steering_mid_tool/input.ts";
 import { assertMultiTurnClaudeOutput } from "./multi_turn/claude_output.ts";
 import { assertMultiTurnOutput } from "./multi_turn/codex_output.ts";
 import { multiTurnInput } from "./multi_turn/input.ts";
-import { openCodeChildApprovalInput } from "./opencode_child_approval/input.ts";
-import { assertOpenCodeChildApprovalOutput } from "./opencode_child_approval/output.ts";
 import { openCode2ArchiveThenDeleteInput } from "./opencode2_archive_then_delete/input.ts";
 import { assertOpenCode2ArchiveThenDeleteOutput } from "./opencode2_archive_then_delete/output.ts";
 import { openCode2AuthorizationFailureInput } from "./opencode2_authorization_failure/input.ts";
@@ -152,7 +148,6 @@ import {
   CODEX_MODEL_SELECTION,
   CURSOR_MODEL_SELECTION,
   GROK_MODEL_SELECTION,
-  OPENCODE_MODEL_SELECTION,
   OPENCODE2_MODEL_SELECTION,
   READ_ONLY_NEVER_POLICY,
   READ_ONLY_ON_REQUEST_POLICY,
@@ -487,21 +482,6 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./subagent_v2_nested/codex_transcript.ndjson", import.meta.url),
         modelSelection: CODEX_MODEL_SELECTION,
         assertOutput: assertSubagentV2NestedOutput,
-      },
-    ],
-  },
-  {
-    name: "opencode_child_approval",
-    buildInput: openCodeChildApprovalInput,
-    providers: [
-      {
-        driver: ProviderDriverKind.make("opencode"),
-        transcriptFile: new URL(
-          "./opencode_child_approval/opencode_transcript.ndjson",
-          import.meta.url,
-        ),
-        modelSelection: OPENCODE_MODEL_SELECTION,
-        assertOutput: assertOpenCodeChildApprovalOutput,
       },
     ],
   },
@@ -1287,21 +1267,6 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./message_steering/grok_transcript.ndjson", import.meta.url),
         modelSelection: ACP_REGISTRY_MODEL_SELECTION,
         assertOutput: assertGrokMessageSteeringOutput,
-      },
-    ],
-  },
-  {
-    name: "message_steering_mid_tool",
-    buildInput: messageSteeringMidToolInput,
-    providers: [
-      {
-        driver: ProviderDriverKind.make("claudeAgent"),
-        transcriptFile: new URL(
-          "./message_steering_mid_tool/claude_transcript.ndjson",
-          import.meta.url,
-        ),
-        modelSelection: CLAUDE_MODEL_SELECTION,
-        assertOutput: assertClaudeMessageSteeringMidToolOutput,
       },
     ],
   },

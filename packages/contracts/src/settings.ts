@@ -804,7 +804,6 @@ export const PiSettings = makeProviderSettingsSchema(
 );
 export type PiSettings = typeof PiSettings.Type;
 
-
 export const AcpRegistryDistributionPreference = Schema.Literals(["auto", "binary", "npx", "uvx"]);
 export type AcpRegistryDistributionPreference = typeof AcpRegistryDistributionPreference.Type;
 

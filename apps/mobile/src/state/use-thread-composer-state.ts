@@ -4,6 +4,7 @@ import {
   deriveThreadRuntime,
   threadRuntimeHasInterruptibleRun,
 } from "@t3tools/client-runtime/state/thread-execution";
+import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert } from "react-native";
 

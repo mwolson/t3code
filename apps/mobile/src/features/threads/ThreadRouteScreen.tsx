@@ -864,7 +864,7 @@ function ThreadRouteContent(
           connectionStateLabel={routeConnectionState}
           threadSyncStatus={selectedThreadDetailState.status}
           historyControls={historyControls}
-          canStopThread={composer.canInterruptThread}
+          canStopThread={composer.interruptibleRunId !== null}
           environmentId={selectedThread.environmentId}
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}

@@ -30,7 +30,6 @@ import { IdAllocatorV2 } from "./IdAllocator.ts";
 import { makeProviderFailure, makeProviderFailureTurnItem } from "./ProviderFailure.ts";
 import { ProjectionStoreV2 } from "./ProjectionStore.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
-import { makeProviderFailure } from "./ProviderFailure.ts";
 import {
   canRouteRelatedSubagent,
   RunExecutionServiceV2,

@@ -402,7 +402,6 @@ import {
   resolveFileAttachmentUrl,
   reconcileMountedTerminalThreadIds,
   resolveComposerInteractionMode,
-  resolveEffectiveInteractionMode,
   resolveComposerProviderSelection,
   observeProactivePanelUserChoice,
   resolveProactiveTurnDiffAction,
@@ -1972,11 +1971,6 @@ export default function ChatView(props: ChatViewProps) {
   // the branch mismatch banner.
   const [, setThreadErrorBannerDismissTick] = useState(0);
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
-  const interactionMode = resolveEffectiveInteractionMode({
-    planModeEnabled: settings.planModeEnabled,
-    composerInteractionMode,
-    threadInteractionMode: activeThread?.interactionMode,
-  });
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;

@@ -5,7 +5,6 @@ import type {
   ChatFileAttachment,
   EnvironmentId,
   ModelSelection,
-
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
   ProviderInteractionMode,
@@ -4153,7 +4152,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       {composerControlsCompact ? (
         <CompactComposerControlsMenu
           interactionMode={interactionMode}
-          runtimeMode={runtimeMode}
+          runtimeMode={compatibleRuntimeMode}
+          runtimeModeOptions={compatibleRuntimeModeOptions.map((mode) => ({
+            mode,
+            label: runtimeModeConfig[mode].label,
+          }))}
           showInteractionModeToggle={planModeUiEnabled}
           traitsMenuContent={providerTraitsMenuContent}
           onToggleInteractionMode={toggleInteractionMode}
@@ -4193,7 +4196,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             >
               <CompactComposerControlsMenu
                 interactionMode={interactionMode}
-                runtimeMode={runtimeMode}
+                runtimeMode={compatibleRuntimeMode}
+                runtimeModeOptions={compatibleRuntimeModeOptions.map((mode) => ({
+                  mode,
+                  label: runtimeModeConfig[mode].label,
+                }))}
                 size="xs"
                 hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
                 showInteractionModeToggle={

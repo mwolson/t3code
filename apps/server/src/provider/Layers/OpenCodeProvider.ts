@@ -273,7 +273,7 @@ function openCode2InventoryIsUsable(inventory: OpenCodeInventorySnapshot): boole
   );
 }
 
-export class OpenCodeInventorySettlementError extends Schema.TaggedErrorClass<OpenCodeInventorySettlementError>()(
+export class OpenCodeInventorySettlementError extends Schema.TaggedError<OpenCodeInventorySettlementError>()(
   "OpenCodeInventorySettlementError",
   { attempts: Schema.Int },
 ) {

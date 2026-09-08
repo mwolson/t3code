@@ -149,8 +149,7 @@ export const workerLive = Layer.effectDiscard(
           yield* clearRetryAttempt(retryKey);
           return;
         }
-        const incomingText =
-          request.messageText ?? request.detail ?? PROVIDER_CONTINUATION_MESSAGE_TEXT;
+        const incomingText = request.detail ?? CONTINUATION_MESSAGE_TEXT;
         const incomingWake = {
           createdBy: "agent" as const,
           creationSource: "provider" as const,
@@ -233,7 +232,6 @@ export const workerLive = Layer.effectDiscard(
           commandId,
           threadId: request.threadId,
           messageId,
-          text: request.detail ?? CONTINUATION_MESSAGE_TEXT,
           text: incomingText,
           attachments: [],
           dispatchMode: { type: "queue_after_active" },

@@ -7925,7 +7925,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 for (const runId of terminalDeliveryRunIds) {
                   yield* finalizeDelegatedCompletionDelivery(threadId, runId);
                 }
-                yield* offerDelegatedCompletionDeliveries(thread.id);
+                yield* offerDelegatedCompletionDeliveries(threadId);
               }),
             )
             .pipe(

@@ -1189,7 +1189,8 @@ export function useThreadOutboxDrain(): void {
           if (liveDeliveryAction !== "send") {
             return true;
           }
-        }        return deliveryAction === "remove"
+        }
+        return deliveryAction === "remove"
           ? creation !== undefined
             ? // A creation entry that survived its delivery cleanup either
               // holds edits (recover them) or the delivered payload (a

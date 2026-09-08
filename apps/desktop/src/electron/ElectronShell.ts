@@ -88,7 +88,9 @@ export const make = ElectronShell.of({
       ),
     ),
   copyText: (text) =>
-    Effect.promise(() => Electron.clipboard.writeText(text).catch(() => undefined)),
+    Effect.sync(() => {
+      Electron.clipboard.writeText(text);
+    }),
 });
 
 export const layer = Layer.succeed(ElectronShell, make);

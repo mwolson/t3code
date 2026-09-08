@@ -6,6 +6,7 @@ import type {
   OrchestrationV2ThreadShellSnapshot,
   OrchestrationV2StoredEvent,
   OrchestrationV2ThreadProjection,
+  OrchestrationV2Subagent,
   OrchestrationV2TurnItem,
   ProviderApprovalDecision,
   ProviderUserInputAnswers,

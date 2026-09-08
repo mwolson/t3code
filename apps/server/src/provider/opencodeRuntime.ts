@@ -81,7 +81,7 @@ export const OpenCodeRuntimeErrorCategory = Schema.Literals([
 ]);
 export type OpenCodeRuntimeErrorCategory = typeof OpenCodeRuntimeErrorCategory.Type;
 
-export class OpenCodeRuntimeError extends Schema.TaggedErrorClass<OpenCodeRuntimeError>()(
+export class OpenCodeRuntimeError extends Schema.TaggedError<OpenCodeRuntimeError>()(
   "OpenCodeRuntimeError",
   {
     category: OpenCodeRuntimeErrorCategory,

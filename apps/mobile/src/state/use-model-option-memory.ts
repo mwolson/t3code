@@ -34,7 +34,7 @@ const PersistedModelOptionMemorySchema = Schema.Struct({
 
 const decodePersistedModelOptionMemory = Schema.decodeUnknownSync(PersistedModelOptionMemorySchema);
 
-export class ModelOptionMemoryPersistenceError extends Schema.TaggedErrorClass<ModelOptionMemoryPersistenceError>()(
+export class ModelOptionMemoryPersistenceError extends Schema.TaggedError<ModelOptionMemoryPersistenceError>()(
   "ModelOptionMemoryPersistenceError",
   {
     operation: Schema.Literals(["open", "read", "decode", "encode", "write", "hydrate"]),
@@ -70,7 +70,7 @@ export function recordModelOptionsInState(
   return {
     ...state,
     [instanceId]: {
-      ...(state[instanceId] ?? {}),
+      ...state[instanceId],
       [model]: options,
     },
   };
@@ -93,7 +93,7 @@ export function mergeModelOptionMemoryState(
   const merged = { ...persisted };
   for (const [instanceId, currentModels] of Object.entries(current)) {
     merged[instanceId] = {
-      ...(persisted[instanceId] ?? {}),
+      ...persisted[instanceId],
       ...currentModels,
     };
   }

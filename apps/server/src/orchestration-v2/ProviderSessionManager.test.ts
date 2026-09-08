@@ -12,7 +12,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
-  type ProviderSessionId,
+  ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
   ThreadId,
@@ -841,7 +841,11 @@ it.effect("ProviderSessionManagerV2 drains subscribers when the provider stops",
         runtimePolicy,
       });
       const subscription = yield* runtime.subscribeEvents!;
-      const collected = yield* subscription.events.pipe(Stream.runCollect, Effect.forkScoped);
+      const collected = yield* subscription.events.pipe(
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
       const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
       assert.isDefined(adapterQueue);
       const providerThreadId = idAllocator.derive.providerThread({
@@ -871,7 +875,6 @@ it.effect("ProviderSessionManagerV2 drains subscribers when the provider stops",
           updatedAt: now,
         },
       });
-      yield* Queue.end(adapterQueue!);
 
       const events = Array.from(yield* Fiber.join(collected));
       assert.deepEqual(

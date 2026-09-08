@@ -451,7 +451,7 @@ describe("resolveTimelineToolPresentation", () => {
   it("pretty prints OpenCode 2 execute-bridged T3 MCP tool names from input", () => {
     expect(
       resolveTimelineToolPresentation("execute", {
-        input: {
+        toolInput: {
           code: `await tools["t3-code"].t3_thread_read({ threadId: "x" });`,
         },
       }),
@@ -2794,8 +2794,8 @@ describe("v2 run and attempt history", () => {
       },
       isWorking: false,
       activeTurnStartedAt: null,
-      turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
     });
 
     expect(rows.map((row) => row.id)).toEqual(["user-entry", "provider-error-entry"]);

@@ -52,7 +52,6 @@ const DRIVER_KIND = ProviderDriverKind.make("pi");
 const UPDATE = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
   npmPackageName: "@earendil-works/pi-coding-agent",
-  homebrewFormula: null,
   nativeUpdate: null,
 });
 
@@ -140,7 +139,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
 
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
       const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<PiSettings>>({
-        maintenanceCapabilities,
+        resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
         getSettings: snapshotSettings.getSettings,
         streamSettings: snapshotSettings.streamSettings,
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
