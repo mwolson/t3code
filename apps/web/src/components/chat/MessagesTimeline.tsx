@@ -15,7 +15,6 @@ import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { Link } from "@tanstack/react-router";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
-import { CHAT_TIMELINE_ANCHOR_OFFSET } from "./timelineScrollAnchoring";
 import {
   resolveWorkEntryToolPresentation,
   resolveViewedImageAsset,
@@ -118,8 +117,16 @@ import {
   buildExpandedImagePreview,
   ExpandedImagePreview,
 } from "./ExpandedImagePreview";
+import {
+  SNAP_SHOT_ATTACHMENT_FRAME_CLASS,
+  SnapShotAttachmentDetails,
+} from "./SnapShotAttachmentDetails";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
+import {
+  CHAT_TIMELINE_ANCHOR_OFFSET,
+  timelineContentOverflowsViewport,
+} from "./timelineScrollAnchoring";
 import { MessageCopyButton } from "./MessageCopyButton";
 import { unwrapSoleMarkdownFence } from "../../markdown-clipboard";
 import { PierreEntryIcon } from "./PierreEntryIcon";
@@ -215,7 +222,8 @@ interface TimelineRowSharedState {
   /** Projection runs, for recovering handoff models on legacy items. */
   runs: ReadonlyArray<HandoffTimelineRun>;
   activeThreadEnvironmentId: EnvironmentId;
-  onRevertUserMessage: (messageId: MessageId) => void;
+  onRevertToTurnCount: (targetTurnCount: number) => void;
+  onUseArtifactTemplate: (template: CodexArtifactTemplate) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
@@ -230,7 +238,6 @@ interface TimelineRowSharedState {
   onToggleTurnFold: (runId: RunId) => void;
   onToggleAttemptFold: (attemptId: RunAttemptId) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
-  onUseArtifactTemplate: (template: CodexArtifactTemplate) => void;
   onFileDownload: (attachment: ChatFileAttachment) => void;
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
   onToggleWorkEntry: (anchorKey: string, collapsed: boolean) => void;
@@ -313,7 +320,7 @@ interface MessagesTimelineProps {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   latestRun: TimelineLatestRun | null;
   runningRunId?: RunId | null;
-  turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
+  turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   routeThreadKey: string;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   onOpenThread: (threadId: OrchestrationV2TurnItem["threadId"]) => void;
@@ -329,12 +336,12 @@ interface MessagesTimelineProps {
     readonly checkpointId: string;
     readonly scopeId: string;
   }) => void;
-  revertTurnCountByUserMessageId: Map<MessageId, number>;
-  onRevertUserMessage: (messageId: MessageId) => void;
+  supportsConversationRollback: boolean;
+  onRevertToTurnCount: (targetTurnCount: number) => void;
+  onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onFileOpen?: (attachment: ChatFileAttachment) => void;
-  onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
   onFileDownload?: (attachment: ChatFileAttachment) => void;
   activeThreadEnvironmentId: EnvironmentId;
   markdownCwd: string | undefined;
@@ -356,6 +363,11 @@ interface MessagesTimelineProps {
    * scroll-mode refs whenever the user drifts near the bottom.
    */
   liveFollowEnabled: boolean;
+  /**
+   * Whether the real rows extend past the viewport above the composer.
+   * Reported after scrolls, row size changes, and viewport resizes.
+   */
+  onContentOverflowChange?: (overflows: boolean) => void;
   onToolOutputCollapsedAtEnd?: () => void;
   onManualNavigation: () => void;
   cancelPositionRestoreRef?: React.RefObject<(() => void) | null>;
@@ -383,19 +395,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   timelineEntries,
   latestRun,
   runningRunId = null,
-  turnDiffSummaryByAssistantMessageId,
+  turnDiffSummaries,
   routeThreadKey,
   onOpenTurnDiff,
   onOpenThread,
   parentThreadLink = null,
   onForkFromRun,
   onRollbackCheckpoint,
-  revertTurnCountByUserMessageId,
-  onRevertUserMessage,
+  supportsConversationRollback,
+  onRevertToTurnCount,
+  onUseArtifactTemplate = NOOP_USE_ARTIFACT_TEMPLATE,
   isRevertingCheckpoint,
   onImageExpand,
   onFileOpen = NOOP_OPEN_ATTACHMENT,
-  onUseArtifactTemplate = NOOP_USE_ARTIFACT_TEMPLATE,
   onFileDownload = NOOP_OPEN_ATTACHMENT,
   activeThreadEnvironmentId,
   markdownCwd,
@@ -410,6 +422,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onAnchorSizeChanged,
   contentInsetEndAdjustment,
   onIsAtEndChange,
+  onContentOverflowChange,
   liveFollowEnabled,
   onToolOutputCollapsedAtEnd,
   onManualNavigation,
@@ -573,8 +586,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         expandedWorkGroupIds,
         isWorking,
         activeTurnStartedAt,
-        turnDiffSummaryByAssistantMessageId,
-        revertTurnCountByUserMessageId,
+        turnDiffSummaries,
+        supportsConversationRollback,
       },
       previous?.threadKey === routeThreadKey && previous.workspaceRoot === workspaceRoot
         ? previous.projection
@@ -594,8 +607,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     expandedWorkGroupIds,
     isWorking,
     activeTurnStartedAt,
-    turnDiffSummaryByAssistantMessageId,
-    revertTurnCountByUserMessageId,
+    turnDiffSummaries,
+    supportsConversationRollback,
   ]);
   const rows = useStableRows(rawRows);
   // Run status/timestamps churn on every stream event; the shared row context
@@ -788,12 +801,49 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [anchoredEndSpace, contentInsetEndAdjustment],
   );
 
+  const measureContentOverflow = useCallback(
+    () =>
+      timelineContentOverflowsViewport(listRef.current?.getState?.(), {
+        composerInset: contentInsetEndAdjustment,
+        anchorOffset: CHAT_TIMELINE_ANCHOR_OFFSET,
+      }),
+    [contentInsetEndAdjustment, listRef],
+  );
+  // LegendList lays rows out from layout effects, so a read on the next frame
+  // sees the settled positions. One frame is shared across bursts of size
+  // changes.
+  const contentOverflowFrameRef = useRef<number | null>(null);
+  const cancelContentOverflowFrame = useCallback(() => {
+    if (contentOverflowFrameRef.current !== null) {
+      cancelAnimationFrame(contentOverflowFrameRef.current);
+      contentOverflowFrameRef.current = null;
+    }
+  }, []);
+  const reportContentOverflow = useCallback(() => {
+    if (!onContentOverflowChange || contentOverflowFrameRef.current !== null) return;
+    contentOverflowFrameRef.current = requestAnimationFrame(() => {
+      contentOverflowFrameRef.current = null;
+      onContentOverflowChange(measureContentOverflow());
+    });
+  }, [measureContentOverflow, onContentOverflowChange]);
+  useEffect(() => cancelContentOverflowFrame, [cancelContentOverflowFrame]);
+  // The list's own layout effects have already run here, so estimated row
+  // positions are in place. Reporting before the first paint lets a thread
+  // open in its final composer layout instead of correcting it a frame later.
+  // A frame scheduled with the previous inset would overwrite this read, so
+  // it is dropped first.
+  useLayoutEffect(() => {
+    cancelContentOverflowFrame();
+    onContentOverflowChange?.(measureContentOverflow());
+  }, [cancelContentOverflowFrame, measureContentOverflow, onContentOverflowChange, rows.length]);
+
   const handleScroll = useCallback(() => {
     const state = listRef.current?.getState?.();
     const isAtEnd = resolveTimelineIsAtEnd(state);
     if (isAtEnd !== undefined && !citationPositioning) {
       onIsAtEndChange(isAtEnd);
     }
+    reportContentOverflow();
     if (!state || minimapItems.length === 0) {
       return;
     }
@@ -821,7 +871,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         strip.dataset.inView = next;
       }
     }
-  }, [citationPositioning, listRef, minimapItems, minimapStripMap, onIsAtEndChange]);
+  }, [
+    citationPositioning,
+    listRef,
+    minimapItems,
+    minimapStripMap,
+    onIsAtEndChange,
+    reportContentOverflow,
+  ]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(handleScroll);
@@ -840,6 +897,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         current === nextHasPersistentGutter ? current : nextHasPersistentGutter,
       );
       setMinimapHitStripWidth(resolveTimelineMinimapHitStripWidth(viewportWidth));
+      reportContentOverflow();
     };
 
     const frame = requestAnimationFrame(measure);
@@ -851,7 +909,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [timelineViewportElement, rows.length]);
+  }, [timelineViewportElement, rows.length, reportContentOverflow]);
 
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
@@ -868,7 +926,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       providerStatuses,
       runs,
       activeThreadEnvironmentId,
-      onRevertUserMessage,
+      onRevertToTurnCount,
       onImageExpand,
       onFileOpen,
       onUseArtifactTemplate,
@@ -896,7 +954,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       providerStatuses,
       runs,
       activeThreadEnvironmentId,
-      onRevertUserMessage,
+      onRevertToTurnCount,
       onImageExpand,
       onFileOpen,
       onUseArtifactTemplate,
@@ -1034,6 +1092,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             }
             maintainScrollAtEndThreshold={1}
             onScroll={handleScroll}
+            onItemSizeChanged={reportContentOverflow}
             className={cn(
               "messages-timeline-scroll scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
               topFadeEnabled && "topbar-scroll-fade",
@@ -1559,7 +1618,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   ];
   const previewImages = userImages.filter((image) => image.name.startsWith("preview-annotation-"));
   const regularImages = userImages.filter((image) => !image.name.startsWith("preview-annotation-"));
-  const canRevertAgentWork = typeof row.revertTurnCount === "number";
+  const revertTurnCount = row.revertTurnCount;
 
   return (
     <div className="group flex flex-col items-end gap-1">
@@ -1600,7 +1659,12 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             {regularImages.map((image) => (
               <div
                 key={image.id}
-                className="aspect-[4/3] overflow-hidden rounded-lg border border-border/80 bg-background/70"
+                className={cn(
+                  "bg-background/70",
+                  image.source?.kind === "snap-shot" && image.previewUrl
+                    ? SNAP_SHOT_ATTACHMENT_FRAME_CLASS
+                    : "aspect-[4/3] overflow-hidden rounded-lg border border-border/80",
+                )}
               >
                 {image.previewUrl ? (
                   <button
@@ -1624,6 +1688,9 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                     {image.name}
                   </div>
                 )}
+                {image.previewUrl && image.source?.kind === "snap-shot" ? (
+                  <SnapShotAttachmentDetails source={image.source} />
+                ) : null}
               </div>
             ))}
             {userVideos.map((file) => (
@@ -1762,7 +1829,9 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             </TooltipPopup>
           </Tooltip>
           <div className="flex items-center gap-0.5">
-            {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
+            {typeof revertTurnCount === "number" && (
+              <RevertUserMessageButton turnCount={revertTurnCount} />
+            )}
             {displayedUserMessage.copyText && (
               <MessageCopyButton text={unwrapSoleMarkdownFence(displayedUserMessage.copyText)} variant="ghost" />
             )}
@@ -1818,7 +1887,7 @@ function UserMessageIntentMarker({
   );
 }
 
-function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
+function RevertUserMessageButton({ turnCount }: { turnCount: number }) {
   const ctx = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
 
@@ -1831,7 +1900,7 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
             size="xs"
             variant="ghost"
             disabled={activity.isRevertingCheckpoint || activity.isWorking}
-            onClick={() => ctx.onRevertUserMessage(messageId)}
+            onClick={() => ctx.onRevertToTurnCount(turnCount)}
             aria-label="Revert to this message"
           />
         }
@@ -3666,7 +3735,7 @@ function buildToolCallExpandedBody(
   viewedImagePath: string | null,
 ): string | null {
   const blocks: string[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<string>([visibleLabel.trim()]);
   const addBlock = (value: string | null | undefined) => {
     const text = value?.trim();
     if (!text || seen.has(text)) return;
@@ -3794,6 +3863,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       : null;
   const commandMatchesVisibleLabel = workEntry.command?.trim() === previewText.trim();
   const canExpand =
+    (showFailedIndicator && previewText.trim().length > 0) ||
     (workEntry.itemType === "dynamic_tool" && workEntry.toolData !== undefined) ||
     Boolean(
       (!commandMatchesVisibleLabel &&
@@ -3905,10 +3975,10 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
             )}
             aria-hidden
           >
-            <ChevronDownIcon
+            <ChevronRightIcon
               className={cn(
                 "size-3 shrink-0 text-icon-muted opacity-70 transition-transform duration-200",
-                expanded && "rotate-180",
+                expanded && "rotate-90",
               )}
             />
           </span>
@@ -3926,7 +3996,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
             alt={viewedImage.alt}
             srcFragment={viewedImage.srcFragment}
             workspaceRoot={workspaceRoot}
-            style={{ maxHeight: "16rem" }}
+            maxHeightRem={16}
             onImageExpand={onImageExpand}
           />
         </div>
