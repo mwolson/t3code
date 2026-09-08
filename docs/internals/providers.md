@@ -11,12 +11,10 @@ session or catalog state.
 
 ## Process and account isolation
 
-T3-managed OpenCode chat uses one server per thread. Its MCP registrations are directory-scoped, while
-T3's MCP connection is thread-scoped. Sharing a chat server between threads in one directory would
-let them replace each other's connection. Catalog and text-generation work can share the
-[instance-owned helper](../../apps/server/src/provider/OpenCodeServerOwner.ts), which closes
-after an idle period. External OpenCode servers remain externally owned and can require an
-external restart to pick up configuration changes.
+T3-managed OpenCode chat attaches to the host OpenCode 2 daemon, or starts it with `service start`.
+Its MCP registrations are directory-scoped, while T3's MCP connection is thread-scoped. Catalog
+and text-generation work use that same daemon. External OpenCode servers remain externally owned
+and can require an external restart to pick up configuration changes.
 
 OpenCode also stores persistent approval grants per directory. Automatic full-access replies use
 `once` so they cannot widen a supervised thread's permissions on a shared external server.
@@ -187,8 +185,6 @@ when a request opens (approval) or user input is requested, via
 [cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts
 [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
 [opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
-[opencode-server-owner]: ../../apps/server/src/provider/OpenCodeServerOwner.ts
-[opencode2]: ../../apps/server/src/provider/Drivers/OpenCode2Driver.ts
 [pi]: ../../apps/server/src/provider/Drivers/PiDriver.ts
 [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
 [instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts

@@ -3,19 +3,18 @@
 T3 Code uses the OpenCode setup on the connected environment. With a remote environment, its
 OpenCode login and configuration apply, not the setup on your desktop or phone.
 
-T3 Code requires OpenCode 1.14.19 or newer. It checks the server version before it loads models or
-starts work. If the check fails, update OpenCode or fix the server URL and password, then refresh
-the provider status. Reconnecting the client also runs the check again.
+T3 Code talks to OpenCode 2 through the built-in OpenCode provider. It attaches to the OpenCode
+daemon already running on the environment, or starts that daemon. It does not spawn a second
+OpenCode server per thread. If the daemon cannot start, update OpenCode 2, then refresh the
+provider status. Reconnecting the client also retries the connection.
 
 ## Server authentication
 
-Without a server URL, T3 Code starts a local OpenCode server. The process inherits
-`OPENCODE_SERVER_PASSWORD` from the environment. A password in the provider settings overrides
-that environment value for both the local process and T3 Code.
+Without a server URL, T3 Code uses the host OpenCode daemon. A password in the provider settings
+overrides `OPENCODE_SERVER_PASSWORD` from the environment.
 
 With a server URL, T3 Code connects to that external server and uses only the password in the
 provider settings. It does not send a local `OPENCODE_SERVER_PASSWORD` to an external server.
-OpenCode uses this password for HTTP Basic authentication.
 
 ## Refresh the model list
 
@@ -31,12 +30,9 @@ On mobile, open the thread settings and select **Refresh models**. The control s
 the refresh runs and shows an error if the refresh fails.
 
 OpenCode reads credential changes on each model-list request. Native OpenCode configuration files
-can stay cached while the local helper is running. The helper closes after 30 seconds with no
-model-list or text-generation work. Refresh after that idle period to start a new helper and read
-the file changes. Repeated refreshes or active helper work can extend this wait.
-
-T3 Code does not own an external OpenCode server. Native configuration changes on that server can
-require its own reload or restart before a refresh returns the new list.
+can stay cached in a running daemon. After changing a login or config outside T3 Code, refresh
+provider status. An external OpenCode server can require its own reload before a refresh returns
+the new list.
 
 If a refresh fails, T3 Code keeps the last known models, slash commands, and skills. Fix the
 connection, then refresh again. A successful refresh can remove entries that OpenCode no longer
