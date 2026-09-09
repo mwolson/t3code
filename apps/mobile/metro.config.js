@@ -23,10 +23,17 @@ const resolveShikiDependencyRoot = (packageName) => {
 
   return currentDir;
 };
+const resolveWorkspacePackageRoot = (packageName) => {
+  const packageJsonPath = require.resolve(`${packageName}/package.json`, {
+    paths: [workspaceRoot, path.join(workspaceRoot, "node_modules/.pnpm/node_modules")],
+  });
+  return path.dirname(packageJsonPath);
+};
 
 config.watchFolders = [...new Set([...(config.watchFolders ?? []), workspaceRoot])];
 config.resolver = {
   ...config.resolver,
+  unstable_enableSymlinks: true,
   blockList: [
     ...(Array.isArray(config.resolver?.blockList)
       ? config.resolver.blockList
@@ -37,7 +44,6 @@ config.resolver = {
   ],
   extraNodeModules: {
     ...config.resolver?.extraNodeModules,
-    shiki: mobileShikiRoot,
     "@shikijs/core": resolveShikiDependencyRoot("@shikijs/core"),
     "@shikijs/engine-javascript": resolveShikiDependencyRoot("@shikijs/engine-javascript"),
     "@shikijs/engine-oniguruma": resolveShikiDependencyRoot("@shikijs/engine-oniguruma"),
@@ -45,6 +51,9 @@ config.resolver = {
     "@shikijs/themes": resolveShikiDependencyRoot("@shikijs/themes"),
     "@shikijs/types": resolveShikiDependencyRoot("@shikijs/types"),
     "@shikijs/vscode-textmate": resolveShikiDependencyRoot("@shikijs/vscode-textmate"),
+    "find-my-way-ts": resolveWorkspacePackageRoot("find-my-way-ts"),
+    multipasta: resolveWorkspacePackageRoot("multipasta"),
+    shiki: mobileShikiRoot,
   },
 };
 
