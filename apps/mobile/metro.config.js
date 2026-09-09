@@ -32,10 +32,18 @@ const resolveShikiDependencyRoot = (packageName) => {
 
   return currentDir;
 };
+const resolveWorkspacePackageRoot = (packageName) => {
+  const effectRoot = path.dirname(require.resolve("effect/package.json", { paths: [__dirname] }));
+  const packageJsonPath = require.resolve(`${packageName}/package.json`, {
+    paths: [effectRoot],
+  });
+  return path.dirname(packageJsonPath);
+};
 
 config.watchFolders = [...new Set([...(config.watchFolders ?? []), workspaceRoot])];
 config.resolver = {
   ...config.resolver,
+  unstable_enableSymlinks: true,
   blockList: [
     ...(Array.isArray(config.resolver?.blockList)
       ? config.resolver.blockList
@@ -56,6 +64,8 @@ config.resolver = {
     "@shikijs/themes": resolveShikiDependencyRoot("@shikijs/themes"),
     "@shikijs/types": resolveShikiDependencyRoot("@shikijs/types"),
     "@shikijs/vscode-textmate": resolveShikiDependencyRoot("@shikijs/vscode-textmate"),
+    "find-my-way-ts": resolveWorkspacePackageRoot("find-my-way-ts"),
+    multipasta: resolveWorkspacePackageRoot("multipasta"),
   },
 };
 
