@@ -1,5 +1,6 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import * as DateTime from "effect/DateTime";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -61,12 +62,18 @@ vi.mock("./use-thread-selection", () => ({
   }),
 }));
 vi.mock("./use-thread-detail", () => ({
-  useSelectedThreadDetail: () => ({
-    activities: fixture.requestIds.map((requestId) => ({
-      id: `activity-${requestId}`,
-      kind: "user-input.requested",
-      createdAt: "2026-09-08T00:00:00Z",
-      payload: {
+  useSelectedThreadProjection: () => ({
+    id: fixture.selectedThread.id,
+    projection: {
+      runtimeRequests: fixture.requestIds.map((requestId) => ({
+        id: requestId,
+        kind: "user_input",
+        status: "pending",
+        createdAt: DateTime.makeUnsafe("2026-09-08T00:00:00Z"),
+        responseCapability: { type: "live" },
+      })),
+      turnItems: fixture.requestIds.map((requestId) => ({
+        type: "user_input_request",
         requestId,
         questions: ["first", "second"].map((id) => ({
           id,
@@ -75,12 +82,12 @@ vi.mock("./use-thread-detail", () => ({
           options: [],
           allowCustomAnswer: true,
         })),
-      },
-    })),
+      })),
+    },
   }),
 }));
 
-import { ApprovalRequestId, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { RuntimeRequestId, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { questionAttachmentDraftKey } from "./question-attachments";
 import { useSelectedThreadRequests } from "./use-selected-thread-requests";
 
@@ -89,7 +96,7 @@ const key = (question: string) =>
   questionAttachmentDraftKey(
     environmentId,
     ThreadId.make("thread-1"),
-    ApprovalRequestId.make("request-1"),
+    RuntimeRequestId.make("request-1"),
     question,
   );
 function submitButtonMarkup() {
@@ -149,39 +156,39 @@ describe("question draft ownership", () => {
       const root = createRoot(container as unknown as HTMLElement);
       try {
         await act(() => root.render(<Probe />));
-        update(ApprovalRequestId.make("request-2"), "first", "hidden");
-        update(ApprovalRequestId.make("missing"), "first", "missing");
-        update(ApprovalRequestId.make("request-1"), "missing", "unknown question");
+        update(RuntimeRequestId.make("request-2"), "first", "hidden");
+        update(RuntimeRequestId.make("missing"), "first", "missing");
+        update(RuntimeRequestId.make("request-1"), "missing", "unknown question");
         expect(fixture.set).not.toHaveBeenCalled();
-        update(ApprovalRequestId.make("request-1"), "first", "current");
+        update(RuntimeRequestId.make("request-1"), "first", "current");
         expect(fixture.set).toHaveBeenCalledOnce();
         const retained = update;
         fixture.set.mockClear();
         fixture.requestIds = ["request-2", "request-1"];
         await act(() => root.render(<Probe />));
-        retained(ApprovalRequestId.make("request-1"), "first", "delayed");
-        update(ApprovalRequestId.make("request-1"), "first", "hidden");
+        retained(RuntimeRequestId.make("request-1"), "first", "delayed");
+        update(RuntimeRequestId.make("request-1"), "first", "hidden");
         expect(fixture.set).not.toHaveBeenCalled();
-        update(ApprovalRequestId.make("request-2"), "first", "new current");
+        update(RuntimeRequestId.make("request-2"), "first", "new current");
         expect(fixture.set).toHaveBeenCalledOnce();
         fixture.set.mockClear();
         fixture.requestIds = [];
         await act(() => root.render(<Probe />));
-        retained(ApprovalRequestId.make("request-1"), "first", "removed");
+        retained(RuntimeRequestId.make("request-1"), "first", "removed");
         expect(fixture.set).not.toHaveBeenCalled();
         fixture.requestIds = ["request-1"];
         await act(() => root.render(<Probe />));
         const beforeSwitch = update;
         fixture.selectedThread = { ...fixture.selectedThread, [scope]: "other-scope" };
         await act(() => root.render(<Probe />));
-        beforeSwitch(ApprovalRequestId.make("request-1"), "first", "old scope");
+        beforeSwitch(RuntimeRequestId.make("request-1"), "first", "old scope");
         expect(fixture.set).not.toHaveBeenCalled();
-        update(ApprovalRequestId.make("request-1"), "first", "current scope");
+        update(RuntimeRequestId.make("request-1"), "first", "current scope");
         expect(fixture.set).toHaveBeenCalledOnce();
         fixture.set.mockClear();
         const beforeUnmount = update;
         await act(() => root.render(null));
-        beforeUnmount(ApprovalRequestId.make("request-1"), "first", "unmounted");
+        beforeUnmount(RuntimeRequestId.make("request-1"), "first", "unmounted");
         expect(fixture.set).not.toHaveBeenCalled();
       } finally {
         await act(() => root.unmount());
