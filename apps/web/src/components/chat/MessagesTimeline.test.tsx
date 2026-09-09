@@ -7,7 +7,7 @@ import { useComposerFocusState } from "./useComposerFocusState";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
 
-const activityTestState = vi.hoisted(() => ({ expanded: false }));
+const activityTestState = vi.hoisted(() => ({ expanded: false, expandedRuns: false }));
 
 vi.mock("../DiffWorkerPoolProvider", () => ({
   DiffWorkerPoolProvider: ({ children }: { children?: ReactNode }) => children,
@@ -21,6 +21,9 @@ vi.mock("./MessagesTimeline.logic", async (importOriginal) => {
       input: Parameters<typeof logic.deriveMessagesTimelineRowsWithState>[0],
       previous: Parameters<typeof logic.deriveMessagesTimelineRowsWithState>[1],
     ) {
+      if (activityTestState.expandedRuns) {
+        input = { ...input, expandedRunIds: new Set([RunId.make("run-1")]) };
+      }
       const projection = logic.deriveMessagesTimelineRowsWithState(input, previous);
       if (!activityTestState.expanded) return projection;
       return logic.deriveMessagesTimelineRowsWithState({
@@ -37,6 +40,7 @@ vi.mock("./MessagesTimeline.logic", async (importOriginal) => {
 
 beforeEach(() => {
   activityTestState.expanded = false;
+  activityTestState.expandedRuns = false;
 });
 
 vi.mock("@legendapp/list/react", async () => {
@@ -1658,7 +1662,7 @@ describe("MessagesTimeline", () => {
     expect(bareMarkup).not.toContain("Full conversation context");
   });
 
-  it("renders created threads as linked cards outside the work log", async () => {
+  it("renders created threads as lean rows with inline chat links", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -1703,7 +1707,7 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('data-v2-item-type="thread_created"');
     expect(markup).toContain('aria-label="Open Claude research thread"');
     expect(markup).toContain("Claude research thread");
-    expect(markup).toContain("claude-default · claude-sonnet-4-6");
+    expect(markup).toContain("Open chat");
     expect(markup).not.toContain("Work Log");
   });
 
@@ -1800,7 +1804,8 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain('aria-label="Hidden work includes a failure"');
   });
 
-  it("renders live subagent progress on the persistent linked card", async () => {
+  it("keeps live subagent progress available on the inline thread link", async () => {
+    activityTestState.expandedRuns = true;
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -1854,7 +1859,8 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("Work Log");
   });
 
-  it("discloses the full Codex subagent result without projecting child events", async () => {
+  it("keeps the completed subagent result on its thread link without a separate disclosure", async () => {
+    activityTestState.expandedRuns = true;
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -1900,9 +1906,9 @@ describe("MessagesTimeline", () => {
     );
 
     expect(markup).toContain('data-v2-item-type="subagent"');
-    expect(markup).toContain('data-v2-subagent-result-disclosure="true"');
-    expect(markup).toContain('data-v2-subagent-result="true"');
-    expect(markup).toContain('aria-label="Show full result for Isolation report"');
+    expect(markup).not.toContain('data-v2-subagent-result-disclosure="true"');
+    expect(markup).not.toContain('data-v2-subagent-result="true"');
+    expect(markup).toContain('aria-label="Open Isolation report"');
     expect(markup).toContain('aria-label="Open Isolation report"');
     expect(markup).toContain("Tests should be isolated.");
     expect(markup).toContain("Result: no shared state.");
@@ -1910,6 +1916,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("keeps live progress when a running subagent streams a partial result", async () => {
+    activityTestState.expandedRuns = true;
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -1963,6 +1970,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("shows the streamed result while a subagent runs without progress", async () => {
+    activityTestState.expandedRuns = true;
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -2015,6 +2023,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("treats a cancelled subagent result as partial output", async () => {
+    activityTestState.expandedRuns = true;
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -2067,6 +2076,7 @@ describe("MessagesTimeline", () => {
   });
 
   it("falls back to progress when a completed subagent result is whitespace-only", async () => {
+    activityTestState.expandedRuns = true;
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
       <MessagesTimeline
