@@ -1720,6 +1720,13 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
         // Direct Stop (requestRuntimeRestart) quarantines residual events from the
         // stopped run so they cannot wake or attach to a later prompt/run.
         const stoppedRunQuarantine = yield* Ref.make(false);
+        // Monitor/task ids mapped from an in-turn tool on a non-interrupted
+        // prompt. Grok session/cancel can detach the foreground command as a
+        // new background task; that leftover is not user-owned and must not
+        // open a synthetic "Background task completed." run after the
+        // replacement turn (live: grok-interrupt-restart-active).
+        const userOwnedBackgroundTaskIds = yield* Ref.make<ReadonlySet<string>>(new Set());
+        const suppressUnownedPostSettleOffers = yield* Ref.make(false);
         // A steering restart (or any interrupt) can finalize a turn while its
         // spawned subagents are still running natively. Carry the live
         // lineages into the next turn on the same session so their terminal
@@ -2688,6 +2695,12 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
           const backgroundTaskId = flavor.extractBackgroundTaskId?.(toolCall);
           if (backgroundTaskId !== undefined) {
             context.toolCallIdsByBackgroundTaskId.set(backgroundTaskId, toolCall.toolCallId);
+            if (!context.interrupted) {
+              yield* Ref.update(userOwnedBackgroundTaskIds, (current) => {
+                if (current.has(backgroundTaskId)) return current;
+                return new Set(current).add(backgroundTaskId);
+              });
+            }
             if (flavor.isPersistentBackgroundTool?.(toolCall) === true) {
               context.persistentBackgroundTaskIds.add(backgroundTaskId);
             }
@@ -3131,6 +3144,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             Effect.gen(function* () {
               if (yield* Ref.get(continuationClosed)) return Option.none();
               if (yield* Ref.get(stoppedRunQuarantine)) return Option.none();
+              if (yield* Ref.get(suppressUnownedPostSettleOffers)) return Option.none();
               if (yield* Ref.get(continuationRequested)) return Option.none();
               const route = yield* Ref.get(lastTurnRoute);
               if (route === null) return Option.none();
@@ -3255,6 +3269,14 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             }
             return;
           }
+          if (!(yield* Ref.get(userOwnedBackgroundTaskIds)).has(mutation.taskId)) {
+            if ((yield* Ref.get(runningBackgroundTaskIds)).size === 0) {
+              yield* Ref.set(suppressUnownedPostSettleOffers, true);
+              yield* Ref.set(wakeBuffer, []);
+              yield* Ref.set(midTurnUnreportedCompletedTaskIds, new Set());
+            }
+            return;
+          }
           if (
             postSettleContinuationEnabled &&
             (yield* Ref.get(activeSessionId)) === sessionId &&
@@ -3279,6 +3301,13 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
           // Direct Stop quarantine: drop residual wake evidence instead of
           // buffering it for a later continuation or follow-up run.
           if (yield* Ref.get(stoppedRunQuarantine)) {
+            return {
+              buffered: false,
+              offerContinuation: false,
+              stopProcessing: true,
+            };
+          }
+          if (yield* Ref.get(suppressUnownedPostSettleOffers)) {
             return {
               buffered: false,
               offerContinuation: false,
@@ -5502,6 +5531,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             // Direct Stop closes and recreates the old runtime before reaching
             // this reset. The quarantine remains session-scoped by design.
             yield* Ref.set(stoppedRunQuarantine, false);
+            yield* Ref.set(suppressUnownedPostSettleOffers, false);
             const runningTurn = providerTurnPayload(context, "running", null);
             yield* Ref.update(providerTurns, (current) => {
               const updated = new Map(current);

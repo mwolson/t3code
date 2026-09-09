@@ -6345,7 +6345,9 @@ describe("AcpAdapterV2", () => {
         );
 
         // _x.ai/task_completed lands ~1.2s after the cancel and clears the
-        // tracked task without opening a synthetic continuation run.
+        // tracked task without opening a synthetic continuation run. A residual
+        // completed tool_call_update from the cancelled command may already be
+        // in the wake buffer (live Grok restart_active).
         let backgroundPending = true;
         for (let attempt = 0; attempt < 50 && backgroundPending; attempt += 1) {
           backgroundPending = yield* hasPendingBackgroundWork;

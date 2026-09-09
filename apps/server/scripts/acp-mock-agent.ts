@@ -726,7 +726,10 @@ const program = Effect.gen(function* () {
       }
       if (emitTaskBackgroundedAfterCancel) {
         // Grok cancel-as-detach: the foreground command is re-run as a
-        // background task that later completes on its own.
+        // background task that later completes on its own. Live Grok also
+        // emits a completed tool_call_update for the cancelled command; that
+        // frame must not open a synthetic continuation when the leftover
+        // task ends.
         yield* Effect.sync(() => {
           writeJsonRpcNotification("_x.ai/task_backgrounded", {
             sessionId: cancelledSessionId,
@@ -735,6 +738,18 @@ const program = Effect.gen(function* () {
               tool_call_id: "task-bg-1",
               task_id: "task-bg-1",
               command: "sleep 30",
+            },
+          });
+          writeJsonRpcNotification("session/update", {
+            sessionId: cancelledSessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId: "tool-call-running-1",
+              title: "Terminal",
+              kind: "execute",
+              status: "completed",
+              rawInput: { command: ["sleep", "30"] },
+              rawOutput: { type: "Bash", exit_code: 0 },
             },
           });
         });
