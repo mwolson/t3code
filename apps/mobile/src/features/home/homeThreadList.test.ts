@@ -112,6 +112,41 @@ describe("buildHomeThreadGroups", () => {
     );
   });
 
+  it("excludes subagent child threads from home groups", () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    const projectId = ProjectId.make("project-1");
+    const rootThreadId = ThreadId.make("root");
+    const projects = [
+      makeProject({
+        environmentId,
+        id: projectId,
+        title: "t3code",
+      }),
+    ];
+    const groups = buildGroups(projects, [
+      makeThread({
+        environmentId,
+        id: rootThreadId,
+        projectId,
+        title: "Root",
+      }),
+      makeThread({
+        environmentId,
+        id: ThreadId.make("child"),
+        projectId,
+        title: "Child",
+        lineage: {
+          rootThreadId,
+          parentThreadId: rootThreadId,
+          relationshipToParent: "subagent",
+        },
+      }),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.threads.map((thread) => thread.id)).toEqual([rootThreadId]);
+  });
+
   it("routes stale duplicate project refs through the canonical repository group", () => {
     const localEnvironmentId = EnvironmentId.make("environment-local");
     const remoteEnvironmentId = EnvironmentId.make("environment-remote");

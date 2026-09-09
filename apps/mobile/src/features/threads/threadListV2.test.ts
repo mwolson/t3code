@@ -380,6 +380,63 @@ describe("getThreadListV2OrderedSection", () => {
 });
 
 describe("buildThreadListV2Items", () => {
+  it("excludes subagent child threads from top-level rows and counts", () => {
+    const rootThreadId = ThreadId.make("root");
+    const layout = buildThreadListV2Items({
+      threads: [
+        makeThread({ id: rootThreadId, title: "Root" }),
+        makeThread({
+          id: ThreadId.make("fork"),
+          title: "Fork",
+          lineage: {
+            rootThreadId,
+            parentThreadId: rootThreadId,
+            relationshipToParent: "fork",
+          },
+        }),
+        makeThread({
+          id: ThreadId.make("active-child"),
+          title: "Active child",
+          lineage: {
+            rootThreadId,
+            parentThreadId: rootThreadId,
+            relationshipToParent: "subagent",
+          },
+        }),
+        makeThread({
+          id: ThreadId.make("settled-child"),
+          title: "Settled child",
+          lineage: {
+            rootThreadId,
+            parentThreadId: rootThreadId,
+            relationshipToParent: "subagent",
+          },
+          settledOverride: "settled",
+          settledAt: "2026-06-01T12:00:00.000Z",
+        }),
+        makeThread({
+          id: ThreadId.make("snoozed-child"),
+          title: "Snoozed child",
+          lineage: {
+            rootThreadId,
+            parentThreadId: rootThreadId,
+            relationshipToParent: "subagent",
+          },
+          snoozedUntil: "2026-06-03T09:00:00.000Z",
+          snoozedAt: "2026-06-01T12:00:00.000Z",
+        }),
+      ],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+      snoozedShelfExpanded: true,
+    });
+
+    expect(layout.items.map((item) => String(item.thread.id)).sort()).toEqual(["fork", "root"]);
+    expect(layout.settledCount).toBe(0);
+    expect(layout.snoozedCount).toBe(0);
+  });
+
   it("places a persisted settled thread in the settled shelf", () => {
     const thread = makeThread({
       id: ThreadId.make("linked-merged"),

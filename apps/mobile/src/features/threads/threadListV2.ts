@@ -208,6 +208,12 @@ function parseTimestampMs(isoDate: string): number {
 
 /** The active order shared by web and native: new/reopened rows, then the
     saved arrangement. Activity does not move a thread. */
+export function isThreadListV2SubagentThread(
+  thread: Pick<EnvironmentThreadShell, "lineage">,
+): boolean {
+  return thread.lineage.relationshipToParent === "subagent";
+}
+
 export function sortThreadsForListV2<
   T extends {
     readonly id: string;
@@ -231,6 +237,7 @@ export function getThreadListV2OrderedSection(input: {
   readonly queuedThreadKeys?: ReadonlySet<string>;
 }): EnvironmentThreadShell[] {
   const threads = input.threads.filter((thread) => {
+    if (isThreadListV2SubagentThread(thread)) return false;
     if (thread.archivedAt !== null) return false;
     if (
       (input.settlementEnvironmentIds?.has(thread.environmentId) ?? true) &&
@@ -442,6 +449,7 @@ export function buildThreadListV2Items(input: {
   const snoozed: EnvironmentThreadShell[] = [];
   let nextSnoozeWakeAt: string | null = null;
   for (const thread of input.threads) {
+    if (isThreadListV2SubagentThread(thread)) continue;
     // Callers pass live shells. The server stamps settledOverride for the tail.
     if (input.environmentId !== null && thread.environmentId !== input.environmentId) continue;
     if (projectKeys !== null && !projectKeys.has(`${thread.environmentId}:${thread.projectId}`)) {
