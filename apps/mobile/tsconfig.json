@@ -2,6 +2,12 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "allowImportingTsExtensions": true,
+    "paths": {
+      "@t3tools/client-runtime/markdown-links": [
+        "../../packages/client-runtime/src/markdownLinks.ts"
+      ],
+      "@t3tools/shared/video": ["../../packages/shared/src/video.ts"]
+    },
     "strict": true
   }
 }
