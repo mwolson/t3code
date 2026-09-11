@@ -1,6 +1,5 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import * as DateTime from "effect/DateTime";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -62,28 +61,22 @@ vi.mock("./use-thread-selection", () => ({
   }),
 }));
 vi.mock("./use-thread-detail", () => ({
-  useSelectedThreadProjection: () => ({
-    id: fixture.selectedThread.id,
-    projection: {
-      runtimeRequests: fixture.requestIds.map((requestId) => ({
-        id: requestId,
-        kind: "user_input",
-        status: "pending",
-        createdAt: DateTime.makeUnsafe("2026-09-08T00:00:00Z"),
-        responseCapability: { type: "live" },
+  useSelectedThreadPendingRequests: () => ({
+    approvals: [],
+    userInputs: fixture.requestIds.map((requestId) => ({
+      requestId,
+      createdAt: "2026-09-08T00:00:00Z",
+      responseCapability: "live",
+      dismissible: false,
+      questions: ["first", "second"].map((id) => ({
+        id,
+        header: id,
+        question: `Attach ${id} file`,
+        options: [],
+        allowCustomAnswer: true,
+        multiSelect: false,
       })),
-      turnItems: fixture.requestIds.map((requestId) => ({
-        type: "user_input_request",
-        requestId,
-        questions: ["first", "second"].map((id) => ({
-          id,
-          header: id,
-          question: `Attach ${id} file`,
-          options: [],
-          allowCustomAnswer: true,
-        })),
-      })),
-    },
+    })),
   }),
 }));
 
