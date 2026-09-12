@@ -1,7 +1,15 @@
-import { CheckpointRef, EnvironmentId, MessageId, RunId, ThreadId } from "@t3tools/contracts";
+import {
+  CheckpointRef,
+  ComposerContextId,
+  EnvironmentId,
+  MessageId,
+  RunId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { act, createRef, useLayoutEffect, type ReactNode, type Ref } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestRenderer } from "react-test-renderer";
+import { COMPOSER_CONTEXT_CLIPBOARD_MIME } from "@t3tools/shared/composerContextClipboard";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -175,6 +183,7 @@ function matchMedia() {
 }
 
 let MessagesTimeline: typeof import("./MessagesTimeline").MessagesTimeline;
+let resolvePreviewAnnotationImage: typeof import("./MessagesTimeline").resolvePreviewAnnotationImage;
 
 beforeEach(async () => {
   const classList = {
@@ -213,7 +222,7 @@ beforeEach(async () => {
     },
   });
 
-  ({ MessagesTimeline } = await import("./MessagesTimeline"));
+  ({ MessagesTimeline, resolvePreviewAnnotationImage } = await import("./MessagesTimeline"));
 }, 30_000);
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
@@ -345,6 +354,69 @@ describe("MessagesTimeline", () => {
       }
     },
   );
+
+  it("keeps fenced canonical references and structured context in the actual Copy handler", async () => {
+    const writes: Array<Record<string, Blob>> = [];
+    class ClipboardItemStub {
+      constructor(readonly data: Record<string, Blob>) {}
+    }
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("ClipboardItem", ClipboardItemStub);
+    vi.stubGlobal("navigator", {
+      clipboard: {
+        writeText,
+        write: async (items: ClipboardItemStub[]) => {
+          writes.push(...items.map((item) => item.data));
+        },
+      },
+    });
+    const text = "```md\n[notes.txt](t3-context://v1/file/file-1)\n```";
+    const record = {
+      version: 1 as const,
+      contextId: ComposerContextId.make("file-1"),
+      kind: "file" as const,
+      label: "notes.txt",
+      attachmentId: "attachment-1",
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 3,
+    };
+    const entry = buildUserTimelineEntry(text);
+    let renderer!: ReactTestRenderer;
+    try {
+      await act(async () => {
+        renderer = create(
+          <MessagesTimeline
+            {...buildProps()}
+            timelineEntries={[
+              {
+                ...entry,
+                message: { ...entry.message, context: { version: 1, records: [record] } },
+              },
+            ]}
+          />,
+        );
+      });
+      await act(async () => {
+        renderer.root
+          .findAllByType("button")
+          .find((button) => button.props["aria-label"] === "Copy message")!
+          .props.onClick({ nativeEvent: new Event("click") });
+      });
+      expect(writeText).not.toHaveBeenCalled();
+      expect(writes).toHaveLength(1);
+      expect(await writes[0]!["text/plain"]!.text()).toBe(text);
+      expect(JSON.parse(await writes[0]![COMPOSER_CONTEXT_CLIPBOARD_MIME]!.text())).toMatchObject({
+        version: 1,
+        source: { environmentId: ACTIVE_THREAD_ENVIRONMENT_ID, messageId: entry.message.id },
+        records: [record],
+      });
+      expect(await writes[0]!["text/html"]!.text()).toContain("t3-context://v1/file/file-1");
+    } finally {
+      act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("shows dynamic tool input without cached output when the row is expanded", async () => {
     activityTestState.expanded = true;
@@ -1408,8 +1480,8 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("Terminal 1 lines 1-5");
     expect(markup).toContain("lucide-terminal");
-    expect(markup).toContain("yoo what&#x27;s</p>");
-    expect(markup).toContain('<span aria-hidden="true"> </span>');
+    expect(markup).toContain("yoo what&#x27;s");
+    expect(markup).not.toContain("terminal_context");
     expect(markup).toContain("Show full message");
   }, 20_000);
 
@@ -2427,9 +2499,8 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("contextWindow.test.ts");
-    expect(markup).toContain("Wadduo");
-    expect(markup).toContain('data-testid="file-diff"');
+    expect(markup).toContain("contextWindow.test.ts +47 to +58");
+    expect(markup).toContain("lucide-message-circle");
     expect(markup).not.toContain(">Review comment<");
     expect(markup).not.toContain("&lt;review_comment");
     expect(markup).not.toContain("&lt;/review_comment&gt;");
@@ -2466,9 +2537,8 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("plan.md");
-    expect(markup).toContain("Clarify this.");
-    expect(markup).toContain("# Plan");
+    expect(markup).toContain("plan.md L1 to L2");
+    expect(markup).not.toContain("review_comment");
     expect(markup).not.toContain('data-testid="file-diff"');
   });
 
