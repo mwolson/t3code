@@ -12,6 +12,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as MobileDatabase from "../persistence/mobile-database";
+import { encodeStoredShellSnapshot } from "./shell-cache-encoding";
 import {
   attachProjectFaviconDatabase,
   projectFaviconDatabaseCache,
@@ -33,9 +34,6 @@ const StoredVcsRefs = Schema.Struct({
 });
 
 const decodeStoredShellSnapshot = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(StoredOrchestrationShellSnapshot),
-);
-const encodeStoredShellSnapshot = Schema.encodeEffect(
   Schema.fromJsonString(StoredOrchestrationShellSnapshot),
 );
 const decodeStoredThreadSnapshot = Schema.decodeUnknownEffect(
