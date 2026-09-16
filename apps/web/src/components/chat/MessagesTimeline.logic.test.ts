@@ -3696,7 +3696,7 @@ it.each([true, false])(
   },
 );
 
-it("shows the worktree setup card instead of the working placeholder", () => {
+it("keeps the working header in place across worktree setup handoff", () => {
   const snapshot: WorktreeSetupSnapshot = {
     threadId: ThreadId.make("thread-setup"),
     phase: "running",
@@ -3747,6 +3747,7 @@ it("shows the worktree setup card instead of the working placeholder", () => {
     worktreeSetup: snapshot,
   });
   expect(withoutMessages).toEqual([
+    { kind: "working", id: "working-indicator-row", createdAt: snapshot.startedAt },
     {
       kind: "worktree-setup",
       id: "worktree-setup-row",
@@ -3770,10 +3771,11 @@ it("shows the worktree setup card instead of the working placeholder", () => {
     "worktree-setup",
     "working",
     "message",
+    "thinking",
   ]);
 
   // Once the agent stage is done the setup script may still be running in
-  // the background: the turn owns the header and the script row follows it.
+  // the background: the header owns its progress chip, so no setup row remains.
   const stage = (id: "agent" | "setup-script", status: "done" | "running") =>
     ({
       id,
@@ -3803,13 +3805,7 @@ it("shows the worktree setup card instead of the working placeholder", () => {
     supportsConversationRollback: false,
     worktreeSetup: asyncSnapshot,
   });
-  expect(asyncRows.map((row) => row.kind)).toEqual([
-    "message",
-    "working",
-    "worktree-setup",
-    "thinking",
-  ]);
-  expect(asyncRows[2]).toMatchObject({ kind: "worktree-setup", embedded: true });
+  expect(asyncRows.map((row) => row.kind)).toEqual(["message", "working", "thinking"]);
 
   // Dispatched but not yet visible as a turn: the full card stays put so
   // nothing collapses during the handoff.
@@ -3821,8 +3817,8 @@ it("shows the worktree setup card instead of the working placeholder", () => {
     supportsConversationRollback: false,
     worktreeSetup: asyncSnapshot,
   });
-  expect(handoffRows.map((row) => row.kind)).toEqual(["message", "worktree-setup"]);
-  expect(handoffRows[1]).toMatchObject({ kind: "worktree-setup", embedded: false });
+  expect(handoffRows.map((row) => row.kind)).toEqual(["message", "working", "worktree-setup"]);
+  expect(handoffRows[2]).toMatchObject({ kind: "worktree-setup", embedded: false });
 
   // A script that already finished has nothing left to show once the turn is live.
   const finishedRows = deriveMessagesTimelineRows({
