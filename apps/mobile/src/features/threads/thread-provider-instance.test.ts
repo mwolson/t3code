@@ -64,8 +64,14 @@ describe("resolveThreadProviderInstance", () => {
     const threadA = makeThread(environmentA, "codex");
     const threadB = makeThread(environmentB, "codex");
 
-    expect(resolveThreadProviderInstance(serverConfigs, threadA)?.accentColor).toBe("#ff8800");
-    expect(resolveThreadProviderInstance(serverConfigs, threadB)?.accentColor).toBeUndefined();
+    expect(
+      resolveThreadProviderInstance(serverConfigs.get(environmentA)?.providers, threadA)
+        ?.accentColor,
+    ).toBe("#ff8800");
+    expect(
+      resolveThreadProviderInstance(serverConfigs.get(environmentB)?.providers, threadB)
+        ?.accentColor,
+    ).toBeUndefined();
   });
 
   it("labels a custom instance by its id so its initials differ from the default", () => {
@@ -81,11 +87,16 @@ describe("resolveThreadProviderInstance", () => {
     ]);
 
     expect(
-      resolveThreadProviderInstance(serverConfigs, makeThread(environmentId, "codex"))?.displayName,
+      resolveThreadProviderInstance(
+        serverConfigs.get(environmentId)?.providers,
+        makeThread(environmentId, "codex"),
+      )?.displayName,
     ).toBe("Codex");
     expect(
-      resolveThreadProviderInstance(serverConfigs, makeThread(environmentId, "codex_personal"))
-        ?.displayName,
+      resolveThreadProviderInstance(
+        serverConfigs.get(environmentId)?.providers,
+        makeThread(environmentId, "codex_personal"),
+      )?.displayName,
     ).toBe("Codex Personal");
   });
 
@@ -113,7 +124,9 @@ describe("resolveThreadProviderInstance", () => {
       },
     };
 
-    expect(resolveThreadProviderInstance(serverConfigs, thread)).toMatchObject({
+    expect(
+      resolveThreadProviderInstance(serverConfigs.get(environmentId)?.providers, thread),
+    ).toMatchObject({
       driverKind: "codex",
       displayName: "Codex Work",
       showBadge: true,
@@ -127,7 +140,9 @@ describe("resolveThreadProviderInstance", () => {
     ]);
     const thread = makeThread(environmentId, "codex");
 
-    expect(resolveThreadProviderInstance(serverConfigs, thread)?.showBadge).toBe(false);
+    expect(
+      resolveThreadProviderInstance(serverConfigs.get(environmentId)?.providers, thread)?.showBadge,
+    ).toBe(false);
   });
 });
 
