@@ -12,7 +12,7 @@ import { create, type ReactTestRenderer } from "react-test-renderer";
 import { COMPOSER_CONTEXT_CLIPBOARD_MIME } from "@t3tools/shared/composerContextClipboard";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef } from "@legendapp/list/react";
 
 const activityTestState = vi.hoisted(() => ({ expanded: false, expandedRuns: false }));
@@ -185,7 +185,8 @@ function matchMedia() {
 let MessagesTimeline: typeof import("./MessagesTimeline").MessagesTimeline;
 let resolvePreviewAnnotationImage: typeof import("./MessagesTimeline").resolvePreviewAnnotationImage;
 
-beforeEach(async () => {
+const ElementStub = class ElementStub {};
+function stubDomGlobals() {
   const classList = {
     add: () => {},
     remove: () => {},
@@ -196,6 +197,7 @@ beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("requestAnimationFrame", () => 0);
   vi.stubGlobal("cancelAnimationFrame", () => {});
+  vi.stubGlobal("Element", ElementStub);
   vi.stubGlobal("localStorage", {
     getItem: () => null,
     setItem: () => {},
@@ -204,6 +206,7 @@ beforeEach(async () => {
   });
   vi.stubGlobal("window", {
     localStorage,
+    Element: ElementStub,
     matchMedia,
     addEventListener: () => {},
     removeEventListener: () => {},
@@ -221,7 +224,11 @@ beforeEach(async () => {
       offsetHeight: 0,
     },
   });
+}
 
+beforeEach(stubDomGlobals);
+beforeAll(async () => {
+  stubDomGlobals();
   ({ MessagesTimeline, resolvePreviewAnnotationImage } = await import("./MessagesTimeline"));
 }, 30_000);
 
