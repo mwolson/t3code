@@ -1640,6 +1640,6 @@ export class OrchestrationDispatchCommandError extends Schema.TaggedError<Orches
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),
-    bootstrapThreadDisposition: Schema.optional(Schema.Literal("deleted")),
+    bootstrapThreadDisposition: Schema.optional(Schema.Literals(["deleted", "not-created"])),
   },
 ) {}
