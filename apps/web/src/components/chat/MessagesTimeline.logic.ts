@@ -102,7 +102,12 @@ export function liveWorkEntryLabel(
   active: boolean,
 ) {
   const status = liveActivityToolStatus(entry.toolLifecycleStatus, active);
-  if (entry.itemType === "reasoning") return status === "inProgress" ? "Thinking" : "Thought";
+  if (entry.itemType === "reasoning") {
+    return (
+      entry.detail?.trim().replace(/\s+/g, " ") ||
+      (status === "inProgress" ? "Thinking" : "Thought")
+    );
+  }
   const toolPresentation = resolveWorkEntryToolPresentation({
     ...entry,
     toolLifecycleStatus: status,
