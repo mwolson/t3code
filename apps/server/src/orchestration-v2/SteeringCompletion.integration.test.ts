@@ -11,6 +11,7 @@ import {
   ProviderTurnId,
   ThreadId,
   type OrchestrationV2DomainEvent,
+  type ModelSelection,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -19,6 +20,7 @@ import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import { PiProviderCapabilitiesV2 } from "./Adapters/PiAdapterV2.ts";
 import { OrchestrationEffectWorkerV2 } from "./EffectWorker.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import { OrchestratorV2 } from "./Orchestrator.ts";
@@ -403,3 +405,178 @@ for (const mailbox of [false, true]) {
     );
   }
 }
+
+it.effect("steers a Pi-like turn when composer selection differs but stays turn-scoped", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      // Replay cannot express this: the failure happens in command policy
+      // before a provider transcript exists. Pi advertises active steering
+      // without interrupt-restart; a composer option diff must not force restart.
+      const cwd = yield* checkpointWorkspace("steer-turn-scoped-selection");
+      const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
+      const started: ProviderAdapterV2TurnInput[] = [];
+      const steered: string[] = [];
+      const piInstanceId = ProviderInstanceId.make("pi");
+      const runningSelection = {
+        instanceId: piInstanceId,
+        model: "grok-4.6",
+        options: [{ id: "thinking", value: "high" }],
+      } satisfies ModelSelection;
+      const composerSelection = {
+        instanceId: piInstanceId,
+        model: "grok-4.6",
+        options: [{ id: "thinking", value: "low" }],
+      } satisfies ModelSelection;
+      const now = yield* DateTime.now;
+      const adapter: ProviderAdapterV2Shape = {
+        instanceId: piInstanceId,
+        driver: ProviderDriverKind.make("pi"),
+        getCapabilities: () => Effect.succeed(PiProviderCapabilitiesV2),
+        planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+        openSession: (input) =>
+          Effect.succeed({
+            instanceId: piInstanceId,
+            driver: ProviderDriverKind.make("pi"),
+            providerSessionId: input.providerSessionId,
+            providerSession: {
+              id: input.providerSessionId,
+              driver: ProviderDriverKind.make("pi"),
+              providerInstanceId: piInstanceId,
+              status: "ready",
+              cwd,
+              model: runningSelection.model,
+              capabilities: PiProviderCapabilitiesV2,
+              createdAt: now,
+              updatedAt: now,
+              lastError: null,
+            },
+            events: Stream.fromQueue(events),
+            ensureThread: ({ threadId }) =>
+              Effect.succeed({
+                id: ProviderThreadId.make(`provider-thread:${threadId}`),
+                driver: ProviderDriverKind.make("pi"),
+                providerInstanceId: piInstanceId,
+                providerSessionId: input.providerSessionId,
+                appThreadId: threadId,
+                ownerNodeId: null,
+                nativeThreadRef: {
+                  driver: ProviderDriverKind.make("pi"),
+                  nativeId: "native-thread",
+                  strength: "strong",
+                },
+                nativeConversationHeadRef: null,
+                status: "idle",
+                firstRunOrdinal: null,
+                lastRunOrdinal: null,
+                handoffIds: [],
+                forkedFrom: null,
+                createdAt: now,
+                updatedAt: now,
+              }),
+            resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
+            startTurn: (turn) =>
+              Effect.gen(function* () {
+                started.push(turn);
+                const startedAt = yield* DateTime.now;
+                yield* Queue.offer(events, {
+                  type: "provider_turn.updated",
+                  driver: ProviderDriverKind.make("pi"),
+                  providerTurn: {
+                    id: ProviderTurnId.make(`provider-turn:${turn.attemptId}`),
+                    providerThreadId: turn.providerThread.id,
+                    nodeId: turn.rootNodeId,
+                    runAttemptId: turn.attemptId,
+                    nativeTurnRef: {
+                      driver: ProviderDriverKind.make("pi"),
+                      nativeId: `native:${turn.attemptId}`,
+                      strength: "strong",
+                    },
+                    ordinal: turn.providerTurnOrdinal,
+                    status: "running",
+                    startedAt,
+                    completedAt: null,
+                  },
+                });
+              }),
+            steerTurn: (turn) =>
+              Effect.sync(() => {
+                steered.push(turn.message.text);
+              }),
+            interruptTurn: () => Effect.void,
+            respondToRuntimeRequest: () => Effect.void,
+            readThreadSnapshot: () => Effect.die("unused"),
+            rollbackThread: () => Effect.die("unused"),
+            forkThread: () => Effect.die("unused"),
+          }),
+      };
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* OrchestratorV2;
+        const worker = yield* OrchestrationEffectWorkerV2;
+        const threadId = ThreadId.make("thread:steer-turn-scoped-selection");
+        const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
+          orchestrator.streamDomainEvents.pipe(
+            Stream.filter(predicate),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create"),
+          threadId,
+          projectId: ProjectId.make("project:steer-turn-scoped-selection"),
+          title: "Steer turn-scoped selection",
+          modelSelection: runningSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: cwd,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const running = yield* watch(
+          (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
+        );
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("first"),
+          threadId,
+          messageId: MessageId.make("message:first"),
+          text: "first",
+          attachments: [],
+          modelSelection: runningSelection,
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* worker.drain();
+        yield* Fiber.join(running);
+        const first = started[0];
+        assert.isDefined(first);
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("steer"),
+          threadId,
+          messageId: MessageId.make("message:steer"),
+          text: "keep going",
+          attachments: [],
+          modelSelection: composerSelection,
+          dispatchMode: { type: "steer_active", targetRunId: first.runId },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* worker.drain();
+        assert.deepEqual(steered, ["keep going"]);
+        assert.equal(started.length, 1);
+      }).pipe(
+        Effect.provide(
+          makeOrchestratorV2ReplayLayerWithRegistry(
+            { name: "steer-turn-scoped-selection" },
+            makeSingleLayer(adapter),
+            { runEffectWorker: false },
+          ),
+        ),
+      );
+    }),
+  ),
+);

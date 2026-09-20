@@ -3365,13 +3365,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
         });
 
+      // A composer selection that the adapter can apply on the next turn is not
+      // a mid-turn restart. Pi (and Claude) can steer the active run but cannot
+      // interrupt-and-restart it; treating every option diff as forceRestart
+      // made those steers fail with "cannot redirect an active run".
+      const requiresSelectionRestart = selectionTransition?.type === "restart_session";
       const steeringPolicy = yield* enforceCommandPolicy(input.command)(
         commandPolicy.decideSteeringExecution({
           commandId: input.command.commandId,
           threadId: input.command.threadId,
           providerInstanceId: targetRun.providerInstanceId,
           capabilities: session.providerSession.capabilities,
-          forceRestart: input.forceRestart || selectionChanged,
+          forceRestart: input.forceRestart || requiresSelectionRestart,
         }),
       );
 
