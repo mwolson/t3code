@@ -25,5 +25,10 @@ describe("navigationPersistence", () => {
       index: 1,
       routes: [{ name: "Home" }, { name: "Settings" }],
     });
+
+    // An empty callback during navigator teardown must not discard the last stack.
+    const beforeTeardown = readRememberedNavigationState();
+    rememberNavigationState(undefined);
+    expect(readRememberedNavigationState()).toBe(beforeTeardown);
   });
 });
