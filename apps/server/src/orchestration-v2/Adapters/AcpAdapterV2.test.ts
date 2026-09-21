@@ -7,9 +7,11 @@ import {
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import * as NodeSea from "node:sea";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import {
   CheckpointId,
   GrokSettings,
@@ -90,6 +92,11 @@ import {
 } from "./AcpAdapterV2.ts";
 
 import { makeGrokAdapterV2 } from "./GrokAdapterV2.ts";
+
+vi.mock("node:sea", async (importOriginal) => {
+  const sea = await importOriginal<typeof import("node:sea")>();
+  return { ...sea, isSea: vi.fn(sea.isSea) };
+});
 
 const DEFAULT_GROK_SETTINGS = Schema.decodeSync(GrokSettings)({});
 
@@ -557,6 +564,77 @@ describe("AcpAdapterV2", () => {
       acpScopedNativeId(instanceId, "item-1"),
     );
   });
+
+  it.effect("starts the MCP bridge directly from the self-contained runtime", () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const idAllocator = yield* IdAllocatorV2;
+      const path = yield* Path.Path;
+      const serverConfig = yield* ServerConfig;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      vi.mocked(NodeSea.isSea).mockReturnValue(true);
+
+      const instanceId = ProviderInstanceId.make("acp-test-self-contained-mcp-bridge");
+      const threadId = ThreadId.make("thread-acp-self-contained-mcp-bridge");
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-acp-self-contained-mcp-bridge"),
+        threadId,
+        providerSessionId: "mcp-session-acp-self-contained-mcp-bridge",
+        providerInstanceId: instanceId,
+        endpoint: "http://127.0.0.1:43123/mcp",
+        authorizationHeader: "Bearer self-contained-mcp-bridge-token",
+        browserToolsAvailable: false,
+      });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          McpProviderSession.clearMcpProviderSession(threadId);
+          vi.mocked(NodeSea.isSea).mockReset();
+        }),
+      );
+
+      let runtimeInput: AcpAdapterV2RuntimeInput | undefined;
+      const makeRuntime = makeMockRuntime({ childProcessSpawner, mockAgentPath });
+      const adapter = makeAcpAdapterV2({
+        crypto: yield* Crypto.Crypto,
+        instanceId,
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          makeRuntime: (input) =>
+            Effect.sync(() => {
+              runtimeInput = input;
+            }).pipe(Effect.andThen(makeRuntime(input))),
+        },
+        fileSystem,
+        idAllocator,
+        serverConfig,
+      });
+      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "default" } as const;
+      yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("provider-session-acp-self-contained-mcp-bridge"),
+        modelSelection,
+        runtimePolicy,
+      });
+
+      const mcpServer = runtimeInput?.mcpServers[0];
+      if (mcpServer === undefined || !("command" in mcpServer)) {
+        return yield* Effect.die("ACP runtime must receive the t3-code stdio MCP server");
+      }
+      assert.equal(mcpServer.command, process.execPath);
+      assert.deepEqual(mcpServer.args, ["acp-mcp-bridge"]);
+      assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_NODE, process.execPath);
+      assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_ENTRYPOINT, undefined);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
 
   it.live("refreshes ACP prompt instructions when the interaction mode changes", () =>
     Effect.gen(function* () {

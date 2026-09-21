@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodePath from "node:path";
+import * as NodeSea from "node:sea";
 
 import {
   type ChatAttachment,
@@ -624,14 +625,23 @@ function acpMcpContext(threadId: ThreadId | null): AcpMcpContext {
   // forwards JSON-RPC to T3's authenticated MCP endpoint. The credential
   // travels via environment variables, never the command line.
   // The agent spawns the bridge from its own working directory, so the server
-  // entrypoint must be an absolute path.
-  const serverEntrypoint = process.argv[1] === undefined ? "t3" : NodePath.resolve(process.argv[1]);
+  // entrypoint must be an absolute path. The single-executable has no
+  // entrypoint script: Node repeats the binary at argv[1], and the executable
+  // dispatches subcommands from argv[2], so it is invoked with none.
+  const serverEntrypoint = NodeSea.isSea()
+    ? undefined
+    : process.argv[1] === undefined
+      ? "t3"
+      : NodePath.resolve(process.argv[1]);
   return {
     servers: [
       {
         name: "t3-code",
         command: process.execPath,
-        args: [serverEntrypoint, "acp-mcp-bridge"],
+        args:
+          serverEntrypoint === undefined
+            ? ["acp-mcp-bridge"]
+            : [serverEntrypoint, "acp-mcp-bridge"],
         env: [
           { name: "ELECTRON_RUN_AS_NODE", value: "1" },
           { name: "T3_ACP_MCP_ENDPOINT", value: session.endpoint },
@@ -646,7 +656,7 @@ function acpMcpContext(threadId: ThreadId | null): AcpMcpContext {
       T3_ACP_MCP_ENDPOINT: session.endpoint,
       T3_ACP_MCP_AUTHORIZATION: session.authorizationHeader,
       T3_ACP_MCP_NODE: process.execPath,
-      T3_ACP_MCP_ENTRYPOINT: serverEntrypoint,
+      ...(serverEntrypoint === undefined ? {} : { T3_ACP_MCP_ENTRYPOINT: serverEntrypoint }),
     },
   };
 }
