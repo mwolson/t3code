@@ -15,6 +15,14 @@ describe("T3 orchestration provider instructions", () => {
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "cross-provider");
   });
 
+  it("documents bounded catalog discovery and top-level project selection", () => {
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "provider summaries");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "modelCursor");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "includeModelOptions: true");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "projectDirectory");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "Delegated children always inherit");
+  });
+
   it("documents structured schedules instead of JSON strings", () => {
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "structured object, never as JSON text");
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, '"everyMs":3600000');

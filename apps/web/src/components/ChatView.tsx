@@ -422,7 +422,7 @@ import {
 } from "./chat/ProviderStatusBanner";
 import {
   dismissThreadErrorBannerForSession,
-  getThreadErrorBannerKey,
+  resolveThreadErrorBanner,
   isThreadErrorBannerDismissedForSession,
   shouldShowThreadErrorBanner,
   ThreadErrorBanner,
@@ -2043,14 +2043,17 @@ export default function ChatView(props: ChatViewProps) {
           },
     [parentSubagentThread?.title, parentSubagentThreadRef],
   );
-  const threadError = isServerThread
-    ? (localServerError ?? serverRuntime?.lastError ?? null)
-    : localDraftError;
-  // Dismissals can only mask the shown error, never clear it: a server thread
-  // keeps its error in session.lastError, so clearing the local shadow would
-  // just fall through to the persisted one. Mask the current error until a
-  // different error arrives, mirroring the provider status banner.
-  const threadErrorBannerKey = getThreadErrorBannerKey(routeThreadKey, threadError);
+  // Mask only the visible occurrence; clearing a local error on dismissal
+  // would expose the hidden durable error immediately.
+  const localErrorEntry = isServerThread
+    ? localServerErrorsByThreadKey[routeThreadKey]
+    : localDraftErrorsByDraftId[draftId ?? ""];
+  const { error: threadError, key: threadErrorBannerKey } = resolveThreadErrorBanner({
+    threadKey: routeThreadKey,
+    localError: isServerThread ? localServerError : localDraftError,
+    localErrorAt: localErrorEntry?.at ?? null,
+    runtime: isServerThread ? (serverRuntime ?? null) : null,
+  });
   const visibleThreadError = shouldShowThreadErrorBanner(
     routeThreadKey,
     threadError,
@@ -4215,24 +4218,26 @@ export default function ChatView(props: ChatViewProps) {
         serverThread.id === targetThreadId
       ) {
         setLocalServerErrorsByThreadKey((existing) => {
-          if ((existing[routeThreadKey]?.message ?? null) === nextError) {
-            return existing;
-          }
+          if (nextError === null && existing[routeThreadKey]?.message == null) return existing;
           return {
             ...existing,
-            [routeThreadKey]: nextEntry,
+            [routeThreadKey]: {
+              ...nextEntry,
+              at: Math.max(nextEntry.at, (existing[routeThreadKey]?.at ?? 0) + 1),
+            },
           };
         });
         return;
       }
       const localDraftErrorKey = draftId ?? targetThreadId;
       setLocalDraftErrorsByDraftId((existing) => {
-        if ((existing[localDraftErrorKey]?.message ?? null) === nextError) {
-          return existing;
-        }
+        if (nextError === null && existing[localDraftErrorKey]?.message == null) return existing;
         return {
           ...existing,
-          [localDraftErrorKey]: nextEntry,
+          [localDraftErrorKey]: {
+            ...nextEntry,
+            at: Math.max(nextEntry.at, (existing[localDraftErrorKey]?.at ?? 0) + 1),
+          },
         };
       });
     },
@@ -10411,7 +10416,6 @@ export default function ChatView(props: ChatViewProps) {
                     : null
                 }
                 onDismiss={() => {
-                  setThreadError(activeThread.id, null);
                   dismissThreadErrorBannerForSession(threadErrorBannerKey);
                   setThreadErrorBannerDismissTick((tick) => tick + 1);
                 }}

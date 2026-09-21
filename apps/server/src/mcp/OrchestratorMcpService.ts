@@ -10,6 +10,7 @@ import {
   type OrchestrationV2ThreadShell,
   type OrchestrationV2TurnItem,
   OrchestratorMcpFailure,
+  type OrchestratorMcpCapabilitiesInput,
   type OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpCreateThreadsInput,
   type OrchestratorMcpCreateThreadsResult,
@@ -51,6 +52,7 @@ import {
   type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
+import * as NodeOS from "node:os";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -58,6 +60,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { ProviderAdapterRegistryV2 } from "../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -74,9 +77,12 @@ import {
   ThreadManagementService,
 } from "../orchestration-v2/ThreadManagementService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
+const DEFAULT_CAPABILITIES_MODEL_LIMIT = 50;
+const MAX_CAPABILITIES_MODEL_LIMIT = 100;
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
 const TASK_POLL_INTERVAL_MS = 50;
@@ -97,6 +103,7 @@ type TerminalTaskStatus = Extract<
 export interface OrchestratorMcpServiceShape {
   readonly capabilities: (
     scope: McpInvocationScope,
+    input: OrchestratorMcpCapabilitiesInput,
   ) => Effect.Effect<OrchestratorMcpCapabilitiesResult, OrchestratorMcpFailure>;
   readonly delegateTask: (
     scope: McpInvocationScope,
@@ -157,6 +164,7 @@ export class OrchestratorMcpService extends Context.Service<
 >()("t3/mcp/OrchestratorMcpService") {}
 
 const isThreadManagementError = Schema.is(ThreadManagementError);
+const isProjectOperationError = Schema.is(ProjectService.ProjectOperationError);
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
   return new OrchestratorMcpFailure({ code, message });
@@ -182,6 +190,50 @@ function threadManagementFailure(error: ThreadManagementError): OrchestratorMcpF
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+interface ResolvedProjectCheckout {
+  readonly projectId: OrchestrationV2ThreadProjection["thread"]["projectId"];
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+}
+
+function expandedAbsoluteProjectDirectory(value: string, path: Path.Path): string | null {
+  const trimmed = value.trim();
+  if (trimmed === "~") {
+    return path.resolve(NodeOS.homedir());
+  }
+  if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return path.resolve(path.join(NodeOS.homedir(), trimmed.slice(2)));
+  }
+  if (!path.isAbsolute(trimmed)) {
+    return null;
+  }
+  return path.resolve(trimmed);
+}
+
+function unknownProjectDirectory(path: string): OrchestratorMcpFailure {
+  return failure("invalid_request", `Project directory '${path}' is not a known T3 project.`);
+}
+
+function isMissingWorkspaceRoot(error: ProjectService.ProjectOperationError): boolean {
+  if (error.operation !== "normalize-workspace") {
+    return false;
+  }
+  const cause = error.cause;
+  if (cause === null || typeof cause !== "object" || !("_tag" in cause)) {
+    return false;
+  }
+  return (
+    cause._tag === "WorkspaceRootNotExistsError" || cause._tag === "WorkspaceRootNotDirectoryError"
+  );
+}
+
+function projectDirectoryResolveFailure(absolute: string, error: unknown): OrchestratorMcpFailure {
+  if (isProjectOperationError(error) && !isMissingWorkspaceRoot(error)) {
+    return failure("orchestration_error", `Unable to resolve project directory '${absolute}'.`);
+  }
+  return unknownProjectDirectory(absolute);
 }
 
 /**
@@ -232,6 +284,43 @@ function providerConstraints(
     constraints.push("Provider is not authenticated.");
   }
   return constraints;
+}
+
+function capabilityModelCatalog(
+  provider: ServerProvider,
+  input: {
+    readonly model: string | undefined;
+    readonly modelCursor: number | undefined;
+    readonly modelLimit: number | undefined;
+    readonly includeModelOptions: boolean;
+  },
+) {
+  const matchingModels =
+    input.model === undefined
+      ? provider.models
+      : provider.models.filter((model) => model.slug === input.model);
+  const cursor = input.model === undefined ? (input.modelCursor ?? 0) : 0;
+  const requestedLimit = input.modelLimit ?? DEFAULT_CAPABILITIES_MODEL_LIMIT;
+  const limit =
+    input.model === undefined ? Math.min(requestedLimit, MAX_CAPABILITIES_MODEL_LIMIT) : 1;
+  const page = matchingModels.slice(cursor, cursor + limit);
+  const nextCursor = cursor + page.length < matchingModels.length ? cursor + page.length : null;
+  const models = page.map((model) => {
+    const summary = {
+      id: model.slug,
+      label: model.name ?? null,
+    };
+    const optionDescriptors = model.capabilities?.optionDescriptors;
+    if (!input.includeModelOptions || optionDescriptors === undefined) {
+      return summary;
+    }
+    return { ...summary, options: optionDescriptors };
+  });
+  return {
+    models,
+    modelsNextCursor: nextCursor,
+    modelsTotal: matchingModels.length,
+  };
 }
 
 /**
@@ -739,6 +828,8 @@ function timelineItem(input: {
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
+  const path = yield* Path.Path;
+  const projects = yield* ProjectService.ProjectService;
   const threadManagement = yield* ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
@@ -781,7 +872,19 @@ const make = Effect.gen(function* () {
       const target =
         threadId === scope.threadId
           ? parent
-          : yield* loadProjectThread(parent.thread.projectId, threadId);
+          : yield* loadProjectThread(parent.thread.projectId, threadId).pipe(
+              Effect.catchIf(
+                (error) =>
+                  error.code === "thread_not_found" &&
+                  parent.turnItems.some(
+                    (item) => item.type === "thread_created" && item.targetThreadId === threadId,
+                  ),
+                () => loadProjection(threadId),
+              ),
+            );
+      if (target.thread.deletedAt !== null) {
+        return yield* failure("thread_not_found", `Thread ${threadId} is no longer available.`);
+      }
       return { parent, target } as const;
     });
 
@@ -809,7 +912,11 @@ const make = Effect.gen(function* () {
       const target = yield* loadProjectThread(parent.thread.projectId, threadId).pipe(
         Effect.catchIf(
           (error) =>
-            error.code === "thread_not_found" && userAttachedThreadIds(parent).has(threadId),
+            error.code === "thread_not_found" &&
+            (userAttachedThreadIds(parent).has(threadId) ||
+              parent.turnItems.some(
+                (item) => item.type === "thread_created" && item.targetThreadId === threadId,
+              )),
           () => loadProjection(threadId),
         ),
       );
@@ -818,6 +925,32 @@ const make = Effect.gen(function* () {
       }
       return { parent, target } as const;
     });
+
+  const resolveProjectDirectory = Effect.fnUntraced(function* (
+    parent: OrchestrationV2ThreadProjection,
+    projectDirectory: string | undefined,
+  ): Effect.fn.Return<ResolvedProjectCheckout, OrchestratorMcpFailure> {
+    if (projectDirectory === undefined) {
+      return {
+        projectId: parent.thread.projectId,
+        branch: parent.thread.branch,
+        worktreePath: parent.thread.worktreePath,
+      };
+    }
+    const absolute = expandedAbsoluteProjectDirectory(projectDirectory, path);
+    if (absolute === null) {
+      return yield* failure(
+        "invalid_request",
+        "projectDirectory must be an absolute path, or a home-relative ~/ path, to a known T3 project.",
+      );
+    }
+    const project = yield* projects
+      .getByWorkspaceRoot(absolute)
+      .pipe(Effect.mapError((error) => projectDirectoryResolveFailure(absolute, error)));
+    if (Option.isNone(project) || project.value.deletedAt !== null)
+      return yield* unknownProjectDirectory(absolute);
+    return { projectId: project.value.id, branch: null, worktreePath: null };
+  });
 
   const loadProviders = providerRegistry.getProviders;
 
@@ -1220,12 +1353,53 @@ const make = Effect.gen(function* () {
           );
         return { scheduledTaskId: existing.id, deleted: true };
       }),
-    capabilities: (scope) =>
+    capabilities: (scope, input) =>
       Effect.gen(function* () {
         yield* requireCapability(scope);
         const parent = yield* loadProjection(scope.threadId);
         const providers = yield* loadProviders;
         const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
+        const expandedProviderInstanceId = input.providerInstanceId ?? undefined;
+        const requestedModel = input.model ?? undefined;
+        const modelCursor = input.modelCursor ?? undefined;
+        const modelLimit = input.modelLimit ?? undefined;
+        const includeModelOptions = input.includeModelOptions ?? false;
+        const expandedProvider = providers.find(
+          (provider) => provider.instanceId === expandedProviderInstanceId,
+        );
+        if (
+          expandedProviderInstanceId === undefined &&
+          (requestedModel !== undefined ||
+            modelCursor !== undefined ||
+            modelLimit !== undefined ||
+            includeModelOptions)
+        ) {
+          return yield* failure(
+            "invalid_request",
+            "providerInstanceId is required to expand a model catalog.",
+          );
+        }
+        if (expandedProviderInstanceId !== undefined && expandedProvider === undefined) {
+          return yield* failure(
+            "provider_unavailable",
+            `Provider instance ${expandedProviderInstanceId} is not registered.`,
+          );
+        }
+        if (includeModelOptions && requestedModel === undefined) {
+          return yield* failure(
+            "invalid_request",
+            "includeModelOptions requires an exact model id.",
+          );
+        }
+        if (
+          requestedModel !== undefined &&
+          !expandedProvider?.models.some((model) => model.slug === requestedModel)
+        ) {
+          return yield* failure(
+            "model_unavailable",
+            `Model ${requestedModel} is not advertised by provider ${expandedProviderInstanceId}.`,
+          );
+        }
         return {
           parentThreadId: scope.threadId,
           inheritedProviderInstanceId: parent.thread.modelSelection.instanceId,
@@ -1240,15 +1414,15 @@ const make = Effect.gen(function* () {
             return {
               providerInstanceId: provider.instanceId,
               driverKind: provider.driver,
-              displayName: provider?.displayName ?? null,
-              models:
-                provider?.models.map((model) => ({
-                  id: model.slug,
-                  label: model.name ?? null,
-                  ...(model.capabilities?.optionDescriptors === undefined
-                    ? {}
-                    : { options: model.capabilities.optionDescriptors }),
-                })) ?? [],
+              displayName: provider.displayName ?? null,
+              ...(provider.instanceId === expandedProviderInstanceId
+                ? capabilityModelCatalog(provider, {
+                    model: requestedModel,
+                    modelCursor,
+                    modelLimit,
+                    includeModelOptions,
+                  })
+                : {}),
               canRunChildTask: constraints.length === 0,
               canRunCrossProviderChildTask: constraints.length === 0,
               constraints: [...constraints],
@@ -1506,6 +1680,7 @@ const make = Effect.gen(function* () {
                 parent.thread.interactionMode,
                 request.interactionMode,
               );
+              const checkout = yield* resolveProjectDirectory(parent, request.projectDirectory);
               const threadId = stableThreadId({
                 scope,
                 requestKey: key,
@@ -1529,13 +1704,13 @@ const make = Effect.gen(function* () {
                     index,
                   }),
                   threadId,
-                  projectId: parent.thread.projectId,
+                  projectId: checkout.projectId,
                   title,
                   modelSelection: target.modelSelection,
                   runtimeMode,
                   interactionMode,
-                  branch: parent.thread.branch,
-                  worktreePath: parent.thread.worktreePath,
+                  branch: checkout.branch,
+                  worktreePath: checkout.worktreePath,
                 })
                 .pipe(
                   Effect.mapError((error) =>
@@ -1739,7 +1914,7 @@ const make = Effect.gen(function* () {
         });
         const result = yield* threadManagement
           .sendToThread({
-            projectId: parent.thread.projectId,
+            projectId: target.thread.projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
@@ -1773,10 +1948,10 @@ const make = Effect.gen(function* () {
       }),
     waitForThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { target } = yield* loadScopedThread(scope, input.threadId);
         const result = yield* threadManagement
           .waitForThread({
-            projectId: parent.thread.projectId,
+            projectId: target.thread.projectId,
             threadId: input.threadId,
             ...(input.runId === undefined ? {} : { runId: input.runId }),
             timeoutMs: Math.min(
@@ -1794,11 +1969,11 @@ const make = Effect.gen(function* () {
       }),
     interruptThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { target } = yield* loadScopedThread(scope, input.threadId);
         const key = yield* requestKey(input.clientRequestId);
         const result = yield* threadManagement
           .interruptThread({
-            projectId: parent.thread.projectId,
+            projectId: target.thread.projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
@@ -1841,5 +2016,7 @@ export const layer: Layer.Layer<
   | ThreadManagementService
   | ProviderRegistry
   | ProviderAdapterRegistryV2
+  | Path.Path
+  | ProjectService.ProjectService
   | ScheduledTaskService
 > = Layer.effect(OrchestratorMcpService, make);

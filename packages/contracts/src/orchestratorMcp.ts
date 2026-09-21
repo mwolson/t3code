@@ -45,6 +45,12 @@ const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512)
 const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(
   Schema.isMaxLength(256),
 ).annotate({ description: "Stable idempotency key to reuse when retrying this mutation." });
+const OrchestratorMcpProjectDirectory = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(4096),
+).annotate({
+  description:
+    "Optional path of a known T3 project workspace for a new top-level thread. Absolute paths and home-relative ~/ paths are accepted. Omit to inherit this thread's project. Unknown or relative paths are rejected.",
+});
 
 /**
  * OpenCode 1.15 has been observed serializing nested MCP union objects as JSON
@@ -94,6 +100,29 @@ export const OrchestratorMcpTargetOptions = Schema.Union([
   OrchestratorMcpTargetOptionsFromRecord,
 ]);
 export type OrchestratorMcpTargetOptions = typeof OrchestratorMcpTargetOptions.Type;
+
+export const OrchestratorMcpCapabilitiesInput = Schema.Struct({
+  providerInstanceId: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)).annotate({
+    description:
+      "Provider instance whose model catalog to expand. Omit for the summary-only response.",
+  }),
+  model: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)).annotate({
+    description: "Optional exact model id to return from the expanded provider catalog.",
+  }),
+  modelCursor: Schema.optionalKey(Schema.NullOr(NonNegativeInt)).annotate({
+    description: "Zero-based cursor for the expanded model catalog. Defaults 0.",
+  }),
+  modelLimit: Schema.optionalKey(
+    Schema.NullOr(PositiveInt.check(Schema.isLessThanOrEqualTo(100))),
+  ).annotate({
+    description: "Maximum models to return from the expanded catalog. Defaults 50; maximum 100.",
+  }),
+  includeModelOptions: Schema.optionalKey(Schema.NullOr(Schema.Boolean)).annotate({
+    description:
+      "Include option descriptors for the exact requested model. Defaults false and requires model.",
+  }),
+});
+export type OrchestratorMcpCapabilitiesInput = typeof OrchestratorMcpCapabilitiesInput.Type;
 
 export const OrchestratorMcpTarget = Schema.Struct({
   providerInstanceId: Schema.optional(
@@ -235,6 +264,7 @@ export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
   target: Schema.optional(OrchestratorMcpTarget),
   runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),
   interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
+  projectDirectory: Schema.optional(OrchestratorMcpProjectDirectory),
 });
 export type OrchestratorMcpCreateThreadRequest = typeof OrchestratorMcpCreateThreadRequest.Type;
 
@@ -272,6 +302,17 @@ export const OrchestratorMcpCreateThreadsResult = Schema.Struct({
   threads: Schema.Array(OrchestratorMcpCreatedThread),
 });
 export type OrchestratorMcpCreateThreadsResult = typeof OrchestratorMcpCreateThreadsResult.Type;
+
+export const OrchestratorMcpThreadStartInput = Schema.Struct({
+  prompt: OrchestratorMcpPrompt,
+  title: Schema.optional(OrchestratorMcpTitle),
+  target: Schema.optional(OrchestratorMcpTarget),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+  runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),
+  interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
+  projectDirectory: Schema.optional(OrchestratorMcpProjectDirectory),
+});
+export type OrchestratorMcpThreadStartInput = typeof OrchestratorMcpThreadStartInput.Type;
 
 export const OrchestratorMcpThreadStatus = Schema.Union([
   Schema.Literal("idle"),
@@ -450,22 +491,40 @@ export const OrchestratorMcpThreadInterruptResult = Schema.Struct({
 });
 export type OrchestratorMcpThreadInterruptResult = typeof OrchestratorMcpThreadInterruptResult.Type;
 
-export const OrchestratorMcpProviderCapability = Schema.Struct({
+const OrchestratorMcpProviderCapabilityFields = {
   providerInstanceId: ProviderInstanceId,
   driverKind: ProviderDriverKind,
   displayName: Schema.NullOr(Schema.String),
-  models: Schema.Array(
-    Schema.Struct({
-      id: Schema.String,
-      label: Schema.NullOr(Schema.String),
-      /** Model options a target may select (for example reasoning effort). */
-      options: Schema.optional(Schema.Array(ProviderOptionDescriptor)),
-    }),
-  ),
   canRunChildTask: Schema.Boolean,
   canRunCrossProviderChildTask: Schema.Boolean,
   constraints: Schema.Array(Schema.String),
+};
+
+const OrchestratorMcpCapabilityModel = Schema.Struct({
+  id: Schema.String,
+  label: Schema.NullOr(Schema.String),
+  /** Model options a target may select (for example reasoning effort). */
+  options: Schema.optionalKey(Schema.Array(ProviderOptionDescriptor)),
 });
+
+const OrchestratorMcpProviderSummaryCapability = Schema.Struct({
+  ...OrchestratorMcpProviderCapabilityFields,
+  models: Schema.optionalKey(Schema.Never),
+  modelsNextCursor: Schema.optionalKey(Schema.Never),
+  modelsTotal: Schema.optionalKey(Schema.Never),
+});
+
+const OrchestratorMcpProviderCatalogCapability = Schema.Struct({
+  ...OrchestratorMcpProviderCapabilityFields,
+  models: Schema.Array(OrchestratorMcpCapabilityModel),
+  modelsNextCursor: Schema.NullOr(NonNegativeInt),
+  modelsTotal: NonNegativeInt,
+});
+
+export const OrchestratorMcpProviderCapability = Schema.Union([
+  OrchestratorMcpProviderCatalogCapability,
+  OrchestratorMcpProviderSummaryCapability,
+]);
 export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({

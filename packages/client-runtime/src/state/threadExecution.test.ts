@@ -4,6 +4,9 @@ import {
   MessageId,
   RunId,
   type OrchestrationV2RunStatus,
+  type OrchestrationV2ProviderCapabilities,
+  ProviderSessionId,
+  ProviderDriverKind,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
@@ -69,6 +72,55 @@ describe("thread execution presentation", () => {
     expect(deriveThreadRuntime(projection)).toMatchObject({
       lastError: "Plan limit reached",
       lastErrorClass: "usage_limit",
+      lastErrorAt: DateTime.formatIso(now),
+    });
+    const later = DateTime.makeUnsafe("2026-09-20T02:00:00Z");
+    const session = {
+      id: ProviderSessionId.make("session:error"),
+      driver: ProviderDriverKind.make("pi"),
+      providerInstanceId: projection.thread.providerInstanceId,
+      status: "error" as const,
+      cwd: "/workspace",
+      model: null,
+      capabilities: {} as OrchestrationV2ProviderCapabilities,
+      createdAt: now,
+      updatedAt: later,
+      lastError: "Separate session failure",
+      lastErrorAt: later,
+    };
+    expect(deriveThreadRuntime({ ...projection, providerSessions: [session] })).toMatchObject({
+      lastError: session.lastError,
+      lastErrorClass: null,
+      lastErrorAt: DateTime.formatIso(later),
+    });
+    expect(
+      deriveThreadRuntime({ ...projection, providerSessions: [{ ...session, lastErrorAt: null }] }),
+    ).toMatchObject({
+      lastError: session.lastError,
+      lastErrorAt: null,
+    });
+    expect(
+      deriveThreadRuntime({
+        ...projection,
+        providerSessions: [{ ...session, lastError: item.failure.message }],
+      }),
+    ).toMatchObject({
+      lastErrorClass: "usage_limit",
+      lastErrorAt: DateTime.formatIso(later),
+    });
+    expect(
+      deriveThreadRuntime({ ...projection, providerSessions: [{ ...session, lastError: null }] }),
+    ).toMatchObject({
+      lastErrorClass: "usage_limit",
+      lastErrorAt: DateTime.formatIso(now),
+    });
+    expect(
+      deriveThreadRuntime({
+        ...projection,
+        turnItems: [{ ...item, startedAt: null, completedAt: null, updatedAt: later }],
+      }),
+    ).toMatchObject({
+      lastErrorAt: null,
     });
     expect(
       deriveThreadRuntime({

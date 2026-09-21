@@ -2,6 +2,8 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
 import {
+  OrchestratorMcpCapabilitiesInput,
+  OrchestratorMcpProviderCapability,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
@@ -10,8 +12,11 @@ import {
   OrchestratorMcpThreadReadInput,
   OrchestratorMcpThreadSendInput,
   OrchestratorMcpThreadWaitInput,
+  OrchestratorMcpThreadStartInput,
 } from "./orchestratorMcp.ts";
 
+const decodeCapabilitiesInput = Schema.decodeUnknownSync(OrchestratorMcpCapabilitiesInput);
+const decodeProviderCapability = Schema.decodeUnknownSync(OrchestratorMcpProviderCapability);
 const decodeCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput);
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
 const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskResult);
@@ -22,6 +27,82 @@ const decodeThreadSendInput = Schema.decodeUnknownSync(OrchestratorMcpThreadSend
 const decodeThreadWaitInput = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitInput);
 
 describe("orchestrator MCP contracts", () => {
+  it("allows projectDirectory only for top-level creation", () => {
+    const input = { prompt: "Inspect", projectDirectory: "/known/project" };
+    expect(Schema.decodeUnknownSync(OrchestratorMcpThreadStartInput)(input)).toEqual(input);
+    expect(decodeCreateThreadsInput({ threads: [input] }).threads[0]?.projectDirectory).toBe(
+      input.projectDirectory,
+    );
+    expect(
+      decodeDelegateTaskInput({ task: "Inspect", projectDirectory: "/other" }),
+    ).not.toHaveProperty("projectDirectory");
+    expect(OrchestratorMcpDelegateTaskInput.fields).not.toHaveProperty("projectDirectory");
+  });
+
+  it("decodes slim and expanded capability requests", () => {
+    expect(decodeCapabilitiesInput({})).toEqual({});
+    expect(
+      decodeCapabilitiesInput({
+        providerInstanceId: "opencode2",
+        model: "opencode/x-preview-f-free",
+        modelCursor: 50,
+        modelLimit: 25,
+        includeModelOptions: true,
+      }),
+    ).toEqual({
+      providerInstanceId: "opencode2",
+      model: "opencode/x-preview-f-free",
+      modelCursor: 50,
+      modelLimit: 25,
+      includeModelOptions: true,
+    });
+    expect(
+      decodeCapabilitiesInput({
+        providerInstanceId: null,
+        model: null,
+        modelCursor: null,
+        modelLimit: null,
+        includeModelOptions: null,
+      }),
+    ).toEqual({
+      providerInstanceId: null,
+      model: null,
+      modelCursor: null,
+      modelLimit: null,
+      includeModelOptions: null,
+    });
+    expect(() =>
+      decodeCapabilitiesInput({ providerInstanceId: "opencode2", modelLimit: 101 }),
+    ).toThrow();
+  });
+
+  it("requires model catalog fields as a complete result shape", () => {
+    const summary = {
+      providerInstanceId: "opencode2",
+      driverKind: "opencode2",
+      displayName: "OpenCode 2",
+      canRunChildTask: true,
+      canRunCrossProviderChildTask: true,
+      constraints: [],
+    };
+
+    expect(decodeProviderCapability(summary)).toEqual(summary);
+    expect(
+      decodeProviderCapability({
+        ...summary,
+        models: [{ id: "opencode/test", label: "Test" }],
+        modelsNextCursor: null,
+        modelsTotal: 1,
+      }),
+    ).toMatchObject({ modelsTotal: 1, modelsNextCursor: null });
+    expect(() =>
+      decodeProviderCapability({
+        ...summary,
+        models: [{ id: "opencode/test", label: "Test" }],
+      }),
+    ).toThrow();
+  });
+
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({
       task: "Inspect the workspace and report the result.",

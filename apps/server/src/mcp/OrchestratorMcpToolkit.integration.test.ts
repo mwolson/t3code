@@ -11,7 +11,9 @@ import {
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ThreadProjection,
+  OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpCreateThreadsResult,
+  OrchestratorMcpCreatedThread,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpTaskCancelResult,
   OrchestratorMcpThreadInterruptResult,
@@ -72,6 +74,7 @@ import {
   materializeReplayTranscriptWorkspace,
 } from "../orchestration-v2/testkit/ReplayTranscriptNdjson.ts";
 import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -79,6 +82,8 @@ import { delegatedTaskRun, hasPendingChildRuns } from "./OrchestratorMcpService.
 
 const parentThreadId = ThreadId.make("thread:mcp-orchestrator-parent");
 const projectId = ProjectId.make("project:mcp-orchestrator");
+const otherProjectId = ProjectId.make("project:mcp-other");
+const otherProjectDirectory = "/workspace/mcp-other";
 const codexInstanceId = ProviderInstanceId.make("codex");
 const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
 const codexModel = "gpt-5.4";
@@ -91,6 +96,8 @@ const createdThreadPrompt = "Complete the newly created ordinary thread.";
 const queuedFollowupPrompt = "Complete the queued follow-up and return the final result.";
 const queuedFollowupResult = "Queued delegated follow-up completed.";
 
+const decodeCapabilitiesResult = Schema.decodeUnknownEffect(OrchestratorMcpCapabilitiesResult);
+const decodeCreatedThread = Schema.decodeUnknownEffect(OrchestratorMcpCreatedThread);
 const decodeCreateThreadsResult = Schema.decodeUnknownEffect(OrchestratorMcpCreateThreadsResult);
 const decodeDelegateTaskResult = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
 const decodeTaskCancelResult = Schema.decodeUnknownEffect(OrchestratorMcpTaskCancelResult);
@@ -102,6 +109,16 @@ const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadR
 const decodeThreadSendResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadSendResult);
 const decodeThreadWaitResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadWaitResult);
 const decodeThreadUpdateResult = Schema.decodeUnknownEffect(ThreadMetadataMcpUpdateResult);
+
+type ProviderCapability = OrchestratorMcpCapabilitiesResult["providers"][number];
+
+function defaultProvidersAreSlim(result: OrchestratorMcpCapabilitiesResult): boolean {
+  return result.providers.every((provider) => !("models" in provider));
+}
+
+function providerCapabilityModels(provider: ProviderCapability | undefined) {
+  return provider !== undefined && "models" in provider ? provider.models : undefined;
+}
 
 const codexSelection = {
   instanceId: codexInstanceId,
@@ -143,6 +160,7 @@ function makeProviderSnapshot(input: {
   readonly instanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
   readonly model: string;
+  readonly additionalModels?: ReadonlyArray<string>;
   readonly optionDescriptors?: ReadonlyArray<ProviderOptionDescriptor>;
 }): ServerProvider {
   return {
@@ -154,17 +172,18 @@ function makeProviderSnapshot(input: {
     status: "ready",
     auth: { status: "authenticated" },
     checkedAt: "2026-06-17T00:00:00.000Z",
-    models: [
-      {
-        slug: input.model,
-        name: input.model,
+    models: [input.model, ...(input.additionalModels ?? [])].map((model, index) => {
+      const capabilities =
+        index === 0 && input.optionDescriptors !== undefined
+          ? { optionDescriptors: input.optionDescriptors }
+          : null;
+      return {
+        slug: model,
+        name: model,
         isCustom: false,
-        capabilities:
-          input.optionDescriptors === undefined
-            ? null
-            : { optionDescriptors: input.optionDescriptors },
-      },
-    ],
+        capabilities,
+      };
+    }),
     slashCommands: [],
     skills: [],
   };
@@ -591,7 +610,11 @@ describe("orchestrator MCP toolkit", () => {
             makeProviderSnapshot({
               instanceId: ProviderInstanceId.make("opencode"),
               driver: ProviderDriverKind.make("opencode"),
-              model: "opencode/test",
+              model: "opencode/test-000",
+              additionalModels: Array.from(
+                { length: 124 },
+                (_, index) => `opencode/test-${String(index + 1).padStart(3, "0")}`,
+              ),
             }),
           ]);
           // In-memory ScheduledTaskService stub so the schedule/list/update/
@@ -629,6 +652,25 @@ describe("orchestrator MCP toolkit", () => {
             Layer.provide(registryLayer),
             Layer.provide(providerRegistryLayer),
             Layer.provide(scheduledTaskStubLayer),
+            Layer.provide(
+              Layer.mock(ProjectService.ProjectService)({
+                getByWorkspaceRoot: (workspaceRoot) =>
+                  Effect.succeed(
+                    workspaceRoot === otherProjectDirectory
+                      ? Option.some({
+                          id: otherProjectId,
+                          title: "Other",
+                          workspaceRoot: otherProjectDirectory,
+                          defaultModelSelection: null,
+                          scripts: [],
+                          createdAt: "2026-01-01T00:00:00.000Z",
+                          updatedAt: "2026-01-01T00:00:00.000Z",
+                          deletedAt: null,
+                        })
+                      : Option.none(),
+                  ),
+              }),
+            ),
             Layer.provide(NodeServices.layer),
           );
 
@@ -1347,18 +1389,95 @@ describe("orchestrator MCP toolkit", () => {
                   providerInstanceId: "opencode",
                   canRunChildTask: false,
                 }),
-                // Models advertise their option descriptors so agents can
-                // discover valid target.options ids and values.
                 expect.objectContaining({
                   providerInstanceId: codexInstanceId,
-                  models: [
-                    expect.objectContaining({
-                      id: codexModel,
-                      options: [expect.objectContaining({ id: "reasoning", type: "select" })],
-                    }),
-                  ],
+                  canRunChildTask: true,
                 }),
               ]),
+            });
+
+            expect(
+              defaultProvidersAreSlim(
+                yield* decodeCapabilitiesResult(capabilities.structuredContent),
+              ),
+            ).toBe(true);
+            for (const [cursor, limit, count, next] of [
+              [0, undefined, 50, 50],
+              [100, 50, 25, null],
+              [200, 50, 0, null],
+              [0, 100, 100, 100],
+            ] as const) {
+              const page = yield* invoke("orchestrator_capabilities", {
+                providerInstanceId: "opencode",
+                modelCursor: cursor,
+                ...(limit === undefined ? {} : { modelLimit: limit }),
+              });
+              const result = yield* decodeCapabilitiesResult(page.structuredContent);
+              const provider = result.providers.find((p) => p.providerInstanceId === "opencode");
+              expect(providerCapabilityModels(provider)).toHaveLength(count);
+              expect(provider).toMatchObject({ modelsNextCursor: next, modelsTotal: 125 });
+              expect(
+                providerCapabilityModels(provider)?.every((m) => m.options === undefined),
+              ).toBe(true);
+              expect(
+                result.providers.find((p) => p.providerInstanceId === codexInstanceId),
+              ).not.toHaveProperty("models");
+            }
+            const exactModel = yield* invoke("orchestrator_capabilities", {
+              providerInstanceId: codexInstanceId,
+              model: codexModel,
+            });
+            const exactResult = yield* decodeCapabilitiesResult(exactModel.structuredContent);
+            expect(
+              providerCapabilityModels(
+                exactResult.providers.find((p) => p.providerInstanceId === codexInstanceId),
+              ),
+            ).toEqual([{ id: codexModel, label: codexModel }]);
+            const modelOptions = yield* invoke("orchestrator_capabilities", {
+              providerInstanceId: codexInstanceId,
+              model: codexModel,
+              includeModelOptions: true,
+            });
+            const optionsResult = yield* decodeCapabilitiesResult(modelOptions.structuredContent);
+            expect(
+              providerCapabilityModels(
+                optionsResult.providers.find((p) => p.providerInstanceId === codexInstanceId),
+              ),
+            ).toMatchObject([
+              { id: codexModel, options: [expect.objectContaining({ id: "reasoning" })] },
+            ]);
+
+            const missingCatalogProvider = yield* invoke("orchestrator_capabilities", {
+              model: codexModel,
+            });
+            expect(missingCatalogProvider.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+              code: "invalid_request",
+              message: expect.stringContaining("providerInstanceId is required"),
+            });
+            const unboundedOptions = yield* invoke("orchestrator_capabilities", {
+              providerInstanceId: codexInstanceId,
+              includeModelOptions: true,
+            });
+            expect(unboundedOptions.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+              code: "invalid_request",
+              message: expect.stringContaining("requires an exact model id"),
+            });
+            const missingProvider = yield* invoke("orchestrator_capabilities", {
+              providerInstanceId: "missing-provider",
+            });
+            expect(missingProvider.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+              code: "provider_unavailable",
+            });
+            const missingModel = yield* invoke("orchestrator_capabilities", {
+              providerInstanceId: codexInstanceId,
+              model: "missing-model",
+            });
+            expect(missingModel.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+              code: "model_unavailable",
             });
 
             const scheduleTool = server.tools.find(({ tool }) => tool.name === "schedule_task");
@@ -1739,6 +1858,62 @@ describe("orchestrator MCP toolkit", () => {
               message: expect.stringContaining("more than once"),
             });
 
+            const unknownProjectCall = yield* invoke("t3_thread_start", {
+              prompt: createdThreadPrompt,
+              projectDirectory: "/definitely-not-a-t3-project",
+              clientRequestId: "start-unknown-project-1",
+            });
+            expect(unknownProjectCall.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+              code: "invalid_request",
+              message: expect.stringContaining("not a known T3 project"),
+            });
+
+            const knownProjectCall = yield* invoke("t3_thread_start", {
+              prompt: createdThreadPrompt,
+              projectDirectory: otherProjectDirectory,
+              clientRequestId: "start-known-project-1",
+            });
+            expect(knownProjectCall.isError).toBe(false);
+            const knownProjectThread = yield* decodeCreatedThread(
+              knownProjectCall.structuredContent,
+            ).pipe(Effect.orDie);
+            const knownProjectChild = yield* orchestrator.getThreadProjection(
+              knownProjectThread.threadId,
+            );
+            expect(knownProjectChild.thread.projectId).toBe(otherProjectId);
+            expect(knownProjectChild.thread.worktreePath).toBeNull();
+
+            const knownReadCall = yield* invoke("t3_thread_read", {
+              threadId: knownProjectThread.threadId,
+              view: "messages",
+            });
+            expect(knownReadCall.isError).toBe(false);
+            const knownRead = yield* decodeThreadReadResult(knownReadCall.structuredContent).pipe(
+              Effect.orDie,
+            );
+            expect(knownRead.thread.projectId).toBe(otherProjectId);
+            expect(knownRead.thread.worktreePath).toBeNull();
+
+            const knownWaitCall = yield* invoke("t3_thread_wait", {
+              threadId: knownProjectThread.threadId,
+            });
+            expect(knownWaitCall.isError).toBe(false);
+
+            const knownSendCall = yield* invoke("t3_thread_send", {
+              threadId: knownProjectThread.threadId,
+              message: "Confirm the other workspace.",
+              mode: "queue",
+              clientRequestId: "send-known-project-1",
+            });
+            expect(knownSendCall.isError).toBe(false);
+
+            const knownInterruptCall = yield* invoke("t3_thread_interrupt", {
+              threadId: knownProjectThread.threadId,
+              clientRequestId: "interrupt-known-project-1",
+            });
+            expect(knownInterruptCall.isError).toBe(false);
+
             const cancellableCall = yield* invoke("delegate_task", {
               task: cancellationPrompt,
               target: {
@@ -1989,6 +2164,13 @@ describe("orchestrator MCP toolkit", () => {
                 model: item.targetModel,
               })),
             ).toEqual([
+              {
+                targetThreadId: knownProjectThread.threadId,
+                targetRunId: knownProjectThread.runId,
+                title: knownProjectThread.title,
+                providerInstanceId: codexInstanceId,
+                model: codexModel,
+              },
               {
                 targetThreadId: emptyThread.threadId,
                 targetRunId: null,
@@ -3070,6 +3252,7 @@ describe("orchestrator MCP toolkit", () => {
           ),
           Layer.provide(providerRegistryLayer),
           Layer.provide(unusedScheduledTaskStubLayer),
+          Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
           Layer.provide(NodeServices.layer),
         );
 

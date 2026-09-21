@@ -1990,6 +1990,7 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
       const assertSummary = Effect.fnUntraced(function* (
         lastError: string | null,
         lastErrorClass: string | null,
+        lastErrorAt: string | null = lastError === null ? null : DateTime.formatIso(now),
       ) {
         const projection = yield* store.getThreadProjection(threadId);
         const memoryShell = threadShellFromProjection(projection);
@@ -1997,6 +1998,7 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
         const sqlShell = shells.threads.find((row) => row.id === threadId)!;
         for (const shell of [memoryShell, sqlShell]) {
           assert.equal(shell.lastError, lastError);
+          assert.equal(shell.lastErrorAt, lastErrorAt);
           assert.equal(shell.lastErrorClass, lastErrorClass);
           assert.equal(
             shell.usageLimitResetAt,
@@ -2147,9 +2149,22 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
         type: "provider-session.updated",
         threadId,
         occurredAt: now,
+        payload: {
+          ...session,
+          status: "error",
+          lastError: "Provider process exited.",
+          lastErrorAt: DateTime.makeUnsafe("2026-09-20T02:00:00.000Z"),
+        },
+      });
+      yield* assertSummary("Provider process exited.", null, "2026-09-20T02:00:00.000Z");
+      yield* store.apply({
+        id: EventId.make("event:limit-shell:legacy-error"),
+        type: "provider-session.updated",
+        threadId,
+        occurredAt: now,
         payload: { ...session, status: "error", lastError: "Provider process exited." },
       });
-      yield* assertSummary("Provider process exited.", null);
+      yield* assertSummary("Provider process exited.", null, null);
       yield* store.apply({
         id: EventId.make("event:limit-shell:session-recovered"),
         type: "provider-session.updated",

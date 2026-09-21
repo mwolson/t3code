@@ -410,7 +410,10 @@ const expectModelFailure = (errorMessage: string) =>
     );
     assert.isTrue(
       sessionError.type === "provider_session.updated" &&
-        sessionError.providerSession.lastError === errorMessage,
+        sessionError.providerSession.lastError === errorMessage &&
+        sessionError.providerSession.lastErrorAt != null &&
+        DateTime.toEpochMillis(sessionError.providerSession.lastErrorAt) ===
+          DateTime.toEpochMillis(sessionError.providerSession.updatedAt),
     );
     const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
     assert.isTrue(

@@ -7,11 +7,14 @@ import {
   ProviderInstanceId,
   RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodePath from "@effect/platform-node/NodePath";
+import * as ProjectService from "../project/ProjectService.ts";
 import { expect, it } from "vite-plus/test";
 
 import { ProviderAdapterRegistryV2 } from "../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -23,9 +26,14 @@ import {
 } from "../orchestration-v2/ThreadManagementService.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
 import {
-  layer as orchestratorMcpServiceLayer,
+  layer as baseOrchestratorMcpServiceLayer,
   OrchestratorMcpService,
 } from "./OrchestratorMcpService.ts";
+
+const orchestratorMcpServiceLayer = baseOrchestratorMcpServiceLayer.pipe(
+  Layer.provide(NodePath.layer),
+  Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+);
 
 const environmentId = EnvironmentId.make("environment-mcp-orchestrator-detail");
 const projectId = ProjectId.make("project-mcp-orchestrator-detail");
@@ -348,6 +356,8 @@ it("readThread reaches a thread the user attached as context, but not one an age
     createdAt: now,
     updatedAt: now,
   });
+  let createdRecord = false;
+  let deleted = false;
   const parentProjection = {
     thread: baseThread({
       threadId: parentThreadId,
@@ -356,6 +366,7 @@ it("readThread reaches a thread the user attached as context, but not one an age
       model: "gpt-5.4",
     }),
     runs: [],
+    turnItems: [],
     visibleTurnItems: [],
     runtimeRequests: [],
     messages: [
@@ -376,6 +387,7 @@ it("readThread reaches a thread the user attached as context, but not one an age
           model: "gpt-5.4",
         }),
         projectId: foreignProjectId,
+        deletedAt: deleted ? now : null,
       },
       runs: [],
       visibleTurnItems: [
@@ -408,7 +420,35 @@ it("readThread reaches a thread the user attached as context, but not one an age
       Layer.mergeAll(
         Layer.mock(ThreadManagementService)({
           getThreadProjection: (threadId) => {
-            if (threadId === parentThreadId) return Effect.succeed(parentProjection);
+            if (threadId === parentThreadId)
+              return Effect.succeed({
+                ...parentProjection,
+                turnItems: createdRecord
+                  ? [
+                      {
+                        type: "thread_created" as const,
+                        targetThreadId: agentOnlyThreadId,
+                        id: TurnItemId.make("created-record"),
+                        threadId: parentThreadId,
+                        runId: null,
+                        nodeId: null,
+                        providerThreadId: null,
+                        providerTurnId: null,
+                        nativeItemRef: null,
+                        parentItemId: null,
+                        ordinal: 0,
+                        status: "completed" as const,
+                        title: null,
+                        startedAt: now,
+                        completedAt: now,
+                        updatedAt: now,
+                        targetRunId: null,
+                        targetProviderInstanceId: parentInstanceId,
+                        targetModel: "gpt-5.4",
+                      },
+                    ]
+                  : [],
+              });
             if (threadId === foreignThreadId || threadId === agentOnlyThreadId) {
               return Effect.succeed(foreignProjection(threadId));
             }
@@ -451,5 +491,36 @@ it("readThread reaches a thread the user attached as context, but not one an age
       .sendToThread(makeScope(), { threadId: foreignThreadId, message: "hi" })
       .pipe(Effect.flip);
     expect(write.code).toBe("thread_not_found");
+    expect(
+      (yield* service.waitForThread(makeScope(), { threadId: foreignThreadId }).pipe(Effect.flip))
+        .code,
+    ).toBe("thread_not_found");
+    expect(
+      (yield* service.interruptThread(makeScope(), { threadId: foreignThreadId }).pipe(Effect.flip))
+        .code,
+    ).toBe("thread_not_found");
+    createdRecord = true;
+    expect(
+      (yield* service.readThread(makeScope(), { threadId: agentOnlyThreadId })).thread.threadId,
+    ).toBe(agentOnlyThreadId);
+    deleted = true;
+    expect(
+      (yield* service.readThread(makeScope(), { threadId: agentOnlyThreadId }).pipe(Effect.flip))
+        .code,
+    ).toBe("thread_not_found");
+    expect(
+      (yield* service
+        .sendToThread(makeScope(), { threadId: agentOnlyThreadId, message: "hi" })
+        .pipe(Effect.flip)).code,
+    ).toBe("thread_not_found");
+    expect(
+      (yield* service.waitForThread(makeScope(), { threadId: agentOnlyThreadId }).pipe(Effect.flip))
+        .code,
+    ).toBe("thread_not_found");
+    expect(
+      (yield* service
+        .interruptThread(makeScope(), { threadId: agentOnlyThreadId })
+        .pipe(Effect.flip)).code,
+    ).toBe("thread_not_found");
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });

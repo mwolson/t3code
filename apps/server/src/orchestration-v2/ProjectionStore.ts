@@ -1,5 +1,6 @@
 import {
-  latestRootProviderFailure,
+  latestRootProviderFailureItem,
+  providerFailureOccurredAt,
   threadErrorSummary,
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
@@ -811,7 +812,7 @@ type ShellThreadRow = {
   readonly active_run_id: string | null;
   readonly activity_run_status: string | null;
   readonly activity_run_started_at: string | null;
-  readonly last_error: string | null;
+  readonly error_state_json: string | null;
   readonly terminal_failure_payload_json: string | null;
   readonly pending_request_payload_json: string | null;
   readonly latest_user_message_at: string | null;
@@ -1233,6 +1234,7 @@ export function threadShellFromProjection(
     activeProviderThreadId: projection.thread.activeProviderThreadId,
     runs: projection.runs,
   });
+  const failureItem = latestRootProviderFailureItem(latestRun, projection.turnItems);
   return {
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
@@ -1269,10 +1271,13 @@ export function threadShellFromProjection(
     activityRunStatus: activityRun?.status ?? null,
     activityRunStartedAt: activityRun?.startedAt ?? activityRun?.requestedAt ?? null,
     status: latestRun?.status ?? "idle",
-    ...threadErrorSummary(
-      latestRootProviderFailure(latestRun, projection.turnItems),
-      providerSession?.lastError ?? null,
-    ),
+    ...threadErrorSummary(failureItem?.failure ?? null, providerSession?.lastError ?? null, {
+      sessionErrorAt:
+        providerSession?.lastErrorAt == null
+          ? null
+          : DateTime.formatIso(providerSession.lastErrorAt),
+      failureAt: providerFailureOccurredAt(failureItem),
+    }),
     pendingRuntimeRequest:
       pendingRuntimeRequest === null
         ? null
@@ -1352,6 +1357,15 @@ function isActivityRunForShell(
   return isInterruptibleRunForShell(run) || run.status === "waiting";
 }
 
+const decodeShellErrorState = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      lastError: Schema.NullOr(Schema.String),
+      lastErrorAt: Schema.NullOr(Schema.String),
+    }),
+  ),
+);
+
 type ShellThreadState = {
   readonly thread: OrchestrationV2ThreadProjection["thread"];
   readonly latestRunId: RunId | null;
@@ -1363,6 +1377,7 @@ type ShellThreadState = {
   readonly activityRunStatus: ShellActivityRunStatus | null;
   readonly activityRunStartedAt: DateTime.Utc | null;
   readonly lastError: string | null;
+  readonly lastErrorAt: string | null;
   readonly lastErrorClass: OrchestrationV2ThreadShell["lastErrorClass"];
   readonly usageLimitResetAt: OrchestrationV2ThreadShell["usageLimitResetAt"];
   readonly pendingRuntimeRequest: OrchestrationV2ThreadProjection["runtimeRequests"][number] | null;
@@ -1500,6 +1515,7 @@ function shellFromState(input: {
     activityRunStartedAt: input.state.activityRunStartedAt,
     status: input.state.latestRunStatus,
     lastError: input.state.lastError,
+    lastErrorAt: input.state.lastErrorAt,
     lastErrorClass: input.state.lastErrorClass,
     usageLimitResetAt: input.state.usageLimitResetAt,
     pendingRuntimeRequest:
@@ -4388,7 +4404,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 LIMIT 1
               ) AS activity_run_started_at,
               (
-                SELECT json_extract(session.payload_json, '$.lastError')
+                SELECT json_object(
+                  'lastError', json_extract(session.payload_json, '$.lastError'),
+                  'lastErrorAt', json_extract(session.payload_json, '$.lastErrorAt')
+                )
                 FROM orchestration_v2_projection_provider_sessions session
                 INNER JOIN orchestration_v2_projection_provider_session_bindings binding
                   ON binding.provider_session_id = session.provider_session_id
@@ -4396,7 +4415,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND session.provider_instance_id = t.provider_instance_id
                 ORDER BY session.updated_at DESC, session.provider_session_id DESC
                 LIMIT 1
-              ) AS last_error,
+              ) AS error_state_json,
               (
                 SELECT item.payload_json
                 FROM orchestration_v2_projection_turn_items item
@@ -4707,6 +4726,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           row.pending_request_payload_json === null
             ? null
             : yield* decodeRuntimeRequestPayload(row.pending_request_payload_json);
+        const sessionError =
+          row.error_state_json === null ? null : yield* decodeShellErrorState(row.error_state_json);
         const terminalFailureItem =
           row.terminal_failure_payload_json === null
             ? null
@@ -4759,7 +4780,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               : null,
           ...threadErrorSummary(
             terminalFailureItem?.type === "error" ? terminalFailureItem.failure : null,
-            row.last_error,
+            sessionError?.lastError ?? null,
+            {
+              sessionErrorAt: sessionError?.lastErrorAt ?? null,
+              failureAt: providerFailureOccurredAt(
+                terminalFailureItem?.type === "error" ? terminalFailureItem : null,
+              ),
+            },
           ),
           pendingRuntimeRequest,
           latestUserMessageAt:

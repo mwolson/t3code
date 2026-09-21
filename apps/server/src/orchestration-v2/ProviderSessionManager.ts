@@ -230,6 +230,24 @@ function releaseStatusFor(
   return reason === "runtime_error" ? "error" : "stopped";
 }
 
+export function releasedProviderSession(input: {
+  readonly reason: ProviderSessionReleaseReason;
+  readonly session: OrchestrationV2ProviderSession;
+  readonly now: DateTime.Utc;
+  readonly detail?: string | undefined;
+}): OrchestrationV2ProviderSession {
+  if (input.reason === "runtime_error") {
+    return {
+      ...input.session,
+      status: "error",
+      updatedAt: input.now,
+      lastError: input.detail ?? "Provider runtime failed.",
+      lastErrorAt: input.now,
+    };
+  }
+  return { ...input.session, status: releaseStatusFor(input.reason), updatedAt: input.now };
+}
+
 function releasedRuntimeRequestStatusFor(
   reason: ProviderSessionReleaseReason,
 ): OrchestrationV2RuntimeRequest["status"] {
@@ -580,15 +598,25 @@ export const layerWithOptions = (
       }) =>
         Effect.gen(function* () {
           const now = yield* DateTime.now;
-          const payload: OrchestrationV2ProviderSession = {
-            ...input.entry.runtime.providerSession,
-            status: releaseStatusFor(input.reason),
-            updatedAt: now,
-            lastError:
-              input.reason === "runtime_error"
-                ? (input.detail ?? "Provider runtime failed.")
-                : null,
-          };
+          let session = input.entry.runtime.providerSession;
+          for (const threadId of input.entry.attachedThreadIds) {
+            const context = yield* projectionStore
+              .getThreadProviderContext(threadId)
+              .pipe(Effect.catch(() => Effect.succeed(null)));
+            const projected = context?.providerSessions.findLast(
+              (candidate) => candidate.id === session.id,
+            );
+            if (projected !== undefined) {
+              session = projected;
+              break;
+            }
+          }
+          const payload = releasedProviderSession({
+            session,
+            reason: input.reason,
+            now,
+            detail: input.detail,
+          });
           yield* writeProviderSessionEvents({
             runtime: input.entry.runtime,
             threadIds: input.entry.attachedThreadIds,
@@ -612,7 +640,7 @@ export const layerWithOptions = (
 
           const events: Array<OrchestrationV2DomainEvent> = [];
           for (const threadId of input.entry.attachedThreadIds) {
-            const projection = yield* projectionStore.getThreadProjection(threadId);
+            const projection = yield* projectionStore.getRuntimeRecoveryProjection(threadId);
             const releasedRequests = projection.runtimeRequests.filter(
               (request) =>
                 request.status === "pending" &&
@@ -642,7 +670,13 @@ export const layerWithOptions = (
                 },
               });
 
-              const requestNode = projection.nodes.find((node) => node.id === request.nodeId);
+              // Recovery omits old runs; a still-live request can retain a node
+              // or item from one of them. Read just that request's context.
+              const requestContext = yield* projectionStore.getRuntimeResponseContext(
+                threadId,
+                request.id,
+              );
+              const requestNode = requestContext.node;
               if (requestNode !== undefined) {
                 events.push({
                   id: yield* idAllocator.allocate.event({
@@ -663,11 +697,7 @@ export const layerWithOptions = (
                 });
               }
 
-              const turnItem = projection.turnItems.find(
-                (item) =>
-                  (item.type === "approval_request" || item.type === "user_input_request") &&
-                  item.requestId === request.id,
-              );
+              const turnItem = requestContext.item;
               if (turnItem !== undefined) {
                 events.push({
                   id: yield* idAllocator.allocate.event({

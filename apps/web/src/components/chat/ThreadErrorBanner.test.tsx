@@ -6,6 +6,7 @@ import {
   getThreadErrorBannerKey,
   isThreadErrorBannerDismissedForSession,
   shouldShowThreadErrorBanner,
+  resolveThreadErrorBanner,
   ThreadErrorBanner,
 } from "./ThreadErrorBanner";
 
@@ -64,6 +65,61 @@ describe("ThreadErrorBanner", () => {
         isThreadErrorBannerDismissedForSession(bannerKey),
       ),
     ).toBe(false);
+  });
+
+  it("distinguishes same-text occurrences and local errors from hidden runtime failures", () => {
+    const thread = "env:occurrence";
+    const first = getThreadErrorBannerKey(thread, "Failed", "2026-09-20T01:00:00Z");
+    dismissThreadErrorBannerForSession(first);
+    expect(
+      isThreadErrorBannerDismissedForSession(
+        getThreadErrorBannerKey(thread, "Failed", "2026-09-20T01:00:00Z"),
+      ),
+    ).toBe(true);
+    expect(
+      isThreadErrorBannerDismissedForSession(
+        getThreadErrorBannerKey(thread, "Failed", "2026-09-20T02:00:00Z"),
+      ),
+    ).toBe(false);
+    const local = getThreadErrorBannerKey(thread, "Failed", 12, "local");
+    dismissThreadErrorBannerForSession(local);
+    expect(
+      isThreadErrorBannerDismissedForSession(
+        getThreadErrorBannerKey(thread, "Failed", 13, "local"),
+      ),
+    ).toBe(false);
+    expect(
+      isThreadErrorBannerDismissedForSession(
+        getThreadErrorBannerKey(thread, "Failed", 12, "runtime"),
+      ),
+    ).toBe(false);
+  });
+
+  it("uses the visible source occurrence and ignores hidden runtime refreshes", () => {
+    const input = {
+      threadKey: "env:precedence",
+      localError: "Failed",
+      localErrorAt: 1,
+      runtime: { lastError: "Failed", lastErrorAt: "2026-09-20T01:00:00Z" },
+    };
+    const local = resolveThreadErrorBanner(input);
+    dismissThreadErrorBannerForSession(local.key);
+    expect(
+      resolveThreadErrorBanner({
+        ...input,
+        runtime: { ...input.runtime, lastErrorAt: "2026-09-20T02:00:00Z" },
+      }),
+    ).toEqual(local);
+    const laterLocal = resolveThreadErrorBanner({ ...input, localErrorAt: 2 });
+    expect(isThreadErrorBannerDismissedForSession(laterLocal.key)).toBe(false);
+    const runtime = resolveThreadErrorBanner({ ...input, localError: null });
+    expect(isThreadErrorBannerDismissedForSession(runtime.key)).toBe(false);
+    const unknownAt = resolveThreadErrorBanner({
+      ...input,
+      localError: null,
+      runtime: { lastError: "Failed", lastErrorAt: null },
+    });
+    expect(unknownAt.key).toBe(getThreadErrorBannerKey(input.threadKey, "Failed"));
   });
 
   it("never shows a null error", () => {

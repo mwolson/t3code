@@ -5,8 +5,34 @@ import { Button } from "../ui/button";
 import { CircleAlertIcon, XIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-export function getThreadErrorBannerKey(threadKey: string, error: string | null): string | null {
-  return error === null ? null : `${threadKey}\u0000${error}`;
+export function getThreadErrorBannerKey(
+  threadKey: string,
+  error: string | null,
+  occurrence: string | number | null = null,
+  source: "local" | "runtime" = "runtime",
+): string | null {
+  return error === null
+    ? null
+    : `${threadKey}\u0000${source}\u0000${occurrence ?? ""}\u0000${error}`;
+}
+
+export function resolveThreadErrorBanner(input: {
+  threadKey: string;
+  localError: string | null;
+  localErrorAt: number | null;
+  runtime: { readonly lastError: string | null; readonly lastErrorAt?: string | null } | null;
+}) {
+  const error = input.localError ?? input.runtime?.lastError ?? null;
+  const isLocal = input.localError !== null;
+  return {
+    error,
+    key: getThreadErrorBannerKey(
+      input.threadKey,
+      error,
+      isLocal ? input.localErrorAt : (input.runtime?.lastErrorAt ?? null),
+      isLocal ? "local" : "runtime",
+    ),
+  };
 }
 
 export function shouldShowThreadErrorBanner(
@@ -19,9 +45,8 @@ export function shouldShowThreadErrorBanner(
 
 // Session-scoped (module-level so it survives ChatView remounts, e.g. route
 // changes between threads). Mirrors the branch-mismatch banner: a dismissal
-// is remembered per thread key plus message, so navigating away to a thread
-// with no error cannot resurrect the banner, while a different error message
-// on the same thread still appears.
+// is remembered per thread and visible error occurrence. Navigation cannot
+// resurrect that occurrence, but a later failure with the same message appears.
 const sessionDismissedThreadErrorBannerKeys = new Set<string>();
 
 export function dismissThreadErrorBannerForSession(bannerKey: string | null): void {

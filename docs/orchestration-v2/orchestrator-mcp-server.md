@@ -187,13 +187,19 @@ The server exposes eleven orchestration tools.
 
 ### `orchestrator_capabilities`
 
-Returns:
+The default `{}` request returns:
 
 - the inherited provider instance and model;
 - the parent runtime and interaction modes;
-- registered provider instances and advertised models;
+- registered provider summaries without model catalogs;
 - whether each provider can run a child task; and
 - feature flags for polling, cancellation, and batch thread creation.
+
+Pass `providerInstanceId` to return that provider's models in pages of 50 by
+default and 100 at most. Continue with `modelCursor` set to the prior
+`modelsNextCursor`. Pass an exact `model` to return only that model, and add
+`includeModelOptions: true` when its option descriptors are needed. Catalog
+responses include `modelsTotal` and a nullable `modelsNextCursor`.
 
 Unavailable providers include model-visible constraints such as missing V2
 adapter support, disabled state, missing executable, or missing authentication.
@@ -222,8 +228,9 @@ type DelegateTaskInput = {
 ```
 
 Provider, model, runtime mode, and interaction mode inherit from the parent
-when omitted. Selecting a different provider without a model uses that
-provider's first advertised model.
+when omitted. Delegated children always inherit the parent thread's project.
+Selecting a different provider without a model uses that provider's first
+advertised model.
 
 Delegation requires an active parent run owned by the MCP credential's
 provider session. The request becomes the V2 command
@@ -288,15 +295,27 @@ type CreateThreadsInput = {
     };
     runtimeMode?: "inherit" | "approval-required" | "auto-accept-edits" | "full-access";
     interactionMode?: "inherit" | "plan" | "default";
+    projectDirectory?: string;
   }>;
   clientRequestId?: string;
 };
 ```
 
-Each entry independently resolves provider, model, and modes. The new threads
-inherit the parent's project, branch, and worktree path, but they have no
-sub-agent lineage. Entries with a prompt immediately dispatch a run; entries
-without a prompt remain idle.
+Each entry independently resolves provider, model, and modes. Without
+`projectDirectory`, it inherits the parent's project, branch, and worktree.
+An absolute or `~/` directory must match a registered, available project root;
+that selection starts at the target root with no inherited branch or worktree.
+Unknown and relative paths are rejected. Entries have no subagent lineage;
+a prompt immediately dispatches a run, otherwise the thread remains idle.
+
+### `t3_thread_start`
+
+Starts one top-level thread with a required `prompt` and the same optional
+`projectDirectory`, target, modes, title, and retry key as `create_threads`.
+Use `t3_thread_launch` for worktree selection. A caller can read, send, wait, or
+interrupt a cross-project thread only when its own durable history records
+creating that thread. This does not broaden project listing or metadata access.
+Delegation always stays in the caller's project.
 
 ### `t3_thread_launch`
 
@@ -418,9 +437,15 @@ results use the latest assistant content from the final work turn.
   mode. It may not escalate privileges.
 - A child interaction mode may stay equal to or narrow from `default` to
   `plan`. It may not escalate from `plan` to `default`.
-- General thread management is limited to the calling thread's project. Send
-  additionally enforces the same runtime and interaction privilege ceiling as
-  child creation.
+- `create_threads` and `t3_thread_start` inherit this thread's project unless
+  `projectDirectory` names another known T3 project workspace. Absolute paths
+  and home-relative `~/` paths are accepted. Unknown or relative paths are
+  rejected. Delegated subagents always inherit the parent project.
+- `t3_thread_list` stays in the calling thread's project. Read, send, wait, and
+  interrupt may follow a top-level thread this parent recorded creating, even
+  when that thread lives in another known project.
+- Send additionally enforces the same runtime and interaction privilege ceiling
+  as child creation.
 - Provider instances must be enabled, installed, available, authenticated, and
   backed by a V2 adapter.
 - A requested model must be advertised by the selected provider when the
