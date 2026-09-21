@@ -57,6 +57,8 @@ export interface EventStoreV2Shape {
     readonly throughSequence?: number;
     readonly threadId?: ThreadId;
     readonly eventType?: OrchestrationV2DomainEvent["type"];
+    /** Match payload.id in persistence, before paging or decoding events. */
+    readonly entityId?: string;
     readonly limit?: number;
   }) => Stream.Stream<OrchestrationV2StoredEvent, EventStoreV2Error>;
   readonly readByCommandId: (input: {
@@ -88,6 +90,7 @@ const baseLayer: Layer.Layer<EventStoreV2, never, OrchestrationEventStore> = Lay
             : { throughSequence: input.throughSequence }),
           ...(input?.threadId === undefined ? {} : { threadId: input.threadId }),
           ...(input?.eventType === undefined ? {} : { eventType: input.eventType }),
+          ...(input?.entityId === undefined ? {} : { entityId: input.entityId }),
           ...(input?.limit === undefined ? {} : { limit: input.limit }),
         })
         .pipe(

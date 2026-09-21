@@ -9050,23 +9050,42 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   // the current mode is insufficient: any intervening user configuration wins.
   yield* modeReflections.take.pipe(
     Effect.flatMap((request) =>
-      threadDispatch
-        .withLock(
+      Effect.gen(function* () {
+        // Creation events are immutable. Resolve just this source before taking
+        // the command lock; mutable ownership/configuration is checked inside it.
+        const source = yield* eventStore
+          .read({
+            threadId: request.threadId,
+            eventType: "run.created",
+            entityId: request.sourceRunId,
+            limit: 1,
+          })
+          .pipe(Stream.runHead);
+        if (Option.isNone(source)) return;
+        yield* threadDispatch.withLock(
           request.threadId,
           Effect.gen(function* () {
             const projection = yield* projectionStore.getThreadProjection(request.threadId);
             const thread = projection.thread;
+            const sourceRun = projection.runs.find((run) => run.id === request.sourceRunId);
             if (
               thread.deletedAt !== null ||
               thread.archivedAt !== null ||
-              thread.lineage.parentThreadId !== null ||
+              thread.lineage.relationshipToParent === "subagent" ||
               (thread.createdBy === "agent" &&
                 request.expectedInteractionMode === "plan" &&
                 request.interactionMode === "default") ||
               thread.activeProviderThreadId !== request.providerThreadId ||
               thread.runtimeMode !== request.expectedRuntimeMode ||
-              projection.runs.at(-1)?.id !== request.sourceRunId ||
-              projection.runs.at(-1)?.status === "rolled_back" ||
+              sourceRun === undefined ||
+              sourceRun.status === "rolled_back" ||
+              sourceRun.providerThreadId !== request.providerThreadId ||
+              // Rollback can restore the binding's lastRunOrdinal to this source;
+              // that must not revive an observation from before the rollback.
+              projection.runs.some(
+                (run) => run.ordinal > sourceRun.ordinal && run.status === "rolled_back",
+              ) ||
+              projection.runs.some((run) => run.id !== sourceRun.id && isBlockingRun(run)) ||
               thread.interactionMode === request.interactionMode
             )
               return;
@@ -9075,20 +9094,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             );
             if (
               providerThread?.driver !== request.driver ||
+              providerThread.ownerNodeId !== null ||
+              // Promotion/start advances this cursor; merely queuing does not.
+              // Unlike array order, it also follows reordered queued turns.
+              providerThread.lastRunOrdinal !== sourceRun.ordinal ||
               (providerThread.nativeThreadRef?.nativeId ?? null) !== request.nativeThreadId
             )
               return;
-            const source = yield* eventStore
-              .read({ threadId: request.threadId, eventType: "run.created" })
-              .pipe(
-                Stream.filter(
-                  (stored) =>
-                    stored.event.type === "run.created" &&
-                    stored.event.payload.id === request.sourceRunId,
-                ),
-                Stream.runHead,
-              );
-            if (Option.isNone(source)) return;
             for (const eventType of [
               "thread.interaction-mode-updated",
               "thread.runtime-mode-updated",
@@ -9131,18 +9143,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               interactionMode: request.interactionMode,
             });
           }),
-        )
-        .pipe(
-          Effect.retry({ schedule: Schedule.exponential("100 millis"), times: 2 }),
-          Effect.catchCause((cause) =>
-            Cause.hasInterruptsOnly(cause)
-              ? Effect.failCause(cause)
-              : Effect.logWarning("Failed to reflect provider interaction mode", {
-                  threadId: request.threadId,
-                  cause,
-                }),
-          ),
+        );
+      }).pipe(
+        Effect.retry({ schedule: Schedule.exponential("100 millis"), times: 2 }),
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("Failed to reflect provider interaction mode", {
+                threadId: request.threadId,
+                cause,
+              }),
         ),
+      ),
     ),
     Effect.forever,
     Effect.forkScoped,

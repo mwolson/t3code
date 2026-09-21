@@ -373,6 +373,7 @@ const makeEventStore = Effect.gen(function* () {
     readonly threadId?: ThreadId;
     readonly commandId?: CommandId;
     readonly eventType?: OrchestrationV2DomainEvent["type"];
+    readonly entityId?: string;
     readonly onlyAgentEvents?: boolean;
     readonly limit: number;
   }) =>
@@ -410,6 +411,9 @@ const makeEventStore = Effect.gen(function* () {
           ...(input.threadId === undefined ? [] : [sql`stream_id = ${input.threadId}`]),
           ...(input.commandId === undefined ? [] : [sql`command_id = ${input.commandId}`]),
           ...(input.eventType === undefined ? [] : [sql`event_type = ${input.eventType}`]),
+          ...(input.entityId === undefined
+            ? []
+            : [sql`json_extract(payload_json, '$.id') = ${input.entityId}`]),
         ])}
       ORDER BY sequence ASC
       LIMIT ${input.limit}
@@ -495,6 +499,7 @@ const makeEventStore = Effect.gen(function* () {
           ...(input?.threadId === undefined ? {} : { threadId: input.threadId }),
           ...(input?.commandId === undefined ? {} : { commandId: input.commandId }),
           ...(input?.eventType === undefined ? {} : { eventType: input.eventType }),
+          ...(input?.entityId === undefined ? {} : { entityId: input.entityId }),
           onlyAgentEvents: true,
           limit: pageLimit,
         }).pipe(

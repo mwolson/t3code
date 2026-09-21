@@ -8,6 +8,10 @@ import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import {
+  EventStoreV2,
+  layerFromOrchestrationEventStore,
+} from "../../orchestration-v2/EventStore.ts";
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { OrchestrationEventStore } from "../Services/OrchestrationEventStore.ts";
@@ -71,6 +75,74 @@ const seedEvents = Effect.fn("test.seedSequenceEvents")(function* (
     RETURNING sequence, aggregate_kind, application_event_version, stream_id, command_id
   `;
 });
+
+it.effect("filters a source run in SQL before paging or decoding unrelated creation payloads", () =>
+  Effect.gen(function* () {
+    const store = yield* EventStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = ThreadId.make("reflection-source-lookup");
+    const targetId = "source-run";
+    const creation = (ordinal: number, id: string, payload: Record<string, unknown>) => ({
+      ...eventRow(ordinal, "thread", 2, threadId, "source-command"),
+      event_type: "run.created",
+      payload_json: encodeJson({ id, ...payload }),
+    });
+    // Valid JSON but intentionally not a decodable run: unrelated historical
+    // payloads must never enter the TypeScript decoder for an exact lookup.
+    yield* seedEvents(Array.from({ length: 1_001 }, (_, i) => creation(i, `other-${i}`, {})));
+    const [source] = yield* seedEvents([
+      creation(1_002, targetId, {
+        threadId,
+        ordinal: 1_003,
+        providerInstanceId: "codex",
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        providerThreadId: null,
+        userMessageId: "source-message",
+        rootNodeId: null,
+        activeAttemptId: null,
+        status: "queued",
+        requestedAt: occurredAt,
+        startedAt: null,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      }),
+    ]);
+    assert.ok(source);
+    const events = yield* store
+      .read({ threadId, eventType: "run.created", entityId: targetId, limit: 1 })
+      .pipe(Stream.runCollect);
+    assert.deepEqual(
+      events.map((event) => [event.sequence, event.commandId]),
+      [[source.sequence, CommandId.make("source-command")]],
+    );
+    assert.deepEqual(
+      yield* store
+        .read({ threadId, eventType: "run.created", entityId: "missing", limit: 1 })
+        .pipe(Stream.runCollect),
+      [],
+    );
+    // Current migrations already index the thread/sequence range. There is no
+    // payload-id index: the narrow SQL predicate avoids materializing all runs,
+    // not a claim of constant-time lookup or a reason to add a cache/migration.
+    const plan = yield* sql<{ readonly detail: string }>`
+      EXPLAIN QUERY PLAN SELECT sequence FROM orchestration_events
+      WHERE sequence > 0 AND sequence <= ${Number.MAX_SAFE_INTEGER}
+        AND application_event_version = 2 AND aggregate_kind = 'thread'
+        AND stream_id = ${threadId} AND event_type = 'run.created'
+        AND json_extract(payload_json, '$.id') = ${targetId}
+      ORDER BY sequence ASC LIMIT 1
+    `;
+    assert.isTrue(
+      plan.some((row) => row.detail.includes("SEARCH orchestration_events USING INDEX")),
+      plan.map((row) => row.detail).join("; "),
+    );
+  }).pipe(
+    Effect.provide(
+      Layer.fresh(layerFromOrchestrationEventStore.pipe(Layer.provideMerge(eventStoreLayer))),
+    ),
+  ),
+);
 
 it.effect("keeps application and scoped agent high-water marks separate from legacy history", () =>
   Effect.gen(function* () {
