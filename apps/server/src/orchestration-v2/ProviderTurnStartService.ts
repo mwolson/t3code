@@ -149,23 +149,19 @@ export const layer: Layer.Layer<
             Effect.catchCause(() => Effect.succeed(false)),
           ),
         hasUnpairedRunInterruptRequest: () =>
-          projectionStore.getThreadProjection(input.threadId).pipe(
-            Effect.map((current) => {
-              const requestId = idAllocator.derive.runSignalTurnItem({
+          projectionStore
+            .hasUnpairedRunInterruptRequest(
+              input.threadId,
+              idAllocator.derive.runSignalTurnItem({
                 runId: input.runId,
                 signal: "interrupt-request",
-              });
-              const resultId = idAllocator.derive.runSignalTurnItem({
+              }),
+              idAllocator.derive.runSignalTurnItem({
                 runId: input.runId,
                 signal: "interrupt-result",
-              });
-              return (
-                current.turnItems.some((item) => item.id === requestId) &&
-                !current.turnItems.some((item) => item.id === resultId)
-              );
-            }),
-            Effect.catchCause(() => Effect.succeed(false)),
-          ),
+              }),
+            )
+            .pipe(Effect.catchCause(() => Effect.succeed(false))),
       };
     };
 

@@ -321,6 +321,11 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     planId: PlanId,
   ) => Effect.Effect<OrchestrationV2PlanArtifact | undefined, ProjectionStoreV2Error>;
+  readonly hasUnpairedRunInterruptRequest: (
+    threadId: ThreadId,
+    requestId: TurnItemId,
+    resultId: TurnItemId,
+  ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly getRuntimeRequest: (
     threadId: ThreadId,
     requestId: RuntimeRequestId,
@@ -3888,6 +3893,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError(controlReadError(threadId)));
 
+    const hasUnpairedRunInterruptRequest: ProjectionStoreV2Shape["hasUnpairedRunInterruptRequest"] =
+      (threadId, requestId, resultId) =>
+        Effect.gen(function* () {
+          const rows = yield* sql<{ pending: number }>`
+        SELECT EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_turn_items
+          WHERE thread_id = ${threadId} AND turn_item_id = ${requestId}
+        ) AND NOT EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_turn_items
+          WHERE thread_id = ${threadId} AND turn_item_id = ${resultId}
+        ) AS pending
+      `;
+          return rows[0]?.pending === 1;
+        }).pipe(Effect.mapError(controlReadError(threadId)));
+
     const getRuntimeRequest: ProjectionStoreV2Shape["getRuntimeRequest"] = (threadId, requestId) =>
       sql
         .withTransaction(
@@ -4933,6 +4953,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getRunMessage,
       canStartQueuedRun,
       getPendingNativeUserInputs,
+      hasUnpairedRunInterruptRequest,
       getRuntimeRequest,
       getPlan,
       getProviderControlContext,
@@ -5118,6 +5139,15 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           if (projection === undefined)
             return yield* new ProjectionStoreThreadNotFoundError({ threadId });
           return projection.plans.find((plan) => plan.id === planId);
+        }),
+      hasUnpairedRunInterruptRequest: (threadId, requestId, resultId) =>
+        Effect.gen(function* () {
+          const projection = (yield* Ref.get(replayState)).projections.get(threadId);
+          return (
+            projection !== undefined &&
+            projection.turnItems.some((item) => item.id === requestId) &&
+            !projection.turnItems.some((item) => item.id === resultId)
+          );
         }),
       getRuntimeRequest: (threadId, requestId) =>
         Effect.gen(function* () {

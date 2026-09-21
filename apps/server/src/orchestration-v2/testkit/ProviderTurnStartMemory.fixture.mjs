@@ -53,8 +53,9 @@ const dependencies = Layer.mergeAll(
     getThreadProjection: () =>
       Effect.sync(() => {
         fullReads++;
-        return current;
+        throw new Error("full transcript read");
       }),
+    hasUnpairedRunInterruptRequest: () => Effect.succeed(false),
     getTurnStartContext: () =>
       Effect.sync(() => {
         fullReads++;
@@ -177,8 +178,9 @@ await Effect.runPromise(
       current = { ...current, runs: [{ ...liveRun, status: "completed" }] };
       NodeAssert.equal(yield* controls.shouldFinalizeRun(), false);
       NodeAssert.deepEqual(yield* controls.loadInheritedBackgroundTurnItems(), []);
-      NodeAssert.equal(fullReads, i * 2 + 1);
+      NodeAssert.equal(fullReads, i + 1);
       NodeAssert.equal(yield* controls.hasUnpairedRunInterruptRequest(), false);
+      NodeAssert.equal(fullReads, i + 1);
       current = null;
       if (i === Math.floor(count / 2) - 1 || i === count - 1) {
         yield* Effect.promise(async () => {

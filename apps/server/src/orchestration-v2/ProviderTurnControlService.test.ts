@@ -224,6 +224,7 @@ it.effect(
           getTurnStartHistory: () => Effect.die("unused"),
           getRuntimeRecoveryProjection: () => Effect.die("unused getRuntimeRecoveryProjection"),
           getPlan: () => Effect.die("unused"),
+          hasUnpairedRunInterruptRequest: () => Effect.die("unused interrupt read"),
           getRuntimeRequest: () => Effect.die("unused getRuntimeRequest"),
           getRunningTurnContext: () => Effect.die("unused getRunningTurnContext"),
           getThreadProviderContext: () => Effect.die("unused getThreadProviderContext"),

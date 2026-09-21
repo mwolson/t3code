@@ -219,6 +219,42 @@ it.effect.each(["sqlite", "memory"] as const)(
       assert.deepEqual(yield* store.getTurnStartHistory(threadId, [oldRunId]), [item]);
       assert.deepEqual(yield* store.getTurnStartHistory(threadId, [runId]), []);
       assert.deepEqual(yield* store.getTurnStartHistory(threadId, []), []);
+      // Pairing depends on IDs, not payload decoding or item status.
+      const resultId = TurnItemId.make("interrupt-result");
+      assert.isTrue(yield* store.hasUnpairedRunInterruptRequest(threadId, item.id, resultId));
+      assert.isFalse(yield* store.hasUnpairedRunInterruptRequest(threadId, resultId, item.id));
+      assert.isFalse(
+        yield* store.hasUnpairedRunInterruptRequest(
+          ThreadId.make("other-thread"),
+          item.id,
+          resultId,
+        ),
+      );
+      yield* store.apply({
+        id: EventId.make("interrupt-result-event"),
+        type: "turn-item.updated",
+        threadId,
+        runId: oldRunId,
+        occurredAt: now,
+        payload: { ...item, id: resultId },
+      });
+      assert.isFalse(yield* store.hasUnpairedRunInterruptRequest(threadId, item.id, resultId));
+      if (storage === "sqlite") {
+        const sql = yield* SqlClient.SqlClient;
+        const original = yield* sql<{ payload_json: string }>`SELECT payload_json
+          FROM orchestration_v2_projection_turn_items WHERE turn_item_id = ${item.id}`;
+        yield* sql`UPDATE orchestration_v2_projection_turn_items
+          SET payload_json = 'invalid JSON' WHERE turn_item_id = ${item.id}`;
+        assert.isTrue(
+          yield* store.hasUnpairedRunInterruptRequest(
+            threadId,
+            item.id,
+            TurnItemId.make("absent-result"),
+          ),
+        );
+        yield* sql`UPDATE orchestration_v2_projection_turn_items
+          SET payload_json = ${original[0]!.payload_json} WHERE turn_item_id = ${item.id}`;
+      }
       for (const text of ["/compact", " \t/COMPACT\n", "\u00a0/compact\u3000"]) {
         yield* store.apply({
           id: EventId.make("compact-input"),
