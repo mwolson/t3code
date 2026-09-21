@@ -53,6 +53,16 @@ export function assertClaudeResultIsErrorOutput(
   assert.equal(errorItem.failure.code, "api_error_401");
   assert.equal(errorItem.failure.class, "provider_error");
 
+  // Claude emits a terminal failure, not session lastError. Its selected error
+  // item's timestamp is the occurrence identity; no session refresh supplies it.
+  assert.isNotNull(errorItem.completedAt);
+  const failureEvent = result.domainEvents.find(
+    (event) => event.type === "turn-item.updated" && event.payload.id === errorItem.id,
+  );
+  assert.isDefined(failureEvent);
+  assert.deepEqual(errorItem.completedAt, failureEvent?.occurredAt);
+  assert.isTrue(projection.providerSessions.every((session) => session.lastError === null));
+
   // The SDK's synthetic assistant message still surfaces as ordinary
   // assistant text (that is what the stream contained), but the error text
   // must not be duplicated a second time via the result-text fallback.

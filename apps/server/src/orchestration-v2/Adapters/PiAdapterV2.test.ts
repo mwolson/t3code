@@ -40,7 +40,7 @@ import {
   type ProviderAdapterV2Event,
   type ProviderAdapterV2SessionRuntime,
 } from "../ProviderAdapter.ts";
-import { makePiAdapterV2, PI_PROVIDER } from "./PiAdapterV2.ts";
+import { makePiAdapterV2, PI_PROVIDER, piLastErrorAt } from "./PiAdapterV2.ts";
 import { makePiRpcConnection, type PiRpcRecord } from "./PiRpc.ts";
 
 const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -424,6 +424,123 @@ const expectModelFailure = (errorMessage: string) =>
   }).pipe(Effect.scoped, Effect.provide(testLayer));
 
 describe("PiAdapterV2", () => {
+  it("keeps the occurrence identity on same-text refreshes, including legacy null", () => {
+    const now = DateTime.makeUnsafe("2026-09-20T12:00:00Z");
+    for (const previousErrorAt of [null, DateTime.makeUnsafe("2026-09-19T12:00:00Z")]) {
+      assert.strictEqual(
+        piLastErrorAt({
+          previousError: "capacity exhausted",
+          previousErrorAt,
+          nextError: "capacity exhausted",
+          now,
+        }),
+        previousErrorAt,
+      );
+    }
+  });
+
+  it("clears the occurrence and stamps changed or newly set errors", () => {
+    const now = DateTime.makeUnsafe("2026-09-20T12:00:00Z");
+    const previousErrorAt = DateTime.makeUnsafe("2026-09-19T12:00:00Z");
+    assert.isNull(
+      piLastErrorAt({ previousError: "capacity exhausted", previousErrorAt, nextError: null, now }),
+    );
+    for (const previousError of [null, "different failure"]) {
+      assert.strictEqual(
+        piLastErrorAt({
+          previousError,
+          previousErrorAt: null,
+          nextError: "capacity exhausted",
+          now,
+        }),
+        now,
+      );
+    }
+  });
+
+  it.effect("emits a new occurrence for the same failure after the next turn clears it", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      const occurrences: Array<number> = [];
+      for (const runOrdinal of [1, 2]) {
+        yield* startTurn(runtime, providerThread, "default", [], "Hello pi", undefined, runOrdinal);
+        yield* fake.takeRequest("prompt");
+        const running = yield* takeEvent(
+          (event) =>
+            event.type === "provider_session.updated" && event.providerSession.status === "running",
+        );
+        assert.equal(running.type, "provider_session.updated");
+        if (running.type !== "provider_session.updated") return;
+        assert.isNull(running.providerSession.lastError);
+        assert.isNull(running.providerSession.lastErrorAt);
+
+        yield* TestClock.adjust("1 second");
+        const failedAt = yield* DateTime.now;
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: "capacity exhausted",
+          },
+        });
+        yield* fake.emit({ type: "agent_settled" });
+        const failed = yield* takeEvent(
+          (event) =>
+            event.type === "provider_session.updated" && event.providerSession.status === "error",
+        );
+        assert.equal(failed.type, "provider_session.updated");
+        if (failed.type !== "provider_session.updated") return;
+        assert.equal(failed.providerSession.lastError, "capacity exhausted");
+        assert.isNotNull(failed.providerSession.lastErrorAt);
+        assert.isDefined(failed.providerSession.lastErrorAt);
+        const occurrence = DateTime.toEpochMillis(failed.providerSession.lastErrorAt!);
+        assert.equal(occurrence, DateTime.toEpochMillis(failedAt));
+        occurrences.push(occurrence);
+        yield* takeEvent((event) => event.type === "turn.terminal");
+      }
+      assert.isAbove(occurrences[1]!, occurrences[0]!);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("retains the occurrence when transport cleanup repeats an unsolicited-work error", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* fake.emit({ type: "agent_start" });
+      const first = yield* takeEvent((event) => event.type === "provider_session.updated");
+      assert.equal(first.type, "provider_session.updated");
+      if (first.type !== "provider_session.updated") return;
+      assert.equal(first.providerSession.status, "error");
+      assert.isNotNull(first.providerSession.lastErrorAt);
+      assert.isDefined(first.providerSession.lastErrorAt);
+      yield* TestClock.adjust("1 second");
+      yield* fake.closeStdout;
+      const refreshed = yield* takeEvent((event) => event.type === "provider_session.updated");
+      assert.equal(refreshed.type, "provider_session.updated");
+      if (refreshed.type !== "provider_session.updated") return;
+      assert.equal(refreshed.providerSession.lastError, first.providerSession.lastError);
+      assert.deepEqual(refreshed.providerSession.lastErrorAt, first.providerSession.lastErrorAt);
+      assert.isAbove(
+        DateTime.toEpochMillis(refreshed.providerSession.updatedAt),
+        DateTime.toEpochMillis(first.providerSession.updatedAt),
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("stops provider-initiated work that has no T3 turn owner", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
