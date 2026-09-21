@@ -26,6 +26,7 @@ import {
   planMobileScopedSettingsClear,
   planMobileScopedSettingsPatch,
   resolveMobileSettingsTargets,
+  uniformMobileSetting,
   type ScopedMobileSettingsTarget,
 } from "./settings-scoped-server";
 
@@ -172,14 +173,14 @@ function AutoSettleSettingsRows() {
           <SettingsSwitchRow
             icon="clock"
             label="Auto-resume limited threads"
-            value={referenceSettings.autoResumeLimitedThreads}
+            value={uniformMobileSetting(displayTargets, "autoResumeLimitedThreads")}
             disabled={disabled}
             onValueChange={(value) => writeToAll({ autoResumeLimitedThreads: value })}
           />
           <SettingsSwitchRow
             icon="clock"
             label="Snooze limited threads"
-            value={referenceSettings.snoozeLimitedThreads}
+            value={uniformMobileSetting(displayTargets, "snoozeLimitedThreads")}
             disabled={disabled}
             onValueChange={(value) => writeToAll({ snoozeLimitedThreads: value })}
           />
