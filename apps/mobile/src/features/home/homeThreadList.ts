@@ -30,6 +30,10 @@ import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 
 export type HomeProjectSortOrder = Exclude<SidebarProjectSortOrder, "manual">;
 
+export function isListedHomeThread(thread: EnvironmentThreadShell): boolean {
+  return thread.archivedAt === null && thread.lineage.relationshipToParent !== "subagent";
+}
+
 export interface HomeProjectScope {
   readonly key: string;
   readonly title: string;
@@ -276,7 +280,7 @@ export function buildHomeThreadGroups(input: {
   }
 
   for (const thread of input.threads) {
-    if (thread.archivedAt !== null) {
+    if (!isListedHomeThread(thread)) {
       continue;
     }
     if (input.environmentId !== null && thread.environmentId !== input.environmentId) {

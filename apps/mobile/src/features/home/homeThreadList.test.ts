@@ -9,6 +9,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildHomeProjectScopes,
   buildHomeThreadGroups,
+  isListedHomeThread,
   sortHomeProjectScopes,
 } from "./homeThreadList";
 import { makeThreadShellFixture } from "../../test-fixtures";
@@ -68,6 +69,18 @@ function buildGroups(
   });
 }
 
+describe("isListedHomeThread", () => {
+  it("ignores child-only history for Home's unfiltered empty-state signal", () => {
+    const root = makeThreadShellFixture();
+    const child = makeThreadShellFixture({
+      lineage: { ...root.lineage, parentThreadId: root.id, relationshipToParent: "subagent" },
+    });
+    const archived = makeThreadShellFixture({ archivedAt: "2026-06-30T00:00:00.000Z" });
+    expect([child, archived].some(isListedHomeThread)).toBe(false);
+    expect([child, archived, root].some(isListedHomeThread)).toBe(true);
+  });
+});
+
 describe("buildHomeThreadGroups", () => {
   it("builds one v2 scope for the same repository across environments", () => {
     const localEnvironmentId = EnvironmentId.make("environment-local");
@@ -110,6 +123,41 @@ describe("buildHomeThreadGroups", () => {
         projectId: project.id,
       })),
     );
+  });
+
+  it("excludes subagent child threads from home groups", () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    const projectId = ProjectId.make("project-1");
+    const rootThreadId = ThreadId.make("root");
+    const projects = [
+      makeProject({
+        environmentId,
+        id: projectId,
+        title: "t3code",
+      }),
+    ];
+    const groups = buildGroups(projects, [
+      makeThread({
+        environmentId,
+        id: rootThreadId,
+        projectId,
+        title: "Root",
+      }),
+      makeThread({
+        environmentId,
+        id: ThreadId.make("child"),
+        projectId,
+        title: "Child",
+        lineage: {
+          rootThreadId,
+          parentThreadId: rootThreadId,
+          relationshipToParent: "subagent",
+        },
+      }),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.threads.map((thread) => thread.id)).toEqual([rootThreadId]);
   });
 
   it("routes stale duplicate project refs through the canonical repository group", () => {

@@ -2,6 +2,23 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "allowImportingTsExtensions": true,
+    "paths": {
+      "@t3tools/client-runtime/markdown-links": [
+        "../../packages/client-runtime/src/markdownLinks.ts"
+      ],
+      "@t3tools/client-runtime/state/attachments": [
+        "../../packages/client-runtime/src/state/attachments.ts"
+      ],
+      "@t3tools/shared/composerContextClipboard": [
+        "../../packages/shared/src/composerContextClipboard.ts"
+      ],
+      "@t3tools/shared/composerContextReferences": [
+        "../../packages/shared/src/composerContextReferences.ts"
+      ],
+      "@t3tools/shared/composerInlineTokens": ["../../packages/shared/src/composerInlineTokens.ts"],
+      "@t3tools/shared/image": ["../../packages/shared/src/image.ts"],
+      "@t3tools/shared/video": ["../../packages/shared/src/video.ts"]
+    },
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true

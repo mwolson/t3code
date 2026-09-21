@@ -6,6 +6,7 @@ const fixture = vi.hoisted(() => ({
   uploads: {} as Record<string, unknown>,
   preparations: {} as Record<string, number>,
   preparationAtom: Symbol("preparation"),
+  requestIds: ["request-1"],
 }));
 vi.mock("react-native", () => ({ Alert: { alert: vi.fn() } }));
 vi.mock("@effect/atom-react", () => ({
@@ -57,28 +58,27 @@ vi.mock("./use-thread-selection", () => ({
 vi.mock("./use-thread-detail", () => ({
   useSelectedThreadPendingRequests: () => ({
     approvals: [],
-    userInputs: [
-      {
-        requestId: "request-1",
-        createdAt: "2026-09-08T00:00:00Z",
-        responseCapability: "live",
-        dismissible: false,
-        questions: ["first", "second"].map((id) => ({
-          id,
-          header: id,
-          question: `Attach ${id} file`,
-          options: [],
-          allowCustomAnswer: true,
-          multiSelect: false,
-        })),
-      },
-    ],
+    userInputs: fixture.requestIds.map((requestId) => ({
+      requestId,
+      createdAt: "2026-09-08T00:00:00Z",
+      responseCapability: "live",
+      dismissible: false,
+      questions: ["first", "second"].map((id) => ({
+        id,
+        header: id,
+        question: `Attach ${id} file`,
+        options: [],
+        allowCustomAnswer: true,
+        multiSelect: false,
+      })),
+    })),
   }),
 }));
 
-import { ApprovalRequestId, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { ApprovalRequestId, EnvironmentId, RuntimeRequestId, ThreadId } from "@t3tools/contracts";
 import { questionAttachmentDraftKey } from "./question-attachments";
 import { useSelectedThreadRequests } from "./use-selected-thread-requests";
+import { appAtomRegistry } from "./atom-registry";
 
 const environmentId = EnvironmentId.make("environment-1");
 const key = (question: string) =>
@@ -96,6 +96,7 @@ function submitButtonMarkup() {
   return renderToStaticMarkup(<Probe />);
 }
 beforeEach(() => {
+  fixture.requestIds = ["request-1"];
   fixture.preparations = {};
   fixture.drafts = Object.fromEntries(
     ["first", "second"].map((id) => [
@@ -116,6 +117,30 @@ beforeEach(() => {
   );
   fixture.uploads = { "environment-1:first": { status: "ready" } };
 });
+describe("question draft ownership", () => {
+  it("ignores custom-answer events from a request that is no longer displayed", () => {
+    fixture.requestIds = ["request-2", "request-1"];
+    const callbacks: Array<
+      ReturnType<typeof useSelectedThreadRequests>["onChangeUserInputCustomAnswer"]
+    > = [];
+    function Probe() {
+      callbacks.push(useSelectedThreadRequests().onChangeUserInputCustomAnswer);
+      return null;
+    }
+    renderToStaticMarkup(<Probe />);
+    const update = callbacks[0]!;
+    const set = vi.spyOn(appAtomRegistry, "set");
+    try {
+      update(RuntimeRequestId.make("request-1"), "first", "stale answer");
+      expect(set).not.toHaveBeenCalled();
+      update(RuntimeRequestId.make("request-2"), "first", "current answer");
+      expect(set).toHaveBeenCalledOnce();
+    } finally {
+      set.mockRestore();
+    }
+  });
+});
+
 describe("question attachment submission readiness", () => {
   it.each([
     undefined,

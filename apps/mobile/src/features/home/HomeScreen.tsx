@@ -78,6 +78,7 @@ import {
   buildHomeProjectScopes,
   buildHomeThreadGroups,
   sortHomeProjectScopes,
+  isListedHomeThread,
   type HomeProjectSortOrder,
 } from "./homeThreadList";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "./thread-swipe-actions";
@@ -1026,8 +1027,7 @@ export function HomeScreen(props: HomeScreenProps) {
   // that matches nothing needs the in-list "No results" state, not the
   // full-page "No threads yet". Settled threads are unarchived live shells,
   // so the v1 check already covers v2.
-  const hasAnyThreads =
-    props.threads.some((thread) => thread.archivedAt === null) || props.pendingTasks.length > 0;
+  const hasAnyThreads = props.threads.some(isListedHomeThread) || props.pendingTasks.length > 0;
   const hasResults = threadListV2Enabled ? threadListV2Items.length > 0 : projectGroups.length > 0;
   const selectedEnvironmentLabel =
     props.selectedEnvironmentId === null

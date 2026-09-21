@@ -20,7 +20,6 @@ import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
-import { PiProviderCapabilitiesV2 } from "./Adapters/PiAdapterV2.ts";
 import { OrchestrationEffectWorkerV2 } from "./EffectWorker.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import { OrchestratorV2 } from "./Orchestrator.ts";
@@ -428,10 +427,18 @@ it.effect("steers a Pi-like turn when composer selection differs but stays turn-
         options: [{ id: "thinking", value: "low" }],
       } satisfies ModelSelection;
       const now = yield* DateTime.now;
+      const piCapabilities = {
+        ...CodexProviderCapabilitiesV2,
+        turns: {
+          ...CodexProviderCapabilitiesV2.turns,
+          supportsActiveSteering: true,
+          supportsSteeringByInterruptRestart: false,
+        },
+      };
       const adapter: ProviderAdapterV2Shape = {
         instanceId: piInstanceId,
         driver: ProviderDriverKind.make("pi"),
-        getCapabilities: () => Effect.succeed(PiProviderCapabilitiesV2),
+        getCapabilities: () => Effect.succeed(piCapabilities),
         planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
         openSession: (input) =>
           Effect.succeed({
@@ -445,7 +452,7 @@ it.effect("steers a Pi-like turn when composer selection differs but stays turn-
               status: "ready",
               cwd,
               model: runningSelection.model,
-              capabilities: PiProviderCapabilitiesV2,
+              capabilities: piCapabilities,
               createdAt: now,
               updatedAt: now,
               lastError: null,

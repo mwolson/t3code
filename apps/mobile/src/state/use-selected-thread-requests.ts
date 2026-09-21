@@ -196,9 +196,8 @@ export function useSelectedThreadRequests() {
 
   const onChangeUserInputCustomAnswer = useCallback(
     (requestId: RuntimeRequestId, questionId: string, customAnswer: string) => {
-      const question = activePendingUserInputs
-        .find((request) => request.requestId === requestId)
-        ?.questions.find((entry) => entry.id === questionId);
+      if (!activePendingUserInput || activePendingUserInput.requestId !== requestId) return;
+      const question = activePendingUserInput.questions.find((entry) => entry.id === questionId);
       if (!selectedThreadShell || !question) {
         return;
       }
@@ -206,7 +205,7 @@ export function useSelectedThreadRequests() {
       const requestKey = scopedRequestKey(selectedThreadShell.environmentId, requestId);
       setUserInputDraftCustomAnswer(requestKey, question, customAnswer);
     },
-    [activePendingUserInputs, selectedThreadShell],
+    [activePendingUserInput, selectedThreadShell],
   );
 
   const onRespondToApproval = useCallback(
