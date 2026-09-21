@@ -26,6 +26,10 @@ import { openCode2AuthorizationFailureInput } from "./opencode2_authorization_fa
 import { assertOpenCode2AuthorizationFailureOutput } from "./opencode2_authorization_failure/output.ts";
 import { openCode2BackgroundStopInput } from "./opencode2_background_stop/input.ts";
 import { assertOpenCode2BackgroundStopOutput } from "./opencode2_background_stop/output.ts";
+import { openCode2ModeReflectionInput } from "./opencode2_mode_reflection/input.ts";
+import { assertOpenCode2ModeReflectionOutput } from "./opencode2_mode_reflection/output.ts";
+import { openCode2SettledBackgroundStopInput } from "./opencode2_settled_background_stop/input.ts";
+import { assertOpenCode2SettledBackgroundStopOutput } from "./opencode2_settled_background_stop/output.ts";
 import { openCode2BackgroundChildStopInput } from "./opencode2_background_child_stop/input.ts";
 import { assertOpenCode2BackgroundChildStopOutput } from "./opencode2_background_child_stop/output.ts";
 import { openCode2BackgroundChildStopRecoveryOrderInput } from "./opencode2_background_child_stop_recovery_order/input.ts";
@@ -594,6 +598,36 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         modelSelection: OPENCODE2_MODEL_SELECTION,
         assertOutput: assertOpenCode2BackgroundStopOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_mode_reflection",
+    buildInput: openCode2ModeReflectionInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode"),
+        transcriptFile: new URL(
+          "./opencode2_mode_reflection/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertOpenCode2ModeReflectionOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_settled_background_stop",
+    buildInput: openCode2SettledBackgroundStopInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode"),
+        transcriptFile: new URL(
+          "./opencode2_settled_background_stop/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertOpenCode2SettledBackgroundStopOutput,
       },
     ],
   },

@@ -52,6 +52,11 @@ export type OrchestratorV2ScenarioStep =
       readonly runId: OrchestrationV2Run["id"];
     }
   | {
+      readonly type: "await_interaction_mode";
+      readonly threadId: ThreadId;
+      readonly interactionMode: "default" | "plan";
+    }
+  | {
       readonly type: "await_run_status";
       readonly threadId: ThreadId;
       readonly runId: OrchestrationV2Run["id"];
@@ -580,6 +585,24 @@ export function runOrchestratorV2Scenario(
           case "await_run_steerable":
             yield* waitForRunSteerable(step.threadId, step.runId);
             break;
+          case "await_interaction_mode": {
+            // Subscribe from a captured sequence, including the snapshot race.
+            const afterSequence = yield* orchestrator.getThreadEventSequence(step.threadId);
+            const projection = yield* orchestrator.getThreadProjection(step.threadId);
+            if (projection.thread.interactionMode !== step.interactionMode) {
+              yield* orchestrator
+                .streamStoredEventsFrom({ threadId: step.threadId, afterSequence })
+                .pipe(
+                  Stream.filter(
+                    (stored) =>
+                      stored.event.type === "thread.interaction-mode-updated" &&
+                      stored.event.payload.interactionMode === step.interactionMode,
+                  ),
+                  Stream.runHead,
+                );
+            }
+            break;
+          }
           case "await_run_status":
             yield* waitForRunStatus(step.threadId, step.runId, step.status);
             break;

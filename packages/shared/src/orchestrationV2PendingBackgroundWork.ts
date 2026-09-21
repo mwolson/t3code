@@ -219,6 +219,21 @@ export function derivePendingBackgroundWork(input: {
   return Array.from(byTaskId.values());
 }
 
+/** The same Stop target for UI clients and server-owned command callers. */
+export function deriveInterruptibleRun<Run extends PendingBackgroundWorkRun>(input: {
+  readonly runs: ReadonlyArray<Run>;
+  readonly providerThreads: ReadonlyArray<PendingBackgroundWorkProviderThread>;
+  readonly turnItems: ReadonlyArray<PendingBackgroundWorkTurnItem>;
+  readonly activeProviderThreadId?: string | null;
+}): Run | undefined {
+  const active = input.runs.findLast((run) =>
+    ["preparing", "starting", "running", "waiting"].includes(run.status),
+  );
+  if (active !== undefined) return active;
+  const latestRun = input.runs.at(-1);
+  return derivePendingBackgroundWork({ ...input, latestRun }).length > 0 ? latestRun : undefined;
+}
+
 export function formatPendingBackgroundWorkLabel(
   tasks: ReadonlyArray<PendingBackgroundWorkTask>,
 ): string | null {

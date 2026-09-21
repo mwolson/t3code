@@ -205,6 +205,10 @@ export type OrchestratorFixtureInputStep =
       readonly targetRunIndex: number;
     }
   | {
+      readonly type: "await_interaction_mode";
+      readonly interactionMode: ProviderInteractionMode;
+    }
+  | {
       readonly type: "await_run_status";
       readonly targetRunIndex: number;
       readonly status: OrchestrationV2RunStatus;
@@ -245,6 +249,8 @@ export type OrchestratorFixtureInputStep =
     }
   | {
       readonly type: "interrupt_provider_native";
+      /** Exercise the ordinary production Stop command after settlement. */
+      readonly targetRunIndex?: number;
       readonly subagentNativeItemId: string;
     }
   | {
@@ -643,6 +649,13 @@ export function materializeFixtureInput(input: {
             runId: runIdFor(step.targetRunIndex),
           });
           break;
+        case "await_interaction_mode":
+          steps.push({
+            type: "await_interaction_mode",
+            threadId: ids.threadId,
+            interactionMode: step.interactionMode,
+          });
+          break;
         case "await_run_status":
           steps.push({
             type: "await_run_status",
@@ -838,7 +851,9 @@ export function materializeFixtureInput(input: {
                 commandName: "interrupt-provider-native",
               }),
               threadId: ids.threadId,
-              intent: "provider_native_only",
+              ...(step.targetRunIndex === undefined
+                ? { intent: "provider_native_only" as const }
+                : { runId: runIdFor(step.targetRunIndex) }),
             },
             { advanceClockAfter: false },
           );

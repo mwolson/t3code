@@ -338,6 +338,7 @@ function makeProviderAdapter(
 }
 
 function makeTestLayer(input: {
+  readonly deleteDetachedThread?: NonNullable<ProviderAdapterV2Shape["deleteDetachedThread"]>;
   readonly state: Ref.Ref<TestProviderRuntimeState>;
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
@@ -359,8 +360,11 @@ function makeTestLayer(input: {
   const configuredEventSinkLayer = input.failReleaseEventWrites
     ? FailingReleaseEventSinkLayer
     : TestEventSinkLayer;
-  const registryLayer = makeProviderAdapterRegistryLayer(
-    makeProviderAdapter(input.state, {
+  const registryLayer = makeProviderAdapterRegistryLayer({
+    ...(input.deleteDetachedThread === undefined
+      ? {}
+      : { deleteDetachedThread: input.deleteDetachedThread }),
+    ...makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
       ...(input.mcpConfigs === undefined ? {} : { mcpConfigs: input.mcpConfigs }),
@@ -372,7 +376,7 @@ function makeTestLayer(input: {
         ? {}
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
     }),
-  );
+  });
   const providerEventIngestorTestLayer = providerEventIngestorLayer.pipe(
     Layer.provide(Layer.mergeAll(configuredEventSinkLayer, idAllocatorLayer, TestStoresLayer)),
   );
@@ -1590,6 +1594,89 @@ it.effect("ProviderSessionManagerV2 terminal detach revokes the thread's MCP cre
 
     yield* effect.pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 1_000, mcpConfigs })));
   }),
+);
+
+it.effect(
+  "native deletion failure remains retryable after terminal detach revokes credentials and releases the session",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const attempts = yield* Ref.make(0);
+      const mcpConfigs = yield* Ref.make<
+        ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+      >([]);
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSinkV2;
+        const idAllocator = yield* IdAllocatorV2;
+        const manager = yield* ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("native-delete-failure");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* runtime.resumeThread({
+          threadId,
+          providerThread: makeProviderThread({ threadId, providerSessionId, idAllocator, now }),
+          modelSelection,
+          runtimePolicy,
+        });
+        const token = (yield* Ref.get(mcpConfigs))
+          .at(-1)!
+          .authorizationHeader.replace(/^Bearer\s+/, "");
+        const providerSession = (yield* manager.get(providerSessionId)).pipe(
+          Option.getOrThrow,
+        ).providerSession;
+        const input = {
+          threadId,
+          providerSessionId,
+          revokeMcpCredential: true,
+          deleteProviderThread: true,
+          providerInstanceId: modelSelection.instanceId,
+          providerSession,
+          providerThreads: [makeProviderThread({ threadId, providerSessionId, idAllocator, now })],
+        };
+        for (let retry = 0; retry < 2; retry++) {
+          const failure = yield* manager.detach(input).pipe(Effect.flip);
+          assert.equal(failure._tag, "ProviderSessionReleaseError");
+          assert.isUndefined(yield* registry.resolve(token));
+          assert.isUndefined(McpProviderSession.readMcpProviderSession(threadId));
+          assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+        }
+        assert.equal(yield* Ref.get(attempts), 2);
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+      }).pipe(
+        Effect.provide(
+          makeTestLayer({
+            state,
+            mcpConfigs,
+            capabilities: ExclusiveCapabilities,
+            idleTimeoutMs: 1_000,
+            deleteDetachedThread: () =>
+              Ref.update(attempts, (count) => count + 1).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderAdapterProtocolError({
+                      driver: CODEX_DRIVER,
+                      detail: "Native deletion unavailable",
+                    }),
+                  ),
+                ),
+              ),
+          }),
+        ),
+      );
+    }),
 );
 
 it.effect("ProviderSessionManagerV2 releases idle sessions without sweeping all sessions", () =>

@@ -35,6 +35,7 @@ import { EventSinkV2, layerFromStores as eventSinkLayer } from "../EventSink.ts"
 import { layer as eventStoreLayer } from "../EventStore.ts";
 import { layer as idAllocatorLayer } from "../IdAllocator.ts";
 import { layer as orchestratorLayer } from "../Orchestrator.ts";
+import { layer as providerInteractionModeReflectionsLayer } from "../ProviderInteractionModeReflections.ts";
 import { layer as projectionStoreLayer } from "../ProjectionStore.ts";
 import { OrchestratorV2, type OrchestratorV2Error } from "../Orchestrator.ts";
 import { ProviderAdapterRegistryV2 } from "../ProviderAdapterRegistry.ts";
@@ -419,7 +420,11 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
     orchestratorProvided,
     effectWorkerProvided,
     eventSinkProvided,
-  ).pipe(Layer.provide(worktreeRepairDependenciesTestLayer), Layer.provide(NodeServices.layer));
+  ).pipe(
+    Layer.provide(providerInteractionModeReflectionsLayer),
+    Layer.provide(worktreeRepairDependenciesTestLayer),
+    Layer.provide(NodeServices.layer),
+  );
 
   // Build the daemon from the exact worker instance exposed alongside the
   // orchestrator. Keeping this acquisition in the replay layer makes the

@@ -17,6 +17,7 @@ import {
   type ScheduledTaskId,
   ThreadId,
 } from "@t3tools/contracts";
+import { deriveInterruptibleRun } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -628,7 +629,15 @@ const make = Effect.gen(function* () {
           runId: input.runId,
         });
       }
-      if (explicitRun !== undefined && isTerminalRunStatus(explicitRun.status)) {
+      const interruptibleRun = deriveInterruptibleRun({
+        ...target,
+        activeProviderThreadId: target.thread.activeProviderThreadId,
+      });
+      if (
+        explicitRun !== undefined &&
+        explicitRun.id !== interruptibleRun?.id &&
+        isTerminalRunStatus(explicitRun.status)
+      ) {
         return {
           type: "already_terminal",
           run: explicitRun as OrchestrationV2Run & {
@@ -636,7 +645,6 @@ const make = Effect.gen(function* () {
           },
         } as const;
       }
-      const interruptibleRun = latestActiveRun(target);
       if (interruptibleRun === undefined) {
         if (input.runId === undefined) {
           return { type: "no_active_run" } as const;

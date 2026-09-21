@@ -1,8 +1,70 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   derivePendingBackgroundWork,
+  deriveInterruptibleRun,
   formatPendingBackgroundWorkLabel,
 } from "./orchestrationV2PendingBackgroundWork.ts";
+
+describe("deriveInterruptibleRun (web, mobile and MCP Stop)", () => {
+  const completed = { id: "completed" as never, ordinal: 1, status: "completed" as const };
+  const running = { id: "running" as never, ordinal: 2, status: "running" as const };
+  it("keeps settled native children reachable while runtime is idle", () => {
+    expect(
+      deriveInterruptibleRun({
+        runs: [completed],
+        providerThreads: [],
+        turnItems: [
+          {
+            id: "native-child",
+            type: "subagent",
+            status: "running",
+            title: "Review",
+            runId: completed.id,
+          },
+        ],
+      }),
+    ).toBe(completed);
+  });
+  it("keeps root native shells reachable without any child", () => {
+    expect(
+      deriveInterruptibleRun({
+        runs: [completed],
+        providerThreads: [
+          {
+            id: "provider-thread" as never,
+            pendingBackgroundTasks: [{ taskId: "shell", taskType: "shell" }],
+          },
+        ],
+        turnItems: [],
+      }),
+    ).toBe(completed);
+  });
+  it("prefers a foreground run over background work and a later queued run", () => {
+    expect(
+      deriveInterruptibleRun({
+        runs: [
+          completed,
+          running,
+          { ...running, id: "queued" as never, ordinal: 3, status: "queued" },
+        ],
+        providerThreads: [],
+        turnItems: [],
+      }),
+    ).toBe(running);
+  });
+  it("does not offer Stop for idle or rolled-back work", () => {
+    expect(
+      deriveInterruptibleRun({ runs: [completed], providerThreads: [], turnItems: [] }),
+    ).toBeUndefined();
+    expect(
+      deriveInterruptibleRun({
+        runs: [{ ...completed, status: "rolled_back" }],
+        providerThreads: [{ id: "pt" as never, pendingBackgroundTasks: [{ taskId: "old-shell" }] }],
+        turnItems: [],
+      }),
+    ).toBeUndefined();
+  });
+});
 
 describe("derivePendingBackgroundWork", () => {
   it("returns empty while the latest run is not settled", () => {

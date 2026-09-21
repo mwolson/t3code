@@ -14,6 +14,7 @@ import {
 } from "../../orchestration-v2/Adapters/CursorAgentSdk.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../../orchestration-v2/IdAllocator.ts";
 import { layer as providerContinuationRequestsLayer } from "../../orchestration-v2/ProviderContinuationRequests.ts";
+import { layer as providerInteractionModeReflectionsLayer } from "../../orchestration-v2/ProviderInteractionModeReflections.ts";
 
 export type ProviderOrchestrationAdapterInfrastructure =
   | ClaudeAgentSdkQueryRunner
@@ -33,4 +34,5 @@ export const ProviderOrchestrationAdapterInfrastructureLive = Layer.mergeAll(
   cursorAgentSdkRunnerLiveLayer,
   idAllocatorLayer,
   providerContinuationRequestsLayer,
+  providerInteractionModeReflectionsLayer,
 );

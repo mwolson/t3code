@@ -1794,7 +1794,8 @@ export const layerWithOptions = (
         release: releaseEntry,
         detach: (input) =>
           Effect.gen(function* () {
-            if (input.deleteProviderThread === true) {
+            const deleteNativeThreads = Effect.gen(function* () {
+              if (input.deleteProviderThread !== true) return;
               const providerThreads = input.providerThreads ?? [];
               const providerSession = input.providerSession;
               if (
@@ -1826,7 +1827,9 @@ export const layerWithOptions = (
                   );
                 }
               }
-            }
+            });
+            // Teardown must complete even if native deletion fails permanently.
+            // Keep the deletion error retryable in the durable effect outbox.
             const key = sessionKey(input.providerSessionId);
             const currentEntry = (yield* Ref.get(sessions)).get(key);
             if (currentEntry?.supportsMultipleProviderThreads === true) {
@@ -1914,21 +1917,21 @@ export const layerWithOptions = (
             if (input.revokeMcpCredential === true) {
               yield* clearMcpSession(input.threadId);
             }
-            if (Option.isNone(detached)) {
-              return;
+            if (Option.isSome(detached)) {
+              if (
+                detached.value.attachedThreadIds.size === 0 &&
+                !detached.value.supportsMultipleProviderThreads
+              ) {
+                yield* releaseEntry({
+                  providerSessionId: input.providerSessionId,
+                  reason: "manual_shutdown",
+                  ...(input.detail === undefined ? {} : { detail: input.detail }),
+                });
+              } else {
+                yield* scheduleIdleRelease(input.providerSessionId);
+              }
             }
-            if (
-              detached.value.attachedThreadIds.size === 0 &&
-              !detached.value.supportsMultipleProviderThreads
-            ) {
-              yield* releaseEntry({
-                providerSessionId: input.providerSessionId,
-                reason: "manual_shutdown",
-                ...(input.detail === undefined ? {} : { detail: input.detail }),
-              });
-              return;
-            }
-            yield* scheduleIdleRelease(input.providerSessionId);
+            yield* deleteNativeThreads;
           }).pipe(
             Effect.catchCause((cause) =>
               Effect.fail(

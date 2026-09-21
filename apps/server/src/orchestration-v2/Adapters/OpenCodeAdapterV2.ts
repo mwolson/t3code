@@ -551,6 +551,7 @@ interface OpenCode2ThreadState {
   providerThread: OrchestrationV2ProviderThread;
   appThread: OrchestrationV2AppThread | null;
   activeTurn: ActiveOpenCode2Turn | null;
+  reflectionSourceTurn?: Pick<ActiveOpenCode2Turn, "runId" | "appThread" | "runtimePolicy">;
   boundModel: string | null;
   boundVariant: string | null;
   boundAgent: string | null;
@@ -1766,6 +1767,7 @@ export function settleOpenCode2ClientRemoval(request: Promise<unknown>): Promise
 /** Stop every native descendant before surfacing a failure; never stop the host daemon. */
 export const interruptOpenCode2Descendants = Effect.fnUntraced(function* (input: {
   readonly rootId: string;
+  readonly knownChildren?: (parentID: string) => ReadonlyArray<{ readonly id: string }>;
   readonly list: (parameters: {
     readonly parentID: string;
     readonly cursor?: string;
@@ -1795,11 +1797,12 @@ export const interruptOpenCode2Descendants = Effect.fnUntraced(function* (input:
           ),
           Effect.result,
         );
-      if (listed._tag === "Failure") {
-        firstFailure ??= listed.failure;
-        break;
-      }
-      for (const child of listed.success.data) {
+      if (listed._tag === "Failure") firstFailure ??= listed.failure;
+      const children = [
+        ...(input.knownChildren?.(parentID) ?? []),
+        ...(listed._tag === "Success" ? listed.success.data : []),
+      ];
+      for (const child of children) {
         if (visited.has(child.id)) continue;
         visited.add(child.id);
         pending.push(child.id);
@@ -1812,7 +1815,7 @@ export const interruptOpenCode2Descendants = Effect.fnUntraced(function* (input:
         );
         if (stopped._tag === "Failure") firstFailure ??= stopped.failure;
       }
-      cursor = listed.success.cursor.next ?? undefined;
+      cursor = listed._tag === "Success" ? (listed.success.cursor.next ?? undefined) : undefined;
       if (cursor !== undefined && cursors.has(cursor)) {
         firstFailure ??= new OpenCodeRuntimeError({
           operation: "session.list",
@@ -4639,28 +4642,29 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
           yield* emitToolPart(projection.state, projection.turn, projection.part);
         });
 
-        const removeRunningShellsForTurn = Effect.fnUntraced(function* (turn: ActiveOpenCode2Turn) {
-          const running = Array.from(shellProjections.values()).filter(
-            (projection) => projection.turn === turn && projection.status === "running",
-          );
+        const removeRunningShellsForSession = Effect.fnUntraced(function* (
+          state: OpenCode2ThreadState,
+        ) {
+          const shellIds = new Set(runningShellIdsBySession.get(state.nativeSessionId));
+          for (const projection of shellProjections.values()) {
+            if (projection.state === state && projection.status === "running")
+              shellIds.add(projection.shellId);
+          }
           let allRemoved = true;
-          for (const projection of running) {
+          for (const shellId of shellIds) {
             const parameters = {
-              id: projection.shellId,
-              location: projection.location,
+              id: shellId,
+              location: shellProjections.get(shellId)?.location ?? state.location,
             };
             const removed = yield* sdkCall("shell.remove", parameters, () =>
-              removeShellHttp({
-                id: projection.shellId,
-                location: projection.location,
-              }),
+              removeShellHttp(parameters),
             ).pipe(
               Effect.map(openCode2ShellRemovalSucceeded),
               Effect.catchCause((cause) =>
                 Effect.logWarning("Failed to stop an interrupted OpenCode 2 shell.", {
                   errorTag: causeErrorTag(cause),
                   provider: driver,
-                  shellId: projection.shellId,
+                  shellId,
                 }).pipe(Effect.as(false)),
               ),
             );
@@ -4672,14 +4676,31 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
         const interruptDescendants = (rootId: string) =>
           interruptOpenCode2Descendants({
             rootId,
+            knownChildren: (parentID) =>
+              Array.from(subagentsByChildSessionId.values()).flatMap((child) =>
+                child.parentState.nativeSessionId === parentID && child.childSessionId !== null
+                  ? [{ id: child.childSessionId }]
+                  : [],
+              ),
             list: (parameters) =>
               sdkCall("session.list", parameters, (signal) =>
                 client.session.list(parameters, { signal }),
               ),
-            interrupt: (sessionID) =>
-              sdkCall("session.interrupt", { sessionID }, (signal) =>
+            interrupt: Effect.fnUntraced(function* (sessionID) {
+              const child = threads.get(sessionID);
+              if (child?.activeTurn) child.activeTurn.interrupted = true;
+              const interrupted = yield* sdkCall("session.interrupt", { sessionID }, (signal) =>
                 client.session.interrupt({ sessionID }, { signal }),
-              ),
+              ).pipe(Effect.exit);
+              const shellsRemoved =
+                child === undefined ? true : yield* removeRunningShellsForSession(child);
+              if (Exit.isFailure(interrupted)) return yield* Effect.failCause(interrupted.cause);
+              if (!shellsRemoved)
+                return yield* new OpenCodeRuntimeError({
+                  operation: "shell.remove",
+                  category: "sdk-request-failed",
+                });
+            }),
           });
 
         const autoReplyPermission = Effect.fnUntraced(function* <E, R>(
@@ -5251,6 +5272,7 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
               state.lastAgentSelectedEventId = event.id;
               state.boundAgent = event.data.agent;
               const reflectedInteractionMode = openCode2InteractionModeForAgent(event.data.agent);
+              const sourceTurn = state.reflectionSourceTurn;
               // A genuinely external switch (a future plan_exit flow, or
               // another client on the same session) reflects into the
               // thread's Build/Plan mode so the next turn does not push the
@@ -5260,7 +5282,10 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
                 interactionModeReflections === undefined ||
                 state.parentSubagent !== null ||
                 state.appThread === null ||
-                reflectedInteractionMode === null
+                reflectedInteractionMode === null ||
+                sourceTurn === undefined ||
+                sourceTurn.runId === null ||
+                sourceTurn.runtimePolicy.interactionMode !== sourceTurn.appThread.interactionMode
               ) {
                 return;
               }
@@ -5270,6 +5295,11 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
               yield* interactionModeReflections.offer({
                 threadId: state.appThread.id,
                 driver: driver,
+                sourceRunId: sourceTurn.runId,
+                providerThreadId: state.providerThread.id,
+                nativeThreadId: state.nativeSessionId,
+                expectedInteractionMode: sourceTurn.appThread.interactionMode,
+                expectedRuntimeMode: sourceTurn.appThread.runtimeMode,
                 interactionMode: reflectedInteractionMode,
                 dedupeKey: `${driver}:${event.id}`,
               });
@@ -6805,8 +6835,17 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
           const lastEmptyAtMs = lastEmptyPendingWorkProbeAtMs.get(sessionID);
           return lastEmptyAtMs !== undefined && nowMs - lastEmptyAtMs < 50;
         };
+        const hasRunningNativeChildren = (sessionID: string) =>
+          Array.from(subagentsByChildSessionId.values()).some(
+            (child) =>
+              child.parentState.nativeSessionId === sessionID &&
+              (child.status === "pending" ||
+                child.status === "running" ||
+                child.status === "waiting"),
+          );
         const hasPendingBackgroundWorkForState = (state: OpenCode2ThreadState) =>
           Effect.gen(function* () {
+            if (hasRunningNativeChildren(state.nativeSessionId)) return true;
             const nowMs = yield* Clock.currentTimeMillis;
             if (recentlyProbedEmpty(state.nativeSessionId, nowMs)) {
               return consumePendingBackgroundWork(state.nativeSessionId, false);
@@ -6907,6 +6946,7 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
               if (state === undefined) {
                 return consumePendingBackgroundWork(sessionID, undefined);
               }
+              if (hasRunningNativeChildren(sessionID)) return true;
               const nowMs = yield* Clock.currentTimeMillis;
               if (recentlyProbedEmpty(sessionID, nowMs)) {
                 return consumePendingBackgroundWork(sessionID, false);
@@ -7155,6 +7195,11 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
                 pendingExecutionFailure: null,
               };
               state.appThread = turnInput.appThread;
+              state.reflectionSourceTurn = {
+                runId: turn.runId,
+                appThread: turn.appThread,
+                runtimePolicy: turn.runtimePolicy,
+              };
               state.activeTurn = turn;
               lastEmptyPendingWorkProbeAtMs.delete(sessionID);
               state.providerTurns.set(String(providerTurnId), providerTurn);
@@ -7277,7 +7322,45 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
                 );
               }
               const turn = state.activeTurn;
-              if (turn === null || turn.providerTurnId !== interruptInput.providerTurnId) {
+              if (turn === null) {
+                const latestTurn = Array.from(state.providerTurns.values()).at(-1);
+                // CTM uses the latest settled root turn as the Stop target for
+                // background work. Never use an old request to stop a newer turn.
+                if (latestTurn?.id !== interruptInput.providerTurnId) {
+                  return yield* protocolError(
+                    "OpenCode background Stop target is no longer current.",
+                  );
+                }
+                const interrupted = yield* sdkCallWithTimeout(
+                  "session.interrupt",
+                  { sessionID },
+                  (signal) => client.session.interrupt({ sessionID }, { signal }),
+                  OPENCODE2_INTERRUPT_REQUEST_TIMEOUT_MS,
+                ).pipe(Effect.exit);
+                const shells = yield* removeRunningShellsForSession(state).pipe(
+                  Effect.timeoutOption(`${OPENCODE2_INTERRUPT_REQUEST_TIMEOUT_MS} millis`),
+                  Effect.exit,
+                );
+                const descendants = yield* interruptDescendants(sessionID).pipe(Effect.exit);
+                const confirmed =
+                  Exit.isSuccess(interrupted) &&
+                  Option.isSome(interrupted.value) &&
+                  Exit.isSuccess(shells) &&
+                  Option.isSome(shells.value) &&
+                  shells.value.value &&
+                  Exit.isSuccess(descendants);
+                if (!confirmed) state.quarantined = true;
+                if (Exit.isFailure(interrupted)) return yield* Effect.failCause(interrupted.cause);
+                if (Exit.isFailure(shells)) return yield* Effect.failCause(shells.cause);
+                if (Exit.isFailure(descendants)) return yield* Effect.failCause(descendants.cause);
+                if (!confirmed) {
+                  return yield* protocolError(
+                    "OpenCode background interruption was not confirmed.",
+                  );
+                }
+                return;
+              }
+              if (turn.providerTurnId !== interruptInput.providerTurnId) {
                 return yield* protocolError(
                   `OpenCode 2 turn ${interruptInput.providerTurnId} is not active`,
                 );
@@ -7302,7 +7385,7 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
                   },
                 );
               }
-              const shellsStopped = yield* removeRunningShellsForTurn(turn).pipe(
+              const shellsStopped = yield* removeRunningShellsForSession(state).pipe(
                 Effect.timeoutOption(`${OPENCODE2_INTERRUPT_REQUEST_TIMEOUT_MS} millis`),
                 Effect.catchCause((cause) =>
                   Effect.logWarning("Failed to stop OpenCode 2 shells during interrupt.", {

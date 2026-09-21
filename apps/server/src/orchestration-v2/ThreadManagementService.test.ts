@@ -354,6 +354,54 @@ it.effect("preserves failed legacy materialization when reading checkpoint conte
   }).pipe(Effect.provide(testLayer));
 });
 
+for (const explicit of [false, true]) {
+  it.effect(
+    `MCP-facing Stop dispatches the ordinary command for settled background work (explicit=${explicit})`,
+    () =>
+      Effect.gen(function* () {
+        const projectId = ProjectId.make("stop-project");
+        const threadId = ThreadId.make("stop-thread");
+        const runId = RunId.make("stop-run");
+        const commands: OrchestrationV2Command[] = [];
+        const projection = {
+          thread: { id: threadId, projectId, deletedAt: null, activeProviderThreadId: null },
+          runs: [{ id: runId, status: "completed", ordinal: 1 }],
+          providerThreads: [
+            {
+              id: "provider-thread",
+              pendingBackgroundTasks: [{ taskId: "root-shell", taskType: "shell" }],
+            },
+          ],
+          turnItems: [],
+        } as unknown as OrchestrationV2ThreadProjection;
+        const service = yield* ThreadManagementService.pipe(
+          Effect.provide(
+            layer.pipe(
+              Layer.provide(
+                Layer.mock(OrchestratorV2)({
+                  getThreadProjection: () => Effect.succeed(projection),
+                  dispatch: (command) => {
+                    commands.push(command);
+                    return Effect.succeed({ sequence: 1, storedEvents: [] });
+                  },
+                }),
+              ),
+            ),
+          ),
+        );
+        const commandId = CommandId.make("stop-command");
+        const result = yield* service.interruptThread({
+          projectId,
+          threadId,
+          commandId,
+          ...(explicit ? { runId } : {}),
+        });
+        expect(result.type).toBe("interrupt_requested");
+        expect(commands).toEqual([{ type: "run.interrupt", threadId, runId, commandId }]);
+      }),
+  );
+}
+
 for (const scenario of [
   { finalStatus: "completed" as const, timedOut: false },
   { finalStatus: "failed" as const, timedOut: false },

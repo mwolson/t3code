@@ -67,6 +67,11 @@ import { ProjectionMaintenanceV2 } from "./ProjectionMaintenance.ts";
 import type { ProviderAdapterV2SessionRuntime, ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import {
+  ProviderInteractionModeReflections,
+  layer as providerInteractionModeReflectionsLayer,
+  type ProviderInteractionModeReflection,
+} from "./ProviderInteractionModeReflections.ts";
+import {
   OrchestrationV2EventSinkLayerLive,
   OrchestrationV2LayerLive,
   ProjectServiceLayerLive,
@@ -160,6 +165,7 @@ const TestProviderInstanceRegistry = Layer.succeed(ProviderInstanceRegistry, {
 });
 
 const TestLayer = Layer.mergeAll(
+  providerInteractionModeReflectionsLayer,
   OrchestrationV2LayerLive,
   OrchestrationV2EventSinkLayerLive,
   ProjectionProjectRepositoryLive,
@@ -360,6 +366,155 @@ const SharedApplicationDataPlaneTestLayer = Layer.merge(
   Layer.provide(ProjectServiceTestLayer),
   Layer.provide(PlatformTestLayer),
 );
+
+it.layer(TestLayer)("OrchestrationV2LayerLive mode reflections", (it) => {
+  it.effect(
+    "drains native mode reflections through production command locks, receipts and policy guards",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* OrchestratorV2;
+        const reflections = yield* ProviderInteractionModeReflections;
+        const prepare = Effect.fnUntraced(function* (
+          name: string,
+          createdBy: "user" | "agent" = "user",
+        ) {
+          const threadId = ThreadId.make(`reflection-${name}`);
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${threadId}-create`),
+            threadId,
+            projectId: ProjectId.make("reflection-project"),
+            title: name,
+            modelSelection,
+            createdBy,
+            creationSource: "web",
+            runtimeMode: "full-access",
+            interactionMode: "plan",
+            branch: null,
+            worktreePath: process.cwd(),
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`${threadId}-message`),
+            threadId,
+            messageId: MessageId.make(`${threadId}-message`),
+            text: "Plan",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+            dispatchMode: { type: "start_immediately" },
+          });
+          const projection = yield* orchestrator.getThreadProjection(threadId);
+          return {
+            threadId,
+            driver,
+            providerThreadId: projection.thread.activeProviderThreadId!,
+            nativeThreadId: projection.providerThreads[0]!.nativeThreadRef?.nativeId ?? null,
+            sourceRunId: projection.runs[0]!.id,
+            expectedInteractionMode: "plan",
+            expectedRuntimeMode: "full-access",
+            interactionMode: "default",
+            dedupeKey: name,
+          } satisfies ProviderInteractionModeReflection;
+        });
+        const awaitMode = (request: ProviderInteractionModeReflection) =>
+          orchestrator.streamStoredEventsFrom({ threadId: request.threadId }).pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "thread.interaction-mode-updated" &&
+                stored.event.payload.interactionMode === request.interactionMode,
+            ),
+            Stream.runHead,
+          );
+        for (const kind of [
+          "valid",
+          "stale-aba",
+          "restricted-agent",
+          "child",
+          "archived",
+          "replaced-binding",
+        ] as const) {
+          const request = yield* prepare(kind, kind === "restricted-agent" ? "agent" : "user");
+          if (kind === "stale-aba") {
+            for (const mode of ["default", "plan"] as const)
+              yield* orchestrator.dispatch({
+                type: "thread.interaction-mode.set",
+                commandId: CommandId.make(`${request.threadId}-${mode}`),
+                threadId: request.threadId,
+                interactionMode: mode,
+              });
+          }
+          if (kind === "child") {
+            const snapshot = yield* orchestrator.getThreadProjection(request.threadId);
+            const sink = yield* EventSinkV2;
+            yield* sink.write({
+              events: [
+                {
+                  id: EventId.make("reflection-child-lineage"),
+                  type: "thread.metadata-updated",
+                  threadId: request.threadId,
+                  occurredAt: yield* DateTime.now,
+                  payload: {
+                    ...snapshot.thread,
+                    lineage: {
+                      ...snapshot.thread.lineage,
+                      parentThreadId: ThreadId.make("plan-restricted-parent"),
+                      relationshipToParent: "subagent",
+                    },
+                  },
+                },
+              ],
+            });
+          }
+          if (kind === "archived")
+            yield* orchestrator.dispatch({
+              type: "thread.archive",
+              commandId: CommandId.make(`${request.threadId}-archive`),
+              threadId: request.threadId,
+            });
+          yield* reflections.offer(
+            kind === "replaced-binding"
+              ? { ...request, providerThreadId: ProviderThreadId.make("obsolete") }
+              : request,
+          );
+          // A subsequent successful receipt is a FIFO consumer barrier, including
+          // for intentionally dropped offers. No sleep/poll or fixture drain.
+          const barrier = yield* prepare(`barrier-${kind}`);
+          yield* reflections.offer(barrier);
+          yield* awaitMode(barrier);
+          const projection = yield* orchestrator.getThreadProjection(request.threadId);
+          assert.equal(projection.thread.interactionMode, kind === "valid" ? "default" : "plan");
+          if (kind === "valid") {
+            const sequence = yield* orchestrator.getThreadEventSequence(request.threadId);
+            yield* reflections.offer(request);
+            const duplicateBarrier = yield* prepare("duplicate-barrier");
+            yield* reflections.offer(duplicateBarrier);
+            yield* awaitMode(duplicateBarrier);
+            assert.equal(yield* orchestrator.getThreadEventSequence(request.threadId), sequence);
+            yield* reflections.offer({
+              ...request,
+              interactionMode: "plan",
+              dedupeKey: "back-to-plan",
+            });
+            yield* awaitMode({ ...request, interactionMode: "plan" });
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(request.threadId)).thread.interactionMode,
+              "plan",
+            );
+            yield* reflections.offer(request);
+            const receiptBarrier = yield* prepare("receipt-barrier");
+            yield* reflections.offer(receiptBarrier);
+            yield* awaitMode(receiptBarrier);
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(request.threadId)).thread.interactionMode,
+              "plan",
+              "replayed older offers must use the original command receipt",
+            );
+          }
+        }
+      }),
+  );
+});
 
 it.layer(TestLayer)("OrchestrationV2LayerLive", (it) => {
   it.effect("creates and reads a thread through the production V2 composition", () =>

@@ -1,4 +1,11 @@
-import { ProviderDriverKind, ProviderInteractionMode, ThreadId } from "@t3tools/contracts";
+import {
+  ProviderDriverKind,
+  ProviderInteractionMode,
+  ThreadId,
+  type RunId,
+  type ProviderThreadId,
+  type RuntimeMode,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -7,6 +14,11 @@ import * as Queue from "effect/Queue";
 export interface ProviderInteractionModeReflection {
   readonly threadId: ThreadId;
   readonly driver: ProviderDriverKind;
+  readonly sourceRunId: RunId;
+  readonly providerThreadId: ProviderThreadId;
+  readonly nativeThreadId: string | null;
+  readonly expectedInteractionMode: ProviderInteractionMode;
+  readonly expectedRuntimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   /**
    * Stable per-native-event key. The worker derives the command id from it, so
@@ -23,7 +35,7 @@ export interface ProviderInteractionModeReflection {
  * follows reality instead of pushing the stale mode back on the next turn.
  * The default reference drops requests, keeping adapter construction
  * dependency-free in tests; the live layer must be shared with the
- * ProviderInteractionModeReflectionService worker that drains it.
+ * orchestrator's scoped consumer that drains it under the thread command lock.
  */
 export class ProviderInteractionModeReflections extends Context.Reference<{
   readonly offer: (request: ProviderInteractionModeReflection) => Effect.Effect<void>;
@@ -35,7 +47,10 @@ export class ProviderInteractionModeReflections extends Context.Reference<{
 export const layer = Layer.effect(
   ProviderInteractionModeReflections,
   Effect.gen(function* () {
-    const queue = yield* Queue.unbounded<ProviderInteractionModeReflection>();
+    // Never stall the provider event pump; under overload keep newer native
+    // observations rather than applying an older queued mode after dropping its successor.
+    const queue = yield* Queue.sliding<ProviderInteractionModeReflection>(128);
+    yield* Effect.addFinalizer(() => Queue.shutdown(queue));
     return {
       offer: (request: ProviderInteractionModeReflection) =>
         Queue.offer(queue, request).pipe(Effect.asVoid),

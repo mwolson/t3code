@@ -68,6 +68,33 @@ describe("OpenCode descendant Stop transport boundary", () => {
     }),
   );
 
+  it.effect("still stops known native children and grandchildren when enumeration fails", () =>
+    Effect.gen(function* () {
+      const stopped: string[] = [];
+      const failure = new OpenCodeRuntimeError({
+        operation: "session.list",
+        category: "network-failed",
+      });
+      const result = yield* interruptOpenCode2Descendants({
+        rootId: "root",
+        knownChildren: (parentID) =>
+          parentID === "root"
+            ? [{ id: "child" }]
+            : parentID === "child"
+              ? [{ id: "grandchild" }]
+              : [],
+        list: () => failure,
+        interrupt: (id) =>
+          Effect.sync(() => {
+            stopped.push(id);
+          }),
+      }).pipe(Effect.result);
+      assert.deepEqual(stopped, ["child", "grandchild"]);
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag === "Failure") assert.strictEqual(result.failure, failure);
+    }),
+  );
+
   it.effect("rejects a repeated pagination cursor rather than silently missing descendants", () =>
     Effect.gen(function* () {
       const result = yield* interruptOpenCode2Descendants({

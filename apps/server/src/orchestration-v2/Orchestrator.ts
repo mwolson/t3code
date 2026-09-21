@@ -79,6 +79,10 @@ import {
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
 import { ProviderContinuationRequests } from "./ProviderContinuationRequests.ts";
+import { ProviderInteractionModeReflections } from "./ProviderInteractionModeReflections.ts";
+import { EventStoreV2 } from "./EventStore.ts";
+import * as Schedule from "effect/Schedule";
+import * as Cause from "effect/Cause";
 import { makeProviderFailure } from "./ProviderFailure.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { ProviderSwitchServiceV2 } from "./ProviderSwitchService.ts";
@@ -610,6 +614,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const fileSystem = yield* FileSystem.FileSystem;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
   const continuationRequests = yield* ProviderContinuationRequests;
+  const modeReflections = yield* ProviderInteractionModeReflections;
+  const eventStore = yield* EventStoreV2;
   const providerSessions = yield* ProviderSessionManagerV2;
   const providerSwitchService = yield* ProviderSwitchServiceV2;
   const runtimePolicy = yield* RuntimePolicyV2;
@@ -9039,6 +9045,109 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const dispatchWithReceipt = (command: OrchestrationV2Command) =>
     threadDispatch.withLock(commandThreadId(command), dispatchWithReceiptEffect(command));
 
+  // Serialize provider reflections with ordinary user commands. Native events
+  // may lag a user toggle (including plan -> build -> plan), so comparing only
+  // the current mode is insufficient: any intervening user configuration wins.
+  yield* modeReflections.take.pipe(
+    Effect.flatMap((request) =>
+      threadDispatch
+        .withLock(
+          request.threadId,
+          Effect.gen(function* () {
+            const projection = yield* projectionStore.getThreadProjection(request.threadId);
+            const thread = projection.thread;
+            if (
+              thread.deletedAt !== null ||
+              thread.archivedAt !== null ||
+              thread.lineage.parentThreadId !== null ||
+              (thread.createdBy === "agent" &&
+                request.expectedInteractionMode === "plan" &&
+                request.interactionMode === "default") ||
+              thread.activeProviderThreadId !== request.providerThreadId ||
+              thread.runtimeMode !== request.expectedRuntimeMode ||
+              projection.runs.at(-1)?.id !== request.sourceRunId ||
+              projection.runs.at(-1)?.status === "rolled_back" ||
+              thread.interactionMode === request.interactionMode
+            )
+              return;
+            const providerThread = projection.providerThreads.find(
+              (entry) => entry.id === request.providerThreadId,
+            );
+            if (
+              providerThread?.driver !== request.driver ||
+              (providerThread.nativeThreadRef?.nativeId ?? null) !== request.nativeThreadId
+            )
+              return;
+            const source = yield* eventStore
+              .read({ threadId: request.threadId, eventType: "run.created" })
+              .pipe(
+                Stream.filter(
+                  (stored) =>
+                    stored.event.type === "run.created" &&
+                    stored.event.payload.id === request.sourceRunId,
+                ),
+                Stream.runHead,
+              );
+            if (Option.isNone(source)) return;
+            for (const eventType of [
+              "thread.interaction-mode-updated",
+              "thread.runtime-mode-updated",
+              "thread.model-selection-updated",
+              "thread.provider-switched",
+              "thread.archived",
+            ] as const) {
+              const changed = yield* eventStore
+                .read({
+                  threadId: request.threadId,
+                  afterSequence: source.value.sequence,
+                  eventType,
+                })
+                .pipe(
+                  Stream.filter(
+                    (stored) =>
+                      stored.commandId !== source.value.commandId &&
+                      !String(stored.commandId).startsWith("command:provider-mode-reflection:"),
+                  ),
+                  Stream.runHead,
+                );
+              if (Option.isSome(changed)) return;
+            }
+            // A policy-restricted context must never authorize a broader next turn.
+            const policy = yield* runtimePolicy.resolve({
+              thread,
+              modelSelection: thread.modelSelection,
+            });
+            if (
+              policy.interactionMode !== thread.interactionMode ||
+              policy.runtimeMode !== thread.runtimeMode
+            )
+              return;
+            yield* dispatchWithReceiptEffect({
+              type: "thread.interaction-mode.set",
+              commandId: CommandId.make(
+                `command:provider-mode-reflection:${request.threadId}:${request.dedupeKey}`,
+              ),
+              threadId: request.threadId,
+              interactionMode: request.interactionMode,
+            });
+          }),
+        )
+        .pipe(
+          Effect.retry({ schedule: Schedule.exponential("100 millis"), times: 2 }),
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.failCause(cause)
+              : Effect.logWarning("Failed to reflect provider interaction mode", {
+                  threadId: request.threadId,
+                  cause,
+                }),
+          ),
+        ),
+    ),
+    Effect.forever,
+    Effect.forkScoped,
+  );
+
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
       const threadId = stored.event.threadId;
@@ -9248,6 +9357,7 @@ export const layer: Layer.Layer<
   | CommandReceiptStoreV2
   | ContextHandoffServiceV2
   | EventSinkV2
+  | EventStoreV2
   | IdAllocatorV2
   | ProjectionProjectRepository
   | ProviderAdapterRegistryV2

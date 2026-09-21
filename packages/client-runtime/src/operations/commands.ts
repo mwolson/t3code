@@ -27,7 +27,7 @@ import {
   type UploadChatAttachment,
 } from "@t3tools/contracts";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
-import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import { deriveInterruptibleRun } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 
@@ -755,27 +755,10 @@ export const interruptThreadTurn = Effect.fn("EnvironmentCommands.interruptThrea
   let runId = input.runId ?? (input.turnId as RunId | undefined);
   if (runId === undefined) {
     const projection = yield* getProjection(input.threadId);
-    runId = projection.runs.findLast(
-      (run) =>
-        run.status === "preparing" ||
-        run.status === "starting" ||
-        run.status === "running" ||
-        run.status === "waiting",
-    )?.id;
-    if (runId === undefined) {
-      const latestRun = projection.runs.at(-1);
-      if (
-        derivePendingBackgroundWork({
-          latestRun,
-          providerThreads: projection.providerThreads,
-          turnItems: projection.turnItems,
-          activeProviderThreadId: projection.thread.activeProviderThreadId,
-          runs: projection.runs,
-        }).length > 0
-      ) {
-        runId = latestRun?.id;
-      }
-    }
+    runId = deriveInterruptibleRun({
+      ...projection,
+      activeProviderThreadId: projection.thread.activeProviderThreadId,
+    })?.id;
   }
   if (runId === undefined) return { sequence: 0 };
   return yield* dispatch({
