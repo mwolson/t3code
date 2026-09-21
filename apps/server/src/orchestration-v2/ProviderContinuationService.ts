@@ -21,7 +21,7 @@ function delegatedCompletionText(taskIds: ReadonlyArray<string>): string {
 }
 
 function currentDelegatedCompletionDelivery(
-  projection: OrchestrationV2ThreadProjection,
+  projection: Pick<OrchestrationV2ThreadProjection, "messages" | "runs" | "providerTurns">,
   completion: NonNullable<ProviderContinuationRequest["delegatedCompletion"]>,
 ) {
   const sourceRun = projection.runs.find((candidate) => candidate.id === completion.parentRunId);
@@ -81,7 +81,16 @@ export const workerLive = Layer.effectDiscard(
 
     const dispatchContinuation = Effect.fn("ProviderContinuationService.dispatchContinuation")(
       function* (request: ProviderContinuationRequest) {
-        const projection = yield* threads.getThreadProjection(request.threadId);
+        const projection = yield* threads.getThreadRecords(
+          request.threadId,
+          ["messages", "runs", "providerTurns"],
+          {
+            messageIds:
+              request.delegatedCompletion === undefined
+                ? []
+                : [request.delegatedCompletion.messageId],
+          },
+        );
         if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
           yield* Effect.logInfo("orchestration-v2.provider-continuation.thread-archived", {
             threadId: request.threadId,
@@ -186,7 +195,16 @@ export const workerLive = Layer.effectDiscard(
                 const retryDelay = yield* nextRetryDelay(retryKey);
                 yield* Effect.gen(function* () {
                   yield* Effect.sleep(`${retryDelay} millis`);
-                  const projection = yield* threads.getThreadProjection(request.threadId);
+                  const projection = yield* threads.getThreadRecords(
+                    request.threadId,
+                    ["messages", "runs", "providerTurns"],
+                    {
+                      messageIds:
+                        request.delegatedCompletion === undefined
+                          ? []
+                          : [request.delegatedCompletion.messageId],
+                    },
+                  );
                   if (currentDelegatedCompletionDelivery(projection, completion) !== undefined) {
                     yield* requests.offer(request);
                   } else {

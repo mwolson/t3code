@@ -1,7 +1,7 @@
 import type { OrchestrationV2Run, OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 
 export function isAutomaticCompletionRun(
-  projection: OrchestrationV2ThreadProjection,
+  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
   run: OrchestrationV2Run,
 ): boolean {
   return projection.messages.some(
@@ -10,7 +10,7 @@ export function isAutomaticCompletionRun(
 }
 
 export function queuedRunsInDeliveryOrder(
-  projection: OrchestrationV2ThreadProjection,
+  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
 ): ReadonlyArray<OrchestrationV2Run> {
   const automaticCompletionMessageIds = new Set(
     projection.messages

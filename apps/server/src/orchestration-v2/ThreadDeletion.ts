@@ -8,7 +8,6 @@ import * as Effect from "effect/Effect";
 
 import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import type { IdAllocatorV2, IdAllocatorV2Error } from "./IdAllocator.ts";
-import { applyToProjection } from "./ProjectionStore.ts";
 
 export interface ThreadDeletionPlan {
   readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -18,7 +17,11 @@ export interface ThreadDeletionPlan {
 /** Plan the same durable cleanup for direct thread deletion and project removal. */
 export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")(function* (input: {
   readonly command: Extract<OrchestrationV2Command, { readonly type: "thread.delete" }>;
-  readonly projection: OrchestrationV2ThreadProjection;
+  readonly projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "thread" | "runs" | "attempts" | "nodes" | "runtimeRequests" | "subagents" | "providerSessions"
+  >;
+  readonly attachmentIds: ReadonlyArray<string>;
   readonly now: DateTime.Utc;
   readonly idAllocator: IdAllocatorV2["Service"];
 }): Effect.fn.Return<ThreadDeletionPlan, IdAllocatorV2Error> {
@@ -35,7 +38,20 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
     });
     const withId = { ...event, id } as Event;
     events.push(withId);
-    current = applyToProjection(current, withId);
+    if (withId.type === "run.updated") {
+      current = {
+        ...current,
+        runs: current.runs.map((run) => (run.id === withId.payload.id ? withId.payload : run)),
+      };
+    }
+    if (withId.type === "subagent.updated") {
+      current = {
+        ...current,
+        subagents: current.subagents.map((task) =>
+          task.id === withId.payload.id ? withId.payload : task,
+        ),
+      };
+    }
   });
 
   yield* emitEvent({
@@ -200,9 +216,7 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
     threadId: command.threadId,
     request: { type: "terminal.cleanup" },
   });
-  const attachmentIds = Array.from(
-    new Set(projection.messages.flatMap((message) => message.attachments.map((item) => item.id))),
-  );
+  const attachmentIds = Array.from(new Set(input.attachmentIds));
   if (attachmentIds.length > 0) {
     effects.push({
       id: `effect:${command.commandId}:attachment.cleanup`,

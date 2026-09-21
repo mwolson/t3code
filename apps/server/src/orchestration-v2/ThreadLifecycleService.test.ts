@@ -22,7 +22,7 @@ it.effect("maps application lifecycle operations to V2-native commands", () => {
           commands.push(command.type);
           return Effect.succeed({ sequence: commands.length, storedEvents: [] });
         },
-        getThreadProjection: () => Effect.succeed(projection),
+        getThreadRecords: () => Effect.succeed(projection),
       }),
     ),
   );

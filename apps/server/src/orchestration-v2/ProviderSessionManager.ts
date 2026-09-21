@@ -612,7 +612,11 @@ export const layerWithOptions = (
 
           const events: Array<OrchestrationV2DomainEvent> = [];
           for (const threadId of input.entry.attachedThreadIds) {
-            const projection = yield* projectionStore.getThreadProjection(threadId);
+            const projection = yield* projectionStore.getThreadRecords(
+              threadId,
+              ["runtimeRequests", "nodes", "turnItems"],
+              { turnItemTypes: ["approval_request", "user_input_request"] },
+            );
             const releasedRequests = projection.runtimeRequests.filter(
               (request) =>
                 request.status === "pending" &&
@@ -1762,7 +1766,10 @@ export const layerWithOptions = (
             const currentEntry = (yield* Ref.get(sessions)).get(key);
             if (currentEntry?.supportsMultipleProviderThreads === true) {
               const projection = yield* Effect.option(
-                projectionStore.getThreadProjection(input.threadId),
+                projectionStore.getThreadRecords(input.threadId, [
+                  "providerThreads",
+                  "providerTurns",
+                ]),
               );
               if (Option.isSome(projection)) {
                 const providerThreads = new Map(

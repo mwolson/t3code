@@ -183,6 +183,9 @@ it.effect("cancels active work without reviving a run while disposing delegated 
     const plan = yield* planThreadDeletion({
       command,
       projection,
+      attachmentIds: projection.messages.flatMap((message) =>
+        message.attachments.map((attachment) => attachment.id),
+      ),
       now: deletedAt,
       idAllocator: yield* IdAllocatorV2,
     });
@@ -268,6 +271,9 @@ it.effect("queues provider and resource cleanup and preserves an earlier deletio
     const plan = yield* planThreadDeletion({
       command,
       projection,
+      attachmentIds: projection.messages.flatMap((message) =>
+        message.attachments.map((attachment) => attachment.id),
+      ),
       now: deletedAt,
       idAllocator: yield* IdAllocatorV2,
     });

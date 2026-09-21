@@ -206,6 +206,77 @@ it.effect.each(["sqlite", "memory"] as const)(
             'tool_call', 'completed', 2, ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
         assert.equal((yield* Effect.exit(store.getThreadProjection(threadId)))._tag, "Failure");
       }
+      const selected = yield* store.getThreadRecords(threadId, ["runs", "messages"], {
+        runIds: [runId],
+        messageIds: [messageId],
+      });
+      assert.deepEqual(Object.keys(selected).sort(), ["messages", "runs", "thread"]);
+      assert.deepEqual(
+        selected.runs.map((r) => r.id),
+        [runId],
+      );
+      assert.deepEqual(
+        selected.messages.map((m) => m.id),
+        [messageId],
+      );
+      assert.deepEqual(
+        (yield* store.getThreadRecords(threadId, ["messages"], { messageIds: [] })).messages,
+        [],
+      );
+      assert.deepEqual(
+        (yield* store.getThreadRecords(threadId, ["turnItems"], {
+          turnItemTypes: ["command_execution"],
+          turnItemRunId: oldRunId,
+        })).turnItems,
+        [item],
+      );
+      assert.deepEqual(
+        (yield* store.getThreadRecords(threadId, ["turnItems"], {
+          turnItemTypes: ["command_execution"],
+          turnItemRunId: runId,
+        })).turnItems,
+        [],
+      );
+      assert.equal(yield* store.getNextTurnItemOrdinal(threadId), storage === "sqlite" ? 3 : 2);
+      assert.equal(yield* store.getMessageCount(threadId), storage === "sqlite" ? 2 : 1);
+      assert.deepEqual(
+        (yield* store.getThreadRecords(threadId, ["messages"], {
+          messageRunIds: [runId],
+        })).messages.map((message) => message.id),
+        [messageId],
+      );
+      assert.deepEqual(
+        (yield* store.getThreadRecords(threadId, ["messages"], { messageRunIds: [] })).messages,
+        [],
+      );
+      assert.deepEqual(
+        (yield* store.getThreadRecords(threadId, ["turnItems"], {
+          turnItemTypes: ["command_execution"],
+          turnItemRunIds: [oldRunId],
+        })).turnItems,
+        [item],
+      );
+      assert.deepEqual(
+        (yield* store.getThreadRecords(threadId, ["turnItems"], { turnItemRunIds: [] })).turnItems,
+        [],
+      );
+      assert.deepEqual(yield* store.getThreadAttachmentIds(threadId), []);
+      if (storage === "sqlite") {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`UPDATE orchestration_v2_projection_messages SET payload_json = json_object('text', ${"x".repeat(512_000)}, 'attachments', json_array(json_object('id', 'attachment:old'))) WHERE message_id = 'obsolete-history'`;
+        assert.deepEqual(yield* store.getThreadAttachmentIds(threadId), ["attachment:old"]);
+      }
+      const page = yield* store.getTimelinePage(threadId, { view: "activity", limit: 1 });
+      assert.deepEqual(
+        page.items.map((row) => row.item),
+        [item],
+      );
+      assert.equal(page.hasMore, storage === "sqlite");
+      assert.equal(page.totalItems, storage === "sqlite" ? 2 : 1);
+      assert.deepEqual(
+        (yield* store.getTimelinePage(threadId, { view: "messages", limit: 1 })).items,
+        [],
+      );
       const context = yield* store.getTurnStartContext(threadId, runId);
       assert.equal(context.thread.id, threadId);
       assert.deepEqual(

@@ -268,7 +268,7 @@ const makeHarness = Effect.fn("ProviderAuthService.test.makeHarness")(function* 
                   )
                 : Effect.succeed(threads.map((thread) => thread.id));
             }),
-          getThreadProjection: (threadId) =>
+          getThreadRecords: (threadId) =>
             Effect.sync(() => {
               actions.push(`sessions:${threadId}`);
               return {

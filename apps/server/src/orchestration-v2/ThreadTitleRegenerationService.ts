@@ -66,7 +66,13 @@ const make = Effect.gen(function* () {
     const outcome:
       | { readonly type: "stale" }
       | { readonly type: "complete"; readonly title?: string } = yield* Effect.gen(function* () {
-      const projection = yield* threads.getThreadProjection(input.threadId);
+      const projection = yield* threads.getThreadRecords(
+        input.threadId,
+        ["messages"],
+        input.kind.type === "initial"
+          ? { messageIds: [input.kind.messageId] }
+          : { messageRoles: ["user", "assistant"] },
+      );
       if (projection.thread.titleRegeneration?.requestId !== input.requestId) {
         return { type: "stale" as const };
       }

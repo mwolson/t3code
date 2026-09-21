@@ -378,7 +378,7 @@ for (const scenario of [
       const testLayer = layer.pipe(
         Layer.provide(
           Layer.mock(OrchestratorV2)({
-            getThreadProjection: () =>
+            getThreadRecords: () =>
               Effect.gen(function* () {
                 reads += 1;
                 if (reads === 1) {

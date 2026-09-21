@@ -147,7 +147,7 @@ export function makeSubagentConversationArtifacts(input: {
 }
 
 export function subagentResultForRun(
-  projection: OrchestrationV2ThreadProjection,
+  projection: Pick<OrchestrationV2ThreadProjection, "messages" | "turnItems">,
   run: OrchestrationV2Run,
 ): {
   readonly text: string;

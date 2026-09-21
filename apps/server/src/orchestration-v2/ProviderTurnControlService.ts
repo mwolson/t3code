@@ -270,7 +270,9 @@ export const layer: Layer.Layer<
           const context = yield* projections.getProviderControlContext(input.threadId, input);
           const ownership = context.message?.delegatedCompletion;
           if (ownership !== undefined) {
-            const projection = yield* projections.getThreadProjection(input.threadId);
+            const projection = yield* projections.getThreadRecords(input.threadId, ["runs"], {
+              runIds: [ownership.parentRunId],
+            });
             const cohort = projection.runs.find(
               (run) => run.id === ownership.parentRunId,
             )?.delegatedCompletion;

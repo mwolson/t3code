@@ -73,14 +73,17 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     const enabled = yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null));
     if (!enabled) return;
     const threads = yield* ThreadManagementService;
-    const projection = yield* threads.getThreadProjection(input.threadId);
+    const messageId = MessageId.make(`message:restart-continuation:${input.sourceRunId}`);
+    const projection = yield* threads.getThreadRecords(input.threadId, ["messages", "runs"], {
+      messageIds: [messageId],
+    });
     if (
       !resolveProjectSettings(enabled, projection.thread.projectId).settings
         .continueThreadsAfterServerUpdate
     )
       return;
     if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) return;
-    const messageId = MessageId.make(`message:restart-continuation:${input.sourceRunId}`);
+
     if (projection.messages.some((message) => message.id === messageId)) return;
     const source = projection.runs.find((run) => run.id === input.sourceRunId);
     if (!source || source.status !== "cancelled") return;

@@ -3369,7 +3369,28 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
         },
       });
 
+      const sourceMessages = (yield* projectionStore.getThreadRecords(sourceThreadId, ["messages"]))
+        .messages;
+      assert.deepEqual(
+        sourceMessages,
+        (yield* projectionStore.getThreadProjection(sourceThreadId)).messages,
+      );
       const targetAfterRollback = yield* projectionStore.getThreadProjection(targetThreadId);
+      const forwardPage = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "activity",
+        limit: 2,
+      });
+      assert.deepEqual(forwardPage.items, targetAfterRollback.visibleTurnItems.slice(0, 2));
+      assert.equal(forwardPage.totalItems, targetAfterRollback.visibleTurnItems.length);
+      assert.isTrue(forwardPage.hasMore);
+      const followingPage = yield* projectionStore.getTimelinePage(targetThreadId, {
+        view: "activity",
+        limit: 10,
+        afterPosition: 1,
+      });
+      assert.deepEqual(followingPage.items, targetAfterRollback.visibleTurnItems.slice(2));
+      assert.isFalse(followingPage.hasMore);
+
       assert.deepEqual(
         targetAfterRollback.visibleTurnItems.map((row) => [
           row.visibility,
@@ -3795,6 +3816,24 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
         turnCursor = page.nextCursor;
       }
       assert.deepEqual(turnPagedIds, expectedNestedIds);
+      const fullNested = yield* projectionStore.getThreadProjection(nestedThreadId);
+      const nestedForward = yield* projectionStore.getTimelinePage(nestedThreadId, {
+        view: "activity",
+        limit: expectedNestedIds.length + 1,
+      });
+      assert.deepEqual(nestedForward.items, fullNested.visibleTurnItems);
+      const messagePage = yield* projectionStore.getTimelinePage(nestedThreadId, {
+        view: "messages",
+        limit: 2,
+      });
+      assert.deepEqual(
+        messagePage.items,
+        fullNested.visibleTurnItems
+          .filter((row) =>
+            ["user_message", "assistant_message", "proposed_plan"].includes(row.item.type),
+          )
+          .slice(0, 2),
+      );
 
       const emptyMiddleThreadId = ThreadId.make(
         "thread:projection-fork-source-rollback:empty-middle",

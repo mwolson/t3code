@@ -23,7 +23,11 @@ import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
 import { ThreadToolkit } from "./tools.ts";
 
-function queueEntry(projection: OrchestrationV2ThreadProjection, runId: RunId, limit: number) {
+function queueEntry(
+  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
+  runId: RunId,
+  limit: number,
+) {
   const run = projection.runs.find((run) => run.id === runId && run.status === "queued");
   const message = projection.messages.find((message) => message.id === run?.userMessageId);
   if (run === undefined || message === undefined) return undefined;
@@ -52,7 +56,9 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (
   },
   writable = false,
 ) {
-  const context = yield* writable ? readWritableThread(input.threadId) : readThread(input.threadId);
+  const context = yield* writable
+    ? readWritableThread(input.threadId, ["runtimeRequests", "turnItems"])
+    : readThread(input.threadId, ["runtimeRequests", "turnItems"]);
   const request = context.projection.runtimeRequests.find(
     (request) =>
       request.id === input.requestId &&
@@ -144,7 +150,7 @@ export const ThreadToolkitHandlersLive = ThreadToolkit.toLayer({
     }),
   t3_thread_transfers: (input) =>
     Effect.gen(function* () {
-      const { projection } = yield* readThread(input.threadId);
+      const { projection } = yield* readThread(input.threadId, ["contextTransfers"]);
       return {
         transfers: projection.contextTransfers.map(
           ({ id, sourceThreadId, targetThreadId, status }) => ({
@@ -187,7 +193,7 @@ export const ThreadToolkitHandlersLive = ThreadToolkit.toLayer({
     }),
   t3_pending_request_list: (input) =>
     Effect.gen(function* () {
-      const { projection } = yield* readThread(input.threadId);
+      const { projection } = yield* readThread(input.threadId, ["runtimeRequests"]);
       return {
         requestIds: projection.runtimeRequests
           .filter((request) => request.kind === "user_input" && request.status === "pending")
@@ -215,7 +221,7 @@ export const ThreadToolkitHandlersLive = ThreadToolkit.toLayer({
     }),
   t3_queue_list: (input) =>
     Effect.gen(function* () {
-      const { projection } = yield* readThread(input.threadId);
+      const { projection } = yield* readThread(input.threadId, ["runs", "messages"]);
       const runs = queuedRunsInDeliveryOrder(projection);
       const cursor = input.cursor ?? 0;
       const end = cursor + (input.limit ?? 20);
@@ -229,7 +235,7 @@ export const ThreadToolkitHandlersLive = ThreadToolkit.toLayer({
     }),
   t3_queue_read: (input) =>
     Effect.gen(function* () {
-      const { projection } = yield* readThread(input.threadId);
+      const { projection } = yield* readThread(input.threadId, ["runs", "messages"]);
       const entry = queueEntry(projection, input.queuedRunId, 16000);
       return (
         entry ??

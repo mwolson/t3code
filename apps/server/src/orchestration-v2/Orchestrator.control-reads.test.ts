@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  MessageId,
   EventId,
   NodeId,
   ProjectId,
@@ -221,5 +222,42 @@ it.effect(
         (yield* projections.getThreadProviderContext(threadId)).providerSessions,
         [],
       );
+      yield* sql`INSERT INTO orchestration_v2_projection_turn_items
+        (turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
+          type, status, ordinal, updated_at, payload_json)
+        VALUES ('obsolete-output', ${threadId}, NULL, NULL, NULL, NULL,
+          'command_execution', 'completed', 900, ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_plans
+        (plan_id, thread_id, run_id, node_id, kind, status, payload_json)
+        VALUES ('obsolete-plan', ${threadId}, NULL, 'old-node', 'proposed', 'completed', '{"obsolete":true}')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_context_handoffs
+        (context_handoff_id, thread_id, target_run_id, to_provider_thread_id, strategy, status, updated_at, payload_json)
+        VALUES ('obsolete-handoff', ${threadId}, 'old-run', 'old-provider-thread', 'full_thread_summary', 'ready', ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("dispatch-with-old-history"),
+        threadId,
+        messageId: MessageId.make("fresh-input"),
+        text: "Continue",
+        attachments: [],
+        dispatchMode: { type: "defer_start" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const fresh = yield* projections.getThreadRecords(threadId, ["turnItems"], {
+        turnItemTypes: ["user_message"],
+      });
+      assert.isAbove(fresh.turnItems.at(-1)!.ordinal, 900);
+      yield* orchestrator.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("archive-with-old-history"),
+        threadId,
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("delete-with-old-history"),
+        threadId,
+      });
+      assert.isNotNull((yield* projections.getThread(threadId)).deletedAt);
     }).pipe(Effect.provide(testLayer)),
 );

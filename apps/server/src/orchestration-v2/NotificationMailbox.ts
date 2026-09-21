@@ -6,7 +6,7 @@ import type { MessageId, OrchestrationV2ThreadProjection } from "@t3tools/contra
  * atomically. Reusing the message ID keeps recovery from duplicating timeline items.
  */
 export function isUndeliveredMailboxSteer(
-  projection: OrchestrationV2ThreadProjection,
+  projection: Pick<OrchestrationV2ThreadProjection, "messages" | "runs" | "providerTurns">,
   messageId: MessageId,
 ): boolean {
   const message = projection.messages.find((candidate) => candidate.id === messageId);

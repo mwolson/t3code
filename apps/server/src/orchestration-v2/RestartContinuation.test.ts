@@ -207,7 +207,7 @@ it.effect("does not duplicate delivery and yields to newer user work or opt-out"
     projection = { ...projection, runs: [{ ...projection.runs[0]!, status: "cancelled" }] };
     const commands: Parameters<ThreadManagementService["Service"]["dispatch"]>[0][] = [];
     const threads = Layer.mock(ThreadManagementService)({
-      getThreadProjection: () => Effect.succeed(projection),
+      getThreadRecords: () => Effect.succeed(projection),
       dispatch: (command) => {
         commands.push(command);
         if (command.type === "message.dispatch")
@@ -300,7 +300,7 @@ it.effect("does not cancel or resume a run that completes while shutdown intent 
         Layer.mergeAll(
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ThreadManagementService)({
-            getThreadProjection: () => Effect.succeed(projection),
+            getThreadRecords: () => Effect.succeed(projection),
             dispatch: () =>
               Effect.sync(() => {
                 dispatched = true;

@@ -1,3 +1,4 @@
+import type { ProjectionRecordField } from "../orchestration-v2/ProjectionStore.ts";
 import {
   CommandId,
   OrchestratorMcpFailure,
@@ -61,10 +62,16 @@ export const readMutationCaller = Effect.fn("mcp.readMutationCaller")(function* 
 });
 
 /** Resolve the credential's project before looking up a caller-supplied thread. */
-export const readThread = Effect.fn("mcp.readThread")(function* (threadId?: ThreadId) {
+export const readThread = Effect.fn("mcp.readThread")(function* <
+  K extends ProjectionRecordField = never,
+>(threadId?: ThreadId, fields: ReadonlyArray<K> = []) {
   const { scope, threads, caller } = yield* readCaller();
   const projection = yield* threads
-    .getProjectThread({ projectId: caller.projectId, threadId: threadId ?? caller.id })
+    .getProjectThreadRecords(
+      { projectId: caller.projectId, threadId: threadId ?? caller.id },
+      fields,
+      { turnItemTypes: ["user_input_request"] },
+    )
     .pipe(
       Effect.mapError((error) =>
         error._tag === "ThreadManagementThreadNotFoundError"
@@ -78,10 +85,10 @@ export const readThread = Effect.fn("mcp.readThread")(function* (threadId?: Thre
   return { scope, threads, caller, projection };
 });
 
-export const readWritableThread = Effect.fn("mcp.readWritableThread")(function* (
-  threadId?: ThreadId,
-) {
-  const context = yield* readThread(threadId);
+export const readWritableThread = Effect.fn("mcp.readWritableThread")(function* <
+  K extends ProjectionRecordField = never,
+>(threadId?: ThreadId, fields: ReadonlyArray<K> = []) {
+  const context = yield* readThread(threadId, fields);
   yield* assertLiveCaller(context);
   yield* OrchestrationMcp.resolveRuntimeMode(
     context.caller.runtimeMode,

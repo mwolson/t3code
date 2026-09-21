@@ -32,7 +32,7 @@ export class ThreadForkPlanError extends Schema.TaggedError<ThreadForkPlanError>
 
 export interface ThreadForkServiceV2Shape {
   readonly plan: (input: {
-    readonly sourceProjection: OrchestrationV2ThreadProjection;
+    readonly sourceProjection: Pick<OrchestrationV2ThreadProjection, "thread">;
     readonly sourceRun: OrchestrationV2Run;
     readonly sourceProviderThread: OrchestrationV2ProviderThread | undefined;
     readonly canonicalSourcePoint: OrchestrationV2ContextSourcePoint;

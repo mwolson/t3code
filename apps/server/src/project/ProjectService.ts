@@ -410,7 +410,14 @@ export const make = Effect.gen(function* () {
               thread.id,
               Effect.gen(function* () {
                 yield* legacyImporter.ensureTranscript(thread.id);
-                const projection = yield* threadProjections.getThreadProjection(thread.id);
+                const projection = yield* threadProjections.getThreadRecords(thread.id, [
+                  "runs",
+                  "attempts",
+                  "nodes",
+                  "runtimeRequests",
+                  "subagents",
+                  "providerSessions",
+                ]);
                 if (
                   projection.thread.deletedAt !== null ||
                   projection.thread.projectId !== projectId
@@ -423,7 +430,13 @@ export const make = Effect.gen(function* () {
                   threadId: thread.id,
                 };
                 const now = yield* DateTime.now;
-                const plan = yield* planThreadDeletion({ command, projection, now, idAllocator });
+                const plan = yield* planThreadDeletion({
+                  command,
+                  projection,
+                  attachmentIds: yield* threadProjections.getThreadAttachmentIds(thread.id),
+                  now,
+                  idAllocator,
+                });
                 const committed = yield* threadEvents.commitCommand({
                   commandId: command.commandId,
                   commandType: command.type,

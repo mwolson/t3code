@@ -53,7 +53,7 @@ export const makeProviderAuthService = Effect.gen(function* () {
     yield* Effect.forEach(
       threadIds,
       (threadId) =>
-        projections.getThreadProjection(threadId).pipe(
+        projections.getThreadRecords(threadId, ["providerSessions"]).pipe(
           Effect.flatMap((projection) =>
             Effect.forEach(
               projection.providerSessions.filter(

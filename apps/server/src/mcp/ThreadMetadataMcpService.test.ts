@@ -27,7 +27,7 @@ function serviceLayer(
       Layer.merge(
         Layer.mock(ThreadManagement.ThreadManagementService)({
           getThreadShell,
-          getThreadProjection: () => Effect.die("projection must not load after shell failure"),
+          getThreadRecords: () => Effect.die("projection must not load after shell failure"),
         } satisfies Partial<ThreadManagement.ThreadManagementService["Service"]>),
         NodeCrypto.layer,
       ),

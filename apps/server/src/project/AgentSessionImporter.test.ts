@@ -70,7 +70,7 @@ it.effect("imports messages once and preserves the provider native resume bindin
             ),
         }),
         Layer.mock(OrchestratorV2)({
-          getThreadProjection: () =>
+          getThreadRecords: () =>
             imported
               ? Effect.succeed({
                   thread: { id: threadId, projectId, historyOrigin: "v1_import" },

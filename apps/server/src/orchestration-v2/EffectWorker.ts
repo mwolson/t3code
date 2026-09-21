@@ -186,7 +186,11 @@ export const executorLayer: Layer.Layer<
                   Effect.gen(function* () {
                     if (effect.request.type !== "provider-turn.steer") return;
                     const messageId = effect.request.messageId;
-                    const projection = yield* threads.getThreadProjection(effect.threadId);
+                    const projection = yield* threads.getThreadRecords(
+                      effect.threadId,
+                      ["messages", "runs"],
+                      { messageIds: [effect.request.messageId] },
+                    );
                     const message = projection.messages.find((row) => row.id === messageId);
                     if (message?.delegatedCompletion === undefined) return;
                     yield* threads.dispatch({
@@ -206,7 +210,11 @@ export const executorLayer: Layer.Layer<
                     ) {
                       return yield* error;
                     }
-                    const projection = yield* threads.getThreadProjection(effect.threadId);
+                    const projection = yield* threads.getThreadRecords(
+                      effect.threadId,
+                      ["messages", "runs"],
+                      { messageIds: [effect.request.messageId] },
+                    );
                     const messageId = effect.request.messageId;
                     const message = projection.messages.find((item) => item.id === messageId);
                     const run = projection.runs.find((item) => item.id === message?.runId);

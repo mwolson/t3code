@@ -136,7 +136,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
         : ["dev", "feature/taken", "feature/taken-idle"],
     ),
   );
-  const getThreadProjection = vi.fn((id: ThreadId) => {
+  const getThreadRecords = vi.fn((id: ThreadId) => {
     if (options.threadReadError === "dispatch") {
       return Effect.fail(
         new OrchestratorDispatchError({
@@ -145,7 +145,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
         }),
       ) as never;
     }
-    if (options.threadReadFailsOnRecheck === true && getThreadProjection.mock.calls.length > 1) {
+    if (options.threadReadFailsOnRecheck === true && getThreadRecords.mock.calls.length > 1) {
       return Effect.fail(
         new OrchestratorDispatchError({
           commandId: CommandId.make("command:test:recheck"),
@@ -155,7 +155,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
     }
     if (
       options.threadAttachedOnRecheck === true &&
-      getThreadProjection.mock.calls.length > 1 &&
+      getThreadRecords.mock.calls.length > 1 &&
       thread !== null
     ) {
       return Effect.succeed(
@@ -164,7 +164,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
     }
     if (
       options.threadArchivedOnRecheck === true &&
-      getThreadProjection.mock.calls.length > 1 &&
+      getThreadRecords.mock.calls.length > 1 &&
       thread !== null
     ) {
       return Effect.succeed(makeProjection({ ...thread, archivedAt: "2026-01-02T00:00:00.000Z" }));
@@ -307,7 +307,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
       Layer.mergeAll(
         Layer.mock(ThreadManagementService)({
           dispatch,
-          getThreadProjection,
+          getThreadRecords,
           sendToThread,
         } satisfies Partial<ThreadManagementService["Service"]>),
         Layer.mock(ProjectService.ProjectService)({
