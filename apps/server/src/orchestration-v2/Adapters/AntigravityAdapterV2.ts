@@ -191,7 +191,7 @@ export function makeAntigravityAcpAdapterFlavor(
             modelSelection.model === ANTIGRAVITY_DEFAULT_MODEL ? undefined : modelSelection.model,
           defaultModel,
           mapError: (cause) => cause,
-        });
+        }).pipe(Effect.map((modelId) => ({ modelId })));
       }),
     sessionModeForPolicy: (policy) => antigravityPermissionMode(policy.runtimeMode),
     approvalOptions: antigravityApprovalOptions,

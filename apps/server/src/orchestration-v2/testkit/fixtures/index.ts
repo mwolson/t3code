@@ -14,7 +14,7 @@ import { assertClaudeMessageSteeringOutput } from "./message_steering/claude_out
 import { assertMessageSteeringOutput } from "./message_steering/codex_output.ts";
 import { assertCursorMessageSteeringOutput } from "./message_steering/cursor_output.ts";
 import { assertGrokMessageSteeringOutput } from "./message_steering/grok_output.ts";
-import { messageSteeringInput } from "./message_steering/input.ts";
+import { messageRestartInput, messageSteeringInput } from "./message_steering/input.ts";
 import { assertMultiTurnClaudeOutput } from "./multi_turn/claude_output.ts";
 import { assertMultiTurnOutput } from "./multi_turn/codex_output.ts";
 import { multiTurnInput } from "./multi_turn/input.ts";
@@ -150,6 +150,18 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         modelSelection: CLAUDE_MODEL_SELECTION,
         assertOutput: assertClaudeResultIsErrorOutput,
+      },
+    ],
+  },
+  {
+    name: "grok_cancel_detach",
+    buildInput: messageRestartInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("grok"),
+        transcriptFile: new URL("./grok_cancel_detach/grok_transcript.ndjson", import.meta.url),
+        modelSelection: GROK_MODEL_SELECTION,
+        assertOutput: assertGrokMessageSteeringOutput,
       },
     ],
   },

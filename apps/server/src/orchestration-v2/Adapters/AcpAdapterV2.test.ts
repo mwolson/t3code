@@ -2745,6 +2745,140 @@ describe("AcpAdapterV2", () => {
     );
   }
 
+  for (const protocolVersion of [1, 2]) {
+    it.live(`Grok applies low -> high -> low reasoning on protocol ${protocolVersion}`, () =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const path = yield* Path.Path;
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const legacyWrites: Array<{ model: string; meta: unknown }> = [];
+        const configWrites: Array<{ id: string; value: unknown }> = [];
+        const modelWrites: Array<string> = [];
+        const instanceId = ProviderInstanceId.make("grok-reasoning");
+        const adapter = makeGrokAdapterV2({
+          instanceId,
+          settings: DEFAULT_GROK_SETTINGS,
+          environment: {},
+          hostPlatform: yield* HostProcessPlatform,
+          childProcessSpawner,
+          crypto: yield* Crypto.Crypto,
+          fileSystem: yield* FileSystem.FileSystem,
+          idAllocator: yield* IdAllocatorV2,
+          serverConfig: yield* ServerConfig,
+          makeRuntime: makeMockRuntime({
+            childProcessSpawner,
+            mockAgentPath,
+            wrapRuntime: (native) => ({
+              ...native,
+              start: () =>
+                native.start().pipe(
+                  Effect.map((started) => ({
+                    ...started,
+                    initializeResult: { ...started.initializeResult, protocolVersion },
+                    sessionSetupResult: {
+                      ...started.sessionSetupResult,
+                      models: {
+                        currentModelId: "composer-2",
+                        availableModels: [
+                          {
+                            modelId: "composer-2",
+                            name: "Composer",
+                            _meta: { reasoningEffort: "low" },
+                          },
+                        ],
+                      },
+                    },
+                  })),
+                ),
+              getConfigOptions: native.getConfigOptions.pipe(
+                Effect.map((options) => [
+                  ...options,
+                  {
+                    id: "reasoningEffort",
+                    name: "Reasoning",
+                    type: "select" as const,
+                    currentValue: "low",
+                    options: ["low", "high"].map((value) => ({ value, name: value })),
+                  },
+                ]),
+              ),
+              setSessionModel: (model, meta) =>
+                Effect.sync(() => {
+                  legacyWrites.push({ model, meta });
+                  return {};
+                }),
+              setModel: (model) =>
+                Effect.sync(() => {
+                  modelWrites.push(model);
+                }).pipe(Effect.andThen(native.setModel(model))),
+              setConfigOption: (id, value) =>
+                Effect.sync(() => {
+                  configWrites.push({ id, value });
+                  return { configOptions: [] };
+                }),
+            }),
+          }),
+        });
+        const threadId = ThreadId.make("grok-reasoning");
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const selection = (value: string) => ({
+          instanceId,
+          model: "composer-2",
+          options: [{ id: "reasoningEffort", value }],
+        });
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("grok-reasoning"),
+          modelSelection: selection("low"),
+          runtimePolicy,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: selection("low"),
+          runtimePolicy,
+        });
+        for (const effort of ["high", "low"]) {
+          yield* runtime.startTurn(
+            makeTurnInput({
+              threadId,
+              providerThread,
+              instanceId,
+              runtimePolicy,
+              now: yield* DateTime.now,
+              modelSelection: selection(effort),
+            }),
+          );
+          yield* runtime.events.pipe(
+            Stream.filter((event) => event.type === "turn.terminal"),
+            Stream.runHead,
+          );
+        }
+        if (protocolVersion === 1) {
+          assert.deepEqual(
+            legacyWrites.map((write) => write.meta),
+            [{ reasoningEffort: "low" }, { reasoningEffort: "high" }, { reasoningEffort: "low" }],
+          );
+          assert.isTrue(legacyWrites.every((write) => write.model === "composer-2"));
+          assert.deepEqual(configWrites, []);
+          assert.deepEqual(modelWrites, []);
+        } else {
+          assert.deepEqual(legacyWrites, []);
+          assert.deepEqual(modelWrites, ["composer-2"]);
+          assert.deepEqual(
+            configWrites,
+            ["low", "high", "low"].map((value) => ({ id: "reasoningEffort", value })),
+          );
+        }
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+    );
+  }
+
   it.live("Grok reapplies an explicit return to the session's setup-time model", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -6814,12 +6948,18 @@ describe("AcpAdapterV2", () => {
         let subagentPhase: "spawn" | "complete" = "spawn";
         type RuntimeService = AcpSessionRuntime.AcpSessionRuntime["Service"];
         let sessionUpdateHandler: Parameters<RuntimeService["handleSessionUpdate"]>[0] | undefined;
+        let applyMutation: AcpAdapterV2ExtensionContext["applyBackgroundTaskMutation"] | undefined;
         const adapter = makeAcpAdapterV2({
           crypto: yield* Crypto.Crypto,
           instanceId,
           flavor: {
             driver: ACP_TEST_DRIVER,
             capabilities: AcpProviderCapabilitiesV2,
+            suppressUnownedBackgroundCompletions: true,
+            registerExtensions: (context) =>
+              Effect.sync(() => {
+                applyMutation = context.applyBackgroundTaskMutation;
+              }),
             deferFinalizeForBackgroundWork: true,
             enablePostSettleContinuation: true,
             extractSubagentUpdate: (toolCall) =>
@@ -6939,6 +7079,19 @@ describe("AcpAdapterV2", () => {
           "carryover live subagent must pin hasPendingBackgroundWork after root settle",
         );
         assert.isDefined(sessionUpdateHandler, "session update handler must be wired");
+
+        if (applyMutation === undefined) return yield* Effect.die("missing mutation handler");
+        yield* applyMutation({
+          sessionId: "mock-session-1",
+          taskId: "cancel-detached",
+          status: "running",
+        });
+        yield* applyMutation({
+          sessionId: "mock-session-1",
+          taskId: "cancel-detached",
+          status: "completed",
+        });
+        assert.lengthOf(continuationRequests, 0, "an unowned completion must not wake on its own");
 
         // Root-session terminal + distinctive assistant text: both enter wakeBuffer
         // and the terminal offers a continuation that will drain them.
@@ -7618,6 +7771,10 @@ describe("AcpAdapterV2", () => {
         const instanceId = ProviderInstanceId.make("acp-test");
         let cancelCalled = false;
         let runtimeOrdinalSeen = 0;
+        let sessionUpdateHandler:
+          | Parameters<AcpSessionRuntime.AcpSessionRuntime["Service"]["handleSessionUpdate"]>[0]
+          | undefined;
+        let applyMutation: AcpAdapterV2ExtensionContext["applyBackgroundTaskMutation"] | undefined;
         const adapter = makeAcpAdapterV2({
           crypto: yield* Crypto.Crypto,
           instanceId,
@@ -7625,6 +7782,7 @@ describe("AcpAdapterV2", () => {
             driver: ACP_TEST_DRIVER,
             capabilities: AcpProviderCapabilitiesV2,
             enablePostSettleContinuation: true,
+            suppressUnownedBackgroundCompletions: true,
             // Production Grok interrupt flags: hard teardown only with
             // requestRuntimeRestart (user Stop). Without
             // restartRuntimeOnEveryInterrupt a mid-prompt steering interrupt
@@ -7632,8 +7790,13 @@ describe("AcpAdapterV2", () => {
             restartRuntimeAfterInterrupt: true,
             terminateRuntimeProcessGroupOnInterrupt: true,
             preserveRuntimeOnSettledInterrupt: true,
-            registerExtensions: ({ runtime: extensionRuntime, applyBackgroundTaskMutation }) =>
-              registerXAiBackgroundTaskTracking(extensionRuntime, applyBackgroundTaskMutation),
+            registerExtensions: ({ runtime: extensionRuntime, applyBackgroundTaskMutation }) => {
+              applyMutation = applyBackgroundTaskMutation;
+              return registerXAiBackgroundTaskTracking(
+                extensionRuntime,
+                applyBackgroundTaskMutation,
+              );
+            },
             // No ownDetachedProcessGroup: if the interrupt wrongly takes the
             // hard path, terminateProcessGroup is missing and the interrupt
             // fails loudly with a poisoned session.
@@ -7644,9 +7807,15 @@ describe("AcpAdapterV2", () => {
                 runtimeOrdinalSeen = Math.max(runtimeOrdinalSeen, runtimeOrdinal);
                 return {
                   T3_ACP_EMIT_RUNNING_COMMAND_THEN_HANG_FIRST_PROMPT: "1",
-                  T3_ACP_EMIT_TASK_BACKGROUNDED_AFTER_CANCEL: "1",
                 };
               },
+              wrapRuntime: (native) => ({
+                ...native,
+                handleSessionUpdate: (handler) => {
+                  sessionUpdateHandler = handler;
+                  return native.handleSessionUpdate(handler);
+                },
+              }),
               protocolEvents,
               wrapCancel: (cancel) =>
                 Effect.sync(() => {
@@ -7730,19 +7899,17 @@ describe("AcpAdapterV2", () => {
           }
         }
         assert.equal(firstTerminalStatus, "interrupted");
-        // The cancel handler emitted _x.ai/task_backgrounded for the detached
-        // command; the tracked task must report as pending background work.
-        let backgroundTracked = false;
-        for (let attempt = 0; attempt < 80 && !backgroundTracked; attempt += 1) {
-          backgroundTracked = yield* hasPendingBackgroundWork;
-          if (!backgroundTracked) {
-            yield* Effect.sleep("25 millis");
-          }
+        if (applyMutation === undefined || sessionUpdateHandler === undefined) {
+          return yield* Effect.die("background mutation and session handlers must be registered");
         }
-        assert.isTrue(
-          backgroundTracked,
-          "cancel-backgrounded task must be tracked as running background work",
-        );
+        // Deliver the detached-task lifecycle explicitly, so completion cannot
+        // race the replacement turn or depend on a mock process timer.
+        yield* applyMutation({
+          sessionId: "mock-session-1",
+          taskId: "task-bg-1",
+          status: "running",
+        });
+        assert.isTrue(yield* hasPendingBackgroundWork);
 
         // The second prompt reuses the same process and session.
         const secondNow = yield* DateTime.now;
@@ -7774,18 +7941,33 @@ describe("AcpAdapterV2", () => {
           "soft mid-prompt interrupt must not respawn the ACP runtime process",
         );
 
-        // _x.ai/task_completed lands ~1.2s after the cancel and clears the
-        // tracked task without opening a synthetic continuation run.
-        let backgroundPending = true;
-        for (let attempt = 0; attempt < 50 && backgroundPending; attempt += 1) {
-          backgroundPending = yield* hasPendingBackgroundWork;
-          if (backgroundPending) {
-            yield* Effect.sleep("100 millis");
-          }
-        }
+        yield* sessionUpdateHandler({
+          sessionId: "mock-session-1",
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "tool-call-running-1",
+            title: "Terminal",
+            kind: "execute",
+            status: "completed",
+            rawInput: { command: ["sleep", "30"] },
+            rawOutput: { type: "Bash", exit_code: 0 },
+          },
+        });
+        yield* applyMutation({
+          sessionId: "mock-session-1",
+          taskId: "task-bg-1",
+          status: "completed",
+        });
+        yield* sessionUpdateHandler({
+          sessionId: "mock-session-1",
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "Detached command finished." },
+          },
+        });
         assert.isFalse(
-          backgroundPending,
-          "tracked background task must clear after _x.ai/task_completed",
+          yield* hasPendingBackgroundWork,
+          "detached residue must not keep the session busy",
         );
         assert.lengthOf(
           continuationRequests,
@@ -9828,6 +10010,7 @@ describe("AcpAdapterV2", () => {
             driver: ACP_TEST_DRIVER,
             capabilities: AcpProviderCapabilitiesV2,
             enablePostSettleContinuation: true,
+            suppressUnownedBackgroundCompletions: true,
             extractBackgroundTaskId: (toolCall) => {
               if (toolCall.toolCallId === "tool-call-monitor-a") return "task-monitor-a";
               if (toolCall.toolCallId === "tool-call-monitor-b") return "task-monitor-b";
@@ -9978,6 +10161,13 @@ describe("AcpAdapterV2", () => {
           "finalize must not offer while B is still running",
         );
 
+        // A detached command can overlap real monitor completions. It must
+        // not erase their pending wake when it is the last running task.
+        yield* applyMutation({
+          sessionId: "mock-session-1",
+          taskId: "detached",
+          status: "running",
+        });
         // B ends post-finalize via mutation-only end-notice (fails
         // acpPostSettleWakeEvidence: extractBackgroundToolMutation matches).
         // Without kept midTurn marks this path would neither buffer nor offer.
@@ -10001,6 +10191,12 @@ describe("AcpAdapterV2", () => {
           "mutation-only end-notice must not count as post-settle wake evidence",
         );
         yield* sessionUpdateHandler!(bEndNotice);
+        assert.lengthOf(continuationRequests, 0);
+        yield* applyMutation({
+          sessionId: "mock-session-1",
+          taskId: "detached",
+          status: "completed",
+        });
         yield* Effect.yieldNow;
         yield* Effect.yieldNow;
         assert.lengthOf(

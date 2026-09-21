@@ -2695,7 +2695,11 @@ export const make = (
             if (modeState?.currentModeId === modeId) {
               return Effect.succeed({} satisfies EffectAcpSchema.SetSessionModeResponse);
             }
-            return setConfigOption("mode", modeId).pipe(
+            return Ref.get(configOptionsRef).pipe(
+              Effect.flatMap((options) => {
+                const modeOption = options.find((option) => option.category === "mode");
+                return setConfigOption(modeOption?.id ?? "mode", modeId);
+              }),
               Effect.tap(() => updateCurrentModeId(modeId)),
               Effect.as({} satisfies EffectAcpSchema.SetSessionModeResponse),
             );

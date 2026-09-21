@@ -220,17 +220,23 @@ export interface AcpAdapterV2Flavor {
     EffectAcpErrors.AcpError,
     Crypto.Crypto | Scope.Scope
   >;
+  /** Grok cancel may detach foreground commands that must not create background wakes. */
+  readonly suppressUnownedBackgroundCompletions?: boolean;
   readonly resolveModelId?: (selection: ModelSelection) => string | undefined;
   /**
    * Replaces the default model application on session setup. Returns the model
-   * the session now runs on. Antigravity resolves its provider-default alias
+   * the session now runs on and any options consumed outside the config API.
+   * Antigravity resolves its provider-default alias
    * against the account's catalog instead of sending it to the agent.
    */
   readonly applyModelSelection?: (input: {
     readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
     readonly startResult: AcpSessionRuntimeStartResult;
     readonly modelSelection: ModelSelection;
-  }) => Effect.Effect<string | undefined, EffectAcpErrors.AcpError>;
+  }) => Effect.Effect<
+    { readonly modelId: string | undefined; readonly consumedOptionIds?: ReadonlyArray<string> },
+    EffectAcpErrors.AcpError
+  >;
   /** Native session mode to select for a runtime policy (e.g. Antigravity `yolo`). */
   readonly sessionModeForPolicy?: (policy: ProviderAdapterV2RuntimePolicy) => string | undefined;
   /**
@@ -1755,6 +1761,9 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
         // Direct Stop (requestRuntimeRestart) quarantines residual events from the
         // stopped run so they cannot wake or attach to a later prompt/run.
         const stoppedRunQuarantine = yield* Ref.make(false);
+        const userOwnedBackgroundTaskIds = yield* Ref.make<ReadonlySet<string>>(new Set());
+        const suppressUnownedPostSettleOffers = yield* Ref.make(false);
+        const ownedPostSettleCompletion = yield* Ref.make(false);
         // A steering restart (or any interrupt) can finalize a turn while its
         // spawned subagents are still running natively. Carry the live
         // lineages into the next turn on the same session so their terminal
@@ -2819,6 +2828,12 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
           const backgroundTaskId = flavor.extractBackgroundTaskId?.(toolCall);
           if (backgroundTaskId !== undefined) {
             context.toolCallIdsByBackgroundTaskId.set(backgroundTaskId, toolCall.toolCallId);
+            if (flavor.suppressUnownedBackgroundCompletions && !context.interrupted) {
+              yield* Ref.update(userOwnedBackgroundTaskIds, (current) =>
+                current.has(backgroundTaskId) ? current : new Set(current).add(backgroundTaskId),
+              );
+              yield* Ref.set(suppressUnownedPostSettleOffers, false);
+            }
             if (flavor.isPersistentBackgroundTool?.(toolCall) === true) {
               context.persistentBackgroundTaskIds.add(backgroundTaskId);
             }
@@ -3373,6 +3388,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             Effect.gen(function* () {
               if (yield* Ref.get(continuationClosed)) return Option.none();
               if (yield* Ref.get(stoppedRunQuarantine)) return Option.none();
+              if (yield* Ref.get(suppressUnownedPostSettleOffers)) return Option.none();
               if (yield* Ref.get(continuationRequested)) return Option.none();
               const route = yield* Ref.get(lastTurnRoute);
               if (route === null) return Option.none();
@@ -3413,7 +3429,10 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
                       yield* Ref.set(continuationRequested, false);
                     }
                   });
-                  if (yield* Ref.get(stoppedRunQuarantine)) {
+                  if (
+                    (yield* Ref.get(stoppedRunQuarantine)) ||
+                    (yield* Ref.get(suppressUnownedPostSettleOffers))
+                  ) {
                     yield* clearIfOwner;
                     return Option.none();
                   }
@@ -3496,6 +3515,29 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             }
             return;
           }
+          if (flavor.suppressUnownedBackgroundCompletions) {
+            if ((yield* Ref.get(userOwnedBackgroundTaskIds)).has(mutation.taskId)) {
+              yield* Ref.set(ownedPostSettleCompletion, true);
+              yield* Ref.set(suppressUnownedPostSettleOffers, false);
+            } else if (
+              !(yield* Ref.get(ownedPostSettleCompletion)) &&
+              (yield* Ref.get(midTurnUnreportedCompletedTaskIds)).size === 0
+            ) {
+              // A cancel-detached foreground command is not an owned monitor.
+              // Its terminal frame and trailing chatter cannot arm a wake. Do
+              // not discard a real monitor's buffered report while it is waiting
+              // for this last detached task to finish.
+              const carryover = yield* Ref.get(carryoverSubagents);
+              if (
+                (yield* Ref.get(runningBackgroundTaskIds)).size === 0 &&
+                (carryover === null || carryover.subagents.length === 0)
+              ) {
+                yield* Ref.set(suppressUnownedPostSettleOffers, true);
+                yield* Ref.set(wakeBuffer, []);
+              }
+              return;
+            }
+          }
           if (
             postSettleContinuationEnabled &&
             (yield* Ref.get(activeSessionId)) === sessionId &&
@@ -3525,6 +3567,9 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               offerContinuation: false,
               stopProcessing: true,
             };
+          }
+          if (yield* Ref.get(suppressUnownedPostSettleOffers)) {
+            return { buffered: false, offerContinuation: false, stopProcessing: true };
           }
           const rootSessionId = yield* Ref.get(activeSessionId);
           if (rootSessionId === null || notification.sessionId !== rootSessionId) {
@@ -5771,12 +5816,15 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
         ) {
           const requestedModel = flavor.resolveModelId?.(modelSelection) ?? modelSelection.model;
           let appliedModel: string | undefined;
+          let consumedOptionIds: ReadonlyArray<string> = [];
           if (flavor.applyModelSelection !== undefined) {
-            appliedModel = yield* flavor.applyModelSelection({
+            const applied = yield* flavor.applyModelSelection({
               runtime,
               startResult,
               modelSelection,
             });
+            appliedModel = applied.modelId;
+            consumedOptionIds = applied.consumedOptionIds ?? [];
           } else if (
             requestedModel.length > 0 &&
             requestedModel !== "auto" &&
@@ -5813,7 +5861,9 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               };
             });
           }
-          const optionSelections = modelSelection.options ?? [];
+          const optionSelections = (modelSelection.options ?? []).filter(
+            (selection) => !consumedOptionIds.includes(selection.id),
+          );
           const configOptions = yield* runtime.getConfigOptions;
           const availableConfigIds = new Set(configOptions.map((option) => option.id));
           const hasNativeConfigWithSyntheticModeId = availableConfigIds.has(
@@ -6528,6 +6578,8 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             // Direct Stop closes and recreates the old runtime before reaching
             // this reset. The quarantine remains session-scoped by design.
             yield* Ref.set(stoppedRunQuarantine, false);
+            yield* Ref.set(suppressUnownedPostSettleOffers, false);
+            yield* Ref.set(ownedPostSettleCompletion, false);
             const runningTurn = providerTurnPayload(context, "running", null);
             yield* Ref.update(providerTurns, (current) => {
               const updated = new Map(current);

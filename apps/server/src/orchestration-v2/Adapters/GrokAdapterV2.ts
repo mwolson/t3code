@@ -208,6 +208,7 @@ export function makeGrokAcpAdapterFlavor(options: GrokAdapterV2Options): AcpAdap
     runtimeHarness: "Grok",
     capabilities: GrokProviderCapabilitiesV2,
     interruptPromptOnCancel: false,
+    suppressUnownedBackgroundCompletions: true,
     // User Stop (requestRuntimeRestart) still hard-kills the process group and
     // respawns so existing background tasks stop too. Older 0.2.x builds could
     // detach a cancelled foreground command (E3 harness 2026-07-18); current
@@ -232,7 +233,10 @@ export function makeGrokAcpAdapterFlavor(options: GrokAdapterV2Options): AcpAdap
         const legacy = startResult.initializeResult.protocolVersion === 1;
         const options = legacy ? [] : yield* runtime.getConfigOptions;
         const configuredModel = options.find((option) => option.category === "model")?.currentValue;
-        return yield* applyGrokAcpModelSelection({
+        const requestedEffort = modelSelection.options?.find(
+          (option) => option.id === "reasoningEffort",
+        )?.value;
+        const modelId = yield* applyGrokAcpModelSelection({
           runtime: legacy
             ? runtime
             : { setSessionModel: (model) => runtime.setModel(model).pipe(Effect.as({})) },
@@ -242,8 +246,13 @@ export function makeGrokAcpAdapterFlavor(options: GrokAdapterV2Options): AcpAdap
               ? configuredModel
               : undefined,
           requestedModelId: resolveGrokAcpBaseModelId(modelSelection.model),
+          // Setup-time reasoning metadata is not live state. Reapply explicit
+          // legacy effort so low -> high -> low cannot skip the last write.
+          requestedReasoningEffort:
+            legacy && typeof requestedEffort === "string" ? requestedEffort : undefined,
           mapError: (cause) => cause,
         });
+        return { modelId, consumedOptionIds: legacy ? ["reasoningEffort"] : [] };
       }),
     makeRuntime:
       options.makeRuntime ??

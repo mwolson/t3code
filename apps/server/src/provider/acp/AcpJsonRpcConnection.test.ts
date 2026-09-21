@@ -1339,6 +1339,52 @@ describe("AcpSessionRuntime", () => {
     ),
   );
 
+  for (const [configId, omitCategory] of [
+    ["mode", "0"],
+    ["session-behavior", "0"],
+    ["mode", "1"],
+  ] as const) {
+    it.effect(
+      `writes the negotiated mode option ${configId} (legacy category: ${omitCategory})`,
+      () => {
+        const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+        return Effect.gen(function* () {
+          const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+          yield* runtime.start();
+          yield* runtime.setMode("code");
+          yield* runtime.setMode("code");
+          expect(
+            requestEvents
+              .filter(
+                (event) =>
+                  event.method === "session/set_config_option" && event.status === "started",
+              )
+              .map((event) => event.payload),
+          ).toEqual([{ sessionId: "mock-session-1", configId, value: "code" }]);
+        }).pipe(
+          Effect.provide(
+            AcpSessionRuntime.layer({
+              authMethodId: "test",
+              spawn: {
+                command: mockAgentCommand,
+                args: mockAgentArgs,
+                env: { T3_ACP_MODE_CONFIG_ID: configId, T3_ACP_OMIT_MODE_CATEGORY: omitCategory },
+              },
+              cwd: process.cwd(),
+              clientInfo: { name: "t3-test", version: "0.0.0" },
+              requestLogger: (event) =>
+                Effect.sync(() => {
+                  requestEvents.push(event);
+                }),
+            }),
+          ),
+          Effect.scoped,
+          Effect.provide(NodeServices.layer),
+        );
+      },
+    );
+  }
+
   it.effect("skips no-op session config writes when the requested value is already active", () => {
     const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
     return Effect.gen(function* () {
