@@ -1,49 +1,49 @@
 # OpenCode
 
-Install and authenticate OpenCode on the machine running your environment, then
-enable it in **Settings > Providers**. See [provider setup](./install.md#providers).
-T3 Code requires OpenCode 1.14.19 or newer, including when you connect an existing
-OpenCode server.
+T3 Code uses the OpenCode setup on the connected environment. With a remote environment, its
+OpenCode login and configuration apply, not the setup on your desktop or phone.
 
-## Local or external server
+T3 Code talks to OpenCode 2 through the built-in OpenCode provider. It attaches to the OpenCode
+daemon already running on the environment, or starts that daemon. It does not spawn a second
+OpenCode server per thread. If the daemon cannot start, update OpenCode 2, then refresh the
+provider status. Reconnecting the client also retries the connection.
 
-Leave **Server URL** empty to let T3 Code start OpenCode locally. A password in
-provider settings applies to both that server and T3 Code's connection. With no
-password setting, the local server uses `OPENCODE_SERVER_PASSWORD` from its
-environment.
+## Server authentication
 
-To use an existing OpenCode server, set **Server URL** and its password in provider
-settings. T3 Code uses only that configured password for an external server; it
-does not forward a local `OPENCODE_SERVER_PASSWORD`. If connection or version checks
-fail, check the URL, credentials, and OpenCode version, then refresh provider status.
+Without a server URL, T3 Code uses the host OpenCode daemon. A password in the provider settings
+overrides `OPENCODE_SERVER_PASSWORD` from the environment.
 
-After a lost connection, send another prompt to reconnect to the same OpenCode
-session.
+With a server URL, T3 Code connects to that external server and uses only the password in the
+provider settings. It does not send a local `OPENCODE_SERVER_PASSWORD` to an external server.
 
-## Approvals
+## Refresh the model list
 
-OpenCode follows the shared [permission modes](./permission-modes.md). **Auto** has
-the same rules as **Supervised** because OpenCode has no AI approval reviewer.
-Environment files such as `.env` and `.env.local` need approval in restricted
-modes even though normal file reads do not; `.env.example` is allowed.
+T3 Code loads the model list when an enabled OpenCode provider starts and keeps the list in its
+cache. Reconnecting a client or using a refresh control asks OpenCode for the list again. The
+periodic provider health setting does not refresh OpenCode's catalog.
 
-**Allow for workspace** applies to matching requests in other OpenCode sessions
-using the same workspace. It is broader than the current thread, especially on a
-shared external server. Use **Allow once** for a single request. Denying an action
-does not stop the whole turn.
+After changing an OpenCode login or configuration outside T3 Code, open **Settings > Providers**,
+select the environment, and choose **Refresh provider status**. Changing the provider's
+configuration in T3 Code also replaces that provider connection.
 
-## Refresh models, commands, and skills
+On mobile, open the thread settings and select **Refresh models**. The control stays disabled while
+the refresh runs and shows an error if the refresh fails.
 
-After changing an OpenCode login or configuration, use **Refresh provider status**
-in **Settings > Providers** for that environment. On mobile, use **Refresh models**
-in the thread settings. Reconnecting also refreshes the catalog; periodic provider
-health checks do not.
+OpenCode reads credential changes on each model-list request. Native OpenCode configuration files
+can stay cached in a running daemon. After changing a login or config outside T3 Code, refresh
+provider status. An external OpenCode server can require its own reload before a refresh returns
+the new list.
 
-Credential changes are read on refresh. Native OpenCode configuration can remain
-cached while the local helper is running. Let it sit for 30 seconds without model
-refreshes or text-generation work, then refresh again to reload the files. Repeated
-refreshes keep the helper alive. An external server may need its own reload or
-restart before T3 Code can see configuration changes.
+If a refresh fails, T3 Code keeps the last known models, slash commands, and skills. Fix the
+connection, then refresh again. A successful refresh can remove entries that OpenCode no longer
+offers.
 
-Existing threads keep their selected model and options even when it disappears
-from the catalog. If OpenCode rejects that model, select an available one and retry.
+## Continue an existing thread
+
+An existing thread keeps its selected model and options when that model is temporarily absent
+from the catalog. The web picker shows an **Unavailable** row and keeps saved option values visible
+until the model metadata returns. T3 Code does not switch the thread to the first model in the
+list.
+
+The stored selection does not guarantee that OpenCode can still run the model. If the provider
+rejects it, select an available model before trying again.

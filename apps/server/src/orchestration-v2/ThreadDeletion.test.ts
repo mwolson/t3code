@@ -275,8 +275,10 @@ it.effect("queues provider and resource cleanup and preserves an earlier deletio
     assert.deepEqual(deleted.thread.deletedAt, createdAt);
     assert.deepEqual(
       deleted.providerSessions.map((session) => session.status),
-      ["stopped", "error"],
+      ["error"],
     );
+    const runningSession = projection.providerSessions[0]!;
+    const stoppedSession = projection.providerSessions[1]!;
     assert.deepEqual(
       plan.effects.map((effect) => effect.request),
       [
@@ -285,9 +287,90 @@ it.effect("queues provider and resource cleanup and preserves an earlier deletio
           providerSessionId: ProviderSessionId.make("session:delete-plan:running"),
           detail: "Thread deleted.",
           revokeMcpCredential: true,
+          deleteProviderThread: true,
+          providerInstanceId,
+          providerSession: runningSession,
+        },
+        {
+          type: "provider-session.detach",
+          providerSessionId: ProviderSessionId.make("session:delete-plan:stopped"),
+          detail: "Thread deleted.",
+          revokeMcpCredential: true,
+          deleteProviderThread: true,
+          providerInstanceId,
+          providerSession: stoppedSession,
         },
         { type: "terminal.cleanup" },
         { type: "attachment.cleanup", attachmentIds: ["shared_file"] },
+      ],
+    );
+  }).pipe(Effect.provide(idAllocatorLayer)),
+);
+
+it.effect("detaches historically retained sessions after archive emptied the live set", () =>
+  Effect.gen(function* () {
+    const base = makeProjection();
+    const historicalSession = {
+      id: ProviderSessionId.make("session:delete-plan:historical"),
+      driver,
+      providerInstanceId,
+      status: "ready" as const,
+      cwd: "/workspace/feature",
+      model: null,
+      capabilities: CodexProviderCapabilitiesV2,
+      createdAt,
+      updatedAt: createdAt,
+      lastError: null,
+    };
+    const projection: OrchestrationV2ThreadProjection = {
+      ...base,
+      providerSessions: [],
+      providerThreads: [
+        {
+          id: providerThreadId,
+          driver,
+          providerInstanceId,
+          providerSessionId: historicalSession.id,
+          appThreadId: threadId,
+          ownerNodeId: null,
+          nativeThreadRef: {
+            driver,
+            nativeId: "ses_historical",
+            strength: "strong",
+          },
+          nativeConversationHeadRef: null,
+          status: "idle",
+          firstRunOrdinal: 1,
+          lastRunOrdinal: 1,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      ],
+    };
+    const plan = yield* planThreadDeletion({
+      command,
+      projection,
+      now: deletedAt,
+      idAllocator: yield* IdAllocatorV2,
+      historicalProviderSessions: [historicalSession],
+    });
+    assert.deepEqual(
+      plan.effects
+        .filter((effect) => effect.request.type === "provider-session.detach")
+        .map((effect) => effect.request),
+      [
+        {
+          type: "provider-session.detach",
+          providerSessionId: historicalSession.id,
+          detail: "Thread deleted.",
+          revokeMcpCredential: true,
+          deleteProviderThread: true,
+          providerInstanceId,
+          providerSession: historicalSession,
+          providerThreads: projection.providerThreads,
+        },
       ],
     );
   }).pipe(Effect.provide(idAllocatorLayer)),

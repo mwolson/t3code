@@ -1,7 +1,9 @@
 import type {
   OrchestrationV2Command,
   OrchestrationV2DomainEvent,
+  OrchestrationV2ProviderSession,
   OrchestrationV2ThreadProjection,
+  ProviderSessionId,
 } from "@t3tools/contracts";
 import type * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -15,12 +17,30 @@ export interface ThreadDeletionPlan {
   readonly effects: ReadonlyArray<PendingOrchestrationEffectV2>;
 }
 
+export function historicalProviderSessionIds(
+  projection: OrchestrationV2ThreadProjection,
+): ReadonlyArray<ProviderSessionId> {
+  const liveIds = new Set(projection.providerSessions.map((session) => session.id));
+  return [
+    ...new Set(
+      projection.providerThreads.flatMap((providerThread) => {
+        const providerSessionId = providerThread.providerSessionId;
+        if (providerSessionId === null || liveIds.has(providerSessionId)) {
+          return [];
+        }
+        return [providerSessionId];
+      }),
+    ),
+  ];
+}
+
 /** Plan the same durable cleanup for direct thread deletion and project removal. */
 export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")(function* (input: {
   readonly command: Extract<OrchestrationV2Command, { readonly type: "thread.delete" }>;
   readonly projection: OrchestrationV2ThreadProjection;
   readonly now: DateTime.Utc;
   readonly idAllocator: IdAllocatorV2["Service"];
+  readonly historicalProviderSessions?: ReadonlyArray<OrchestrationV2ProviderSession>;
 }): Effect.fn.Return<ThreadDeletionPlan, IdAllocatorV2Error> {
   const { command, projection, now, idAllocator } = input;
   const events: Array<OrchestrationV2DomainEvent> = [];
@@ -168,8 +188,19 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
     }
   }
 
-  for (const session of projection.providerSessions) {
-    if (session.status === "stopped" || session.status === "error") continue;
+  const sessionsById = new Map(
+    projection.providerSessions.map((session) => [session.id, session] as const),
+  );
+  for (const session of input.historicalProviderSessions ?? []) {
+    if (!sessionsById.has(session.id)) {
+      sessionsById.set(session.id, session);
+    }
+  }
+  for (const session of sessionsById.values()) {
+    if (session.status === "error") continue;
+    const providerThreads = projection.providerThreads.filter(
+      (providerThread) => providerThread.providerSessionId === session.id,
+    );
     yield* emitEvent({
       type: "provider-session.detached",
       threadId: command.threadId,
@@ -191,6 +222,10 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
         providerSessionId: session.id,
         detail: "Thread deleted.",
         revokeMcpCredential: true,
+        deleteProviderThread: true,
+        providerInstanceId: session.providerInstanceId,
+        providerSession: session,
+        ...(providerThreads.length === 0 ? {} : { providerThreads }),
       },
     });
   }

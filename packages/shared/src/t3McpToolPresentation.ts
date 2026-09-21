@@ -322,11 +322,34 @@ export function resolveT3McpToolDefinition(
   return name !== null && Object.hasOwn(T3_MCP_TOOLS, name) ? T3_MCP_TOOLS[name]! : null;
 }
 
+export function extractOpenCode2ExecuteT3McpToolName(code: string): string | null {
+  const dot = /tools\s*\[\s*["']t3-code["']\s*\]\s*\.\s*([A-Za-z0-9_]+)\s*\(/.exec(code);
+  if (dot?.[1]) return dot[1];
+  const bracket = /tools\s*\[\s*["']t3-code["']\s*\]\s*\[\s*["']([A-Za-z0-9_]+)["']\s*\]\s*\(/.exec(
+    code,
+  );
+  if (bracket?.[1]) return bracket[1];
+  return null;
+}
+
+function codeFromToolInput(input: unknown): string | null {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) return null;
+  const code = (input as { readonly code?: unknown }).code;
+  return typeof code === "string" && code.length > 0 ? code : null;
+}
+
 export function resolveT3McpToolPresentation(
   toolName: string | null | undefined,
+  options?: { readonly toolInput?: unknown },
 ): T3McpToolPresentation | null {
   const definition = resolveT3McpToolDefinition(toolName);
-  return definition === null ? null : { displayName: definition.displayName, logo: "t3-code" };
+  if (definition !== null) return { displayName: definition.displayName, logo: "t3-code" };
+  const code = codeFromToolInput(options?.toolInput);
+  const embedded = code === null ? null : extractOpenCode2ExecuteT3McpToolName(code);
+  const embeddedDefinition = embedded === null ? null : resolveT3McpToolDefinition(embedded);
+  return embeddedDefinition === null
+    ? null
+    : { displayName: embeddedDefinition.displayName, logo: "t3-code" };
 }
 
 export function resolveT3McpToolSummaryAction(

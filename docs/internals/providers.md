@@ -11,12 +11,15 @@ session or catalog state.
 
 ## Process and account isolation
 
-T3-managed OpenCode chat uses one server per thread. Its MCP registrations are directory-scoped, while
-T3's MCP connection is thread-scoped. Sharing a chat server between threads in one directory would
-let them replace each other's connection. Catalog and text-generation work can share the
-[instance-owned helper](../../apps/server/src/provider/OpenCodeServerOwner.ts), which closes
-after an idle period. External OpenCode servers remain externally owned and can require an
-external restart to pick up configuration changes.
+Built-in OpenCode uses the OpenCode 2 host daemon, not a T3-owned per-thread server.
+The [runtime](../../apps/server/src/provider/opencodeRuntime.ts) attaches using the host
+service metadata or starts the user service. Session disposal must never terminate that daemon.
+T3 does not rewrite the host daemon's directory-scoped MCP configuration per thread.
+An explicitly configured external endpoint remains externally owned too.
+
+The pinned OpenCode 2 client exposes no account quota API. Report usage limits as unsupported
+rather than reading an OpenCode 1 `auth.json` account that may not belong to the host daemon.
+Per-turn token usage is separate and comes from native assistant-step events.
 
 OpenCode also stores persistent approval grants per directory. Automatic full-access replies use
 `once` so they cannot widen a supervised thread's permissions on a shared external server.
