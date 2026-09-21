@@ -266,6 +266,96 @@ export const layer: Layer.Layer<
           cause: `Run ${runId} is missing its execution projection state.`,
         });
       }
+      // Settles a run that never reached the provider: one signal turn item plus
+      // terminal run, attempt and root node, written only while the run is still
+      // the current starting attempt.
+      const settleRunBeforeStart = Effect.fn("orchestrationV2.providerTurnStart.settleBeforeStart")(
+        function* (input: {
+          readonly signal: string;
+          readonly status: "completed" | "failed";
+          readonly now: DateTime.Utc;
+          /** Omitted when the run never started, so `startedAt` stays as projected. */
+          readonly startedAt?: DateTime.Utc;
+          readonly providerInstanceId: OrchestrationV2Run["providerInstanceId"];
+          readonly itemProviderThreadId: OrchestrationV2ProviderThread["id"];
+          readonly item:
+            | Pick<
+                Extract<OrchestrationV2TurnItem, { type: "error" }>,
+                "type" | "title" | "failure"
+              >
+            | Pick<
+                Extract<OrchestrationV2TurnItem, { type: "command_execution" }>,
+                "type" | "title" | "input" | "output" | "exitCode"
+              >;
+          /** Emitted after the run events when the provider thread should go idle. */
+          readonly providerThreadUpdate?: OrchestrationV2ProviderThread;
+        }) {
+          const { now, status } = input;
+          const started = input.startedAt === undefined ? {} : { startedAt: input.startedAt };
+          const item: OrchestrationV2TurnItem = {
+            id: idAllocator.derive.runSignalTurnItem({ runId, signal: input.signal }),
+            threadId: projection.thread.id,
+            runId,
+            nodeId: rootNode.id,
+            providerThreadId: input.itemProviderThreadId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal:
+              Math.max(
+                0,
+                ...projection.turnItems
+                  .filter((item) => item.runId === runId)
+                  .map((item) => item.ordinal),
+              ) + 1,
+            status,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            ...input.item,
+          };
+          const eventPayloads = [
+            { type: "turn-item.updated", payload: item },
+            { type: "run.updated", payload: { ...run, status, ...started, completedAt: now } },
+            {
+              type: "run-attempt.updated",
+              payload: { ...attempt, status, ...started, completedAt: now },
+            },
+            {
+              type: "node.updated",
+              payload: { ...rootNode, status, ...started, completedAt: now },
+            },
+            ...(input.providerThreadUpdate === undefined
+              ? []
+              : [
+                  {
+                    type: "provider-thread.updated" as const,
+                    payload: input.providerThreadUpdate,
+                  },
+                ]),
+          ] as const;
+          const events = yield* Effect.forEach(eventPayloads, (event) =>
+            Effect.gen(function* () {
+              return {
+                ...event,
+                id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
+                threadId: projection.thread.id,
+                runId,
+                nodeId: rootNode.id,
+                providerInstanceId: input.providerInstanceId,
+                occurredAt: now,
+              } satisfies OrchestrationV2DomainEvent;
+            }),
+          );
+          yield* eventSink.writeIfRunCurrent({
+            threadId: projection.thread.id,
+            runId,
+            activeAttemptId: attempt.id,
+            expectedStatus: "starting",
+            events,
+          });
+        },
+      );
       if (message.attachments.length === 0 && message.text.trimStart().startsWith("/")) {
         const isEmptyCompaction =
           message.text.trim().toLowerCase() === "/compact" && !projection.hasConversation;
@@ -320,87 +410,34 @@ export const layer: Layer.Layer<
                 })
               : undefined;
           const status = failure === undefined ? "completed" : "failed";
-          const itemBase = {
-            id: idAllocator.derive.runSignalTurnItem({
-              runId,
-              signal: isEmptyCompaction ? "empty-compaction" : "provider-sign-out",
-            }),
-            threadId: projection.thread.id,
-            runId,
-            nodeId: rootNode.id,
-            providerThreadId: nativeThread?.id ?? providerThread.id,
-            providerTurnId: null,
-            nativeItemRef: null,
-            parentItemId: null,
-            ordinal:
-              Math.max(
-                0,
-                ...projection.turnItems
-                  .filter((item) => item.runId === runId)
-                  .map((item) => item.ordinal),
-              ) + 1,
+          yield* settleRunBeforeStart({
+            signal: isEmptyCompaction ? "empty-compaction" : "provider-sign-out",
             status,
+            now,
             startedAt: now,
-            completedAt: now,
-            updatedAt: now,
-          } as const;
-          const item: OrchestrationV2TurnItem =
-            failure !== undefined
-              ? {
-                  ...itemBase,
-                  type: "error",
-                  title: isEmptyCompaction
-                    ? "Cannot compact an empty thread"
-                    : "Provider sign-out failed",
-                  failure,
-                }
-              : {
-                  ...itemBase,
-                  type: "command_execution",
-                  title: "Provider signed out",
-                  input: message.text.trim(),
-                  output: "Provider signed out",
-                  exitCode: 0,
-                };
-          const eventPayloads = [
-            { type: "turn-item.updated", payload: item },
-            { type: "run.updated", payload: { ...run, status, startedAt: now, completedAt: now } },
-            {
-              type: "run-attempt.updated",
-              payload: { ...attempt, status, startedAt: now, completedAt: now },
+            providerInstanceId: authInstanceId,
+            itemProviderThreadId: nativeThread?.id ?? providerThread.id,
+            item:
+              failure !== undefined
+                ? {
+                    type: "error",
+                    title: isEmptyCompaction
+                      ? "Cannot compact an empty thread"
+                      : "Provider sign-out failed",
+                    failure,
+                  }
+                : {
+                    type: "command_execution",
+                    title: "Provider signed out",
+                    input: message.text.trim(),
+                    output: "Provider signed out",
+                    exitCode: 0,
+                  },
+            providerThreadUpdate: {
+              ...providerThread,
+              status: providerThread.nativeThreadRef === null ? "not_loaded" : "idle",
+              updatedAt: now,
             },
-            {
-              type: "node.updated",
-              payload: { ...rootNode, status, startedAt: now, completedAt: now },
-            },
-            {
-              type: "provider-thread.updated",
-              payload: {
-                ...providerThread,
-                status: providerThread.nativeThreadRef === null ? "not_loaded" : "idle",
-                updatedAt: now,
-              },
-            },
-          ] as const;
-          const events = yield* Effect.forEach(eventPayloads, (event) =>
-            Effect.gen(function* () {
-              return {
-                ...event,
-                id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
-                threadId: projection.thread.id,
-                runId,
-                nodeId: rootNode.id,
-                providerInstanceId: authInstanceId,
-                occurredAt: now,
-              } satisfies OrchestrationV2DomainEvent;
-            }),
-          );
-          yield* eventSink.writeIfRunCurrent({
-            threadId: projection.thread.id,
-            runId,
-            activeAttemptId: attempt.id,
-            expectedStatus: "starting",
-            events,
           });
           return;
         }
@@ -473,23 +510,51 @@ export const layer: Layer.Layer<
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
       );
-      const session = yield* providerSessions.open({
-        threadId: projection.thread.id,
-        providerSessionId,
-        modelSelection: run.modelSelection,
-        runtimePolicy: resolvedRuntimePolicy,
-        ...(existingSessionProjection === undefined
-          ? {}
-          : { resumeFromSession: existingSessionProjection }),
-        ...(providerThread.nativeThreadRef?.nativeId == null
-          ? {}
-          : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
-        ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
-          ? {}
-          : {
-              initialProviderItemIdentityVersion: providerThread.nativeMetadata.itemIdentityVersion,
-            }),
-      });
+      const sessionResult = yield* Effect.result(
+        providerSessions.open({
+          threadId: projection.thread.id,
+          providerSessionId,
+          modelSelection: run.modelSelection,
+          runtimePolicy: resolvedRuntimePolicy,
+          ...(existingSessionProjection === undefined
+            ? {}
+            : { resumeFromSession: existingSessionProjection }),
+          ...(providerThread.nativeThreadRef?.nativeId == null
+            ? {}
+            : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
+          ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
+            ? {}
+            : {
+                initialProviderItemIdentityVersion:
+                  providerThread.nativeMetadata.itemIdentityVersion,
+              }),
+        }),
+      );
+      if (sessionResult._tag === "Failure") {
+        const failedAt = yield* DateTime.now;
+        const openError = sessionResult.failure;
+        const nestedCause = "cause" in openError ? openError.cause : undefined;
+        const failure = makeProviderFailure({
+          cause: openError,
+          message:
+            nestedCause instanceof Error
+              ? nestedCause.message
+              : typeof nestedCause === "string"
+                ? nestedCause
+                : openError.message,
+          class: "provider_error",
+        });
+        yield* settleRunBeforeStart({
+          signal: "provider-session-open-failure",
+          status: "failed",
+          now: failedAt,
+          providerInstanceId: run.providerInstanceId,
+          itemProviderThreadId: providerThread.id,
+          item: { type: "error", title: "Provider session failed to open", failure },
+        });
+        return;
+      }
+      const session = sessionResult.success;
       let effectiveHandoffs = handoffs;
       const loadedProviderThread = yield* Effect.gen(function* () {
         if (nativeForkTransfer !== undefined) {
