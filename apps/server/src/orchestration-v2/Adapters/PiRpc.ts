@@ -40,6 +40,18 @@ export class PiRpcError extends Schema.TaggedError<PiRpcError>()("PiRpcError", {
   }
 }
 
+export class PiRpcTimeoutError extends Schema.TaggedError<PiRpcTimeoutError>()(
+  "PiRpcTimeoutError",
+  {
+    operation: Schema.String,
+    timeoutMs: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+  },
+) {
+  override get message(): string {
+    return `Pi RPC ${this.operation} failed: timed out after ${this.timeoutMs}ms.`;
+  }
+}
+
 export type PiRpcRecord = Record<string, unknown>;
 
 export function piRecordField(input: unknown, key: string): unknown {
@@ -82,7 +94,10 @@ export interface PiRpcConnection {
    * record, and returns its `data` (undefined when the command carries none).
    * Fails on `success: false`, transport death, or timeout.
    */
-  readonly request: (record: PiRpcRecord, timeoutMs?: number) => Effect.Effect<unknown, PiRpcError>;
+  readonly request: (
+    record: PiRpcRecord,
+    timeoutMs?: number,
+  ) => Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError>;
   /**
    * Session events (every non-response stdout record) in arrival order. The
    * full queue is exposed so consumers can append order-preserving synthetic
@@ -426,7 +441,7 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
   const request = (
     record: PiRpcRecord,
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-  ): Effect.Effect<unknown, PiRpcError> =>
+  ): Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError> =>
     Effect.gen(function* () {
       const id = `t3-${nextRequestId++}`;
       const deferred = yield* Deferred.make<unknown, PiRpcError>();
@@ -443,9 +458,9 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
           duration: Duration.millis(timeoutMs),
           orElse: () =>
             Effect.fail(
-              new PiRpcError({
+              new PiRpcTimeoutError({
                 operation: String(record["type"] ?? "request"),
-                detail: `timed out after ${timeoutMs}ms`,
+                timeoutMs,
               }),
             ),
         }),
@@ -459,6 +474,8 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     request,
     events,
     exited: Deferred.await(exitDeferred),
-    terminate: terminateProcess.pipe(Effect.ignore, Effect.uninterruptible),
+    terminate: failTransport(
+      new PiRpcError({ operation: "terminate", detail: "pi process was stopped" }),
+    ).pipe(Effect.andThen(terminateProcess), Effect.ignore, Effect.uninterruptible),
   } satisfies PiRpcConnection;
 });
