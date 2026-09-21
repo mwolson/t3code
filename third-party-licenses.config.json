@@ -153,6 +153,33 @@
   ],
   "packageOverrides": [
     {
+      "name": "@opencode-ai/client",
+      "version": "0.0.0-beta-18999",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2025 opencode"]
+      },
+      "sourceUrl": "https://github.com/anomalyco/opencode"
+    },
+    {
+      "name": "@opencode-ai/protocol",
+      "version": "0.0.0-beta-18999",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2025 opencode"]
+      },
+      "sourceUrl": "https://github.com/anomalyco/opencode"
+    },
+    {
+      "name": "@opencode-ai/schema",
+      "version": "0.0.0-beta-18999",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2025 opencode"]
+      },
+      "sourceUrl": "https://github.com/anomalyco/opencode"
+    },
+    {
       "name": "@bufbuild/protobuf",
       "version": "1.10.0",
       "generatedNotices": [
