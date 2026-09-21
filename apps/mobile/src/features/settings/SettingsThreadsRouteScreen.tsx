@@ -84,7 +84,9 @@ function AutoSettleSettingsRows() {
     return null;
   }
 
-  const writeToAll = (patch: Partial<AutoSettleSettings>) => {
+  const writeToAll = (
+    patch: Partial<AutoSettleSettings> & { autoResumeLimitedThreads?: boolean },
+  ) => {
     if (writeInFlight.current) return;
     const writes = planMobileScopedSettingsPatch(syncTargets, projectSelected, patch);
     if (writes.length === 0) return;
@@ -161,6 +163,17 @@ function AutoSettleSettingsRows() {
           pending={pendingWrites > 0}
           onClear={clearProjectOverrides}
         />
+      ) : null}
+      {!projectSelected ? (
+        <SettingsSection title="Usage limits">
+          <SettingsSwitchRow
+            icon="clock"
+            label="Auto-resume limited threads"
+            value={referenceSettings.autoResumeLimitedThreads}
+            disabled={disabled}
+            onValueChange={(value) => writeToAll({ autoResumeLimitedThreads: value })}
+          />
+        </SettingsSection>
       ) : null}
       <SettingsSection title="Auto-settle">
         <SettingsSwitchRow
