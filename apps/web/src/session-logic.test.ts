@@ -1610,5 +1610,21 @@ it("renders automatic completion as a work entry instead of a user bubble", () =
         },
       ],
     })[0]?.kind,
+  ).toBe("work");
+  const ordinaryUser = {
+    ...item,
+    type: "user_message" as const,
+    messageId: MessageId.make("ordinary-user"),
+    createdBy: "user" as const,
+    creationSource: "web" as const,
+    inputIntent: "turn_start" as const,
+    attachments: [],
+    text: "Delegated task node:task-1 reached a terminal state.",
+  };
+  expect(
+    deriveTimelineEntriesFromVisibleTurnItems({
+      optimisticMessages: [],
+      visibleTurnItems: [{ ...row, item: ordinaryUser }],
+    })[0]?.kind,
   ).toBe("message");
 });

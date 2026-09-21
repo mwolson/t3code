@@ -395,16 +395,21 @@ const ComposerDraftSchema = Schema.Struct({
   project: Schema.optional(ComposerDraftProjectSchema),
 });
 
+const ModelOptionMemorySchema = Schema.Record(
+  Schema.String,
+  Schema.Record(Schema.String, Schema.Array(ProviderOptionSelectionSchema)),
+);
+const LEGACY_MODEL_OPTION_MEMORY_FILE = "model-option-memory.json";
+const decodeLegacyModelOptionMemory = Schema.decodeUnknownSync(
+  Schema.Struct({ schemaVersion: Schema.Literal(1), byInstance: ModelOptionMemorySchema }),
+);
+
 const PersistedComposerDraftsSchema = Schema.Struct({
   schemaVersion: Schema.Literal(COMPOSER_DRAFTS_SCHEMA_VERSION),
   drafts: Schema.Record(Schema.String, ComposerDraftSchema),
   stickyModelSelection: Schema.optional(ModelSelectionSchema),
-  modelOptionMemory: Schema.optional(
-    Schema.Record(
-      Schema.String,
-      Schema.Record(Schema.String, Schema.Array(ProviderOptionSelectionSchema)),
-    ),
-  ),
+  modelOptionMemory: Schema.optional(ModelOptionMemorySchema),
+  legacyModelOptionMemoryImported: Schema.optional(Schema.Literal(true)),
   cloudAccountId: Schema.optional(Schema.String),
   signedOutDrafts: Schema.optional(
     Schema.Record(
@@ -463,12 +468,14 @@ export const composerCloudDraftsAtom = Atom.make<ComposerCloudDraftState>({
 let loadPromise: Promise<void> | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let persistRetryNeeded = false;
+let legacyModelOptionMemoryImported = false;
 const persistenceQueue = new SerializedAsyncQueue();
 
 /** Resets module-level state between test runs. */
 export function resetComposerDraftsLoadState(): void {
   loadPromise = null;
   persistRetryNeeded = false;
+  legacyModelOptionMemoryImported = false;
 }
 
 function attachmentContextRecord(
@@ -624,6 +631,7 @@ export function decodePersistedComposerState(value: unknown): {
   readonly drafts: Record<string, ComposerDraft>;
   readonly stickyModelSelection: ModelSelection | null;
   readonly modelOptionMemory: ModelOptionMemoryState;
+  readonly legacyModelOptionMemoryImported?: true;
   readonly cloudDrafts: ComposerCloudDraftState;
 } {
   const parsed = decodePersistedComposerDraftsDocument(value);
@@ -663,6 +671,7 @@ export function decodePersistedComposerState(value: unknown): {
     ),
     stickyModelSelection: parsed.stickyModelSelection ?? null,
     modelOptionMemory: parsed.modelOptionMemory ?? {},
+    ...(parsed.legacyModelOptionMemoryImported ? { legacyModelOptionMemoryImported: true } : {}),
     cloudDrafts: {
       accountId: parsed.cloudAccountId ?? null,
       signedOut: Object.fromEntries(
@@ -684,11 +693,57 @@ export function decodePersistedComposerState(value: unknown): {
   };
 }
 
-async function getComposerDraftsFile() {
+async function getComposerDraftsFile(fileName = COMPOSER_DRAFTS_FILE) {
   const { Directory, File, Paths } = await import("expo-file-system");
   const directory = new Directory(Paths.document, COMPOSER_DRAFTS_DIRECTORY);
   directory.create({ idempotent: true, intermediates: true });
-  return new File(directory, COMPOSER_DRAFTS_FILE);
+  return new File(directory, fileName);
+}
+
+function mergeModelOptionMemory(
+  persisted: ModelOptionMemoryState,
+  current: ModelOptionMemoryState,
+): ModelOptionMemoryState {
+  return {
+    ...persisted,
+    ...Object.fromEntries(
+      Object.entries(current).map(([instanceId, models]) => [
+        instanceId,
+        { ...persisted[instanceId], ...models },
+      ]),
+    ),
+  };
+}
+
+async function loadLegacyModelOptionMemory(): Promise<ModelOptionMemoryState | null> {
+  let operation: ComposerDraftPersistenceError["operation"] = "open";
+  try {
+    const file = await getComposerDraftsFile(LEGACY_MODEL_OPTION_MEMORY_FILE);
+    if (!file.exists) return null;
+    operation = "read";
+    const raw = await file.text();
+    operation = "decode";
+    const { byInstance } = decodeLegacyModelOptionMemory(JSON.parse(raw) as unknown);
+    return Object.fromEntries(
+      Object.entries(byInstance).map(([instanceId, models]) => [
+        instanceId,
+        Object.fromEntries(Object.entries(models).filter(([, options]) => options.length > 0)),
+      ]),
+    );
+  } catch (cause) {
+    // Legacy option memory must never prevent saved drafts from hydrating. Leave
+    // the import unmarked on failure so a later launch can retry the old file.
+    console.warn(
+      "[composer-drafts] could not import legacy model options",
+      new ComposerDraftPersistenceError({
+        operation,
+        directory: COMPOSER_DRAFTS_DIRECTORY,
+        fileName: LEGACY_MODEL_OPTION_MEMORY_FILE,
+        cause,
+      }),
+    );
+    return null;
+  }
 }
 
 async function loadPersistedComposerState(): Promise<
@@ -734,6 +789,7 @@ async function writePersistedComposerState(
     const document = {
       schemaVersion: COMPOSER_DRAFTS_SCHEMA_VERSION,
       drafts: nonEmptyDrafts,
+      ...(legacyModelOptionMemoryImported ? { legacyModelOptionMemoryImported: true } : {}),
       ...(stickyModelSelection ? { stickyModelSelection } : {}),
       ...(Object.keys(appAtomRegistry.get(modelOptionMemoryAtom)).length > 0
         ? { modelOptionMemory: appAtomRegistry.get(modelOptionMemoryAtom) }
@@ -1025,7 +1081,13 @@ export function ensureComposerDraftsLoaded(): void {
   if (loadPromise !== null) {
     return;
   }
-  const loading = loadPersistedComposerState().then((persisted) => {
+  const loading = loadPersistedComposerState().then(async (persisted) => {
+    const legacyMemory = persisted.legacyModelOptionMemoryImported
+      ? null
+      : await loadLegacyModelOptionMemory();
+    const persistedMemory = mergeModelOptionMemory(legacyMemory ?? {}, persisted.modelOptionMemory);
+    legacyModelOptionMemoryImported =
+      persisted.legacyModelOptionMemoryImported === true || legacyMemory !== null;
     appAtomRegistry.set(composerCloudDraftsAtom, persisted.cloudDrafts);
     if (Object.keys(persisted.drafts).length > 0) {
       const current = appAtomRegistry.get(composerDraftsAtom);
@@ -1040,18 +1102,15 @@ export function ensureComposerDraftsLoaded(): void {
     ) {
       appAtomRegistry.set(stickyComposerModelSelectionAtom, persisted.stickyModelSelection);
     }
-    if (Object.keys(persisted.modelOptionMemory).length > 0) {
-      const current = appAtomRegistry.get(modelOptionMemoryAtom);
-      appAtomRegistry.set(modelOptionMemoryAtom, {
-        ...persisted.modelOptionMemory,
-        ...Object.fromEntries(
-          Object.entries(current).map(([instanceId, models]) => [
-            instanceId,
-            { ...(persisted.modelOptionMemory[instanceId] ?? {}), ...models },
-          ]),
-        ),
-      });
+    if (Object.keys(persistedMemory).length > 0) {
+      appAtomRegistry.set(
+        modelOptionMemoryAtom,
+        mergeModelOptionMemory(persistedMemory, appAtomRegistry.get(modelOptionMemoryAtom)),
+      );
     }
+    // The marker and imported choices land atomically with drafts through the
+    // existing retryable writer. Never delete or write the legacy file.
+    if (legacyMemory !== null) schedulePersistComposerState();
   });
   loadPromise = loading;
   // Handle fire-and-forget hook loads without swallowing failures from the

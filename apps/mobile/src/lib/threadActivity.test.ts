@@ -1749,6 +1749,47 @@ it("renders automatic completion as a neutral activity while retaining its detai
   expect(buildThreadFeed([projected(userMessage(), 0)])[0]?.type).toBe("message");
 });
 
+it("keeps historical trial wakes outside compact folds without hiding user text", () => {
+  const wake: OrchestrationV2TurnItem = {
+    ...userMessage(),
+    type: "user_message",
+    messageId: MessageId.make("legacy-wake"),
+    createdBy: "agent",
+    creationSource: "provider",
+    inputIntent: "turn_start",
+    attachments: [],
+    text: "Background task completed.",
+    providerWake: { kind: "background_task", count: 1 },
+  };
+  const feed = buildThreadFeed([
+    projected(wake, 0),
+    projected(command(), 1),
+    projected(assistantMessage(), 2),
+  ]);
+  expect(feed[0]?.type).toBe("activity-group");
+  const presented = deriveThreadFeedPresentation(
+    feed,
+    {
+      runId,
+      status: "completed",
+      startedAt: "2026-06-20T00:00:01.000Z",
+      completedAt: "2026-06-20T00:00:03.000Z",
+    },
+    new Set(),
+  );
+  expect(
+    presented.some(
+      (entry) =>
+        entry.type === "activity-group" &&
+        entry.activities.some((activity) => activity.summary === "Background task finished"),
+    ),
+  ).toBe(true);
+  expect(
+    buildThreadFeed([projected({ ...wake, createdBy: "user", creationSource: "mobile" }, 0)])[0]
+      ?.type,
+  ).toBe("message");
+});
+
 it("uses a compact reasoning preview and a short expanded heading", () => {
   const entry = {
     id: "thought",
