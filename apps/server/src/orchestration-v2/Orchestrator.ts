@@ -816,9 +816,113 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     });
 
-  const offerDelegatedCompletionDeliveries = (threadId: ThreadId) =>
+  const pendingDelegatedCompletionTaskIds = (
+    projection: OrchestrationV2ThreadProjection,
+    parentRunId: RunId,
+  ) =>
+    projection.subagents
+      .filter(
+        (task) =>
+          task.origin === "app_owned" &&
+          task.runId === parentRunId &&
+          isTerminalDelegatedTaskStatus(task.status) &&
+          task.completionDelivery?.state === "pending" &&
+          (!hasLiveRun(projection) || task.completionWake === "always"),
+      )
+      .map((task) => task.id);
+
+  // Callers hold the thread lock; use their one cohort snapshot rather than
+  // reloading the entire history for every historical parent run.
+  const reservePendingDelegatedCompletionDelivery = Effect.fnUntraced(function* (
+    projection: OrchestrationV2ThreadProjection,
+    parentRun: OrchestrationV2Run,
+  ) {
+    const threadId = projection.thread.id;
+    const cohort = parentRun.delegatedCompletion;
+    if (
+      cohort === undefined ||
+      cohort.disposition !== "open" ||
+      cohort.delivery !== null ||
+      projection.thread.archivedAt !== null ||
+      projection.thread.deletedAt !== null
+    ) {
+      return;
+    }
+    const pendingTaskIds = pendingDelegatedCompletionTaskIds(projection, parentRun.id);
+    if (pendingTaskIds.length === 0) {
+      return;
+    }
+    const now = yield* DateTime.now;
+    const messageId = yield* mapDelegatedCompletionError(
+      idAllocator.allocate.message({
+        threadId,
+        ordinal: projection.messages.length + 1,
+      }),
+    );
+    const updatedParentRun: OrchestrationV2Run = {
+      ...parentRun,
+      delegatedCompletion: {
+        ...cohort,
+        nextGeneration: cohort.nextGeneration + 1,
+        delivery: {
+          generation: cohort.nextGeneration,
+          messageId,
+          taskIds: pendingTaskIds,
+        },
+      },
+    };
+    const taskEvents = projection.subagents.flatMap((task) => {
+      if (!pendingTaskIds.includes(task.id)) {
+        return [];
+      }
+      return [
+        {
+          type: "subagent.updated" as const,
+          threadId,
+          ...(task.runId === null ? {} : { runId: task.runId }),
+          nodeId: task.id,
+          driver: task.driver,
+          providerInstanceId: task.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            ...task,
+            completionDelivery: {
+              state: "claimed" as const,
+              observedByRunId: null,
+            },
+            updatedAt: now,
+          },
+        },
+      ];
+    });
+    yield* writeSystemEvents([
+      ...taskEvents,
+      {
+        type: "run.updated",
+        threadId,
+        runId: updatedParentRun.id,
+        ...(updatedParentRun.rootNodeId === null ? {} : { nodeId: updatedParentRun.rootNodeId }),
+        providerInstanceId: updatedParentRun.providerInstanceId,
+        occurredAt: now,
+        payload: updatedParentRun,
+      },
+    ]);
+  });
+
+  const offerDelegatedCompletionDeliveries = (
+    threadId: ThreadId,
+    options: { readonly replanPending?: boolean } = {},
+  ) =>
     Effect.gen(function* () {
-      const projection = yield* projectionStore.getThreadProjection(threadId);
+      let projection = yield* projectionStore.getThreadProjection(threadId);
+      // Only an explicit policy change or startup recovery rearms a cancelled
+      // batch. A late/duplicate mailbox acceptance must not undo Stop.
+      if (options.replanPending) {
+        for (const run of projection.runs) {
+          yield* reservePendingDelegatedCompletionDelivery(projection, run);
+        }
+        projection = yield* projectionStore.getThreadProjection(threadId);
+      }
       for (const run of projection.runs) {
         if (
           run.delegatedCompletion?.delivery !== undefined &&
@@ -4226,6 +4330,76 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             capabilities: queuedCapabilities,
           }),
         );
+        // Dispatch and promotion share the thread lock. Merge only still-queued
+        // Codex command notifications; if promotion won, create a new delivery
+        // normally. Public queued-run.edit must continue rejecting notifications.
+        if (
+          queuedAdapter.driver === "codex" &&
+          command.creationSource === "provider" &&
+          command.notification?.source.kind === "background_command" &&
+          command.delegatedCompletion === undefined &&
+          command.attachments.length === 0 &&
+          command.context === undefined &&
+          command.sourcePlanRef === undefined &&
+          command.scheduledTaskId === undefined
+        ) {
+          const queuedRun = queuedRunsInDeliveryOrder(projection).find((candidate) => {
+            const message = projection.messages.find((row) => row.id === candidate.userMessageId);
+            return (
+              candidate.providerThreadId === targetProviderThread?.id &&
+              modelSelectionsEqual(candidate.modelSelection, modelSelection) &&
+              message?.createdBy === "agent" &&
+              message.creationSource === "provider" &&
+              message.delegatedCompletion === undefined &&
+              message.attachments.length === 0 &&
+              message.context === undefined &&
+              message.scheduledTaskId === undefined &&
+              candidate.sourcePlanRef === undefined &&
+              message.notification?.source.kind === "background_command"
+            );
+          });
+          const queuedMessage = projection.messages.find(
+            (row) => row.id === queuedRun?.userMessageId,
+          );
+          if (queuedRun !== undefined && queuedMessage?.notification !== undefined) {
+            const previous = queuedMessage.notification;
+            const incoming = command.notification;
+            const outcomes = [previous.outcome, incoming.outcome];
+            const outcome = outcomes.includes("failed")
+              ? "failed"
+              : outcomes.every((value) => value === "completed")
+                ? "completed"
+                : "updated";
+            const notification: NonNullable<OrchestrationV2ConversationMessage["notification"]> = {
+              // A batch has no single native command identity.
+              source: { kind: "background_command" },
+              outcome,
+              summary: "Background commands finished",
+              detail: [
+                previous.detail ?? previous.summary,
+                incoming.detail ?? incoming.summary,
+              ].join("\n\n"),
+            };
+            yield* emit(
+              events,
+              command,
+            )({
+              type: "message.updated",
+              threadId: command.threadId,
+              runId: queuedRun.id,
+              ...(queuedMessage.nodeId === null ? {} : { nodeId: queuedMessage.nodeId }),
+              providerInstanceId: queuedRun.providerInstanceId,
+              occurredAt: now,
+              payload: {
+                ...queuedMessage,
+                text: `${queuedMessage.text}\n\n${command.text}`,
+                notification,
+                updatedAt: now,
+              },
+            });
+            return;
+          }
+        }
         const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
           id: idAllocator.derive.providerThread({
             driver: queuedAdapter.driver,
@@ -7739,7 +7913,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (deliveryRun !== undefined) {
         // The terminal-run listener owns reconciliation of a completed wake.
         // A sibling that wins the parent lock first remains pending for its
-        // one successor rather than creating a competing delivery.
+        // next delivery rather than creating a competing delivery.
         return {
           task: {
             ...input.updatedTask,
@@ -7779,23 +7953,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
 
     const settledDeliveryCount = cohort?.settledDeliveryCount ?? 0;
-    if (settledDeliveryCount >= 2) {
-      // A cohort permits one initial delivery and one successor. Keep the
-      // result pending and inspectable instead of recursively re-arming the
-      // parent for every child that finishes after that bounded handoff.
-      return {
-        task: {
-          ...input.updatedTask,
-          completionDelivery: {
-            state: "pending" as const,
-            observedByRunId: null,
-          },
-        },
-        parentRun: undefined,
-        message: undefined,
-        offer: false,
-      };
-    }
     const generation = cohort?.nextGeneration ?? 1;
     const messageId = yield* mapDelegatedCompletionError(
       idAllocator.allocate.message({
@@ -8153,7 +8310,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cohort.disposition === "open" &&
         projection.thread.archivedAt === null &&
         projection.thread.deletedAt === null &&
-        settledDeliveryCount < 2 &&
+        deliveryRun.status !== "cancelled" &&
         pendingTaskIds.length > 0;
       const nextDelivery = canReserveFollowUp
         ? {
@@ -8253,9 +8410,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const parentIsLive = hasLiveRun(projection);
     const pendingTaskIds =
-      projection.thread.archivedAt === null &&
-      projection.thread.deletedAt === null &&
-      (cohort.settledDeliveryCount ?? 0) < 2
+      projection.thread.archivedAt === null && projection.thread.deletedAt === null
         ? projection.subagents
             .filter(
               (task) =>
@@ -8301,7 +8456,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     // Provider acceptance drains this batch but does not acknowledge its results
-    // or spend an idle-wake allowance. task_status owns acknowledgment.
+    // or count as a settled wake run. task_status owns acknowledgment.
     yield* emitEvent({
       type: "run.updated",
       threadId: command.threadId,
@@ -8691,7 +8846,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.threadId));
     }
     if (command.type === "delegated_task.wake-policy") {
-      yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.parentThreadId));
+      yield* mapDispatchError(command)(
+        offerDelegatedCompletionDeliveries(command.parentThreadId, { replanPending: true }),
+      );
     }
 
     return {
@@ -8808,18 +8965,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 for (const runId of terminalDeliveryRunIds) {
                   yield* finalizeDelegatedCompletionDelivery(threadId, runId);
                 }
-                const refreshed =
-                  terminalDeliveryRunIds.length === 0
-                    ? projection
-                    : yield* projectionStore.getThreadProjection(threadId);
-                for (const run of refreshed.runs) {
-                  if (
-                    run.delegatedCompletion?.delivery !== null &&
-                    run.delegatedCompletion !== undefined
-                  ) {
-                    yield* offerDelegatedCompletionDelivery(threadId, run.id);
-                  }
-                }
+                yield* offerDelegatedCompletionDeliveries(threadId, { replanPending: true });
               }),
             )
             .pipe(

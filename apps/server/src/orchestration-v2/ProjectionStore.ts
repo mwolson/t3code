@@ -417,7 +417,18 @@ function needsRecovery(
         )
       );
     case "delegated-completions":
-      return projection.runs.some((run) => run.delegatedCompletion?.delivery != null);
+      return projection.runs.some(
+        (run) =>
+          run.delegatedCompletion?.delivery != null ||
+          (run.delegatedCompletion?.disposition === "open" &&
+            projection.subagents.some(
+              (task) =>
+                task.runId === run.id &&
+                task.origin === "app_owned" &&
+                ["completed", "failed", "interrupted", "cancelled"].includes(task.status) &&
+                task.completionDelivery?.state === "pending",
+            )),
+      );
     case "subagent-results": {
       const parentThreadId = projection.thread.lineage.parentThreadId;
       return (
@@ -3193,9 +3204,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               `;
             case "delegated-completions":
               return sql`
-                SELECT thread_id FROM orchestration_v2_projection_runs
-                WHERE CASE WHEN json_valid(payload_json)
-                  THEN json_type(payload_json, '$.delegatedCompletion.delivery') = 'object'
+                SELECT run.thread_id FROM orchestration_v2_projection_runs AS run
+                WHERE CASE WHEN json_valid(run.payload_json) THEN
+                  json_type(run.payload_json, '$.delegatedCompletion.delivery') = 'object'
+                  OR (
+                    json_extract(run.payload_json, '$.delegatedCompletion.disposition') = 'open'
+                    AND EXISTS (
+                      SELECT 1 FROM orchestration_v2_projection_subagents AS task
+                      WHERE task.thread_id = run.thread_id AND task.run_id = run.run_id
+                        AND task.status IN ('completed', 'failed', 'interrupted', 'cancelled')
+                        AND CASE WHEN json_valid(task.payload_json) THEN
+                          json_extract(task.payload_json, '$.origin') = 'app_owned'
+                          AND json_extract(task.payload_json, '$.completionDelivery.state') = 'pending'
+                        ELSE 0 END
+                    )
+                  )
                   ELSE 0 END
               `;
             case "subagent-results":
