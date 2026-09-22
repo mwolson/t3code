@@ -5620,5 +5620,7 @@
   "856812e7e1fc445e": "Tool calls in chat",
   "8d545d54c0a9e950": "Hide the commands, edits, and searches agents run. Hide successful keeps failures. Zen shows only final answers. Approvals, questions, and errors always show.",
   "99d51127f573296b": "Another account",
-  "8ec2c57414669b79": "Connect a second {tracker} workspace or user."
+  "8ec2c57414669b79": "Connect a second {tracker} workspace or user.",
+  "cf45dd747b6b7b69": "Checking {product}",
+  "a4b5aab4d4e546db": "{product} did not load. Retry without clearing app data."
 }

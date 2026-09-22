@@ -129,7 +129,6 @@ function ConfiguredSettingsRouteScreen() {
           icon: "person.crop.circle",
           label: gt("T3 Account"),
           value: accountLabel,
-          disabled: !isLoaded,
           onPress: () => navigation.navigate("SettingsAuth"),
         },
         environmentsRow(gt("Environments"), Object.keys(savedConnectionsById).length),
