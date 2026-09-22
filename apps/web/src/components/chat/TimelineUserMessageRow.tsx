@@ -77,7 +77,7 @@ import {
   encodeComposerContextClipboardHtml,
   encodeComposerContextFragment,
 } from "@t3tools/shared/composerContextClipboard";
-import { chatMarkdownClipboardPayload } from "../../markdown-clipboard";
+import { chatMarkdownClipboardPayload, unwrapSoleMarkdownFence } from "../../markdown-clipboard";
 import type { ChatMarkdownContextReference } from "../ChatMarkdown";
 import { cn } from "~/lib/utils";
 import { markdownProseDirection } from "~/textDirection";
@@ -821,7 +821,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         )}
         {copyText && (
           <MessageCopyButton
-            text={contextClipboardFragment ? copyText : plainText}
+            text={contextClipboardFragment ? copyText : unwrapSoleMarkdownFence(plainText)}
             {...(contextClipboardFragment
               ? {
                   extraFlavors: {
