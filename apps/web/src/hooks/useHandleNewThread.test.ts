@@ -9,7 +9,7 @@ const testState = vi.hoisted(() => {
   let targetSettings = {
     defaultThreadEnvMode: "local" as "local" | "worktree" | null,
     newWorktreesStartFromOrigin: false,
-    defaultModelSelection: null,
+    defaultModelSelection: null as unknown,
     defaultRuntimeMode: "full-access" as RuntimeMode,
   };
   let storedDraft: {
@@ -32,6 +32,8 @@ const testState = vi.hoisted(() => {
     getDraftSessionByLogicalProjectKey: vi.fn(() => storedDraft),
     getDraftSession: vi.fn(() => null),
     getDraftThread: vi.fn(() => null),
+    stickyActiveProvider: null as string | null,
+    stickyModelSelectionByProvider: {} as Record<string, unknown>,
     applyStickyState: vi.fn(),
     setDraftThreadContext: vi.fn(),
     setLogicalProjectDraftThreadId: vi.fn(),
@@ -79,6 +81,9 @@ const testState = vi.hoisted(() => {
       router.navigate.mockClear();
       draftStore.setDraftThreadContext.mockClear();
       draftStore.setLogicalProjectDraftThreadId.mockClear();
+      draftStore.setModelSelection.mockClear();
+      draftStore.stickyActiveProvider = null;
+      draftStore.stickyModelSelectionByProvider = {};
       projectFileRead = new Promise<null>((resolve) => {
         completeProjectFileRead = resolve;
       });
@@ -169,7 +174,6 @@ vi.mock("../composerDraftStore", () => {
 vi.mock("../lib/chatThreadActions", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/chatThreadActions")>()),
   hasExplicitComposerModelSelection: () => false,
-  resolveNewThreadModelSelectionOverride: () => null,
 }));
 vi.mock("../lib/t3ProjectFileDefaults", () => ({
   readT3ProjectFile: () => testState.projectFileRead,
@@ -258,6 +262,30 @@ describe.each([
     await expect(pendingOpen).resolves.toBeNull();
     expect(testState.router.navigate).not.toHaveBeenCalled();
     expect(testState.draftStore.setLogicalProjectDraftThreadId).not.toHaveBeenCalled();
+  });
+
+  it("uses the last-used model over the project default", async () => {
+    testState.reset(draft);
+    const sticky = { instanceId: "codex", model: "last-used-model" };
+    testState.targetSettings.defaultModelSelection = {
+      instanceId: "codex",
+      model: "project-model",
+    };
+    const pendingOpen = useNewThreadHandler()(
+      { environmentId: "environment-ssh", projectId: "project-remote" } as never,
+      { replace: true },
+    );
+
+    testState.draftStore.stickyActiveProvider = "codex";
+    testState.draftStore.stickyModelSelectionByProvider = { codex: sticky };
+    testState.completeProjectFileRead(null);
+    const opened = await pendingOpen;
+
+    expect(testState.draftStore.setModelSelection).toHaveBeenLastCalledWith(
+      opened?.draftId,
+      sticky,
+      expect.anything(),
+    );
   });
 });
 
