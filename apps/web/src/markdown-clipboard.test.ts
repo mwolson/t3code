@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { serializeRenderedMarkdownFragment } from "./markdown-clipboard";
 import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import {
   collectAssistantCitations,
   serializeAssistantCitation,
 } from "@t3tools/shared/assistantCitations";
+import { serializeRenderedMarkdownFragment, unwrapSoleMarkdownFence } from "./markdown-clipboard";
 
 const TEXT_NODE = 3;
 const ELEMENT_NODE = 1;
@@ -196,5 +196,19 @@ describe("serializeRenderedMarkdownFragment", () => {
     expect(serializeRenderedMarkdownFragment(asNode(container))).toBe(
       "printf '%s' 'TOKEN' | gh secret set CLOUDFLARE_API_TOKEN",
     );
+  });
+});
+
+describe("unwrapSoleMarkdownFence", () => {
+  it("unwraps only a message that is one complete code block", () => {
+    expect(unwrapSoleMarkdownFence("```sh\ngh workflow run Deploy\n```")).toBe(
+      "gh workflow run Deploy",
+    );
+    for (const source of [
+      "Run this:\n\n```\ngh workflow run Deploy\n```",
+      "```js\na()\n```\n\n```js\nb()\n```",
+    ]) {
+      expect(unwrapSoleMarkdownFence(source)).toBe(source);
+    }
   });
 });

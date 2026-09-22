@@ -1165,3 +1165,16 @@ it("keeps concurrent approvals actionable outside collapsed work and restores se
     .element(screen.getByRole("button", { name: "Open the current tab", exact: true }))
     .toBeVisible();
 });
+
+describe("MessagesTimeline sole fenced copy", () => {
+  it.each(["user", "assistant"] as const)(
+    "copies %s messages without the outer fence",
+    async (role) => {
+      setup();
+      await using screen = await renderTimeline([message("```bash\necho hello\n```", { role })]);
+      using clipboard = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+      await click(screen.button("Copy message"));
+      expect(clipboard).toHaveBeenCalledWith("echo hello");
+    },
+  );
+});
