@@ -184,7 +184,7 @@ export function DraftHeroHeadline({
       return;
     }
     setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId);
-    seedDraftModelSelection(draftId, projectRef);
+    seedDraftModelSelection(draftId, projectRef, { preferLastUsed: true });
   };
   const startScratch = async (): Promise<boolean> => {
     if (scratchTargetEnvironmentId === null || isScratchDraft) {
