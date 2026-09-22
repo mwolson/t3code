@@ -21,6 +21,8 @@ const harness = vi.hoisted(() => ({
 // Navigation, the header renders again only when the options are no longer shallowly equal.
 vi.mock("@react-navigation/native", () => {
   const navigation = {
+    addListener: () => () => {},
+    isFocused: () => true,
     setOptions(options: HeaderOptions) {
       harness.setOptionsCalls += 1;
       const previous: Record<string, unknown> = harness.appliedOptions;
