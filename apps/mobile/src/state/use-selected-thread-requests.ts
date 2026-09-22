@@ -13,7 +13,7 @@ import {
   composerAttachmentsStillUploading,
 } from "./composer-attachment-uploads";
 import { useAtomValue } from "@effect/atom-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   ApprovalRequestId,
@@ -105,6 +105,16 @@ export function useSelectedThreadRequests() {
   );
   const activePendingApproval = activePendingApprovals[0] ?? null;
   const activePendingUserInput = activePendingUserInputs[0] ?? null;
+  const displayedRequestRef = useRef<{
+    request: typeof activePendingUserInput;
+    thread: typeof selectedThreadShell;
+  } | null>(null);
+  useLayoutEffect(() => {
+    displayedRequestRef.current = { request: activePendingUserInput, thread: selectedThreadShell };
+    return () => {
+      displayedRequestRef.current = null;
+    };
+  }, [activePendingUserInput, selectedThreadShell]);
   const questionServerConfigs = useServerConfigs();
   const attachmentDrafts = useAtomValue(composerDraftsAtom);
   const preparationCounts = useAtomValue(questionAttachmentPreparationAtom);
@@ -199,9 +209,15 @@ export function useSelectedThreadRequests() {
 
   const onChangeUserInputCustomAnswer = useCallback(
     (requestId: ApprovalRequestId, questionId: string, customAnswer: string) => {
-      const question = activePendingUserInputs
-        .find((request) => request.requestId === requestId)
-        ?.questions.find((entry) => entry.id === questionId);
+      const displayed = displayedRequestRef.current;
+      if (
+        !displayed?.request ||
+        displayed.request.requestId !== requestId ||
+        displayed.thread?.id !== selectedThreadShell?.id ||
+        displayed.thread?.environmentId !== selectedThreadShell?.environmentId
+      )
+        return;
+      const question = displayed.request.questions.find((entry) => entry.id === questionId);
       if (!selectedThreadShell || !question) {
         return;
       }
@@ -209,7 +225,7 @@ export function useSelectedThreadRequests() {
       const requestKey = scopedRequestKey(selectedThreadShell.environmentId, requestId);
       setUserInputDraftCustomAnswer(requestKey, question, customAnswer);
     },
-    [activePendingUserInputs, selectedThreadShell],
+    [selectedThreadShell],
   );
 
   const onRespondToApproval = useCallback(
