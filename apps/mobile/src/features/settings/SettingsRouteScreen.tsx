@@ -22,6 +22,7 @@ import { useCompactWorkspaceTabs } from "../workspace/useSystemWorkspaceTabBar";
 import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-grouping";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { clerkAccountRowLabel } from "../cloud/clerkLoadRecovery";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
@@ -66,11 +67,11 @@ function ConfiguredSettingsRouteScreen() {
   const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
   const { user } = useUser();
   const { savedConnectionsById } = useSavedRemoteConnections();
-  const accountLabel = !isLoaded
-    ? "Checking"
-    : !isSignedIn
-      ? "Sign in"
-      : (user?.primaryEmailAddress?.emailAddress ?? "Signed in");
+  const accountLabel = clerkAccountRowLabel({
+    email: user?.primaryEmailAddress?.emailAddress,
+    isLoaded,
+    isSignedIn: Boolean(isSignedIn),
+  });
 
   return (
     <View collapsable={false} className="flex-1">
@@ -87,7 +88,6 @@ function ConfiguredSettingsRouteScreen() {
             icon="person.crop.circle"
             label="T3 Account"
             value={accountLabel}
-            disabled={!isLoaded}
             onPress={() => navigation.navigate("SettingsSheet", { screen: "SettingsAuth" })}
           />
           <SettingsRow
