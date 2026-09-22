@@ -13,7 +13,10 @@ import { projectIconColorClassName } from "~/projectIconColors";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { useScratchProject } from "~/hooks/useScratchProject";
 import { useClientSettings } from "~/hooks/useSettings";
-import { hasExplicitComposerModelSelection } from "~/lib/chatThreadActions";
+import {
+  hasExplicitComposerModelSelection,
+  resolveNewThreadModelSelectionOverride,
+} from "~/lib/chatThreadActions";
 import {
   deriveLogicalProjectKeyFromSettings,
   selectProjectGroupingSettings,
@@ -199,8 +202,19 @@ export function DraftHeroHeadline({
         ? resolveProjectSettings(environmentSettings, project.id, project).settings
             .defaultModelSelection
         : project.defaultModelSelection;
-      if (defaultModelSelection) {
-        setModelSelection(draftId, defaultModelSelection, {
+      const { stickyActiveProvider, stickyModelSelectionByProvider } =
+        useComposerDraftStore.getState();
+      const modelSelection = resolveNewThreadModelSelectionOverride({
+        projectDefaultSelection: defaultModelSelection ?? null,
+        stickySelection: stickyActiveProvider
+          ? (stickyModelSelectionByProvider[stickyActiveProvider] ?? null)
+          : null,
+        carrySelection: null,
+        carrySourceDraftId: draftId,
+        destinationDraftId: draftId,
+      });
+      if (modelSelection) {
+        setModelSelection(draftId, modelSelection, {
           replaceOptions: true,
         });
       }
