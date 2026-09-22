@@ -18,6 +18,7 @@ import {
   AppearancePreferencesProvider,
   useAppearancePreferences,
 } from "./features/settings/appearance/AppearancePreferencesProvider";
+import { readRememberedNavigationState, rememberNavigationState } from "./navigationPersistence";
 import { RootStack } from "./Stack";
 import { appAtomRegistry } from "./state/atom-registry";
 import { subscribeComposerDraftModelReconciliation } from "./state/use-composer-drafts";
@@ -106,7 +107,12 @@ function AppContent() {
               <GlobalVoiceInputControl>
                 <NativeLayoutMetricsProvider>
                   <IncomingShareProvider>
-                    <Navigation linking={appLinking} theme={navigationTheme} />
+                    <Navigation
+                      initialState={readRememberedNavigationState()}
+                      linking={appLinking}
+                      onStateChange={rememberNavigationState}
+                      theme={navigationTheme}
+                    />
                   </IncomingShareProvider>
                   <Dialog.Host />
                   <ThreadArrangementHost />

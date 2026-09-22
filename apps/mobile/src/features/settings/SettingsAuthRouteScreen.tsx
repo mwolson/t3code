@@ -8,6 +8,10 @@ import { StackActions, useNavigation } from "@react-navigation/native";
 import { useEffect, useLayoutEffect, useState } from "react";
 import { View } from "react-native";
 
+import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
+import { Button } from "../../components/ui/Button";
+import { AppText as Text } from "../../components/ui/AppText";
+import { useCloudAuthLoadState } from "../cloud/CloudAuthProvider";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { T3ConnectProfilePage } from "../cloud/T3ConnectProfilePage";
 
@@ -34,6 +38,7 @@ export function SettingsAuthRouteScreen() {
 
 function ConfiguredSettingsAuthRouteScreen() {
   const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
+  const { remount } = useCloudAuthLoadState();
   const navigation = useNavigation();
   const handleHostBack = () => navigation.dispatch(StackActions.popTo("SettingsContent"));
   // Once signed in, stay on the profile view so signing out pops back instead of
@@ -59,7 +64,26 @@ function ConfiguredSettingsAuthRouteScreen() {
         ) : (
           <AuthView isDismissible={false} onHostBack={handleHostBack} />
         )
-      ) : null}
+      ) : (
+        <ClerkLoadPendingView onRetry={remount} />
+      )}
+    </View>
+  );
+}
+
+function ClerkLoadPendingView(props: { readonly onRetry: () => void }) {
+  return (
+    <View collapsable={false} className="flex-1 items-center justify-center gap-4 px-8">
+      <AppActivityIndicator colorClassName="accent-icon-muted" />
+      <Text className="text-center text-base font-t3-bold text-foreground">
+        Checking T3 Account
+      </Text>
+      <Text className="text-center text-sm leading-normal text-foreground-muted">
+        T3 Account is still loading. Retry without clearing app data.
+      </Text>
+      <View>
+        <Button label="Retry" onPress={props.onRetry} />
+      </View>
     </View>
   );
 }
