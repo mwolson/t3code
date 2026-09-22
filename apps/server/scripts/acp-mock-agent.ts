@@ -115,7 +115,20 @@ process.once("exit", (code) => {
   logExit(`exit:${code}`);
 });
 
+const modeConfigId = process.env.T3_ACP_MODE_CONFIG_ID ?? "mode";
+
 function configOptions(): ReadonlyArray<AcpSchema.SessionConfigOption> {
+  return rawConfigOptions().map((option) => {
+    if (option.category !== "mode") return option;
+    if (process.env.T3_ACP_OMIT_MODE_CATEGORY === "1") {
+      const { category: _, ...legacyOption } = option;
+      return { ...legacyOption, id: modeConfigId };
+    }
+    return { ...option, id: modeConfigId };
+  });
+}
+
+function rawConfigOptions(): ReadonlyArray<AcpSchema.SessionConfigOption> {
   if (antigravityProfile) {
     return [
       {
@@ -565,7 +578,7 @@ const program = Effect.gen(function* () {
           },
         );
       }
-      if (request.configId === "mode" && typeof request.value === "string") {
+      if (request.configId === modeConfigId && typeof request.value === "string") {
         currentModeId = request.value;
       }
       if (request.configId === "model" && typeof request.value === "string") {
