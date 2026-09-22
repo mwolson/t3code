@@ -9,10 +9,18 @@ import { readEnvironment, readEnvironmentProviders } from "../state/environments
 import { hasExplicitComposerModelSelection } from "./chatThreadActions";
 
 /** Gives a draft that moved project or machine the model a new thread there would start with. */
-export function seedDraftModelSelection(draftId: DraftId, projectRef: ScopedProjectRef): void {
+export function seedDraftModelSelection(
+  draftId: DraftId,
+  projectRef: ScopedProjectRef,
+  options?: { readonly preferLastUsed: boolean },
+): void {
   const store = useComposerDraftStore.getState();
   if (hasExplicitComposerModelSelection(store.getComposerDraft(draftId))) return;
   store.applyStickyState(draftId);
+  if (options?.preferLastUsed && store.stickyActiveProvider !== null) {
+    const stickySelection = store.stickyModelSelectionByProvider[store.stickyActiveProvider];
+    if (stickySelection) return;
+  }
   const project = readProject(projectRef);
   const settings = readEnvironment(projectRef.environmentId)?.serverConfig?.settings;
   const providers = readEnvironmentProviders(projectRef.environmentId) ?? [];
