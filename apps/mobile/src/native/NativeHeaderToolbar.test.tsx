@@ -23,6 +23,8 @@ vi.mock("@react-navigation/native", async () => {
   // vi.mock factories run before the file's imports.
   const { createContext, use } = await vi.importActual<typeof import("react")>("react");
   const navigation = {
+    addListener: () => () => {},
+    isFocused: () => true,
     setOptions(options: HeaderOptions) {
       harness.setOptionsCalls += 1;
       const previous: Record<string, unknown> = harness.appliedOptions;
