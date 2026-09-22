@@ -16,7 +16,7 @@ import {
   composerAttachmentsStillUploading,
 } from "./composer-attachment-uploads";
 import { useAtomValue } from "@effect/atom-react";
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import {
   type EnvironmentId,
@@ -187,6 +187,17 @@ export function useSelectedThreadRequests() {
   const activePendingApproval = activePendingApprovals[0] ?? null;
   const activePendingUserInputs = pendingRequests?.userInputs ?? EMPTY_PENDING_REQUESTS.userInputs;
   const activePendingUserInput = activePendingUserInputs[0] ?? null;
+  const displayedRequestRef = useRef<{
+    request: typeof activePendingUserInput;
+    thread: typeof selectedThreadShell;
+  } | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- records the committed request so a retained answer handler cannot write into a request that replaced it
+  useLayoutEffect(() => {
+    displayedRequestRef.current = { request: activePendingUserInput, thread: selectedThreadShell };
+    return () => {
+      displayedRequestRef.current = null;
+    };
+  }, [activePendingUserInput, selectedThreadShell]);
   const questionServerConfigs = useServerConfigs();
   const attachmentDrafts = useAtomValue(
     questionAttachmentDraftsAtom(
@@ -273,9 +284,15 @@ export function useSelectedThreadRequests() {
     questionId: string,
     customAnswer: string,
   ) => {
-    const question = activePendingUserInputs
-      .find((request) => request.requestId === requestId)
-      ?.questions.find((entry) => entry.id === questionId);
+    const displayed = displayedRequestRef.current;
+    if (
+      !displayed?.request ||
+      displayed.request.requestId !== requestId ||
+      displayed.thread?.id !== selectedThreadShell?.id ||
+      displayed.thread?.environmentId !== selectedThreadShell?.environmentId
+    )
+      return;
+    const question = displayed.request.questions.find((entry) => entry.id === questionId);
     if (!selectedThreadShell || !question) {
       return;
     }
