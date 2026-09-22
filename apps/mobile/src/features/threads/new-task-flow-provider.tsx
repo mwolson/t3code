@@ -434,7 +434,7 @@ export function NewTaskFlowProvider(
   );
   const modelOptions = buildModelOptions(
     selectedEnvironmentServerConfig,
-    draftModelSelection ?? projectDefaultModelSelection ?? stickyModelSelection,
+    draftModelSelection ?? stickyModelSelection ?? projectDefaultModelSelection,
     undefined,
     selectedProject?.id ?? null,
   );
@@ -447,8 +447,7 @@ export function NewTaskFlowProvider(
   });
   const selectedModel = resolveNewThreadModelSelection({
     defaultSelection: selectedDefaultModel,
-    explicitSelection:
-      draftModelSelection ?? (projectDefaultModelSelection ? null : stickyModelSelection),
+    explicitSelection: draftModelSelection ?? stickyModelSelection,
     fallbackSelection: selectedEnvironmentServerConfig?.settings.fallbackModelSelection ?? null,
     providers: selectedEnvironmentServerConfig?.providers ?? [],
     ...(selectedEnvironmentServerConfig
