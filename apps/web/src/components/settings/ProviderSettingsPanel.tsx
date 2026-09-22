@@ -1038,7 +1038,11 @@ export function EnvironmentProviderSettings({
               readOnly={readOnly}
               onEnable={() => updateProviderInstance(row, { ...row.instance, enabled: true })}
             />
-          ) : mode === "editor" && !readOnly && liveProvider?.setup?.canAuthenticate ? (
+          ) : mode === "editor" &&
+            !readOnly &&
+            liveProvider &&
+            (liveProvider.setup?.canAuthenticate ||
+              (liveProvider.driver === "acpRegistry" && liveProvider.installed)) ? (
             <ProviderAuthenticationSection
               key={`${environmentId}:${row.instanceId}`}
               environmentId={environmentId}
