@@ -259,6 +259,7 @@ const makeHarness = Effect.fn("ProviderAuthService.test.makeHarness")(function* 
             Effect.suspend(() => {
               assert.isTrue(gateClosed);
               actions.push("list-threads");
+              input.onListThreads?.(instances);
               return input.shellError
                 ? Effect.fail(
                     new ProjectionStoreReadError({

@@ -232,6 +232,7 @@ export const ServerProvider = Schema.Struct({
     Schema.Struct({
       canAuthenticate: Schema.Boolean,
       canInstall: Schema.Boolean,
+      documentationUrl: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(2_048))),
     }),
   ),
   nativeSessions: Schema.optional(

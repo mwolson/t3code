@@ -10,13 +10,14 @@ import * as Semaphore from "effect/Semaphore";
 
 import { ProviderSessionManagerV2 } from "../../orchestration-v2/ProviderSessionManager.ts";
 import { ProjectionStoreV2 } from "../../orchestration-v2/ProjectionStore.ts";
-import { ProviderAuthService } from "../Services/ProviderAuthService.ts";
+import * as ProviderAuthService from "../Services/ProviderAuthService.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 
 export const makeProviderAuthService = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry;
   const projections = yield* ProjectionStoreV2;
   const providerSessions = yield* ProviderSessionManagerV2;
+  const credentialChanges = yield* Semaphore.make(1);
 
   const getController = Effect.fn("ProviderAuthService.getController")(function* (
     instanceId: ProviderInstanceId,
@@ -44,6 +45,18 @@ export const makeProviderAuthService = Effect.gen(function* () {
   ) {
     const failure = (detail: string) =>
       new ProviderSetupError({ instanceId, operation: "stopSessions", detail });
+    const affectedIds = new Set([
+      instanceId,
+      ...(binding === undefined
+        ? []
+        : (yield* registry.listInstances)
+            .filter(
+              (instance) =>
+                instance.auth?.credentialBinding?.key === binding.key &&
+                instance.auth.credentialBinding.owner === binding.owner,
+            )
+            .map((instance) => instance.instanceId)),
+    ]);
     const threadIds = yield* projections
       .getRecoveryThreadIds("runtime")
       .pipe(
@@ -58,19 +71,30 @@ export const makeProviderAuthService = Effect.gen(function* () {
             Effect.forEach(
               projection.providerSessions.filter(
                 (session) =>
-                  session.providerInstanceId === instanceId &&
+                  affectedIds.has(session.providerInstanceId) &&
                   session.status !== "stopped" &&
                   session.status !== "error" &&
                   !released.has(session.id),
               ),
               (session) =>
-                providerSessions
-                  .release({
-                    providerSessionId: session.id,
-                    reason: "manual_shutdown",
-                    detail: "Provider sign-in changed.",
-                  })
-                  .pipe(Effect.tap(() => Effect.sync(() => released.add(session.id)))),
+                Effect.gen(function* () {
+                  if (session.providerInstanceId !== instanceId) {
+                    const current = yield* registry.getInstance(session.providerInstanceId);
+                    if (
+                      !binding ||
+                      current?.auth?.credentialBinding?.key !== binding.key ||
+                      current.auth.credentialBinding.owner !== binding.owner
+                    )
+                      return;
+                  }
+                  yield* providerSessions
+                    .release({
+                      providerSessionId: session.id,
+                      reason: "manual_shutdown",
+                      detail: "Provider sign-in changed.",
+                    })
+                    .pipe(Effect.tap(() => Effect.sync(() => released.add(session.id))));
+                }),
               { discard: true },
             ),
           ),
