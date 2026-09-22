@@ -8,6 +8,10 @@ import { useNavigation } from "@react-navigation/native";
 import { useEffect, useState } from "react";
 import { View } from "react-native";
 
+import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
+import { AppText as Text } from "../../components/ui/AppText";
+import { Button } from "../../components/ui/Button";
+import { useClerkLoadRetry } from "../cloud/clerkLoadRecovery";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { T3ConnectProfilePage } from "../cloud/T3ConnectProfilePage";
 
@@ -55,6 +59,28 @@ function ConfiguredSettingsAuthRouteScreen() {
         ) : (
           <AuthView isDismissible={false} onHostBack={handleHostBack} />
         )
+      ) : (
+        <ClerkLoadPendingView />
+      )}
+    </View>
+  );
+}
+
+function ClerkLoadPendingView() {
+  const retry = useClerkLoadRetry();
+  return (
+    <View collapsable={false} className="flex-1 items-center justify-center gap-4 px-8">
+      <AppActivityIndicator />
+      <Text className="text-center text-base font-t3-bold text-foreground">
+        Checking T3 Account
+      </Text>
+      {retry ? (
+        <>
+          <Text className="text-center text-sm leading-normal text-foreground-muted">
+            T3 Account did not load. Retry without clearing app data.
+          </Text>
+          <Button label="Retry" onPress={retry} />
+        </>
       ) : null}
     </View>
   );

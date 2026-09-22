@@ -351,7 +351,7 @@ function PairingScanCard(props: {
 }
 
 function T3ConnectSection() {
-  const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
+  const { isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
   const navigation = useNavigation();
   const { connectedEnvironments, onSetEnvironmentEnabled, onRemoveEnvironmentPress } =
     useRemoteConnections();
@@ -376,7 +376,6 @@ function T3ConnectSection() {
         <ListRow
           label="Sign in to T3 Connect"
           description="Reach your machines from anywhere, no network setup."
-          disabled={!isLoaded}
           onPress={() => navigation.navigate("SettingsAuth")}
         />
       )}
