@@ -21,6 +21,7 @@ vi.mock("@react-navigation/native", () => {
       harness.navigatedRoutes.push(route);
     },
     addListener: () => () => {},
+    isFocused: () => true,
     setOptions: (options: { unstable_headerRightItems?: () => Array<Record<string, unknown>> }) => {
       harness.setOptionsCalls += 1;
       harness.renderedRightItems.push(options.unstable_headerRightItems?.() ?? []);
