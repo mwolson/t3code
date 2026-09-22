@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { serializeRenderedMarkdownFragment } from "./markdown-clipboard";
 import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import {
   collectAssistantCitations,
   serializeAssistantCitation,
 } from "@t3tools/shared/assistantCitations";
+import { serializeRenderedMarkdownFragment, unwrapSoleMarkdownFence } from "./markdown-clipboard";
 
 const TEXT_NODE = 3;
 const ELEMENT_NODE = 1;
@@ -341,5 +341,47 @@ describe("serializeRenderedMarkdownFragment", () => {
     expect(serializeRenderedMarkdownFragment(asNode(container))).toBe(
       "Hello World (Document template)",
     );
+  });
+});
+
+describe("unwrapSoleMarkdownFence", () => {
+  it.each([
+    ["```\n```", ""],
+    ["~~~sh\nprintf hello\n~~~~", "printf hello"],
+    ["```text\r\na\r\nb\r\n```\r\n", "a\r\nb"],
+    ["\n```\n\nbody\n\n```\n", "\nbody\n"],
+    ["````md\n```js\na()\n```\n````", "```js\na()\n```"],
+    ["```\na\n~~~\nb\n```", "a\n~~~\nb"],
+  ])("unwraps one valid fence: %j", (source, expected) => {
+    expect(unwrapSoleMarkdownFence(source)).toBe(expected);
+  });
+
+  it.each([
+    "```js\na()\n```\n\n```js\nb()\n```",
+    "~~~\na\n~~~\ntext\n~~~",
+    "```\na\n```\ntrailing text",
+    "```\na\n``` trailing text",
+    "```\na\n~~~,",
+    "````\na\n```",
+    "```bad`info\na\n```",
+    "    ```\na\n```",
+    "plain text",
+  ])("preserves messages that are not one complete block: %j", (source) => {
+    expect(unwrapSoleMarkdownFence(source)).toBe(source);
+  });
+
+  it("copies a message that is only a fenced code block without the fences", () => {
+    expect(
+      unwrapSoleMarkdownFence("```\nLorem ipsum dolor sit amet, consectetur adipiscing elit.\n```"),
+    ).toBe("Lorem ipsum dolor sit amet, consectetur adipiscing elit.");
+  });
+
+  it("strips an info string from a sole fenced block", () => {
+    expect(unwrapSoleMarkdownFence("```text\nprintf hello\n```")).toBe("printf hello");
+  });
+
+  it("keeps fences when the message has prose around the code block", () => {
+    const markdown = "Run this:\n\n```\ngh workflow run Deploy\n```";
+    expect(unwrapSoleMarkdownFence(markdown)).toBe(markdown);
   });
 });

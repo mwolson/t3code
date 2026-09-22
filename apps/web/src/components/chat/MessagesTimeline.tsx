@@ -197,6 +197,7 @@ import {
   type AssistantCitationTarget,
 } from "./AssistantCitationSource";
 import { useAssistantCitationTarget, type CitationHistoryPage } from "./useAssistantCitationTarget";
+import { unwrapSoleMarkdownFence } from "../../markdown-clipboard";
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRowsWithState,
@@ -2622,7 +2623,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             {resolvedContext.text && (
               <MessageCopyButton
                 // Structured paste needs the canonical links to retain their positions.
-                text={contextClipboardFragment ? resolvedContext.text : plainText}
+                text={
+                  contextClipboardFragment
+                    ? resolvedContext.text
+                    : unwrapSoleMarkdownFence(plainText)
+                }
                 {...(contextClipboardFragment
                   ? {
                       extraFlavors: { [COMPOSER_CONTEXT_CLIPBOARD_MIME]: contextClipboardFragment },

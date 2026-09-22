@@ -342,6 +342,20 @@ export function serializeRenderedMarkdownFragment(container: Node): string {
   return tidyMarkdown(serializeChildren(container));
 }
 
+/** Unwrap only a complete single code block, stopping at its first closing fence. */
+export function unwrapSoleMarkdownFence(markdown: string): string {
+  const source = markdown.replace(/^(?:[ \t]*\r?\n)+/, "");
+  const opening = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)\r?\n/.exec(source);
+  if (!opening) return markdown;
+  const fence = opening[1]!;
+  if (fence.startsWith("`") && opening[2]!.includes("`")) return markdown;
+  const closingPattern = new RegExp(`^ {0,3}${fence[0]}{${fence.length},}[ \\t]*\\r?$`, "gm");
+  closingPattern.lastIndex = opening[0].length;
+  const closing = closingPattern.exec(source);
+  if (!closing || source.slice(closing.index + closing[0].length).trim()) return markdown;
+  return source.slice(opening[0].length, closing.index).replace(/\r?\n$/, "");
+}
+
 export function serializeTableElementToMarkdown(table: Element): string {
   return serializeTable(table).trim();
 }
