@@ -16,7 +16,10 @@ import { useProjectPin } from "~/hooks/useProjectGroupUpdate";
 import { useScratchProject } from "~/hooks/useScratchProject";
 import { isTriagePrompt } from "@t3tools/shared/triagePrompt";
 import { useClientSettings } from "~/hooks/useSettings";
-import { hasExplicitComposerModelSelection } from "~/lib/chatThreadActions";
+import {
+  hasExplicitComposerModelSelection,
+  resolveNewThreadModelSelectionOverride,
+} from "~/lib/chatThreadActions";
 import {
   deriveLogicalProjectKeyFromSettings,
   pickableProjectGroups,
@@ -225,8 +228,19 @@ export function DraftHeroHeadline({
       const defaultModelSelection = fallbackResolution.fallback
         ? fallbackResolution.selection
         : defaultSelection;
-      if (defaultModelSelection) {
-        setModelSelection(draftId, defaultModelSelection, {
+      const { stickyActiveProvider, stickyModelSelectionByProvider } =
+        useComposerDraftStore.getState();
+      const modelSelection = resolveNewThreadModelSelectionOverride({
+        projectDefaultSelection: defaultModelSelection ?? null,
+        stickySelection: stickyActiveProvider
+          ? (stickyModelSelectionByProvider[stickyActiveProvider] ?? null)
+          : null,
+        carrySelection: null,
+        carrySourceDraftId: draftId,
+        destinationDraftId: draftId,
+      });
+      if (modelSelection) {
+        setModelSelection(draftId, modelSelection, {
           replaceOptions: true,
         });
       }
