@@ -1,6 +1,7 @@
 import {
   ApprovalRequestId,
   CheckpointRef,
+  ComposerContextId,
   EnvironmentId,
   MessageId,
   TurnId,
@@ -11,6 +12,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { LegendListRef, MaintainScrollAtEndOptions } from "@legendapp/list/react";
+import { COMPOSER_CONTEXT_CLIPBOARD_MIME } from "@t3tools/shared/composerContextClipboard";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
 
@@ -156,6 +158,9 @@ function stubDomGlobals() {
     contains: () => false,
   };
 
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("requestAnimationFrame", () => 0);
+  vi.stubGlobal("cancelAnimationFrame", () => {});
   vi.stubGlobal("Element", ElementStub);
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -165,6 +170,7 @@ function stubDomGlobals() {
   });
   vi.stubGlobal("window", {
     Element: ElementStub,
+    localStorage,
     matchMedia,
     addEventListener: () => {},
     removeEventListener: () => {},
@@ -176,6 +182,7 @@ function stubDomGlobals() {
     desktopBridge: undefined,
   });
   vi.stubGlobal("document", {
+    getElementById: () => ({}),
     documentElement: {
       classList,
       offsetHeight: 0,
@@ -285,6 +292,102 @@ function buildSnapShotTimelineEntry(previewUrl?: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it.each(["user", "assistant"] as const)(
+    "copies a sole fence through the actual %s Copy handler",
+    async (role) => {
+      const writeText = vi.fn(async () => {});
+      vi.stubGlobal("navigator", { clipboard: { writeText } });
+      let renderer!: ReactTestRenderer;
+      try {
+        await act(async () => {
+          renderer = create(
+            <MessagesTimeline
+              {...buildProps()}
+              timelineEntries={[
+                role === "user"
+                  ? buildUserTimelineEntry("```text\r\na\r\nb\r\n```\r\n")
+                  : buildAssistantTimelineEntry("```text\r\na\r\nb\r\n```\r\n"),
+              ]}
+            />,
+          );
+        });
+        await act(async () => {
+          renderer.root
+            .findAllByType("button")
+            .find((button) => button.props["aria-label"] === "Copy message")!
+            .props.onClick({ nativeEvent: new Event("click") });
+        });
+        expect(writeText).toHaveBeenCalledExactlyOnceWith("a\r\nb");
+      } finally {
+        act(() => renderer?.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("keeps fenced canonical references and structured context in the actual Copy handler", async () => {
+    const writes: Array<Record<string, Blob>> = [];
+    class ClipboardItemStub {
+      constructor(readonly data: Record<string, Blob>) {}
+    }
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("ClipboardItem", ClipboardItemStub);
+    vi.stubGlobal("navigator", {
+      clipboard: {
+        writeText,
+        write: async (items: ClipboardItemStub[]) => {
+          writes.push(...items.map((item) => item.data));
+        },
+      },
+    });
+    const text = "```md\n[notes.txt](t3-context://v1/file/file-1)\n```";
+    const record = {
+      version: 1 as const,
+      contextId: ComposerContextId.make("file-1"),
+      kind: "file" as const,
+      label: "notes.txt",
+      attachmentId: "attachment-1",
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 3,
+    };
+    const entry = buildUserTimelineEntry(text);
+    let renderer!: ReactTestRenderer;
+    try {
+      await act(async () => {
+        renderer = create(
+          <MessagesTimeline
+            {...buildProps()}
+            timelineEntries={[
+              {
+                ...entry,
+                message: { ...entry.message, context: { version: 1, records: [record] } },
+              },
+            ]}
+          />,
+        );
+      });
+      await act(async () => {
+        renderer.root
+          .findAllByType("button")
+          .find((button) => button.props["aria-label"] === "Copy message")!
+          .props.onClick({ nativeEvent: new Event("click") });
+      });
+      expect(writeText).not.toHaveBeenCalled();
+      expect(writes).toHaveLength(1);
+      expect(await writes[0]!["text/plain"]!.text()).toBe(text);
+      expect(JSON.parse(await writes[0]![COMPOSER_CONTEXT_CLIPBOARD_MIME]!.text())).toMatchObject({
+        version: 1,
+        source: { environmentId: ACTIVE_THREAD_ENVIRONMENT_ID, messageId: entry.message.id },
+        records: [record],
+      });
+      expect(await writes[0]!["text/html"]!.text()).toContain("t3-context://v1/file/file-1");
+    } finally {
+      act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("renders previous and next controls with the minimap", () => {
     const first = buildUserTimelineEntry("First turn");
     const secondBase = buildUserTimelineEntry("Second turn");
