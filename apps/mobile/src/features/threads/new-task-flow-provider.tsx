@@ -496,7 +496,7 @@ export function NewTaskFlowProvider(
   );
   const modelOptions = buildModelOptions(
     selectedEnvironmentServerConfig,
-    draftModelSelection ?? projectDefaultModelSelection ?? stickyModelSelection,
+    draftModelSelection ?? stickyModelSelection ?? projectDefaultModelSelection,
     undefined,
     selectedProject?.id ?? null,
   );
