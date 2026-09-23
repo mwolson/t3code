@@ -380,9 +380,30 @@ export const make = Effect.gen(function* () {
     };
     const groups = Map.groupBy(lookupCandidates, lookupKey);
 
-    const pullRequestFor = Effect.fn("ThreadSettlementServiceV2.pullRequestFor")(function* (
-      thread: (typeof lookupCandidates)[number],
+    const wouldSettle = Effect.fn("ThreadSettlementServiceV2.wouldSettle")(function* (
+      group: ReadonlyArray<(typeof lookupCandidates)[number]>,
+      pullRequest: SettlementPullRequest,
     ) {
+      const currentSettings = yield* settingsService.getSettings;
+      const decisionNow = yield* DateTime.now;
+      return group.some((thread) => {
+        const { settings } = resolveProjectSettings(currentSettings, thread.projectId);
+        return (
+          resolveAutoSettlementAt({
+            thread,
+            pullRequest,
+            nowMs: DateTime.toEpochMillis(decisionNow),
+            autoSettleAfterDays: settings.sidebarAutoSettleAfterDays,
+            autoSettleOnMerge: settings.sidebarAutoSettleOnMerge,
+          }) !== null
+        );
+      });
+    });
+
+    const pullRequestFor = Effect.fn("ThreadSettlementServiceV2.pullRequestFor")(function* (
+      group: ReadonlyArray<(typeof lookupCandidates)[number]>,
+    ) {
+      const thread = group[0]!;
       const reference = thread.linkedPullRequest ?? thread.branchPullRequest;
       if (reference != null) {
         // The event carries the merged state, so only the threads linked to
@@ -412,8 +433,16 @@ export const make = Effect.gen(function* () {
               },
               { recoverTransientFailure: false },
             );
+        const terminal = {
+          state: summary.state,
+          closedAt: summary.closedAt ?? null,
+          mergedAt: summary.mergedAt ?? null,
+        } satisfies SettlementPullRequest;
         const cwd = lookupCwdByThreadId.get(thread.id);
         if (summary.state !== "open" && thread.branch !== null && cwd !== undefined) {
+          // Recheck reused branches only when this sweep would settle a thread.
+          // Eligibility that changes after this check waits for the next sweep.
+          if (!(yield* wouldSettle(group, terminal))) return undefined;
           const current = yield* git.branchPullRequest(
             { cwd, branch: thread.branch },
             { refresh: true },
@@ -427,11 +456,7 @@ export const make = Effect.gen(function* () {
             return current;
           }
         }
-        return {
-          state: summary.state,
-          closedAt: summary.closedAt ?? null,
-          mergedAt: summary.mergedAt ?? null,
-        } satisfies SettlementPullRequest;
+        return terminal;
       }
       if (thread.branch === null) return null;
       const cwd = lookupCwdByThreadId.get(thread.id);
@@ -445,7 +470,8 @@ export const make = Effect.gen(function* () {
       groups.values(),
       (group) =>
         Effect.gen(function* () {
-          const pullRequest = yield* pullRequestFor(group[0]!);
+          const pullRequest = yield* pullRequestFor(group);
+          if (pullRequest === undefined) return;
           yield* Effect.forEach(group, (thread) => settleThread(thread, pullRequest), {
             discard: true,
           });
