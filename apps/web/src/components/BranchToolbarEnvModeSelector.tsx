@@ -1,3 +1,4 @@
+import { ThreadDetailsSelectControl } from "./chat/ThreadDetailsControl";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { FolderGit2Icon, FolderGitIcon, FolderIcon, HistoryIcon } from "lucide-react";
 import { memo, useMemo } from "react";
@@ -6,7 +7,6 @@ import {
   THREAD_DETAILS_PANEL_ICON_CLASS,
   THREAD_DETAILS_PANEL_LOCKED_ROW_CLASS,
   THREAD_DETAILS_PANEL_ROW_POPUP_CLASS,
-  THREAD_DETAILS_PANEL_SELECT_ROW_CLASS,
 } from "./chat/threadDetailsPanelStyles";
 
 import {
@@ -23,7 +23,6 @@ import {
   SelectGroupLabel,
   SelectItem,
   SelectPopup,
-  SelectTrigger,
   SelectValue,
 } from "./ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
@@ -135,13 +134,9 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
       <Tooltip>
         <TooltipTrigger
           render={
-            <SelectTrigger
-              variant="ghost"
-              size={displayMode === "panel" ? "default" : "xs"}
-              className={cn(
-                "min-w-0 shrink font-normal text-xs!",
-                displayMode === "panel" && THREAD_DETAILS_PANEL_SELECT_ROW_CLASS,
-              )}
+            <ThreadDetailsSelectControl
+              panel={displayMode === "panel"}
+              className="min-w-0 shrink"
               aria-label="Workspace"
               data-composer-shortcut="composer.workspace"
               data-composer-context-control
@@ -182,7 +177,7 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
         {...(displayMode === "toolbar" ? composerFloatingLayerProps : {})}
         {...(displayMode === "panel"
           ? {
-              popupClassName: THREAD_DETAILS_PANEL_ROW_POPUP_CLASS,
+              className: THREAD_DETAILS_PANEL_ROW_POPUP_CLASS,
             }
           : {})}
       >

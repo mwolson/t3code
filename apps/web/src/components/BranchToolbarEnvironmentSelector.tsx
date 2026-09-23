@@ -1,3 +1,4 @@
+import { ThreadDetailsSelectControl } from "./chat/ThreadDetailsControl";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "./ui/tooltip";
 import type { EnvironmentId } from "@t3tools/contracts";
@@ -10,7 +11,6 @@ import {
   THREAD_DETAILS_PANEL_ICON_CLASS,
   THREAD_DETAILS_PANEL_LOCKED_ROW_CLASS,
   THREAD_DETAILS_PANEL_ROW_POPUP_CLASS,
-  THREAD_DETAILS_PANEL_SELECT_ROW_CLASS,
 } from "./chat/threadDetailsPanelStyles";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { useComposerMenuProps } from "./chat/composerEventScope";
@@ -20,7 +20,6 @@ import {
   SelectGroupLabel,
   SelectItem,
   SelectPopup,
-  SelectTrigger,
   SelectValue,
 } from "./ui/select";
 
@@ -104,13 +103,9 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
       <Tooltip>
         <TooltipTrigger
           render={
-            <SelectTrigger
-              variant="ghost"
-              size={displayMode === "panel" ? "default" : "xs"}
-              className={cn(
-                "min-w-0 max-w-full font-normal text-xs!",
-                displayMode === "panel" && THREAD_DETAILS_PANEL_SELECT_ROW_CLASS,
-              )}
+            <ThreadDetailsSelectControl
+              panel={displayMode === "panel"}
+              className="min-w-0 max-w-full"
               aria-label="Run on"
               data-composer-shortcut="composer.host"
               data-composer-context-control
@@ -143,7 +138,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
         {...(displayMode === "toolbar" ? composerFloatingLayerProps : {})}
         {...(displayMode === "panel"
           ? {
-              popupClassName: THREAD_DETAILS_PANEL_ROW_POPUP_CLASS,
+              className: THREAD_DETAILS_PANEL_ROW_POPUP_CLASS,
             }
           : {})}
       >

@@ -419,11 +419,7 @@ const composerContextPresentationRegistry = createContextPresentationRegistry<
       canRender: (entry) => entry.kind === "thread",
       render: (entry, context) =>
         entry.kind === "thread" ? (
-          <ThreadContextChip
-            record={entry.record}
-            className={COMPOSER_INLINE_CHIP_CLASS_NAME}
-            labelClassName={COMPOSER_INLINE_CHIP_LABEL_CLASS_NAME}
-          />
+          <ThreadContextChip record={entry.record} />
         ) : (
           <UnresolvedContextChip label={context.label} />
         ),

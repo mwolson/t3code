@@ -115,7 +115,7 @@ export function WorktreeBaseBranchPicker({
         id={id}
         disabled={disabled || !cwd}
         render={<Button variant="outline" size="sm" />}
-        className="w-full justify-between font-normal"
+        className="w-full justify-between "
       >
         <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground" />
         <MiddleTruncate value={label} className="flex-1 text-left" />

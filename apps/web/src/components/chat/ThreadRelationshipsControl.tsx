@@ -1,3 +1,4 @@
+import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { CollapsibleSectionHeader, SectionHeaderStatus } from "../ui/collapsible-section-header";
@@ -46,15 +47,11 @@ import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { AgentElapsed } from "./AgentElapsed";
 import { ThreadRelationshipIcon } from "./ThreadRelationshipIcon";
-import { Button } from "../ui/button";
+
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
-  THREAD_DETAILS_PANEL_ICON_ACTION_CLASS,
-  THREAD_DETAILS_PANEL_LINK_ROW_CLASS,
   THREAD_DETAILS_PANEL_LINK_SPLIT_GROUP_CLASS,
-  THREAD_DETAILS_PANEL_LINK_SPLIT_PRIMARY_CLASS,
-  THREAD_DETAILS_PANEL_LINK_SPLIT_SECONDARY_CLASS,
   THREAD_DETAILS_PANEL_MENU_POPUP_CLASS,
   THREAD_DETAILS_PANEL_SPLIT_SEPARATOR_CLASS,
 } from "./threadDetailsPanelStyles";
@@ -296,10 +293,10 @@ export function ThreadRelationshipsPanel(props: {
           <Menu>
             <MenuTrigger
               render={
-                <Button
+                <ThreadDetailsControl
                   size="icon-xs"
                   variant="ghost"
-                  className={THREAD_DETAILS_PANEL_ICON_ACTION_CLASS}
+                  part="icon"
                   aria-label="More thread actions"
                   disabled={busyAction !== null}
                 />
@@ -398,10 +395,10 @@ export function ThreadRelationshipsPanel(props: {
                         <TooltipTrigger
                           delay={200}
                           render={
-                            <Button
+                            <ThreadDetailsControl
                               size="sm"
                               variant="ghost"
-                              className={THREAD_DETAILS_PANEL_LINK_SPLIT_PRIMARY_CLASS}
+                              part="link-primary"
                               disabled={node?.missing === true}
                               onClick={() => openThread(threadId)}
                             />
@@ -418,10 +415,10 @@ export function ThreadRelationshipsPanel(props: {
                       <Tooltip>
                         <TooltipTrigger
                           render={
-                            <Button
+                            <ThreadDetailsControl
                               size="sm"
                               variant="ghost"
-                              className={THREAD_DETAILS_PANEL_LINK_SPLIT_SECONDARY_CLASS}
+                              part="secondary"
                               aria-label={
                                 parentTitle
                                   ? `Merge back to ${parentTitle}`
@@ -435,7 +432,7 @@ export function ThreadRelationshipsPanel(props: {
                               ) : (
                                 <PullRequestGlyph.merged className="size-3" />
                               )}
-                            </Button>
+                            </ThreadDetailsControl>
                           }
                         />
                         <TooltipPopup side="left">
@@ -452,12 +449,12 @@ export function ThreadRelationshipsPanel(props: {
                       <TooltipTrigger
                         delay={200}
                         render={
-                          <Button
+                          <ThreadDetailsControl
                             size="sm"
                             variant="ghost"
                             disabled={node?.missing === true}
                             onClick={() => openThread(threadId)}
-                            className={THREAD_DETAILS_PANEL_LINK_ROW_CLASS}
+                            part="row"
                           />
                         }
                       >
