@@ -5,10 +5,10 @@ import {
   PanelRightIcon,
   SquareMenuIcon,
 } from "lucide-react";
-import { memo, type ReactElement, type ReactNode, type RefObject } from "react";
+import { memo, type ReactElement } from "react";
 
 import type { ThreadPanelPresentation } from "../../rightPanelLayout";
-import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { PopoverCreateHandle, PopoverTrigger } from "../ui/popover";
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
@@ -21,8 +21,7 @@ export interface PanelLayoutControlsProps {
   terminalShortcutLabel: string | null;
   threadPanelOpen: boolean;
   threadPanelPresentation: ThreadPanelPresentation;
-  threadPanelPopoverAnchor?: RefObject<Element | null>;
-  threadPanelPopoverContent?: ReactNode;
+  threadPanelPopoverHandle?: ReturnType<typeof PopoverCreateHandle>;
   threadPanelShortcutLabel: string | null;
   threadPanelHasAttention: boolean;
   rightPanelAvailable: boolean;
@@ -43,8 +42,7 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
   terminalShortcutLabel,
   threadPanelOpen,
   threadPanelPresentation,
-  threadPanelPopoverAnchor,
-  threadPanelPopoverContent,
+  threadPanelPopoverHandle,
   threadPanelShortcutLabel,
   threadPanelHasAttention,
   rightPanelAvailable,
@@ -90,32 +88,13 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
       className="flex h-full shrink-0 items-center gap-1 [-webkit-app-region:no-drag]"
       data-panel-layout-controls
     >
-      {showThreadPanelControl ? (
-        threadPanelPresentation === "popover" ? (
-          <Popover
-            open={threadPanelOpen}
-            onOpenChange={(open) => {
-              if (open !== threadPanelOpen) onToggleThreadPanel();
-            }}
-          >
-            {threadPanelTooltip(<PopoverTrigger render={threadPanelToggle} />)}
-            <PopoverPopup
-              anchor={threadPanelPopoverAnchor}
-              align="end"
-              alignOffset={0}
-              collisionAvoidance={{ side: "shift", align: "shift", fallbackAxisSide: "none" }}
-              side="bottom"
-              sideOffset={0}
-              variant="panel"
-              padding="none"
-            >
-              {threadPanelPopoverContent}
-            </PopoverPopup>
-          </Popover>
-        ) : (
-          threadPanelTooltip(threadPanelToggle)
-        )
-      ) : null}
+      {showThreadPanelControl
+        ? threadPanelPresentation === "popover"
+          ? threadPanelTooltip(
+              <PopoverTrigger handle={threadPanelPopoverHandle} render={threadPanelToggle} />,
+            )
+          : threadPanelTooltip(threadPanelToggle)
+        : null}
       {showTerminalControl ? (
         <Tooltip>
           <TooltipTrigger render={<span className="flex shrink-0" />}>

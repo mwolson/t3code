@@ -139,6 +139,7 @@ interface GitActionsControlProps {
    */
   onOpenPullRequest?: ((number: number) => void) | undefined;
   displayMode?: "toolbar" | "panel";
+  compact?: boolean;
   onOpenChanges?: () => void;
 }
 
@@ -1058,6 +1059,7 @@ export default function GitActionsControl({
   activeThreadRef,
   draftId,
   displayMode = "toolbar",
+  compact = false,
   onOpenChanges,
 }: GitActionsControlProps) {
   const isPanel = displayMode === "panel";
@@ -1782,7 +1784,7 @@ export default function GitActionsControl({
             {initAction.isPending ? "Initializing..." : "Initialize Git"}
           </span>
         </ThreadDetailsControl>
-      ) : (
+      ) : compact && !gitActionProgress && !visibleInlineSuccess ? null : (
         <ActionGroup
           role="group"
           aria-label="Git actions"

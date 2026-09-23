@@ -11,6 +11,7 @@ import {
   useState,
 } from "react";
 
+import { useChatCanvas } from "../chat/ChatCanvasContext";
 import { BrowserSurfaceSlot } from "~/browser/BrowserSurfaceSlot";
 import {
   findActiveBrowserRecordingRuntimeTabId,
@@ -43,11 +44,9 @@ import {
   PREVIEW_MINI_PLAYER_CORNER_RADIUS,
   PREVIEW_MINI_PLAYER_WEBVIEW_Z_INDEX,
   type PreviewMiniPlayerFrame,
-  type PreviewMiniPlayerObstacles,
   resizePreviewMiniPlayer,
   resolveDeviceMiniPlayerCornerRadius,
   resolveDeviceMiniPlayerSourceSize,
-  resolvePreviewMiniPlayerFrame,
   resolvePreviewMiniPlayerSourceSize,
 } from "./previewMiniPlayerLayout";
 
@@ -62,79 +61,6 @@ interface PointerGesture {
 interface Props {
   readonly threadRef: ScopedThreadRef;
   readonly miniPlayer: PreviewMiniPlayerState;
-  /** The docked composer overlay; null while the composer floats mid-screen. */
-  readonly composerOverlayElement: HTMLElement | null;
-  /** Whether the inline thread-details card is open in the chat column. */
-  readonly detailsPanelOpen: boolean;
-}
-
-interface Layout {
-  readonly container: PreviewMiniPlayerSize;
-  readonly obstacles: PreviewMiniPlayerObstacles;
-}
-
-const sameSpan = <T extends { readonly left: number; readonly right: number }>(
-  a: T | null,
-  b: T | null,
-  extent: keyof T,
-) =>
-  a === b ||
-  (a !== null && b !== null && a.left === b.left && a.right === b.right && a[extent] === b[extent]);
-
-const sameLayout = (a: Layout, b: Layout) =>
-  a.container.width === b.container.width &&
-  a.container.height === b.container.height &&
-  sameSpan(a.obstacles.composer, b.obstacles.composer, "height") &&
-  sameSpan(a.obstacles.detailsCard, b.obstacles.detailsCard, "bottom");
-
-/**
- * The inline thread-details card lives in the aside beside the chat column,
- * so it is found from the column's nearest ancestor that reserves room for it.
- */
-function findDetailsCard(container: HTMLElement): HTMLElement | null {
-  const card = container
-    .closest('[data-thread-details-inline-reserved="true"]')
-    ?.querySelector('[data-thread-details-panel="inline"] [data-thread-details-card]');
-  return card instanceof HTMLElement ? card : null;
-}
-
-/**
- * Measures the chat column, the composer, and the details card in the column's
- * coordinates. The composer's columns come from its centered stack, not the
- * full-width overlay, so the margins beside it stay open to the player.
- */
-function measureLayout(
-  container: HTMLElement,
-  composerOverlay: HTMLElement | null,
-  detailsCard: HTMLElement | null,
-): Layout {
-  const containerRect = container.getBoundingClientRect();
-  const stackRect = composerOverlay
-    ?.querySelector('[data-chat-composer-stack="true"]')
-    ?.getBoundingClientRect();
-  const overlayRect = composerOverlay?.getBoundingClientRect();
-  const cardRect = detailsCard?.getBoundingClientRect();
-  return {
-    container: { width: container.clientWidth, height: container.clientHeight },
-    obstacles: {
-      composer:
-        overlayRect && stackRect && overlayRect.height > 0
-          ? {
-              left: Math.floor(stackRect.left - containerRect.left),
-              right: Math.ceil(stackRect.right - containerRect.left),
-              height: Math.ceil(overlayRect.height),
-            }
-          : null,
-      detailsCard:
-        cardRect && cardRect.height > 0
-          ? {
-              left: Math.floor(cardRect.left - containerRect.left),
-              right: Math.ceil(cardRect.right - containerRect.left),
-              bottom: Math.ceil(cardRect.bottom - containerRect.top),
-            }
-          : null,
-    },
-  };
 }
 
 const frameCornerRadius = () => PREVIEW_MINI_PLAYER_CORNER_RADIUS;
@@ -155,12 +81,7 @@ const RESIZE_HANDLES: ReadonlyArray<{
 ];
 
 /** Floats the thread's browser tab or device stream over chat. */
-export function ThreadPreviewMiniPlayer({
-  threadRef,
-  miniPlayer,
-  composerOverlayElement,
-  detailsPanelOpen,
-}: Props) {
+export function ThreadPreviewMiniPlayer({ threadRef, miniPlayer }: Props) {
   const { source } = miniPlayer;
   return source.kind === "browser" ? (
     <BrowserMiniPlayer
@@ -168,8 +89,6 @@ export function ThreadPreviewMiniPlayer({
       threadRef={threadRef}
       tabId={source.tabId}
       miniPlayer={miniPlayer}
-      composerOverlayElement={composerOverlayElement}
-      detailsPanelOpen={detailsPanelOpen}
     />
   ) : (
     <DeviceMiniPlayer
@@ -177,19 +96,11 @@ export function ThreadPreviewMiniPlayer({
       threadRef={threadRef}
       source={source}
       miniPlayer={miniPlayer}
-      composerOverlayElement={composerOverlayElement}
-      detailsPanelOpen={detailsPanelOpen}
     />
   );
 }
 
-function BrowserMiniPlayer({
-  threadRef,
-  tabId,
-  miniPlayer,
-  composerOverlayElement,
-  detailsPanelOpen,
-}: Props & { readonly tabId: string }) {
+function BrowserMiniPlayer({ threadRef, tabId, miniPlayer }: Props & { readonly tabId: string }) {
   const previewState = useThreadPreviewState(threadRef);
   const snapshot = previewState.sessions[tabId] ?? null;
   const runtimeTabId = previewRuntimeTabId(threadRef, previewState.serverEpoch, tabId);
@@ -233,8 +144,6 @@ function BrowserMiniPlayer({
       threadRef={threadRef}
       miniPlayer={miniPlayer}
       sourceSize={sourceSize}
-      composerOverlayElement={composerOverlayElement}
-      detailsPanelOpen={detailsPanelOpen}
       label="Floating browser preview"
       recording={recording}
       onOpenInPanel={openInPanel}
@@ -292,8 +201,6 @@ function DeviceMiniPlayer({
   threadRef,
   source,
   miniPlayer,
-  composerOverlayElement,
-  detailsPanelOpen,
 }: Props & { readonly source: Extract<PreviewMiniPlayerSource, { kind: "device" }> }) {
   const { state: deviceState } = useDeviceState(threadRef.environmentId);
   const [screen, setScreen] = useState<DeviceScreenSize | null>(null);
@@ -323,8 +230,6 @@ function DeviceMiniPlayer({
       threadRef={threadRef}
       miniPlayer={miniPlayer}
       sourceSize={sourceSize}
-      composerOverlayElement={composerOverlayElement}
-      detailsPanelOpen={detailsPanelOpen}
       label="Floating device preview"
       onOpenInPanel={openInPanel}
       cornerRadius={cornerRadius}
@@ -360,8 +265,6 @@ function MiniPlayerShell({
   threadRef,
   miniPlayer,
   sourceSize,
-  composerOverlayElement,
-  detailsPanelOpen,
   label,
   onOpenInPanel,
   pillActions,
@@ -372,8 +275,6 @@ function MiniPlayerShell({
   readonly threadRef: ScopedThreadRef;
   readonly miniPlayer: PreviewMiniPlayerState;
   readonly sourceSize: PreviewMiniPlayerSize;
-  readonly composerOverlayElement: HTMLElement | null;
-  readonly detailsPanelOpen: boolean;
   readonly label: string;
   readonly onOpenInPanel: () => void;
   readonly pillActions?: ReactNode;
@@ -382,21 +283,33 @@ function MiniPlayerShell({
   readonly cornerRadius?: (frame: PreviewMiniPlayerSize) => number;
   readonly children: (frame: PreviewMiniPlayerFrame) => ReactNode;
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const canvas = useChatCanvas();
   const gestureRef = useRef<PointerGesture | null>(null);
-  const [layout, setLayout] = useState<Layout | null>(null);
-  const container = layout?.container ?? null;
-  const obstacles = layout?.obstacles ?? NO_PREVIEW_MINI_PLAYER_OBSTACLES;
+  const container = canvas?.container ?? null;
+  const obstacles = NO_PREVIEW_MINI_PLAYER_OBSTACLES;
   const sourceKey = previewMiniPlayerSourceKey(miniPlayer.source);
-  const frame = container
-    ? resolvePreviewMiniPlayerFrame({
-        width: miniPlayer.width,
-        position: miniPlayer.position,
-        source: sourceSize,
-        container,
-        obstacles,
-      })
-    : null;
+  const frame = canvas?.previewKey === sourceKey ? canvas.layout.frame : null;
+  const { width: sourceWidth, height: sourceHeight } = sourceSize;
+  const reportPreview = canvas?.reportPreview;
+  const clearPreview = canvas?.clearPreview;
+  useLayoutEffect(() => {
+    reportPreview?.({
+      key: sourceKey,
+      width: miniPlayer.width,
+      position: miniPlayer.position,
+      lastInteraction: miniPlayer.lastInteraction,
+      source: { width: sourceWidth, height: sourceHeight },
+    });
+  }, [
+    reportPreview,
+    sourceKey,
+    miniPlayer.width,
+    miniPlayer.position,
+    miniPlayer.lastInteraction,
+    sourceWidth,
+    sourceHeight,
+  ]);
+  useLayoutEffect(() => () => clearPreview?.(sourceKey), [clearPreview, sourceKey]);
 
   const radius = frame ? cornerRadius(frame) : PREVIEW_MINI_PLAYER_CORNER_RADIUS;
   // Inside a wide curve the default 8px inset would land on the clipped-away corner.
@@ -405,26 +318,6 @@ function MiniPlayerShell({
   const close = () => {
     usePreviewMiniPlayerStore.getState().close(threadRef);
   };
-
-  // The composer and the details card grow on their own (drafts, banners,
-  // workspace rows), so both are observed alongside the column. The card is
-  // looked up when the panel opens; the flag re-runs this on toggle.
-  useLayoutEffect(() => {
-    const element = containerRef.current;
-    if (!element) return;
-    const detailsCard = detailsPanelOpen ? findDetailsCard(element) : null;
-    const measure = () => {
-      const next = measureLayout(element, composerOverlayElement, detailsCard);
-      setLayout((current) => (current && sameLayout(current, next) ? current : next));
-    };
-    measure();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    if (composerOverlayElement) observer.observe(composerOverlayElement);
-    if (detailsCard) observer.observe(detailsCard);
-    return () => observer.disconnect();
-  }, [composerOverlayElement, detailsPanelOpen]);
 
   const beginGesture = (
     event: ReactPointerEvent<HTMLElement>,
@@ -469,8 +362,7 @@ function MiniPlayerShell({
       container,
       obstacles,
     });
-    store.resize(threadRef, sourceKey, next.width);
-    store.move(threadRef, sourceKey, { x: next.x, y: next.y });
+    store.resize(threadRef, sourceKey, next.width, { x: next.x, y: next.y });
   };
 
   const endGesture = (event: ReactPointerEvent<HTMLElement>) => {
@@ -482,7 +374,7 @@ function MiniPlayerShell({
   };
 
   return (
-    <div ref={containerRef} className="pointer-events-none absolute inset-0">
+    <div className="pointer-events-none absolute inset-0">
       {frame ? (
         <section
           aria-label={label}
@@ -497,8 +389,12 @@ function MiniPlayerShell({
           }}
         >
           <div
-            className="group pointer-events-auto absolute z-[49] size-3"
+            className="group pointer-events-auto absolute z-[49] size-3 touch-none cursor-grab active:cursor-grabbing"
             style={{ right: pillInset, top: pillInset }}
+            onPointerDown={(event) => beginGesture(event, null)}
+            onPointerMove={handlePointerMove}
+            onPointerUp={endGesture}
+            onPointerCancel={endGesture}
           >
             <div
               role={recording ? "status" : undefined}
@@ -513,13 +409,7 @@ function MiniPlayerShell({
                 )}
               />
             </div>
-            <div
-              className="pointer-events-none absolute right-0 top-0 flex h-8 cursor-grab items-center gap-0.5 rounded-lg border border-border/80 bg-popover/92 p-0.5 opacity-0 shadow-lg/20 backdrop-blur-xl transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 active:cursor-grabbing"
-              onPointerDown={(event) => beginGesture(event, null)}
-              onPointerMove={handlePointerMove}
-              onPointerUp={endGesture}
-              onPointerCancel={endGesture}
-            >
+            <div className="pointer-events-none absolute right-0 top-0 flex h-8 cursor-grab items-center gap-0.5 rounded-lg border border-border/80 bg-popover/92 p-0.5 opacity-0 shadow-lg/20 backdrop-blur-xl transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 active:cursor-grabbing">
               {recording ? (
                 <span aria-hidden className="flex size-6 shrink-0 items-center justify-center">
                   <span className="size-2 rounded-full bg-red-500 motion-safe:animate-status-pulse" />

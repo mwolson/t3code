@@ -8,6 +8,7 @@ export function ThreadDetailsSection({
   title,
   actions,
   separated = true,
+  showHeading = true,
   children,
   ...props
 }: Omit<ComponentProps<"section">, "className" | "style" | "title" | "aria-labelledby"> & {
@@ -15,14 +16,21 @@ export function ThreadDetailsSection({
   title: string;
   actions?: ReactNode;
   separated?: boolean;
+  showHeading?: boolean;
 }) {
   return (
     <section
       {...props}
-      aria-labelledby={headingId}
+      aria-labelledby={showHeading ? headingId : undefined}
+      aria-label={showHeading ? undefined : title}
       className={cn("px-2 pt-2 pb-2.5", separated && "border-t border-border/65")}
     >
-      <div className="mb-1 flex min-h-8 min-w-0 items-center justify-between gap-2 px-1.5">
+      <div
+        className={cn(
+          "mb-1 flex min-h-8 min-w-0 items-center justify-between gap-2 px-1.5",
+          !showHeading && "hidden",
+        )}
+      >
         <h3
           id={headingId}
           className="min-w-0 truncate text-[11px] font-medium text-muted-foreground select-none"

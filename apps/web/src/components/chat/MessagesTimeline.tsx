@@ -1,3 +1,4 @@
+import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
@@ -1232,6 +1233,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     );
   }, [historyControls, onOpenThread, parentThreadLink, topFadeEnabled]);
 
+  const canvas = useChatCanvas();
+  const registerTimeline = canvas?.registerTimeline;
+  const setTimelineList = useCallback(
+    (list: LegendListRef | null) => {
+      listRef.current = list;
+      registerTimeline?.(list?.getScrollableNode() ?? null);
+    },
+    [listRef, registerTimeline],
+  );
+
   // Stable renderItem — no closure deps. Row components read shared state
   // from TimelineRowCtx, which propagates through LegendList's memo.
   const renderItem = useCallback(
@@ -1281,7 +1292,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             />
           ) : null}
           <LegendList<MessagesTimelineRow>
-            ref={listRef}
+            ref={setTimelineList}
             data={rows}
             extraData={`${listIdentityKey}:${rows.length}`}
             keyExtractor={keyExtractor}
@@ -1316,7 +1327,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             onScroll={handleScroll}
             onItemSizeChanged={reportContentOverflow}
             className={cn(
-              "messages-timeline-scroll scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
+              "messages-timeline-scroll scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain [overflow-anchor:none]",
               topFadeEnabled && "topbar-scroll-fade",
             )}
             ListHeaderComponent={listHeader}
