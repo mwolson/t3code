@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import Constants from "expo-constants";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Socket from "effect/socket/Socket";
@@ -7,6 +8,7 @@ import { layerRemoteHttpClient } from "@t3tools/client-runtime/rpc";
 
 import * as Dpop from "../features/cloud/dpop";
 import * as ManagedRelayLayer from "../features/cloud/managedRelayLayer";
+import { resolvePersonalBackgroundRoute } from "../features/cloud/personalBackgroundRoute";
 import { resolveCloudPublicConfig } from "../features/cloud/publicConfig";
 import * as Tracing from "../features/observability/tracing";
 import * as Persistence from "../persistence/layer";
@@ -15,8 +17,16 @@ import { whenProtectedDataAvailable } from "./protectedData";
 
 declare const module: { readonly hot?: FoundationHotModule } | undefined;
 
-function configuredRelayUrl(): string {
-  return resolveCloudPublicConfig().relay.url ?? "http://relay.invalid";
+function configuredRelayOptions(): Parameters<typeof ManagedRelayLayer.layer>[0] {
+  const relay = resolveCloudPublicConfig().relay;
+  const extra = Constants.expoConfig?.extra;
+  return {
+    relayUrl: relay.url ?? "http://relay.invalid",
+    background:
+      extra?.iosPersonalTeamBuild === true
+        ? resolvePersonalBackgroundRoute(extra)
+        : { kind: "default", url: relay.backgroundUrl },
+  };
 }
 
 const layerHttpClient = layerRemoteHttpClient(fetch);
@@ -30,7 +40,7 @@ type RuntimeLayerSource =
   | typeof Tracing.layer;
 
 const layerRuntime = Layer.merge(
-  ManagedRelayLayer.layer(configuredRelayUrl()),
+  ManagedRelayLayer.layer(configuredRelayOptions()),
   Socket.layerWebSocketConstructorGlobal,
 ).pipe(
   Layer.provideMerge(Dpop.layer),

@@ -1,5 +1,4 @@
 import * as Dialog from "../../components/ui/Dialog";
-import Constants from "expo-constants";
 import * as Crypto from "expo-crypto";
 import { PROVIDER_SEND_TURN_MAX_FILE_BYTES } from "@t3tools/contracts";
 import {
@@ -44,13 +43,7 @@ type IncomingShareContextValue = {
 const IncomingShareContext = React.createContext<IncomingShareContextValue | null>(null);
 
 function receiveSharingEnabled(): boolean {
-  if (Platform.OS === "android") {
-    return true;
-  }
-  if (Platform.OS !== "ios") {
-    return false;
-  }
-  return Constants.expoConfig?.extra?.iosPersonalTeamBuild !== true;
+  return Platform.OS === "android" || Platform.OS === "ios";
 }
 
 const getIncomingSharePayloads = createIncomingSharePayloadReader({
