@@ -319,7 +319,17 @@ export class ManagedRelayRequestProofCreationError extends Schema.TaggedError<Ma
   }
 }
 
+export class ManagedRelayBackgroundRelayDisabledError extends Schema.TaggedError<ManagedRelayBackgroundRelayDisabledError>()(
+  "ManagedRelayBackgroundRelayDisabledError",
+  {},
+) {
+  override get message(): string {
+    return "Background relay is disabled for this build.";
+  }
+}
+
 export const ManagedRelayClientError = Schema.Union([
+  ManagedRelayBackgroundRelayDisabledError,
   ManagedRelayUrlInvalidError,
   ManagedRelayRequestFailedError,
   ManagedRelayRequestTimeoutError,
@@ -373,6 +383,7 @@ export interface ManagedRelayClientLayerOptions {
   readonly relayUrl: string;
   readonly clientId: RelayPublicClientId;
   readonly backgroundRelayUrl?: string;
+  readonly backgroundRelayDisabled?: boolean;
   readonly accessTokenStore?: ManagedRelayAccessTokenStore;
 }
 
@@ -1120,6 +1131,17 @@ export const make = Effect.fn("ManagedRelayClient.makeWithBackgroundRelay")(func
   options: ManagedRelayClientLayerOptions,
 ) {
   const primary = yield* makeSingleRelay(options);
+  if (options.backgroundRelayDisabled) {
+    const disabled = () => Effect.fail(new ManagedRelayBackgroundRelayDisabledError());
+    return ManagedRelayClient.of({
+      ...primary,
+      listDevices: disabled,
+      registerDevice: disabled,
+      unregisterDevice: disabled,
+      registerLiveActivity: disabled,
+      getAgentActivitySnapshot: disabled,
+    });
+  }
   if (
     options.backgroundRelayUrl === undefined ||
     normalizeSecureRelayUrl(options.backgroundRelayUrl) === primary.relayUrl

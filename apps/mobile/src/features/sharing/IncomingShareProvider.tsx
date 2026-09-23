@@ -1,7 +1,6 @@
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import * as Dialog from "../../components/ui/Dialog";
 import { m } from "../../i18n/messages";
-import Constants from "expo-constants";
 import * as Crypto from "expo-crypto";
 import { EnvironmentId, PROVIDER_SEND_TURN_MAX_FILE_BYTES } from "@t3tools/contracts";
 import {
@@ -52,13 +51,7 @@ import {
 } from "./incoming-share-storage";
 
 function receiveSharingEnabled(): boolean {
-  if (Platform.OS === "android") {
-    return true;
-  }
-  if (Platform.OS !== "ios") {
-    return false;
-  }
-  return Constants.expoConfig?.extra?.iosPersonalTeamBuild !== true;
+  return Platform.OS === "android" || Platform.OS === "ios";
 }
 
 const getIncomingSharePayloads = createIncomingSharePayloadReader({

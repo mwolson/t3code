@@ -3,6 +3,8 @@ import { relayClerkTokenOptions } from "@t3tools/shared/relayAuth";
 import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
 import * as Schema from "effect/Schema";
 
+import { resolvePersonalBackgroundRoute } from "./personalBackgroundRoute";
+
 export class CloudPublicConfigMissingError extends Schema.TaggedError<CloudPublicConfigMissingError>()(
   "CloudPublicConfigMissingError",
   {
@@ -35,9 +37,12 @@ type UntrustedSection<T> = {
 };
 
 type ExpoExtra =
-  | {
+  | ({
       readonly [Section in keyof CloudPublicConfig]?: UntrustedSection<CloudPublicConfig[Section]>;
-    }
+    } & {
+      readonly iosPersonalTeamBuild?: unknown;
+      readonly iosPushRelay?: unknown;
+    })
   | undefined;
 
 function trimNonEmpty(value: unknown): string | null {
@@ -68,9 +73,15 @@ export class BackgroundRelayUrlInvalidError extends Schema.TaggedError<Backgroun
 
 export function resolveCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig?.extra) {
   const rawBackgroundUrl = trimNonEmpty(extra?.relay?.backgroundUrl);
-  const backgroundUrl =
-    rawBackgroundUrl === null ? null : normalizeSecureRelayUrl(rawBackgroundUrl);
-  if (rawBackgroundUrl !== null && backgroundUrl === null) {
+  const personal = extra?.iosPersonalTeamBuild === true;
+  const personalRoute = personal ? resolvePersonalBackgroundRoute(extra) : null;
+  let backgroundUrl: string | null;
+  if (personalRoute) {
+    backgroundUrl = personalRoute.kind === "private" ? personalRoute.url : null;
+  } else {
+    backgroundUrl = rawBackgroundUrl === null ? null : normalizeSecureRelayUrl(rawBackgroundUrl);
+  }
+  if (!personal && rawBackgroundUrl !== null && backgroundUrl === null) {
     throw new BackgroundRelayUrlInvalidError();
   }
   return {
