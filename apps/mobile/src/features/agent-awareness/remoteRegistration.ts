@@ -150,7 +150,7 @@ function readRelayConfig(): { readonly url: string } | null {
 }
 
 function canRegisterRemoteLiveActivities(): boolean {
-  return Platform.OS === "ios";
+  return Platform.OS === "ios" && supportsAgentAwarenessPush();
 }
 
 function canRegisterPushNotifications(): boolean {
@@ -805,7 +805,7 @@ function ensureAppStateListener(): void {
 }
 
 function endLocalLiveActivities(context: string): void {
-  if (!canRegisterRemoteLiveActivities()) {
+  if (Platform.OS !== "ios") {
     return;
   }
   try {
