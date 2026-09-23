@@ -196,9 +196,10 @@ function proofIat(proof: string): number {
   return decoded.iat;
 }
 
-const layerRelayTest = ManagedRelayLayer.layer("https://relay.example.test").pipe(
-  Layer.provide(Layer.mergeAll(FetchHttpClient.layer, Dpop.layer)),
-);
+const layerRelayTest = ManagedRelayLayer.layer({
+  relayUrl: "https://relay.example.test",
+  background: { kind: "default", url: null },
+}).pipe(Layer.provide(Layer.mergeAll(FetchHttpClient.layer, Dpop.layer)));
 
 const runBackgroundOperations = Effect.fn("TestRemoteRegistration.runBackgroundOperations")(
   function* () {
@@ -251,25 +252,32 @@ describe("makeRelayDeviceRegistrationRequest", () => {
     environmentConfigsMock.configs.clear();
   });
 
-  it("disables push features in Personal Team relay registrations", () => {
-    Constants.expoConfig!.extra = { iosPersonalTeamBuild: true };
+  it.each([false, true])(
+    "sets personal relay registration preferences for opt-in %j",
+    (iosPushRelay) => {
+      Constants.expoConfig!.extra = {
+        iosPersonalTeamBuild: true,
+        iosPushRelay,
+        relay: { backgroundUrl: "https://private.example.test" },
+      };
 
-    expect(
-      makeRelayDeviceRegistrationRequest({
-        deviceId: "device-1",
-        label: "Julius's iPhone",
-        iosMajorVersion: 18,
-        appVersion: "1.0.0",
-        pushToken: "apns-token",
-        pushToStartToken: "push-to-start-token",
-        notificationsEnabled: true,
-        preferences: {},
-      }).preferences,
-    ).toMatchObject({
-      liveActivitiesEnabled: false,
-      notificationsEnabled: false,
-    });
-  });
+      expect(
+        makeRelayDeviceRegistrationRequest({
+          deviceId: "device-1",
+          label: "Julius's iPhone",
+          iosMajorVersion: 18,
+          appVersion: "1.0.0",
+          pushToken: "apns-token",
+          pushToStartToken: "push-to-start-token",
+          notificationsEnabled: true,
+          preferences: {},
+        }).preferences,
+      ).toMatchObject({
+        liveActivitiesEnabled: iosPushRelay,
+        notificationsEnabled: iosPushRelay,
+      });
+    },
+  );
 
   it.effect("registers one push-token listener per Live Activity across wrappers", () => {
     const addPushTokenListener = vi.fn();
@@ -649,9 +657,10 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       }).pipe(
         Effect.provideService(FetchHttpClient.Fetch, globalThis.fetch),
         Effect.provide(
-          ManagedRelayLayer.layer("https://permission-relay.example.test").pipe(
-            Layer.provide(Layer.mergeAll(FetchHttpClient.layer, Dpop.layer)),
-          ),
+          ManagedRelayLayer.layer({
+            relayUrl: "https://permission-relay.example.test",
+            background: { kind: "default", url: null },
+          }).pipe(Layer.provide(Layer.mergeAll(FetchHttpClient.layer, Dpop.layer))),
         ),
       );
     },
@@ -715,6 +724,67 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       return Effect.gen(function* () {
         yield* runBackgroundOperations();
         expect(configureAndroidAgentNotifications).not.toHaveBeenCalled();
+        expect(saveAgentAwarenessRegistrationRecord).not.toHaveBeenCalled();
+      }).pipe(Effect.provide(layerRelayTest));
+    },
+  );
+  it.effect(
+    "refreshes a personal iOS registration on cold start and on foreground after a minute",
+    () => {
+      const privateUrl = "https://private.example.test";
+      Constants.expoConfig!.extra = {
+        iosPersonalTeamBuild: true,
+        iosPushRelay: true,
+        relay: {
+          url: "https://relay.example.test",
+          backgroundUrl: privateUrl,
+        },
+      };
+      const now = vi.spyOn(Date, "now").mockReturnValue(1000000);
+      setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
+      return Effect.gen(function* () {
+        const client = yield* ManagedRelay.ManagedRelayClient;
+        const register = vi
+          .spyOn(client, "registerDevice")
+          .mockReturnValue(Effect.succeed({ ok: true }));
+        yield* runBackgroundOperations();
+        expect(register).toHaveBeenCalledTimes(1);
+        expect(registrationRecordStore.current?.signature).toContain(privateUrl);
+        // Keep the persisted signature across a simulated cold start.
+        __resetAgentAwarenessRemoteRegistrationForTest();
+        appStateMock.listeners.length = 0;
+        setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
+        yield* runBackgroundOperations();
+        expect(register).toHaveBeenCalledTimes(2);
+        register.mockClear();
+        now.mockReturnValue(1030000);
+        for (const listener of appStateMock.listeners) listener("active");
+        yield* runBackgroundOperations();
+        expect(register).not.toHaveBeenCalled();
+        now.mockReturnValue(1061000);
+        for (const listener of appStateMock.listeners) listener("active");
+        yield* runBackgroundOperations();
+        expect(register).toHaveBeenCalledTimes(1);
+      }).pipe(Effect.provide(layerRelayTest));
+    },
+  );
+
+  it.effect.each([undefined, "https://relay.example.test"])(
+    "never registers a personal device through the primary relay (%j)",
+    (backgroundUrl) => {
+      Constants.expoConfig!.extra = {
+        iosPersonalTeamBuild: true,
+        iosPushRelay: true,
+        relay: { url: "https://relay.example.test", backgroundUrl },
+      };
+      setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token"), "user-a");
+      return Effect.gen(function* () {
+        const client = yield* ManagedRelay.ManagedRelayClient;
+        const register = vi
+          .spyOn(client, "registerDevice")
+          .mockReturnValue(Effect.succeed({ ok: true }));
+        yield* runBackgroundOperations();
+        expect(register).not.toHaveBeenCalled();
         expect(saveAgentAwarenessRegistrationRecord).not.toHaveBeenCalled();
       }).pipe(Effect.provide(layerRelayTest));
     },

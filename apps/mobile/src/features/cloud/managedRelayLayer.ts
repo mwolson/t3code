@@ -8,7 +8,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 
 import { createDpopProof, loadOrCreateDpopProofKeyPair } from "./dpop";
-import { resolveCloudPublicConfig } from "./publicConfig";
+import type { PersonalBackgroundRoute } from "./personalBackgroundRoute";
 import { managedRelayAccessTokenStore } from "./managedRelayTokenStore";
 
 const layerRelayDpopSigner = Layer.effect(
@@ -63,10 +63,18 @@ const layerRelayDpopSigner = Layer.effect(
   }),
 );
 
-export const layer = (relayUrl: string) =>
+export const layer = (options: {
+  readonly relayUrl: string;
+  readonly background:
+    | PersonalBackgroundRoute
+    | { readonly kind: "default"; readonly url: string | null };
+}) =>
   ManagedRelay.layer({
-    relayUrl,
-    backgroundRelayUrl: resolveCloudPublicConfig().relay.backgroundUrl ?? undefined,
+    relayUrl: options.relayUrl,
+    backgroundRelayDisabled: options.background.kind === "disabled",
+    ...(options.background.kind !== "disabled" && options.background.url
+      ? { backgroundRelayUrl: options.background.url }
+      : {}),
     clientId: RelayMobileClientId,
     accessTokenStore: managedRelayAccessTokenStore,
   }).pipe(Layer.provideMerge(layerRelayDpopSigner));
