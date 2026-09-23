@@ -235,7 +235,6 @@ export const executorLayer: Layer.Layer<
                       text: message.text,
                       ...(message.context ? { context: message.context } : {}),
                       attachments: message.attachments,
-                      modelSelection: run.modelSelection,
                       dispatchMode: {
                         type:
                           message.delegatedCompletion === undefined
