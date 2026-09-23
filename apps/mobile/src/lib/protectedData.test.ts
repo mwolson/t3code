@@ -36,6 +36,7 @@ vi.mock("react-native", () => ({
   },
 }));
 
+vi.mock("expo-constants", () => ({ default: { expoConfig: { extra: {} } } }));
 vi.mock("../persistence/layer", async () => {
   const Effect = await import("effect/Effect");
   const Layer = await import("effect/Layer");
