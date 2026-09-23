@@ -257,7 +257,7 @@ export default function ProjectScriptsControl({
               onClick={() => onRunScript(primaryScript)}
             >
               <ScriptIcon icon={primaryScript.icon} className="size-4" />
-              <MenuItemLabel className="truncate">Run {primaryScript.name}</MenuItemLabel>
+              <MenuItemLabel>Run {primaryScript.name}</MenuItemLabel>
               <MenuShortcut>
                 {shortcutLabelForCommand(keybindings, commandForProjectScript(primaryScript.id))}
               </MenuShortcut>
@@ -274,9 +274,7 @@ export default function ProjectScriptsControl({
                 <ScriptIcon icon="play" className="size-4" />
                 <MenuItemLabel>Project actions</MenuItemLabel>
               </MenuSubTrigger>
-              <MenuSubPopup className="min-w-32 max-w-[calc(100vw-2rem)]">
-                {scriptItems}
-              </MenuSubPopup>
+              <MenuSubPopup>{scriptItems}</MenuSubPopup>
             </MenuSub>
           ) : (
             <MenuItem

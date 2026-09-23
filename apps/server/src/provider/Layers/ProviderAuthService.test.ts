@@ -123,6 +123,13 @@ function makeSession(
   };
 }
 
+function sessionThreads(list: ReadonlyArray<OrchestrationV2ProviderSession>) {
+  return {
+    threads: list.map((session) => makeThread(session.id)),
+    sessions: new Map(list.map((session) => [ThreadId.make(session.id), [session]])),
+  };
+}
+
 const makeHarness = Effect.fn("ProviderAuthService.test.makeHarness")(function* (
   input: {
     enabled?: boolean;
@@ -139,6 +146,7 @@ const makeHarness = Effect.fn("ProviderAuthService.test.makeHarness")(function* 
     beforeStop?: Effect.Effect<void>;
     beforeListSessions?: Effect.Effect<void>;
     onLookup?: Effect.Effect<void>;
+    onListThreads?: (instances: ProviderInstance[]) => void;
   } = {},
 ) {
   const actions: string[] = [];
@@ -256,11 +264,12 @@ const makeHarness = Effect.fn("ProviderAuthService.test.makeHarness")(function* 
         }),
         Layer.mock(ProjectionStoreV2)({
           getRecoveryThreadIds: () =>
-            Effect.suspend(() => {
+            Effect.gen(function* () {
               assert.isTrue(gateClosed);
               actions.push("list-threads");
               input.onListThreads?.(instances);
-              return input.shellError
+              yield* input.beforeListSessions ?? Effect.void;
+              return yield* input.shellError
                 ? Effect.fail(
                     new ProjectionStoreReadError({
                       threadId: ThreadId.make("shell"),
@@ -279,11 +288,12 @@ const makeHarness = Effect.fn("ProviderAuthService.test.makeHarness")(function* 
         }),
         Layer.mock(ProviderSessionManagerV2)({
           release: ({ providerSessionId, reason }) =>
-            Effect.suspend(() => {
+            Effect.gen(function* () {
               assert.isTrue(gateClosed);
               actions.push(`stop:${providerSessionId}`);
+              yield* input.beforeStop ?? Effect.void;
               if (input.stopError) {
-                return Effect.fail(
+                return yield* Effect.fail(
                   new ProviderSessionReleaseError({
                     providerSessionId,
                     reason,
@@ -292,13 +302,34 @@ const makeHarness = Effect.fn("ProviderAuthService.test.makeHarness")(function* 
                 );
               }
               released.push(providerSessionId);
-              return Effect.void;
+              for (const [threadId, list] of sessions) {
+                const remaining = list.filter((session) => session.id !== providerSessionId);
+                if (remaining.length === 0) sessions.delete(threadId);
+                else sessions.set(threadId, remaining);
+              }
             }),
         }),
       ),
     ),
   );
-  return { service, actions, released };
+  return {
+    service,
+    actions,
+    released,
+    sessions,
+    auth,
+    addInstance: (instance: ProviderInstance) => instances.push(instance),
+    replaceInstance: (replacement: ProviderInstance) => {
+      const index = instances.findIndex(
+        (instance) => instance.instanceId === replacement.instanceId,
+      );
+      assert.isAtLeast(index, 0);
+      instances[index] = replacement;
+    },
+    replaceAuth: (next: ProviderAuthController) => {
+      instances[0] = makeInstance({ instanceId, enabled: input.enabled ?? true, auth: next });
+    },
+  };
 });
 
 const makeStreamingController = Effect.fn("ProviderAuthService.test.makeStreamingController")(
@@ -388,11 +419,11 @@ describe("ProviderAuthService", () => {
       Effect.gen(function* () {
         const { service, actions, sessions } = yield* makeHarness({
           sharedCredentials: true,
-          sessions: [
+          ...sessionThreads([
             makeSession("target"),
-            makeSession("shared", otherInstanceId),
-            makeSession("unrelated", unsupportedInstanceId),
-          ],
+            makeSession("shared", "ready", otherInstanceId),
+            makeSession("unrelated", "ready", unsupportedInstanceId),
+          ]),
         });
         yield* service.logout({ instanceId });
         assert.deepStrictEqual([...sessions.keys()], [ThreadId.make("unrelated")]);
@@ -815,10 +846,10 @@ it.effect.each(["start", "logout", "prompt"] as const)(
           Effect.andThen(Deferred.await(continueCheck)),
           Effect.as(false),
         ),
-        sessions: [
-          makeSession("old-shared", otherInstanceId),
-          makeSession("replacement-shared", replacementPeerId),
-        ],
+        ...sessionThreads([
+          makeSession("old-shared", "ready", otherInstanceId),
+          makeSession("replacement-shared", "ready", replacementPeerId),
+        ]),
       });
       harness.addInstance(
         makeInstance({
@@ -884,7 +915,7 @@ it.effect.each([
       const continueDrain = yield* Deferred.make<void>();
       const harness = yield* makeHarness({
         sharedCredentials: true,
-        sessions: [makeSession("shared-draining", otherInstanceId)],
+        ...sessionThreads([makeSession("shared-draining", "ready", otherInstanceId)]),
         beforeStop: Deferred.succeed(draining, undefined).pipe(
           Effect.andThen(Deferred.await(continueDrain)),
         ),
@@ -924,14 +955,11 @@ it.effect.each(["selection", "drain"] as const)(
       );
       const harness = yield* makeHarness({
         sharedCredentials: true,
-        sessions: [
+        ...sessionThreads([
           makeSession("target-draining"),
-          makeSession("peer-replacement", otherInstanceId),
-        ],
-        bindings: [
-          makeBinding("target-draining", "running"),
-          makeBinding("peer-persisted", "running", otherInstanceId),
-        ],
+          makeSession("peer-replacement", "ready", otherInstanceId),
+          makeSession("peer-persisted", "running", otherInstanceId),
+        ]),
         ...(phase === "selection" ? { beforeListSessions: block } : { beforeStop: block }),
       });
       const logout = yield* harness.service.logout({ instanceId }).pipe(Effect.forkChild);

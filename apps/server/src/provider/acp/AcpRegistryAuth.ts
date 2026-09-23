@@ -16,7 +16,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import type * as AcpSchema from "effect-acp/compat";
 
 import * as PtyAdapter from "../../terminal/PtyAdapter.ts";
-import { makeProviderAuthFlow, type ProviderAuthFlowContext } from "../ProviderAuthFlow.ts";
+import { make as makeProviderAuthFlow, type ProviderAuthFlowContext } from "../ProviderAuthFlow.ts";
 import { normalizeAcpRegistryAuthMethods, normalizeAcpRegistryWebUrl } from "./AcpRegistryProbe.ts";
 import * as AcpRegistrySupport from "./AcpRegistrySupport.ts";
 import * as AcpRegistryRuntimeCoordinator from "./AcpRegistryRuntimeCoordinator.ts";

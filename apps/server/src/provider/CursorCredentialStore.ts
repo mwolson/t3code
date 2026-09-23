@@ -30,10 +30,7 @@ export const makeCursorCredentialStore = Effect.fn("makeCursorCredentialStore")(
   instanceId: ProviderInstanceId,
   legacyFile?: string,
 ) {
-  const credentials = yield* ProviderCredentialStore.makeProviderCredentialStore(
-    "cursor",
-    instanceId,
-  );
+  const credentials = yield* ProviderCredentialStore.make("cursor", instanceId);
   if (legacyFile !== undefined) {
     const fileSystem = yield* FileSystem.FileSystem;
     yield* Effect.gen(function* () {

@@ -270,14 +270,14 @@ it.effect("interrupts admitted session startup when a shared peer signs out", ()
     const entered = yield* Deferred.make<void>();
     const stopped = yield* Deferred.make<void>();
     const binding = { owner: "provider" as const, key: "shared-cli" };
-    const auth = yield* ProviderAuthFlow.makeProviderAuthFlow({
+    const auth = yield* ProviderAuthFlow.make({
       instanceId: personalId,
       credentialBinding: binding,
       methods: Effect.succeed([]),
       authenticate: () => Effect.void,
       logout: Effect.void,
     });
-    const peerAuth = yield* ProviderAuthFlow.makeProviderAuthFlow({
+    const peerAuth = yield* ProviderAuthFlow.make({
       instanceId: workId,
       credentialBinding: binding,
       methods: Effect.succeed([]),

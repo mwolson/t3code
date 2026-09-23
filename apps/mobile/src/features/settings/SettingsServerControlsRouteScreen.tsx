@@ -275,7 +275,7 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                     {SUBMODULE_CHOICES.filter(
                       (choice) => choice.mode !== null || !projectSelected,
                     ).map((choice, index) => (
-                      <ChoiceRow
+                      <SettingsChoiceRow
                         key={choice.mode ?? "inherit"}
                         label={choice.label}
                         description={choice.description}
