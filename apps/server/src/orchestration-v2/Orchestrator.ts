@@ -3610,11 +3610,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: input.command.threadId,
           providerInstanceId: targetRun.providerInstanceId,
           capabilities: session.providerSession.capabilities,
-          forceRestart: input.forceRestart || selectionChanged,
+          forceRestart:
+            input.forceRestart ||
+            (selectionChanged &&
+              (providerInstanceChanged || selectionTransition?.type !== "apply_on_next_turn")),
         }),
       );
 
       if (steeringPolicy === "active_steering") {
+        // A completion's selection is pinned to the running turn, not a new desired selection.
+        if (
+          input.delegatedCompletion === undefined &&
+          !modelSelectionsEqual(input.projection.thread.modelSelection, input.modelSelection)
+        ) {
+          yield* emitEvent({
+            type: "thread.model-selection-updated",
+            threadId: input.command.threadId,
+            providerInstanceId: input.modelSelection.instanceId,
+            occurredAt: now,
+            payload: {
+              ...input.projection.thread,
+              modelSelection: input.modelSelection,
+              updatedAt: now,
+            },
+          });
+        }
         yield* appendSteeringMessage({
           runId: targetRun.id,
           nodeId: rootNodeId,

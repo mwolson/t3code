@@ -537,6 +537,165 @@ it.live("restarts selection as a new attempt and retries after old-session clean
   ),
 );
 
+for (const transition of ["restart_session", "create_with_handoff"] as const) {
+  it.live(`steer_active completes an incompatible ${transition} replacement attempt`, () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const name = `steer-${transition}`;
+        const cwd = yield* checkpointWorkspace(name);
+        const threadId = ThreadId.make(`thread:${name}`);
+        const state = yield* Ref.make<RestartAdapterState>({
+          activeTurn: null,
+          opened: [],
+          started: [],
+          closedSessionCount: 0,
+          failedReplacementOpen: true,
+        });
+        let steers = 0;
+        let interrupts = 0;
+        const base = makeRestartAdapter(state, exclusiveCapabilities);
+        const adapter: ProviderAdapterV2Shape = {
+          ...base,
+          planSelectionTransition: ({ current, target }) =>
+            Effect.succeed(
+              current.model === target.model
+                ? { type: "apply_on_next_turn" }
+                : { type: transition },
+            ),
+          openSession: (input) =>
+            base.openSession(input).pipe(
+              Effect.map((session) => ({
+                ...session,
+                ensureThread: (input) =>
+                  session.ensureThread(input).pipe(
+                    Effect.map((thread) => ({
+                      ...thread,
+                      id: ProviderThreadId.make(`${thread.id}:${session.providerSessionId}`),
+                    })),
+                  ),
+                steerTurn: () =>
+                  Effect.sync(() => {
+                    steers += 1;
+                  }),
+                interruptTurn: (input) =>
+                  Effect.gen(function* () {
+                    interrupts += 1;
+                    yield* session.interruptTurn(input);
+                  }),
+              })),
+            ),
+        };
+        const { projection, captured } = yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${name}:create`),
+            threadId,
+            projectId: ProjectId.make(`project:${name}`),
+            title: name,
+            modelSelection: initialSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const running = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "provider-turn.updated" && event.payload.status === "running",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`${name}:first`),
+            threadId,
+            messageId: MessageId.make(`${name}:first`),
+            text: "first",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* worker.drain();
+          yield* Fiber.join(running);
+          const active = yield* orchestrator.getThreadProjection(threadId);
+          const runId = active.runs[0]!.id;
+          const completed = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "run.updated" &&
+                event.payload.id === runId &&
+                event.payload.status === "completed",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`${name}:steer`),
+            threadId,
+            messageId: MessageId.make(`${name}:steer`),
+            text: "new selection",
+            attachments: [],
+            modelSelection: replacementSelection,
+            dispatchMode: { type: "steer_active", targetRunId: runId },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const replacing = yield* orchestrator.getThreadProjection(threadId);
+          assert.lengthOf(replacing.attempts, 2);
+          assert.equal(replacing.attempts[0]!.status, "superseded");
+          yield* worker.drain();
+          yield* Fiber.join(completed);
+          yield* worker.drain();
+          return {
+            projection: yield* orchestrator.getThreadProjection(threadId),
+            captured: yield* Ref.get(state),
+          };
+        }).pipe(
+          Effect.provide(
+            makeOrchestratorV2ReplayLayerWithRegistry(
+              { name },
+              ProviderAdapterRegistry.makeSingleLayer(adapter),
+            ),
+          ),
+        );
+        assert.equal(steers, 0);
+        assert.equal(interrupts, 1);
+        assert.lengthOf(projection.runs, 1);
+        assert.deepEqual(projection.thread.modelSelection, replacementSelection);
+        assert.deepEqual(projection.runs[0]!.modelSelection, replacementSelection);
+        assert.deepEqual(
+          projection.attempts.map((attempt) => attempt.status),
+          ["superseded", "completed"],
+        );
+        assert.deepEqual(
+          projection.providerTurns.map((turn) => turn.status),
+          ["interrupted", "completed"],
+        );
+        assert.equal(projection.attempts[1]!.reason, "steering_restart");
+        assert.lengthOf(projection.contextHandoffs, transition === "create_with_handoff" ? 1 : 0);
+        assert.deepEqual(
+          captured.started.map((turn) => turn.model),
+          [initialSelection.model, replacementSelection.model],
+        );
+        assert.deepEqual(
+          captured.opened.map((session) => session.model),
+          [initialSelection.model, replacementSelection.model],
+        );
+        assert.equal(captured.closedSessionCount, 1);
+      }),
+    ),
+  );
+}
+
 for (const deadStatus of ["stopped", "error"] as const) {
   it.live(
     `restarts the live session on a model change when a newer ${deadStatus} session record exists`,
