@@ -299,6 +299,104 @@ it.effect("memory recovery selection includes unfinished items from missing runs
   }).pipe(Effect.provide(projectionStoreMemoryLayer)),
 );
 
+for (const [backend, layer] of [
+  ["SQL", TestLayer],
+  ["memory", projectionStoreMemoryLayer],
+] as const) {
+  it.layer(layer)(`Limit recovery flags (${backend})`, (it) => {
+    it.effect.each([
+      { autoResume: false, snooze: false },
+      { autoResume: false, snooze: true },
+      { autoResume: true, snooze: false },
+      { autoResume: true, snooze: true },
+    ])("filters recovery candidates with %j", (options) =>
+      Effect.gen(function* () {
+        const store = yield* ProjectionStoreV2;
+        const threadId = yield* addRolledBackRecoveryCandidate(
+          `recovery-flags:${options.autoResume}:${options.snooze}`,
+        );
+        const projection = yield* store.getThreadProjection(threadId);
+        const run = projection.runs[0]!;
+        const now = yield* DateTime.now;
+        const reset = DateTime.add(now, { hours: 1 });
+        yield* store.apply({
+          id: EventId.make(`${threadId}:failed`),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...run, status: "failed", completedAt: now },
+        });
+        yield* store.apply({
+          id: EventId.make(`${threadId}:error`),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`${threadId}:error`),
+            threadId,
+            runId: run.id,
+            nodeId: run.rootNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 2,
+            status: "failed",
+            title: "Usage limit reached",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "error",
+            failure: {
+              class: "usage_limit",
+              message: "Plan limit reached.",
+              resetAt: DateTime.formatIso(reset),
+              code: null,
+              retryable: null,
+            },
+          },
+        });
+        const assertSelected = Effect.fnUntraced(function* (at: typeof now, expected: boolean) {
+          const candidates = yield* store.getLimitRecoveryCandidates({ ...options, now: at });
+          assert.equal(
+            candidates.some((candidate) => candidate.id === threadId),
+            expected,
+          );
+        });
+        yield* assertSelected(now, options.autoResume || options.snooze);
+        yield* assertSelected(reset, options.autoResume);
+        for (const autoResume of [false, true]) {
+          yield* store.apply({
+            id: EventId.make(`${threadId}:armed:${autoResume}`),
+            type: "thread.metadata-updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...projection.thread,
+              limitRecovery: {
+                runId: run.id,
+                resetAt: DateTime.formatIso(reset),
+                autoResume,
+                requestId: CommandId.make("flags:choice"),
+              },
+            },
+          });
+          yield* assertSelected(now, false);
+          yield* assertSelected(reset, autoResume);
+        }
+        yield* store.apply({
+          id: EventId.make(`${threadId}:invalid-reset`),
+          type: "run.updated",
+          threadId,
+          occurredAt: reset,
+          payload: { ...run, status: "failed", completedAt: reset },
+        });
+        yield* assertSelected(reset, false);
+      }),
+    );
+  });
+}
+
 it.layer(TestLayer)("ProjectionStoreV2", (it) => {
   it.effect("limits turn-start history to the requested runs, including an empty selection", () =>
     Effect.gen(function* () {
