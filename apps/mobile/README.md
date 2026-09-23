@@ -79,12 +79,23 @@ After changing a native dependency patch, rerun CocoaPods before rebuilding an e
 project. pnpm gives each patch hash a new package path; Pods can otherwise keep compiling the
 previous directory.
 
-If your Xcode account only has a Personal Team, use a bundle identifier you control and opt into the
-reduced-capability local build. Personal Team builds omit the widget and share extensions, push
-entitlement, and native Sign in with Apple entitlement; builds without this opt-in are unchanged.
+For a personal build, use a bundle identifier you control and a paid Apple Developer Program team.
+`T3CODE_IOS_PERSONAL_TEAM=1` keeps the widgets and Send To share extension,
+with App Groups derived from your bundle identifier. Free Personal Teams cannot provision these
+capabilities. Associated domains and native Sign in with Apple remain disabled because the configured
+Clerk integration belongs to T3 Tools. Supply your ten-character team ID with `T3CODE_IOS_TEAM_ID`.
+Push notifications and Live Activities are unavailable by default. Enabling them requires both
+`T3CODE_IOS_PERSONAL_PUSH_RELAY=1` and `T3CODE_BACKGROUND_RELAY_URL` pointing to a private HTTPS
+origin backed by your team's APNs key. The URL must differ from the primary relay's hostname and
+cannot use `t3.codes` or its subdomains. Invalid opt-in configuration fails the build; personal
+background calls never fall back to the primary relay. The hosted relay's T3 Tools credentials
+cannot deliver to your bundle identifier. Both extensions and their App Group stay signed with
+either flag value, so enabling the relay needs no reprovisioning. Personal push builds refresh
+the device registration on cold start and on foreground after at least 60 seconds.
 
 ```bash
 T3CODE_IOS_PERSONAL_TEAM=1 \
+T3CODE_IOS_TEAM_ID=YOURTEAMID \
 T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID=com.example.t3code.dev \
 vp run ios:dev
 ```
@@ -95,10 +106,11 @@ Build and install a self-contained Release app that does not need Metro:
 vp run ios:release
 ```
 
-The Personal Team equivalent also needs a unique bundle identifier:
+The personal build also needs a unique bundle identifier:
 
 ```bash
 T3CODE_IOS_PERSONAL_TEAM=1 \
+T3CODE_IOS_TEAM_ID=YOURTEAMID \
 T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID=com.example.t3code \
 vp run ios:release
 ```
