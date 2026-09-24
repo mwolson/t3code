@@ -16,6 +16,10 @@ import * as Cause from "effect/Cause";
 import * as IdAllocator from "./IdAllocator.ts";
 import type { ProviderAdapterFailureReason } from "./ProviderAdapter.ts";
 import * as Schema from "effect/Schema";
+import {
+  PROVIDER_BUFFERED_OUTPUT_MESSAGE,
+  PROVIDER_RUNNING_WORK_MESSAGE,
+} from "./ProviderAdapter.ts";
 
 export class ContextHandoffBudgetError extends Schema.TaggedError<ContextHandoffBudgetError>()(
   "ContextHandoffBudgetError",
@@ -108,6 +112,10 @@ function curatedCauseMessages(cause: unknown): {
       if (typeof cause !== "object") break;
       const tag = (cause as Record<string, unknown>)._tag;
       switch (tag) {
+        case "ProviderAdapterRunningWorkError":
+          return { known: PROVIDER_RUNNING_WORK_MESSAGE, category: categoryMessage() };
+        case "ProviderAdapterBufferedOutputError":
+          return { known: PROVIDER_BUFFERED_OUTPUT_MESSAGE, category: categoryMessage() };
         case "ContextHandoffBudgetError":
           return { known: new ContextHandoffBudgetError().message, category: categoryMessage() };
         case "ContextHandoffBackgroundWorkError":

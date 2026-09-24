@@ -9273,6 +9273,7 @@ describe("AcpAdapterV2", () => {
       const userPromptStarted = yield* Deferred.make<void>();
       const releaseUserPrompt = yield* Deferred.make<void>();
       const bufferedAssistantText = "BUFFERED_WAKE_QUEUED_AFTER_USER";
+      const lostReplyModel = "composer-2[fast=true]";
       let promptOrdinal = 0;
       type RuntimeService = AcpSessionRuntime.AcpSessionRuntime["Service"];
       let sessionUpdateHandler: Parameters<RuntimeService["handleSessionUpdate"]>[0] | undefined;
@@ -9304,6 +9305,20 @@ describe("AcpAdapterV2", () => {
                   }
                   return result;
                 }),
+              // The agent applies this model, but its reply never arrives.
+              setConfigOption: (id, value, options) =>
+                value === lostReplyModel
+                  ? runtime.setConfigOption(id, value, options).pipe(
+                      Effect.andThen(
+                        Effect.fail(
+                          new EffectAcpErrors.AcpTransportError({
+                            detail: "Injected lost reply",
+                            cause: "test",
+                          }),
+                        ),
+                      ),
+                    )
+                  : runtime.setConfigOption(id, value, options),
             }),
           }),
         },
@@ -9458,6 +9473,76 @@ describe("AcpAdapterV2", () => {
       assert.equal(continuationTerminalStatus, "completed");
       assert.isTrue(bufferedTextSeen, "continuation must drain the wake buffer after the user run");
       assert.isFalse(yield* hasPendingBackgroundWork);
+
+      // A model write whose outcome is unknown leaves the producing selection unknown, and the
+      // output buffered under it still drains with the next wake.
+      const lostReply = yield* Effect.exit(
+        runtime.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 4,
+            modelSelection: { instanceId, model: lostReplyModel },
+          }),
+        ),
+      );
+      assert.isTrue(Exit.isFailure(lostReply));
+      const wakeText = (text: string) =>
+        sessionUpdateHandler!({
+          sessionId: "mock-session-1",
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+        });
+      yield* wakeText("UNKNOWN_SELECTION_WAKE");
+      assert.isTrue(yield* runtime.hasBufferedOutputForThread!(providerThread));
+      assert.isNull(yield* runtime.bufferedExecutionSelection!(providerThread));
+      const composer = { instanceId, model: "composer-2" } as const;
+      yield* runtime.startTurn(
+        makeTurnInput({
+          threadId,
+          providerThread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+          ordinal: 5,
+          modelSelection: composer,
+        }),
+      );
+      yield* Stream.fromQueue(events).pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runDrain,
+      );
+      yield* wakeText("KNOWN_SELECTION_WAKE");
+      yield* runtime.startTurn(
+        makeTurnInput({
+          threadId,
+          providerThread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+          ordinal: 6,
+          modelSelection: composer,
+          messageCreatedBy: "agent",
+          messageCreationSource: "provider",
+          messageText: "Background task completed.",
+        }),
+      );
+      yield* TestClock.adjust("3 seconds");
+      const drained = Array.from(
+        yield* Stream.fromQueue(events).pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        ),
+      ).flatMap((event) =>
+        event.type === "message.updated" && event.message.role === "assistant"
+          ? [event.message.text]
+          : [],
+      );
+      assert.include(drained.join(""), "UNKNOWN_SELECTION_WAKE");
+      assert.include(drained.join(""), "KNOWN_SELECTION_WAKE");
+      assert.isFalse(yield* runtime.hasBufferedOutputForThread!(providerThread));
     }).pipe(Effect.provide(layerTest)),
   );
 

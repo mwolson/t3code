@@ -184,7 +184,7 @@ import * as ProviderContinuationRequests from "@t3tools/provider-core/server/Pro
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
-import { ProviderSwitchServiceV2 } from "./ProviderSwitchService.ts";
+import { ProviderSwitchPlanError, ProviderSwitchServiceV2 } from "./ProviderSwitchService.ts";
 import { isAutomaticCompletionRun, queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
 import { isRuntimePolicyAboveCeilingError, RuntimePolicyV2 } from "./RuntimePolicy.ts";
 import {
@@ -201,7 +201,7 @@ import {
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 
 const isMessageQuestionAnswer = Schema.is(
@@ -1661,6 +1661,138 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
     );
 
+  const planExecutionSelection = Effect.fnUntraced(function* (input: {
+    readonly projection: Pick<
+      OrchestrationV2ThreadProjection,
+      "thread" | "providerThreads" | "providerSessions"
+    >;
+    readonly targetModelSelection: ModelSelection;
+    readonly buffered?: boolean;
+    readonly admit?: boolean;
+    /** A wake that delivers the binding's output is already queued, so none is offered. */
+    readonly drainQueued?: boolean;
+  }) {
+    const { projection, targetModelSelection } = input;
+    const binding = projection.providerThreads.find(
+      (thread) => thread.id === projection.thread.activeProviderThreadId,
+    );
+    const sessionId = binding?.providerSessionId;
+    if (binding === undefined || sessionId === null || sessionId === undefined) {
+      return yield* providerSwitchService.plan({
+        ...input,
+        executionSelection: null,
+        freshAttachment: true,
+      });
+    }
+    const resident = yield* providerSessions.get(sessionId);
+    const current =
+      Option.isSome(resident) && resident.value.executionSelection !== undefined
+        ? yield* resident.value.executionSelection(binding)
+        : null;
+    const pending = Option.isSome(resident)
+      ? yield* (
+          resident.value.hasPendingBackgroundWorkForThread?.(binding, { includeSubagents: true }) ??
+            resident.value.hasPendingBackgroundWork ??
+            Effect.succeed(false)
+        )
+      : false;
+    // A provider wake only delivers output its binding already holds, so it never replaces
+    // the binding; refusing it would make the adapter drop that output.
+    if (
+      input.buffered === true ||
+      (input.admit === true &&
+        Option.isSome(resident) &&
+        (yield* (
+          resident.value.canAdoptUnselectedBufferedOutput?.(binding, targetModelSelection) ??
+            Effect.succeed(false)
+        )))
+    ) {
+      return {
+        instanceChanged: false,
+        releaseProviderSessionIds: [],
+        transition: { type: "reuse" as const },
+      };
+    }
+    const attached = Option.isSome(resident)
+      ? yield* resident.value.hasResidentBinding?.(binding) ?? Effect.succeed(current !== null)
+      : false;
+    const projectedLive = projection.providerSessions.some(
+      (session) =>
+        session.id === sessionId && session.status !== "stopped" && session.status !== "error",
+    );
+    // Without a resident runtime there is no execution evidence to plan from.
+    if (Option.isNone(resident) && projectedLive) {
+      return yield* providerSwitchService.plan({ projection, targetModelSelection });
+    }
+    const plan = yield* providerSwitchService
+      .plan({
+        ...input,
+        executionSelection: attached && !projectedLive ? null : current,
+        freshAttachment:
+          !attached ||
+          (Option.isSome(resident) &&
+            (yield* (
+              resident.value.reappliesFullSelection?.(targetModelSelection) ?? Effect.succeed(false)
+            ))),
+      })
+      .pipe(
+        Effect.map((plan) =>
+          attached && plan.transition.type === "restart_and_resume"
+            ? { ...plan, releaseProviderSessionIds: [sessionId] }
+            : plan,
+        ),
+      );
+    const replacing =
+      plan.transition.type === "restart_and_resume" ||
+      plan.transition.type === "create_with_handoff";
+    // Native output and work are the resident runtime's, whether or not the
+    // manager has seen this binding load or run: a binding opened by a
+    // rollback can own a wake before any turn of T3's.
+    if (input.admit === true && Option.isSome(resident)) {
+      const buffered = yield* (
+        resident.value.hasBufferedOutputForThread?.(binding) ?? Effect.succeed(false)
+      );
+      const producingSelection = buffered
+        ? yield* resident.value.bufferedExecutionSelection?.(binding) ?? Effect.succeed(current)
+        : null;
+      if (
+        buffered &&
+        (current === null ||
+          producingSelection === null ||
+          replacing ||
+          !modelSelectionsEqual(current, targetModelSelection) ||
+          !modelSelectionsEqual(producingSelection, targetModelSelection))
+      ) {
+        const runtime = resident.value;
+        if (input.drainQueued !== true) {
+          yield* continuationRequests.offer({
+            threadId: projection.thread.id,
+            providerThreadId: binding.id,
+            driver: binding.driver,
+            detail: null,
+            dispatchIfCurrent: Effect.fn("Orchestrator.drainBufferedOutput")(function* (effect) {
+              if (!(yield* runtime.hasBufferedOutputForThread!(binding))) return Option.none();
+              return Option.some(yield* effect);
+            }),
+          });
+        }
+        return yield* new ProviderSwitchPlanError({
+          threadId: projection.thread.id,
+          targetProviderInstanceId: targetModelSelection.instanceId,
+          cause: ProviderAdapter.PROVIDER_BUFFERED_OUTPUT_MESSAGE,
+        });
+      }
+      if (pending && replacing) {
+        return yield* new ProviderSwitchPlanError({
+          threadId: projection.thread.id,
+          targetProviderInstanceId: targetModelSelection.instanceId,
+          cause: ProviderAdapter.PROVIDER_RUNNING_WORK_MESSAGE,
+        });
+      }
+    }
+    return plan;
+  });
+
   const providerSessionIdFor = (input: {
     readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
     readonly providerInstanceId: ProviderInstanceId;
@@ -2398,7 +2530,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return true;
   });
 
-  const startNextQueuedRun = Effect.fn("Orchestrator.startNextQueuedRun")(
+  const startQueuedRun = Effect.fn("Orchestrator.startNextQueuedRun")(
     function* (
       threadId: ThreadId,
       options?: {
@@ -2631,7 +2763,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               storedProviderThread.nativeThreadRef !== null)
           ? undefined
           : storedProviderThread;
-      const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
+      let queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
         id: idAllocator.derive.providerThread({
           driver: targetAdapter.driver,
           // The queue reserved `pending:<run>` for this run; another run may have taken it.
@@ -2658,44 +2790,78 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection.thread.modelSelection,
         queuedRun.modelSelection,
       );
-      // The picker may already have moved ahead of the native conversation.
-      const switchFromActiveProvider =
-        followsCurrent &&
-        activeProviderThread !== undefined &&
-        activeProviderThread.providerInstanceId !== queuedRun.providerInstanceId;
-      const switchPlan =
-        selectionChanged || switchFromActiveProvider
-          ? yield* providerSwitchService
-              .plan({
-                projection: switchFromActiveProvider
-                  ? {
-                      ...projection,
-                      thread: {
-                        ...projection.thread,
-                        modelSelection: {
-                          ...projection.thread.modelSelection,
-                          instanceId: activeProviderThread.providerInstanceId,
-                        },
-                      },
-                    }
-                  : projection,
-                targetModelSelection: queuedRun.modelSelection,
-              })
-              .pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new OrchestratorDispatchError({
-                      commandId,
-                      commandType: "message.dispatch",
-                      cause,
-                    }),
-                ),
-              )
-          : null;
+      const queuedSelectionInput = {
+        projection: freshContext
+          ? { ...projection, thread: { ...projection.thread, activeProviderThreadId: null } }
+          : projection,
+        targetModelSelection: queuedRun.modelSelection,
+        buffered:
+          queuedMessage.createdBy === "agent" && queuedMessage.creationSource === "provider",
+      };
+      const queuedDrain = queuedSelectionInput.buffered
+        ? undefined
+        : queuedRunsInDeliveryOrder(projection).find((run) => {
+            const message = projection.messages.find(
+              (candidate) => candidate.id === run.userMessageId,
+            );
+            return (
+              run.queueHeld !== true &&
+              message !== undefined &&
+              isBufferedProviderNotification(message)
+            );
+          });
+      // Undelivered output refuses this start. A wake already queued delivers it, so that wake
+      // goes first and this run keeps its place; with none queued the start fails, because
+      // waiting for the drain offered here could block the queue. Running work holds below.
+      const switchPlan = yield* planExecutionSelection({
+        ...queuedSelectionInput,
+        admit: true,
+        drainQueued: queuedDrain !== undefined,
+      }).pipe(
+        Effect.catchTags({
+          ProviderSwitchPlanError: (error) => {
+            if (error.cause === ProviderAdapter.PROVIDER_RUNNING_WORK_MESSAGE) {
+              return planExecutionSelection(queuedSelectionInput);
+            }
+            return queuedDrain !== undefined &&
+              error.cause === ProviderAdapter.PROVIDER_BUFFERED_OUTPUT_MESSAGE
+              ? Effect.undefined
+              : Effect.fail(error);
+          },
+        }),
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorDispatchError({
+              commandId,
+              commandType: "message.dispatch",
+              cause,
+            }),
+        ),
+      );
+      if (switchPlan === undefined) return queuedDrain?.id;
+      const queuedHandoff =
+        !freshContext &&
+        switchPlan.transition.type === "create_with_handoff" &&
+        !switchPlan.instanceChanged &&
+        queuedProviderThread.nativeThreadRef !== null;
+      if (queuedHandoff) {
+        queuedProviderThread = {
+          ...queuedProviderThread,
+          id: idAllocator.derive.providerThread({
+            driver: queuedProviderThread.driver,
+            nativeThreadId: `handoff:${queuedRun.id}`,
+          }),
+          providerSessionId: null,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          nativeMetadata: undefined,
+        };
+      }
       const releasableSessions = uniqueSessions([
         ...projection.providerSessions.filter(
           (session) =>
-            switchPlan?.releaseProviderSessionIds.includes(session.id) &&
+            (switchPlan.releaseProviderSessionIds.includes(session.id) ||
+              (queuedHandoff && session.id === activeProviderThread?.providerSessionId)) &&
             session.status !== "stopped" &&
             session.status !== "error",
         ),
@@ -2770,7 +2936,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         freshContext ||
         canResumeAcrossInstances ||
         latestHandoffRun === undefined ||
-        latestHandoffRun.providerInstanceId === queuedRun.providerInstanceId
+        (latestHandoffRun.providerInstanceId === queuedRun.providerInstanceId && !queuedHandoff)
           ? []
           : projection.runs.filter(
               (run) =>
@@ -2913,16 +3079,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const providerSessionId =
         (!canResumeAcrossInstances &&
         queuedProviderThread.providerSessionId !== null &&
+        Option.isSome(
+          yield* providerSessions.get(queuedProviderThread.providerSessionId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestratorDispatchError({
+                  commandId,
+                  commandType: "message.dispatch",
+                  cause,
+                }),
+            ),
+          ),
+        ) &&
         !switchPlan?.releaseProviderSessionIds.includes(queuedProviderThread.providerSessionId)
           ? queuedProviderThread.providerSessionId
           : null) ??
         (yield* providerAdapters.get(queuedRun.providerInstanceId).pipe(
           Effect.flatMap((adapter) =>
-            providerSessionIdFor({
-              adapter,
-              providerInstanceId: queuedRun.providerInstanceId,
-              threadId,
-            }),
+            switchPlan.transition.type === "restart_and_resume" || queuedHandoff
+              ? idAllocator.allocate.providerSession({
+                  providerInstanceId: queuedRun.providerInstanceId,
+                  threadId,
+                })
+              : providerSessionIdFor({
+                  adapter,
+                  providerInstanceId: queuedRun.providerInstanceId,
+                  threadId,
+                }),
           ),
           Effect.mapError(
             (cause) =>
@@ -3111,7 +3294,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : "Provider or model selection changed.";
       yield* writeSystemEvents(
         [
-          ...(selectionChanged
+          ...(selectionChanged &&
+          queuedMessage.notification === undefined &&
+          queuedMessage.delegatedCompletion === undefined
             ? [
                 {
                   type:
@@ -3251,6 +3436,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             request: {
               type: "provider-session.detach" as const,
               providerSessionId: session.id,
+              preserveBufferedOutput: true,
               detail: detachReason,
             },
           })),
@@ -3266,9 +3452,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
     (effect, threadId, options?) =>
       effect.pipe(
-        Effect.catch((cause) => failQueuedRunStart(threadId, cause, options?.queuedRunId)),
+        Effect.catch((cause) =>
+          failQueuedRunStart(threadId, cause, options?.queuedRunId).pipe(Effect.as(undefined)),
+        ),
       ),
   );
+
+  // Untraced: each start it makes carries the span.
+  const startNextQueuedRun = Effect.fnUntraced(function* (
+    ...[threadId, options]: Parameters<typeof startQueuedRun>
+  ) {
+    const drainFirst = yield* startQueuedRun(threadId, options);
+    if (drainFirst !== undefined) {
+      yield* startQueuedRun(threadId, { ...options, queuedRunId: drainFirst });
+    }
+  });
 
   // Under load a resumed provider can time out before taking the prompt; the restart still owes the turn.
   const retryContinuationStart = Effect.fn("Orchestrator.retryContinuationStart")(function* (
@@ -4475,12 +4673,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   }),
               ),
             );
-            const plan = yield* providerSwitchService
-              .plan({
-                projection: providerContext!,
-                targetModelSelection: command.modelSelection,
-              })
-              .pipe(mapDispatchError(command));
+            const plan = yield* planExecutionSelection({
+              projection: providerContext!,
+              targetModelSelection: command.modelSelection,
+            }).pipe(mapDispatchError(command));
             if (plan.instanceChanged || plan.releaseProviderSessionIds.length > 0) {
               const projection = yield* loadProjectionForCommand(command, ["runs"], {
                 turnItemTypes: [],
@@ -5482,6 +5678,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                         : command.type === "thread.runtime-mode.set"
                           ? "Runtime mode changed."
                           : "Provider or model selection changed.",
+                ...(command.type === "thread.model-selection.set" ||
+                command.type === "provider.switch"
+                  ? { preserveBufferedOutput: true }
+                  : {}),
                 // Terminal detaches revoke MCP credentials; reattachments need other detach reasons to preserve them.
                 ...(command.type === "thread.archive" ? { revokeMcpCredential: true } : {}),
               },
@@ -7082,6 +7282,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projection = applyToProjection(projection, event);
     }
     let modelSelection = command.modelSelection ?? projection.thread.modelSelection;
+    // A provider wake delivers output an earlier turn produced, so its run keeps that turn's
+    // selection even when the thread's selection has moved on since.
+    if (
+      command.createdBy === "agent" &&
+      command.creationSource === "provider" &&
+      command.notification !== undefined
+    ) {
+      const owner = projection.providerThreads.find(
+        (thread) => thread.id === projection.thread.activeProviderThreadId,
+      );
+      const resident =
+        owner?.providerSessionId == null
+          ? Option.none()
+          : yield* providerSessions.get(owner.providerSessionId).pipe(mapDispatchError(command));
+      if (owner !== undefined && Option.isSome(resident)) {
+        const runtime = resident.value;
+        modelSelection =
+          (yield* runtime.bufferedExecutionSelection?.(owner) ?? Effect.succeed(null)) ??
+          (yield* runtime.executionSelection?.(owner) ?? Effect.succeed(null)) ??
+          modelSelection;
+      }
+    }
     let dispatchMode = resolveMessageDispatchIntent(
       projection,
       command.dispatchMode,
@@ -7870,8 +8092,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
     const now = yield* DateTime.now;
     if (
-      !modelSelectionsEqual(projection.thread.modelSelection, modelSelection) ||
-      projection.thread.providerInstanceId !== modelSelection.instanceId
+      command.notification === undefined &&
+      command.delegatedCompletion === undefined &&
+      (!modelSelectionsEqual(projection.thread.modelSelection, modelSelection) ||
+        projection.thread.providerInstanceId !== modelSelection.instanceId)
     ) {
       yield* emit(
         events,
@@ -7902,6 +8126,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: "A fresh session can't start while a fork or merge is still being applied.",
       });
     }
+    const admission = yield* planExecutionSelection({
+      projection: freshContext
+        ? { ...projection, thread: { ...projection.thread, activeProviderThreadId: null } }
+        : projection,
+      targetModelSelection: modelSelection,
+      admit: true,
+      buffered: command.createdBy === "agent" && command.creationSource === "provider",
+    }).pipe(mapDispatchError(command));
     const ordinal = nextRunOrdinal(projection);
     const runId = idAllocator.derive.run({ threadId: command.threadId, ordinal });
     const contextBoundary = freshContext ? ordinal : contextBoundaryOrdinal(projection);
@@ -7911,9 +8143,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projection.thread.historyOrigin === "v1_import" && contextBoundary === 0
         ? yield* readHandoffItems(command.threadId, [null])
         : [];
+    const selectionHandoff =
+      activeProviderThread !== undefined &&
+      activeProviderThread.providerInstanceId === modelSelection.instanceId &&
+      admission.transition.type === "create_with_handoff";
     const isProviderSwitch =
       activeProviderThread !== undefined &&
-      activeProviderThread.providerInstanceId !== modelSelection.instanceId;
+      (activeProviderThread.providerInstanceId !== modelSelection.instanceId || selectionHandoff);
     // Account overlays share native history. Selection commands may already
     // have updated the app thread, so classify against the native thread's owner.
     const providerSwitchPlan = isProviderSwitch
@@ -7941,7 +8177,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const releasableSessions = uniqueSessions([
       ...projection.providerSessions.filter(
         (session) =>
-          providerSwitchPlan?.releaseProviderSessionIds.includes(session.id) &&
+          (providerSwitchPlan?.releaseProviderSessionIds.includes(session.id) ||
+            (selectionHandoff && session.id === activeProviderThread?.providerSessionId)) &&
           session.status !== "stopped" &&
           session.status !== "error",
       ),
@@ -7966,7 +8203,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (
       pendingForkTransfer === undefined &&
       pendingMergeBackTransfer === undefined &&
-      (!isProviderSwitch || freshContext)
+      (freshContext ||
+        (!isProviderSwitch &&
+          (activeProviderThread === undefined ||
+            admission.transition.type !== "create_with_handoff")))
     ) {
       const reusableProviderThread = freshContext ? undefined : activeProviderThread;
       const adapter = yield* providerAdapters.get(modelSelection.instanceId).pipe(
@@ -7979,15 +8219,60 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
-      const providerSessionId =
-        reusableProviderThread?.providerSessionId ??
-        (yield* mapDispatchError(command)(
-          providerSessionIdFor({
-            adapter,
-            providerInstanceId: modelSelection.instanceId,
+      const replacesBinding = !freshContext && admission.transition.type === "restart_and_resume";
+      const providerSessionId = replacesBinding
+        ? yield* idAllocator.allocate
+            .providerSession({
+              providerInstanceId: modelSelection.instanceId,
+              threadId: command.threadId,
+            })
+            .pipe(mapDispatchError(command))
+        : reusableProviderThread?.providerSessionId != null &&
+            Option.isSome(
+              yield* providerSessions
+                .get(reusableProviderThread.providerSessionId)
+                .pipe(mapDispatchError(command)),
+            )
+          ? reusableProviderThread.providerSessionId
+          : yield* mapDispatchError(command)(
+              providerSessionIdFor({
+                adapter,
+                providerInstanceId: modelSelection.instanceId,
+                threadId: command.threadId,
+              }),
+            );
+      if (replacesBinding && activeProviderThread?.providerSessionId != null) {
+        const oldSessionId = activeProviderThread.providerSessionId;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "provider-session.detached",
+          threadId: command.threadId,
+          driver: activeProviderThread.driver,
+          providerInstanceId: activeProviderThread.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            providerSessionId: oldSessionId,
+            detachedAt: now,
+            reason: "Execution selection requires a fresh binding.",
+          },
+        });
+        yield* Ref.update(effects, (existing) => [
+          ...existing,
+          {
+            id: `effect:${command.commandId}:provider-session.detach:${oldSessionId}`,
+            commandId: command.commandId,
             threadId: command.threadId,
-          }),
-        ));
+            request: {
+              type: "provider-session.detach",
+              providerSessionId: oldSessionId,
+              preserveBufferedOutput: true,
+              detail: "Execution selection requires a fresh binding.",
+            },
+          } satisfies PendingOrchestrationEffectV2,
+        ]);
+      }
       const providerThreadId =
         reusableProviderThread?.id ??
         idAllocator.derive.providerThread({
@@ -8412,11 +8697,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }),
       ),
     );
-    const targetProviderThread =
-      isProviderSwitch && !canResumeAcrossInstances
+    const targetProviderThread = selectionHandoff
+      ? undefined
+      : isProviderSwitch && !canResumeAcrossInstances
         ? rootProviderThreadsForProvider(projection, modelSelection.instanceId)[0]
         : activeProviderThread;
     const providerSessionId =
+      (selectionHandoff || canResumeAcrossInstances
+        ? yield* idAllocator.allocate
+            .providerSession({
+              providerInstanceId: modelSelection.instanceId,
+              threadId: command.threadId,
+            })
+            .pipe(mapDispatchError(command))
+        : undefined) ??
       (canResumeAcrossInstances ? undefined : targetProviderThread?.providerSessionId) ??
       (yield* mapDispatchError(command)(
         providerSessionIdFor({
@@ -9357,6 +9651,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           request: {
             type: "provider-session.detach",
             providerSessionId: session.id,
+            preserveBufferedOutput: true,
             detail: detachDetail,
           },
         } satisfies PendingOrchestrationEffectV2,

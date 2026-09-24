@@ -96,6 +96,9 @@ const isProviderAdapterProtocolError = Schema.is(ProviderAdapter.ProviderAdapter
 const isProviderAdapterOpenSessionError = Schema.is(
   ProviderAdapter.ProviderAdapterOpenSessionError,
 );
+const isProviderAdapterBufferedOutputError = Schema.is(
+  ProviderAdapter.ProviderAdapterBufferedOutputError,
+);
 
 /**
  * Claude refuses these before it reads the prompt: replacing a process running background work,
@@ -821,7 +824,8 @@ export const layer: Layer.Layer<
       ) {
         const loaded = yield* Effect.result(load);
         if (loaded._tag === "Success") return loaded.success;
-        if (input.willRetry === true) return yield* loaded.failure;
+        if (input.willRetry === true || isProviderAdapterBufferedOutputError(loaded.failure))
+          return yield* loaded.failure;
         yield* settleStartFailure({
           signal: "provider-thread-load-failure",
           title: "Provider turn failed to start",
@@ -1109,7 +1113,7 @@ export const layer: Layer.Layer<
       let resumedHandoffContext: ReturnType<typeof handoffContextForThread> | undefined;
       let portableForkFallback: OrchestrationV2ContextHandoff | undefined;
       let recoveryTurnItem: OrchestrationV2TurnItem | undefined;
-      const loadedProviderThread = yield* Effect.gen(function* () {
+      const bindingResult = yield* Effect.gen(function* () {
         if (nativeForkTransfer !== undefined) {
           const sourceProjection = yield* projectionStore.getThreadRecords(
             nativeForkTransfer.sourceThreadId,
@@ -1385,6 +1389,8 @@ export const layer: Layer.Layer<
             );
           }
         }
+        if (resumed._tag === "Failure" && isProviderAdapterBufferedOutputError(resumed.failure))
+          return yield* resumed.failure;
         resumedHandoffContext = undefined;
         resumedRetryHandoff = [];
         if (!(yield* isCurrentAttemptInStatus("starting"))) return undefined;
@@ -1509,7 +1515,19 @@ export const layer: Layer.Layer<
         });
         recoveryTurnItem = handoffTurnItem;
         return replacement;
-      });
+      }).pipe(Effect.result);
+      if (bindingResult._tag === "Failure") {
+        if (!isProviderAdapterBufferedOutputError(bindingResult.failure))
+          return yield* bindingResult.failure;
+        yield* settleStartFailure({
+          signal: "provider-buffered-output-owned",
+          title: "Provider output must be delivered first",
+          error: bindingResult.failure,
+          message: "Buffered provider output must be delivered before changing its binding.",
+        });
+        return;
+      }
+      const loadedProviderThread = bindingResult.success;
       if (loadedProviderThread === undefined) return;
       if (!(yield* isCurrentAttemptInStatus("starting"))) {
         return;

@@ -238,8 +238,11 @@ const applyGrokSessionModelSelection: NonNullable<AcpAdapterV2Flavor["applyModel
     runtime,
     startResult,
     modelSelection,
+    force,
   }) {
     const requestedModelId = resolveGrokAcpBaseModelId(modelSelection.model);
+    // An uncertain selection is resent even when the cached model already matches.
+    const resend = force === true && requestedModelId !== GROK_DEFAULT_MODEL_SLUG;
     const requestedEffort = getModelSelectionStringOptionValue(
       modelSelection,
       GROK_REASONING_EFFORT_OPTION_ID,
@@ -274,7 +277,7 @@ const applyGrokSessionModelSelection: NonNullable<AcpAdapterV2Flavor["applyModel
       const apply = (requestedReasoningEffort: string | undefined) =>
         applyGrokAcpModelSelection({
           runtime,
-          currentModelId,
+          currentModelId: resend ? undefined : currentModelId,
           requestedModelId,
           requestedReasoningEffort,
           mapError: (cause) => cause,
@@ -290,8 +293,10 @@ const applyGrokSessionModelSelection: NonNullable<AcpAdapterV2Flavor["applyModel
     }
 
     const appliedModelId = yield* applyGrokAcpModelSelection({
-      runtime: { setSessionModel: (model) => runtime.setModel(model).pipe(Effect.as({})) },
-      currentModelId: findModelConfigOption(yield* runtime.getConfigOptions)?.currentValue,
+      runtime: { setSessionModel: (model) => runtime.setModel(model, resend).pipe(Effect.as({})) },
+      currentModelId: resend
+        ? undefined
+        : findModelConfigOption(yield* runtime.getConfigOptions)?.currentValue,
       requestedModelId,
       mapError: (cause) => cause,
     });
@@ -362,6 +367,7 @@ export function makeGrokAcpAdapterFlavor(
         ? window
         : undefined;
     },
+    canForceModelSelection: true,
     applyModelSelection: applyGrokSessionModelSelection,
     ownedModelOptionIds: [GROK_REASONING_EFFORT_OPTION_ID],
     makeRuntime:

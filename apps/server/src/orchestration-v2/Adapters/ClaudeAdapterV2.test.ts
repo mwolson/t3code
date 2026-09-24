@@ -3557,6 +3557,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly settings?: ClaudeSettings;
     readonly modelCatalog?: Effect.Effect<ClaudeModelCatalog>;
     readonly freshQueueOnReopen?: boolean;
+    readonly reopen?: Effect.Effect<never, ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError>;
     readonly forkSession?: ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerShape["forkSession"];
     readonly allocateSessionId?: Effect.Effect<string>;
     readonly offer?: (message: SDKUserMessage) => Effect.Effect<void>;
@@ -3643,6 +3644,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             Effect.succeed(options?.nativeSessionId ?? WAKE_NATIVE_SESSION),
           open: (input) =>
             Effect.gen(function* () {
+              if (options?.reopen !== undefined && processQueues.length > 0) {
+                return yield* options.reopen;
+              }
               openedOptions = input.options;
               const processMessages =
                 options?.freshQueueOnReopen === true && processQueues.length > 0
@@ -3832,6 +3836,29 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  // An idle process's exit emits nothing by itself. One still running a background command
+  // drops that command from the roster in its exit cleanup, which is the event awaited here.
+  const exitIdleProcess = Effect.fnUntraced(function* (
+    harness: Effect.Success<typeof makeWakeHarness>,
+  ) {
+    const taskId = "task-running-at-exit";
+    yield* harness.offerAndWait(
+      claudeSdkFrame({
+        ...wakeTaskStarted,
+        task_id: taskId,
+        tool_use_id: "toolu_01RunningAtExit",
+        uuid: "00000000-0000-4000-8000-000000000109",
+      }),
+    );
+    const rosterListsTask = () =>
+      harness.events
+        .findLast((event) => event.type === "provider_thread.updated")
+        ?.providerThread.pendingBackgroundTasks?.some((task) => task.taskId === taskId) === true;
+    yield* harness.until(rosterListsTask);
+    yield* Queue.shutdown(harness.sdkMessages);
+    yield* harness.until(() => !rosterListsTask());
+  });
 
   describe("ClaudeAdapterV2 session title sync", () => {
     type TitleSyncHarness = Effect.Success<ReturnType<typeof makeWakeHarnessWithOptions>>;
@@ -7544,6 +7571,25 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         { effortLevel: "high", fastMode: null, ultracode: null },
       ]);
       assert.lengthOf(harness.offeredMessages, 2);
+
+      // A wake after the steered turn is the steered model's output.
+      yield* harness.offerAndWait(
+        makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000c01", result: "Sonnet." }),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          type: "user",
+          message: { role: "user", content: "A background task finished." },
+          parent_tool_use_id: null,
+          uuid: "00000000-0000-4000-8000-000000000c02",
+          session_id: WAKE_NATIVE_SESSION,
+        }),
+      );
+      assert.deepEqual(yield* harness.runtime.bufferedExecutionSelection!(harness.providerThread), {
+        ...opus,
+        model: "claude-sonnet-4-6",
+      });
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -7649,10 +7695,29 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       yield* harness.offerAndWait(turnOneResult);
       yield* Queue.take(harness.terminalReceipts);
 
+      assert.deepEqual(
+        yield* harness.runtime.liveExecutionSelection!(harness.providerThread),
+        opus,
+      );
+
       const failed = yield* harness.runtime
         .startTurn(turn(2, { ...opus, model: "claude-sonnet-4-6" }))
         .pipe(Effect.result);
       assert.equal(failed._tag, "Failure");
+      assert.isNull(yield* harness.runtime.liveExecutionSelection!(harness.providerThread));
+
+      // Output the process buffers now came from an unknown selection, not from Opus.
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          type: "user",
+          message: { role: "user", content: "A background task finished." },
+          parent_tool_use_id: null,
+          uuid: "00000000-0000-4000-8000-000000000c03",
+          session_id: WAKE_NATIVE_SESSION,
+        }),
+      );
+      assert.isTrue(yield* harness.runtime.hasBufferedOutputForThread!(harness.providerThread));
+      assert.isNull(yield* harness.runtime.bufferedExecutionSelection!(harness.providerThread));
 
       // The process may now run Sonnet, so returning to Opus must send it.
       yield* harness.runtime.startTurn(turn(3, opus));
@@ -15393,7 +15458,14 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
   it.effect("buffers wake output and requests a single continuation run", () =>
     Effect.gen(function* () {
-      const harness = yield* makeWakeHarness;
+      const harness = yield* makeWakeHarnessWithOptions({
+        reopen: Effect.fail(
+          new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+            method: "open",
+            cause: "rejected open",
+          }),
+        ),
+      });
       const now = yield* DateTime.now;
 
       yield* harness.runtime.startTurn(
@@ -15424,10 +15496,50 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       assert.equal(harness.continuationRequests[0]?.driver, ClaudeAdapterV2.CLAUDE_PROVIDER);
       assert.equal(harness.continuationRequests[0]?.detail, WAKE_SUMMARY);
 
+      // The wake starts a background subagent that is still running at the root's result.
+      yield* harness.offerAndWait(
+        makeSubagentTaskStartedFrame({
+          taskId: "a2f6c1d09b3e4f587",
+          toolUseId: "toolu_01ExitedWakeSubagentLaunch",
+          uuid: "00000000-0000-4000-8000-000000000108",
+        }),
+      );
       yield* harness.offerAndWait(wakeResult);
       assert.lengthOf(harness.continuationRequests, 1);
       assert.lengthOf(harness.terminalEvents(), 1);
       assert.isTrue(yield* harness.hasPendingBackgroundWork);
+
+      // The process exits with the whole wake buffered, so delivering it needs no new process.
+      yield* exitIdleProcess(harness);
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-claude-wake-2"),
+          text: "Background task completed.",
+          attachments: [],
+          providerTurnOrdinal: 2,
+          messageCreatedBy: "agent",
+          messageCreationSource: "provider",
+        }),
+      );
+      yield* harness.awaitTerminal(2);
+      assert.equal(harness.terminalEvents()[1]?.status, "completed");
+      assert.isTrue(
+        harness.events.some(
+          (event) => event.type === "message.updated" && event.message.text === WAKE_ASSISTANT_TEXT,
+        ),
+      );
+      assert.isFalse(yield* harness.runtime.hasBufferedOutputForThread!(harness.providerThread));
+      // Nothing is left to end the subagent the replayed wake started, so the replay does.
+      assert.deepEqual(
+        harness.events.flatMap((event) =>
+          event.type === "subagent.updated" ? [event.subagent.status] : [],
+        ),
+        ["running", "failed"],
+      );
+      assert.isFalse(yield* harness.hasPendingBackgroundWork);
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -16419,7 +16531,14 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     "carries a rejected wake rate limit into the continuation failure (event=%s)",
     (standaloneEvent) =>
       Effect.gen(function* () {
-        const harness = yield* makeWakeHarness;
+        const harness = yield* makeWakeHarnessWithOptions({
+          reopen: Effect.fail(
+            new ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerError({
+              method: "open",
+              cause: "rejected open",
+            }),
+          ),
+        });
         const now = yield* DateTime.now;
         const resetsAt = 1790298600;
 
@@ -16494,6 +16613,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
 
+        // The process exits behind that lifecycle result; the wake is still whole.
+        yield* exitIdleProcess(harness);
         yield* harness.runtime.startTurn(
           makeClaudeTestTurnInput({
             threadId: harness.threadId,
@@ -17048,12 +17169,29 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       assert.deepInclude(harness.liveSelectionChanges, { model: "claude-sonnet-4-6" });
       assert.lengthOf(harness.continuationRequests, 0);
       assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      assert.isFalse(yield* harness.runtime.hasBufferedOutputForThread!(harness.providerThread));
 
       // A root user frame the CLI produced on its own still marks a wake.
       yield* harness.offerAndWait(
         idleUserFrame("00000000-0000-4000-8000-000000000b02", "A background task finished.", false),
       );
       assert.isTrue(yield* harness.hasPendingBackgroundWork);
+      // The wake belongs to the turn that produced it, so no other selection may replace
+      // its process before it is delivered.
+      assert.deepEqual(
+        yield* harness.runtime.bufferedExecutionSelection!(harness.providerThread),
+        turn(2, "claude-sonnet-4-6").modelSelection,
+      );
+      const replaced = yield* harness.runtime
+        .startTurn({ ...turn(3, ""), modelSelection: CLAUDE_TEST_RESTART_MODEL_SELECTION })
+        .pipe(Effect.result);
+      assert.equal(replaced._tag, "Failure");
+      if (replaced._tag === "Failure") {
+        assert.instanceOf(
+          replaced.failure.cause,
+          ProviderAdapter.ProviderAdapterBufferedOutputError,
+        );
+      }
     }).pipe(
       Effect.provide(
         Layer.mergeAll(

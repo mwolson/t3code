@@ -3588,6 +3588,15 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
 
         const runtimeSession: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
           instanceId: options.instanceId,
+          preservesSelectionOnSameSelectionFailure: true,
+          reappliesFullSelection: (selection) =>
+            Effect.succeed(
+              getModelSelectionStringOptionValue(selection, "agent") !== undefined &&
+                getModelSelectionStringOptionValue(selection, "variant") !== undefined &&
+                (selection.options ?? []).every((option) =>
+                  ["agent", "variant"].includes(option.id),
+                ),
+            ),
           driver: OPENCODE_PROVIDER,
           providerSessionId: input.providerSessionId,
           providerSession: sessionEntity,
