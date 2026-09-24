@@ -5917,6 +5917,100 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
+  it.effect("keeps a live model switch and steered completion free of phantom output", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let controlReply = Effect.void;
+        const harness = yield* makeWakeHarnessWithOptions({
+          applyFlagSettings: () => controlReply,
+        });
+        const now = yield* DateTime.now;
+        const opus = { ...CLAUDE_TEST_MODEL_SELECTION, model: "claude-opus-5-5" };
+        const fable = { ...opus, model: "claude-fable-5-2" };
+        const turn = (ordinal: number, modelSelection: ModelSelection) =>
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make(`attempt-model-control:${ordinal}`),
+            text: `Request ${ordinal}`,
+            attachments: [],
+            providerTurnOrdinal: ordinal,
+            modelSelection,
+          });
+        yield* harness.runtime.startTurn(turn(1, opus));
+        yield* harness.offerAndWait(turnOneResult);
+        yield* Queue.take(harness.terminalReceipts);
+        controlReply = harness.offerAndWait(
+          claudeSdkFrame({
+            type: "user",
+            message: {
+              role: "user",
+              content:
+                "<local-command-stdout>Set model to `claude-fable-5-2`</local-command-stdout>",
+            },
+            session_id: WAKE_NATIVE_SESSION,
+            parent_tool_use_id: null,
+            uuid: "model-control-reply",
+            isReplay: true,
+          }),
+        );
+        const switched = turn(2, fable);
+        yield* harness.runtime.startTurn(switched);
+        assert.deepEqual(
+          yield* harness.runtime.liveExecutionSelection!(harness.providerThread),
+          fable,
+        );
+        assert.isFalse(yield* harness.runtime.hasBufferedOutputForThread!(harness.providerThread));
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: switched.runId,
+          providerThread: harness.providerThread,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+            nativeTurnId: `turn:${switched.attemptId}`,
+          }),
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("model-control-steer"),
+            text: "Finish here",
+            attachments: [],
+          },
+        });
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "model-control-abort",
+            result: "",
+            terminalReason: "aborted_tools",
+          }),
+        );
+        yield* harness.offerAndWait(wakeTurnInit);
+        yield* harness.offerAndWait(wakeAssistant);
+        yield* harness.offerAndWait(
+          makeResultFrame({ uuid: "model-control-completed", result: "Done" }),
+        );
+        assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "completed");
+        assert.isFalse(yield* harness.runtime.hasBufferedOutputForThread!(harness.providerThread));
+        assert.isNull(yield* harness.runtime.bufferedExecutionSelection!(harness.providerThread));
+        assert.lengthOf(harness.continuationRequests, 0);
+        yield* harness.runtime.startTurn(turn(3, fable));
+        assert.lengthOf(harness.processQueues, 1);
+        assert.lengthOf(harness.offeredMessages, 4);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+    ),
+  );
+
   it.effect("re-sends the model on the turn after a live selection change fails", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -5958,6 +6052,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           .startTurn(turn(2, { ...opus, model: "claude-sonnet-4-6" }))
           .pipe(Effect.result);
         assert.equal(failed._tag, "Failure");
+        assert.isNull(yield* harness.runtime.liveExecutionSelection!(harness.providerThread));
 
         // The process may now run Sonnet, so returning to Opus must send it.
         yield* harness.runtime.startTurn(turn(3, opus));
@@ -16407,7 +16502,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
           yield* Queue.offer(secondProcess, wakeResult);
           yield* changes.until(() => continuationRequests.length === 1);
-          assert.equal(continuationRequests[0]?.detail, WAKE_SUMMARY);
+          assert.isNull(continuationRequests[0]?.detail);
+          assert.deepEqual(
+            yield* runtime.bufferedExecutionSelection!(providerThread),
+            alternateModel,
+          );
           yield* runtime.startTurn(
             makeClaudeTestTurnInput({
               threadId,

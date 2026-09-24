@@ -349,6 +349,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
       let nativeSessionId: string | undefined;
       let thread: OrchestrationV2ProviderThread | undefined;
       let active: ActiveTurn | undefined;
+      let executionSelection: ModelSelection | null = null;
       let lastProviderTurn: OrchestrationV2ProviderTurn | undefined;
       let latestSubscriptionUsage: MuseSubscriptionUsage | undefined;
       const agentEndedAt = new Map<string, DateTime.Utc>();
@@ -364,7 +365,11 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
       const agentTitles = new Map<string, string>();
       const finishedBackground: Array<BackgroundWorkReport> = [];
       let wake:
-        | { readonly nativeId: string; readonly events: Array<[string, unknown]> }
+        | {
+            readonly nativeId: string;
+            readonly selection: ModelSelection | null;
+            readonly events: Array<[string, unknown]>;
+          }
         | undefined;
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
         Queue.offer(events, event).pipe(Effect.asVoid);
@@ -1431,7 +1436,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
         ) {
           if (active && !active.compact) active.joined.add(params.turnId);
           else if (!active && !wake) {
-            const held = { nativeId: params.turnId, events: [] };
+            const held = { nativeId: params.turnId, selection: executionSelection, events: [] };
             wake = held;
             const notification = backgroundWorkNotification(finishedBackground.splice(0));
             if (thread?.appThreadId && options.continuationRequests)
@@ -2047,6 +2052,8 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
       });
       const validateThread = (candidate: OrchestrationV2ProviderThread) =>
         thread !== undefined &&
+        candidate.id === thread.id &&
+        candidate.providerSessionId === input.providerSessionId &&
         candidate.driver === MUSE_PROVIDER &&
         candidate.providerInstanceId === options.instanceId &&
         candidate.appThreadId === thread.appThreadId &&
@@ -2087,6 +2094,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
         const targetModel = continuation
           ? undefined
           : yield* resolveModel(turnInput.modelSelection);
+        if (!continuation && !compact) executionSelection = null;
         if (targetModel && session.model !== targetModel) {
           yield* request("session/setModel", {
             model: { modelId: targetModel, providerId: "meta" },
@@ -2198,6 +2206,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
               );
               return yield* protocolError("Muse admitted the turn under an unexpected identity");
             }
+            executionSelection = turnInput.modelSelection;
           }
         }).pipe(
           Effect.onError((cause) => {
@@ -2263,6 +2272,23 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
         providerSession: session,
         events: Stream.fromQueue(events),
         backgroundTasksEndWithProcess: true,
+        continuationDrainsOutput: true,
+        hasBufferedOutputForThread: (candidate) =>
+          Effect.sync(() => validateThread(candidate) && wake !== undefined),
+        bufferedExecutionSelection: (candidate) =>
+          Effect.sync(() => (validateThread(candidate) ? (wake?.selection ?? null) : null)),
+        canAdoptUnselectedBufferedOutput: (candidate, selection) =>
+          Effect.sync(
+            () =>
+              validateThread(candidate) &&
+              !broken &&
+              !closed &&
+              wake !== undefined &&
+              wake.selection === null &&
+              executionSelection === null &&
+              selection.instanceId === options.instanceId &&
+              selection.model === session.model,
+          ),
         // A running workflow or a held Muse turn keeps the host: idle release must wait.
         hasPendingBackgroundWork: Effect.sync(
           () => observedChildren.size > 0 || wake !== undefined,
