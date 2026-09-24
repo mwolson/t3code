@@ -9,6 +9,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { ProviderSessionId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -102,6 +103,56 @@ it.effect("forks a session stored under the instance's own CLAUDE_CONFIG_DIR", (
     }).pipe(Effect.provide(forkRunnerLayer)),
   ).pipe(Effect.provide(NodeServices.layer)),
 );
+it.effect("opens a query only after Claude acknowledges initialization", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const initialize = Promise.withResolvers<unknown>();
+      const initializing = Promise.withResolvers<void>();
+      let completedOpen = false;
+      const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(() => {
+        initializing.resolve();
+        return {
+          initializationResult: () => initialize.promise,
+          close: () => {},
+          next: () => Promise.resolve({ done: true, value: undefined }),
+          return: () => Promise.resolve({ done: true, value: undefined }),
+          [Symbol.asyncIterator]() {
+            return this;
+          },
+        } as unknown as ClaudeSdk.Query;
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+      const runner = yield* ClaudeAgentSdkQueryRunner;
+      const opening = yield* runner
+        .open({
+          threadId: ThreadId.make("thread-initialization"),
+          providerSessionId: ProviderSessionId.make("session-initialization"),
+          options: {
+            sessionId: "native-session-initialization",
+            model: "claude-sonnet-4-6",
+            tools: [],
+            permissionMode: "default",
+            effort: "high",
+          },
+        })
+        .pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              completedOpen = true;
+            }),
+          ),
+          Effect.forkChild({ startImmediately: true }),
+        );
+      yield* Effect.promise(() => initializing.promise);
+      assert.isFalse(completedOpen, "scheduling initialization is not acknowledgment");
+      initialize.resolve({ commands: [], models: [] });
+      const session = yield* Fiber.join(opening);
+      assert.isTrue(completedOpen);
+      yield* session.close;
+    }).pipe(Effect.provide(forkRunnerLayer)),
+  ).pipe(Effect.provide(NodeServices.layer)),
+);
+
 const realQueryRunner = layerQueryRunner.pipe(
   Layer.provide(
     Layer.succeed(ProviderEventLoggers, {
@@ -146,6 +197,9 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI pro
           'dir=$(dirname "$0")',
           'sleep 600 > "$dir/alive" &',
           'echo $! > "$dir/leftover.pid"',
+          "IFS= read -r request",
+          `request_id=$(printf '%s' "$request" | sed 's/.*"request_id":"\\([^"]*\\)".*/\\1/')`,
+          `printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"commands":[],"models":[]}}}\\n' "$request_id"`,
           "cat > /dev/null",
         ].join("\n"),
       );

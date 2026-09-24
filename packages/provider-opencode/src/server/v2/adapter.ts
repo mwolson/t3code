@@ -3446,6 +3446,13 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           const state = nativeId == null ? undefined : threads.get(nativeId);
           return state !== undefined && hasBackground(state);
         }),
+      hasBufferedOutputForThread: (providerThread) =>
+        Effect.sync(() => {
+          const nativeId = providerThread.nativeThreadRef?.nativeId;
+          const state = nativeId == null ? undefined : threads.get(nativeId);
+          return state !== undefined && state.wakes.length > 0;
+        }),
+      continuationDrainsOutput: true,
       getModelContextWindow: (selection, cwd) =>
         selection.instanceId === instanceId
           ? windowOf(cwd === undefined ? session.cwd : cwd, selection.model)
