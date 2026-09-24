@@ -630,6 +630,19 @@ export const claudeAgentSdkQueryRunnerLiveLayer: Layer.Layer<
             }),
           catch: (cause) => queryRunnerError(cause, "query"),
         });
+        yield* Effect.tryPromise({
+          try: () => queryRuntime.initializationResult(),
+          catch: (cause) => queryRunnerError(cause, "initialize"),
+        }).pipe(
+          Effect.onExit((exit) =>
+            Exit.isFailure(exit)
+              ? Queue.shutdown(promptQueue).pipe(
+                  Effect.andThen(closeClaudeQuery(queryRuntime)),
+                  Effect.ignore,
+                )
+              : Effect.void,
+          ),
+        );
         yield* logProtocolEvent({
           direction: "outgoing",
           stage: "decoded",
@@ -2983,9 +2996,14 @@ export function makeClaudeAdapterV2(
         });
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
+        const lastTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
+        const acknowledgedQueryTurn = yield* Ref.make<{
+          readonly query: ClaudeLiveQueryContext;
+          readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
+        } | null>(null);
         const openedNativeThreads = yield* Ref.make(new Set<string>());
         const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
         const planIdsByNativeItem = yield* Ref.make(
@@ -3053,7 +3071,14 @@ export function makeClaudeAdapterV2(
         const wakeBuffers = yield* Ref.make(
           new Map<
             string,
-            { readonly messages: ReadonlyArray<SDKMessage>; readonly detail: string | null }
+            {
+              readonly messages: ReadonlyArray<SDKMessage>;
+              readonly detail: string | null;
+              readonly producer: {
+                readonly query: ClaudeLiveQueryContext;
+                readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
+              } | null;
+            }
           >(),
         );
         // Background work that ended and has not been named by a wake offer yet,
@@ -4914,6 +4939,22 @@ export function makeClaudeAdapterV2(
                 const nativeThreadId =
                   input.context.input.providerThread.nativeThreadRef?.nativeId ?? null;
                 if (nativeThreadId !== null) {
+                  const buffered = (yield* Ref.get(wakeBuffers)).get(nativeThreadId);
+                  const live = yield* Ref.get(queryContext);
+                  if (
+                    input.status === "completed" &&
+                    buffered?.producer != null &&
+                    buffered.producer.query === live &&
+                    buffered.producer.input.runOrdinal < input.context.input.runOrdinal &&
+                    buffered.messages.every(
+                      (message) =>
+                        message.type === "system" && message.subtype === "task_notification",
+                    ) &&
+                    !(yield* hasOwnedBufferedOutput(nativeThreadId))
+                  ) {
+                    // The later turn on this query consumed its queued opaque notification.
+                    yield* clearWakeStateForNativeThread(nativeThreadId);
+                  }
                   if (input.status !== "completed") {
                     yield* clearPendingBackgroundTasksForNativeThread(nativeThreadId);
                     yield* clearNativeThreadTaskIdSet(
@@ -5180,12 +5221,16 @@ export function makeClaudeAdapterV2(
               childThreadId: registered?.childThreadId,
             });
           }
+          const acknowledged = yield* Ref.get(acknowledgedQueryTurn);
+          const live = yield* Ref.get(queryContext);
+          const producer = acknowledged?.query === live ? acknowledged : null;
           yield* Ref.update(wakeBuffers, (current) => {
             const existing = current.get(wakeInput.nativeThreadId);
             const updated = new Map(current);
             updated.set(wakeInput.nativeThreadId, {
               messages: [...(existing?.messages ?? []), message],
               detail: notificationSummary ?? existing?.detail ?? null,
+              producer: existing?.producer ?? producer,
             });
             return updated;
           });
@@ -5375,8 +5420,9 @@ export function makeClaudeAdapterV2(
           // A held subagent frame replayed after its owner registered. Its
           // turn-level assistant bookkeeping already ran when it arrived.
           readonly replayed?: boolean;
+          readonly replayContext?: ClaudeLiveQueryContext;
         }) {
-          const liveQuery = yield* Ref.get(queryContext);
+          const liveQuery = input.replayContext ?? (yield* Ref.get(queryContext));
           if (liveQuery?.query !== input.query) {
             return;
           }
@@ -6350,18 +6396,26 @@ export function makeClaudeAdapterV2(
         const handleRoutedSdkMessage = Effect.fnUntraced(function* (input: {
           readonly query: ClaudeAgentSdkQuerySession;
           readonly message: SDKMessage;
+          readonly replayContext?: ClaudeLiveQueryContext;
         }) {
+          const held = (message: SDKMessage) =>
+            handleSdkMessageFrame({
+              query: input.query,
+              message,
+              replayed: true,
+              ...(input.replayContext === undefined ? {} : { replayContext: input.replayContext }),
+            });
           // Progress or a notification can be the first frame naming a known
           // subagent's tool_use_id; its held frames must precede the result.
           if (input.message.type !== "system" || input.message.subtype !== "task_started") {
             for (const message of yield* takeReleasableSubagentFrames(input.message)) {
-              yield* handleSdkMessageFrame({ query: input.query, message, replayed: true });
+              yield* held(message);
             }
           }
           yield* handleSdkMessageFrame(input);
           // task_started registers its subagent while being handled.
           for (const message of yield* takeReleasableSubagentFrames(input.message)) {
-            yield* handleSdkMessageFrame({ query: input.query, message, replayed: true });
+            yield* held(message);
           }
         });
 
@@ -6406,10 +6460,11 @@ export function makeClaudeAdapterV2(
         const handleSdkMessage = Effect.fnUntraced(function* (input: {
           readonly query: ClaudeAgentSdkQuerySession;
           readonly message: SDKMessage;
+          readonly replayContext?: ClaudeLiveQueryContext;
         }) {
           const message = input.message;
           const context = yield* Ref.get(activeTurn);
-          const liveQuery = yield* Ref.get(queryContext);
+          const liveQuery = input.replayContext ?? (yield* Ref.get(queryContext));
           if (
             context === null ||
             context.promptUuid === null ||
@@ -6853,6 +6908,22 @@ export function makeClaudeAdapterV2(
           return false;
         });
 
+        const hasOwnedBufferedOutput = Effect.fnUntraced(function* (nativeThreadId: string) {
+          const buffered = (yield* Ref.get(wakeBuffers)).get(nativeThreadId);
+          const subagents = yield* Ref.get(sessionSubagentsByTaskId);
+          return (
+            buffered?.messages.some(
+              (message) =>
+                message.type === "user" ||
+                message.type === "assistant" ||
+                message.type === "result" ||
+                (message.type === "system" &&
+                  message.subtype === "task_notification" &&
+                  subagents.has(message.task_id)),
+            ) === true
+          );
+        });
+
         const openQuery = Effect.fnUntraced(function* (
           turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
           nativeThreadId: string,
@@ -6895,18 +6966,19 @@ export function makeClaudeAdapterV2(
             return existing;
           }
 
-          // Background agents and shells run inside the CLI process, so a
-          // new selection would kill them and lose their results. Refuse until
-          // they finish or the user presses Stop, which closes the process.
-          // Another native thread on this session is one the app thread has
-          // left (Claude sessions serve one app thread), so it is replaced.
-          if (
-            existing !== null &&
-            existing.nativeThreadId === nativeThreadId &&
-            !existing.stopping &&
-            (yield* liveProcessRunsBackgroundWork(existing))
-          ) {
-            return yield* new ClaudeBackgroundWorkBlocksQueryReplacementError();
+          if (existing !== null && !existing.stopping) {
+            if (yield* hasOwnedBufferedOutput(existing.nativeThreadId)) {
+              return yield* new ProviderAdapter.ProviderAdapterBufferedOutputError({
+                driver: CLAUDE_PROVIDER,
+                providerThreadId: turnInput.providerThread.id,
+              });
+            }
+            if (
+              existing.nativeThreadId === nativeThreadId &&
+              (yield* liveProcessRunsBackgroundWork(existing))
+            ) {
+              return yield* new ClaudeBackgroundWorkBlocksQueryReplacementError();
+            }
           }
 
           // openQuery owns one live process. Closing it for another native
@@ -6916,6 +6988,7 @@ export function makeClaudeAdapterV2(
           // the replacement open succeeds or fails below.
           const closedExistingNativeThreadId = existing !== null ? existing.nativeThreadId : null;
           if (existing !== null) {
+            yield* Ref.update(queryContext, (current) => (current === existing ? null : current));
             yield* existing.query.close.pipe(Effect.ignore);
             if (existing.nativeThreadId !== nativeThreadId) {
               yield* clearWakeStateForNativeThread(existing.nativeThreadId);
@@ -7140,7 +7213,11 @@ export function makeClaudeAdapterV2(
                   skillNames: yield* userInvocableSkillNames(turnInput.runtimePolicy.cwd),
                   uuid: claudePromptUuid(turnInput.attemptId),
                 });
-            const querySession = yield* openQuery(turnInput, nativeThreadId);
+            const buffered = (yield* Ref.get(wakeBuffers)).get(nativeThreadId);
+            const querySession =
+              isContinuationTurn && buffered?.producer != null
+                ? buffered.producer.query
+                : yield* openQuery(turnInput, nativeThreadId);
             yield* Ref.set(activeTurn, context);
             yield* emitProviderEvent({
               type: "provider_turn.updated",
@@ -7158,8 +7235,11 @@ export function makeClaudeAdapterV2(
               // Counted only here, so a turn that failed to start does not age reports.
               yield* startUserTurnForWakeReports(nativeThreadId);
               yield* querySession.query.offer(userMessage);
+              yield* Ref.set(acknowledgedQueryTurn, { query: querySession, input: turnInput });
+              yield* Ref.set(lastTurn, context);
               return;
             }
+            yield* Ref.set(lastTurn, context);
             const drained = yield* Ref.modify(wakeBuffers, (current) => {
               const entry = current.get(nativeThreadId);
               if (entry === undefined) {
@@ -7198,12 +7278,20 @@ export function makeClaudeAdapterV2(
             );
             for (const entry of drained) {
               if (entry.type !== "result") {
-                yield* handleSdkMessage({ query: querySession.query, message: entry });
+                yield* handleSdkMessage({
+                  query: querySession.query,
+                  message: entry,
+                  replayContext: querySession,
+                });
               }
             }
             const lastResult = resultMessages.at(-1);
             if (lastResult !== undefined) {
-              yield* handleSdkMessage({ query: querySession.query, message: lastResult });
+              yield* handleSdkMessage({
+                query: querySession.query,
+                message: lastResult,
+                replayContext: querySession,
+              });
               return;
             }
             // A drained `init` means Claude began the wake turn, so its output
@@ -7221,6 +7309,13 @@ export function makeClaudeAdapterV2(
           },
           (effect, turnInput) =>
             effect.pipe(
+              Effect.onExit((exit) =>
+                Exit.isFailure(exit)
+                  ? Ref.update(activeTurn, (current) =>
+                      current?.input.attemptId === turnInput.attemptId ? null : current,
+                    )
+                  : Effect.void,
+              ),
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterTurnStartError({
@@ -7254,11 +7349,20 @@ export function makeClaudeAdapterV2(
               }
               // The background shells belong to the CLI process, so closing
               // its query is what stops them.
+              existing.stopping = true;
               yield* closeLiveQueryForNativeThread(nativeThreadId);
               // A turn started while the close was pending may have opened a
               // replacement process. Its Waiting and wake state are its own.
               const current = yield* Ref.get(queryContext);
               if (current === null || current.query === existing.query) {
+                const context = yield* Ref.get(lastTurn);
+                if (context !== null) {
+                  for (const [taskId, entry] of yield* Ref.get(sessionSubagentsByTaskId)) {
+                    if (entry.task.status === "running")
+                      yield* updateClaudeSubagentNode({ context, taskId, status: "cancelled" });
+                  }
+                }
+                yield* Ref.set(lastTurn, null);
                 yield* clearWakeStateForNativeThread(nativeThreadId);
                 yield* resetBackgroundTaskStateForNativeThreadProcess(nativeThreadId, {
                   status: "idle",
@@ -7447,20 +7551,52 @@ export function makeClaudeAdapterV2(
             }
             return false;
           }),
+          liveExecutionSelection: (providerThread) =>
+            Effect.gen(function* () {
+              const acknowledged = yield* Ref.get(acknowledgedQueryTurn);
+              const live = yield* Ref.get(queryContext);
+              return live !== null &&
+                acknowledged?.query === live &&
+                acknowledged.input.providerThread.id === providerThread.id &&
+                live.nativeThreadId === providerThread.nativeThreadRef?.nativeId
+                ? acknowledged.input.modelSelection
+                : null;
+            }),
+          bufferedExecutionSelection: (providerThread) =>
+            Effect.gen(function* () {
+              const nativeId = providerThread.nativeThreadRef?.nativeId;
+              const producer =
+                nativeId == null ? null : (yield* Ref.get(wakeBuffers)).get(nativeId)?.producer;
+              return producer?.input.providerThread.id === providerThread.id
+                ? producer.input.modelSelection
+                : null;
+            }),
+          hasBufferedOutputForThread: (providerThread) =>
+            Effect.gen(function* () {
+              const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
+              return nativeThreadId != null && (yield* hasOwnedBufferedOutput(nativeThreadId));
+            }),
           hasPendingBackgroundWorkForThread: (providerThread) =>
             Effect.gen(function* () {
               const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
               if (nativeThreadId === undefined || nativeThreadId === null) {
                 return false;
               }
-              // Root-run stop gate: only this native thread's roster. Session
-              // subagents and wake buffers stay on the session-wide probe.
               return (
                 rosterForNativeThread(
                   yield* Ref.get(pendingBackgroundTasksByNativeThread),
                   nativeThreadId,
                 ).size > 0
               );
+            }),
+          hasRunningBackgroundWorkForThread: (providerThread) =>
+            Effect.gen(function* () {
+              const live = yield* Ref.get(queryContext);
+              return live !== null &&
+                !live.stopping &&
+                live.nativeThreadId === providerThread.nativeThreadRef?.nativeId
+                ? yield* liveProcessRunsBackgroundWork(live)
+                : false;
             }),
           ensureThread: Effect.fn("ClaudeAdapterV2.ensureThread")(
             function* (threadInput: ProviderAdapter.ProviderAdapterV2EnsureThreadInput) {
