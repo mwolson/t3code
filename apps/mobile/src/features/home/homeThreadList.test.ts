@@ -5,7 +5,7 @@ import type {
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildHomeProjectScopes, findHomeProjectScope } from "./homeThreadList";
+import { buildHomeProjectScopes, findHomeProjectScope, hasHomeThreads } from "./homeThreadList";
 import { makeThreadShellFixture } from "../../test-fixtures";
 import { buildThreadListV2Items } from "../threads/threadListV2";
 
@@ -221,5 +221,25 @@ describe("home project scopes", () => {
     expect(findHomeProjectScope(scopes, "environment-local:project-target")).toBe(targetScope);
     expect(findHomeProjectScope(scopes, "environment-local:missing")).toBeNull();
     expect(findHomeProjectScope(scopes, null)).toBeNull();
+  });
+});
+
+describe("hasHomeThreads", () => {
+  it("ignores child-only history", () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    const projectId = ProjectId.make("project-1");
+    const root = makeThread({ environmentId, id: ThreadId.make("root"), projectId, title: "Root" });
+    const child = {
+      ...makeThread({ environmentId, id: ThreadId.make("child"), projectId, title: "Child" }),
+      lineage: {
+        rootThreadId: root.id,
+        parentThreadId: root.id,
+        relationshipToParent: "subagent" as const,
+      },
+    };
+    const counts = { pendingTaskCount: 0, settledCount: 0 };
+
+    expect(hasHomeThreads({ threads: [child], ...counts })).toBe(false);
+    expect(hasHomeThreads({ threads: [child, root], ...counts })).toBe(true);
   });
 });
