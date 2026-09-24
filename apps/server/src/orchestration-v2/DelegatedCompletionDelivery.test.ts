@@ -13,6 +13,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   RunId,
   RuntimeRequestId,
@@ -40,6 +41,7 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
@@ -1610,6 +1612,57 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
 
         // The shape ProviderContinuationService dispatches when the provider
         // reports a background command (wire kind `background_command`) ended.
+        // A real wake comes from the resident session that buffered it.
+        yield* eventSink.write({
+          commandId: reconcileCommandId("background-wake-child-binding"),
+          events: [
+            {
+              id: EventId.make("event:background-wake-child-binding"),
+              type: "provider-thread.updated",
+              threadId: child.childThreadId,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              occurredAt: now,
+              payload: {
+                id: ProviderThreadId.make("provider-thread:background-wake-child"),
+                driver,
+                providerInstanceId: modelSelection.instanceId,
+                providerSessionId: ProviderSessionId.make("session:background-wake-child"),
+                appThreadId: child.childThreadId,
+                ownerNodeId: null,
+                nativeThreadRef: {
+                  driver,
+                  nativeId: "native:background-wake-child",
+                  strength: "strong",
+                },
+                nativeConversationHeadRef: null,
+                status: "active",
+                firstRunOrdinal: 1,
+                lastRunOrdinal: 1,
+                handoffIds: [],
+                forkedFrom: null,
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+        const childSelection = (yield* orchestrator.getThreadProjection(child.childThreadId)).thread
+          .modelSelection;
+        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const runtime: Pick<
+          ProviderAdapter.ProviderAdapterV2SessionRuntime,
+          "bufferedExecutionSelection" | "hasBufferedOutputForThread"
+        > = {
+          bufferedExecutionSelection: () => Effect.succeed(childSelection),
+          hasBufferedOutputForThread: () => Effect.succeed(true),
+        };
+        const sessionSpy = vi
+          .spyOn(sessions, "get")
+          .mockReturnValue(
+            Effect.succeedSome(runtime as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+          );
+        yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
         const wakeMessageId = MessageId.make("message:background-wake");
         yield* orchestrator.dispatch({
           type: "message.dispatch",
@@ -1627,6 +1680,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           attachments: [],
           dispatchMode: { type: "queue_after_active" },
         });
+        sessionSpy.mockRestore();
         const run = (yield* orchestrator.getThreadProjection(child.childThreadId)).runs.find(
           (row) => row.userMessageId === wakeMessageId,
         )!;

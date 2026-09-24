@@ -92,16 +92,20 @@ class WorktreeRecreateNoBaseError extends Schema.TaggedError<WorktreeRecreateNoB
 }
 
 const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
+const isProviderAdapterBufferedOutputError = Schema.is(
+  ProviderAdapter.ProviderAdapterBufferedOutputError,
+);
 
 /**
  * Claude refuses these before it reads the prompt: replacing a process running background work,
- * launch arguments whose appended system prompt or settings cannot be read, or MCP registration
- * that never answers while the query opens.
+ * launch arguments whose appended system prompt or settings cannot be read, or initialization or
+ * MCP registration that never answers while the query opens.
  */
 const PROMPT_REFUSAL_TAGS = [
   "ClaudeBackgroundWorkBlocksQueryReplacementError",
   "ClaudeAppendSystemPromptFileError",
   "ClaudeAppendSystemPromptMissingValueError",
+  "ClaudeInitializationTimeoutError",
   "ClaudeSettingsLaunchArgError",
   "ClaudeMcpRegistrationTimeoutError",
 ] as const;
@@ -747,7 +751,8 @@ export const layer: Layer.Layer<
       ) {
         const loaded = yield* Effect.result(load);
         if (loaded._tag === "Success") return loaded.success;
-        if (input.willRetry === true) return yield* loaded.failure;
+        if (input.willRetry === true || isProviderAdapterBufferedOutputError(loaded.failure))
+          return yield* loaded.failure;
         yield* settleStartFailure({
           signal: "provider-thread-load-failure",
           title: "Provider turn failed to start",
@@ -1030,7 +1035,7 @@ export const layer: Layer.Layer<
       };
       let resumedRetryHandoff: ReadonlyArray<OrchestrationV2ContextHandoff> | undefined;
       let resumedHandoffContext: ReturnType<typeof handoffContextForThread> | undefined;
-      const loadedProviderThread = yield* Effect.gen(function* () {
+      const bindingResult = yield* Effect.gen(function* () {
         if (nativeForkTransfer !== undefined) {
           const sourceProjection = yield* projectionStore.getThreadRecords(
             nativeForkTransfer.sourceThreadId,
@@ -1158,6 +1163,8 @@ export const layer: Layer.Layer<
             );
           }
         }
+        if (resumed._tag === "Failure" && isProviderAdapterBufferedOutputError(resumed.failure))
+          return yield* resumed.failure;
         resumedHandoffContext = undefined;
         resumedRetryHandoff = [];
         if (!(yield* isCurrentAttemptInStatus("starting"))) return undefined;
@@ -1229,7 +1236,29 @@ export const layer: Layer.Layer<
           ],
         });
         return replacement;
-      });
+      }).pipe(Effect.result);
+      if (bindingResult._tag === "Failure") {
+        if (!isProviderAdapterBufferedOutputError(bindingResult.failure))
+          return yield* bindingResult.failure;
+        yield* settleRunBeforeStart({
+          signal: "provider-buffered-output-owned",
+          status: "failed",
+          now: yield* DateTime.now,
+          providerInstanceId: run.providerInstanceId,
+          itemProviderThreadId: providerThread.id,
+          item: {
+            type: "error",
+            title: "Provider output must be delivered first",
+            failure: makeProviderFailure({
+              cause: bindingResult.failure,
+              class: "provider_error",
+              message: "Buffered provider output must be delivered before changing its binding.",
+            }),
+          },
+        });
+        return;
+      }
+      const loadedProviderThread = bindingResult.success;
       if (loadedProviderThread === undefined) return;
       if (!(yield* isCurrentAttemptInStatus("starting"))) {
         return;

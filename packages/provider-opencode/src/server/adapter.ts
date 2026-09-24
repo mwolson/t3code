@@ -3022,6 +3022,15 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
 
         const runtimeSession: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
           instanceId: options.instanceId,
+          preservesSelectionOnSameSelectionFailure: true,
+          reappliesFullSelection: (selection) =>
+            Effect.succeed(
+              getModelSelectionStringOptionValue(selection, "agent") !== undefined &&
+                getModelSelectionStringOptionValue(selection, "variant") !== undefined &&
+                (selection.options ?? []).every((option) =>
+                  ["agent", "variant"].includes(option.id),
+                ),
+            ),
           driver: OPENCODE_PROVIDER,
           providerSessionId: input.providerSessionId,
           providerSession: sessionEntity,
@@ -3290,7 +3299,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                       }),
                 ),
                 Effect.catch((cause) =>
-                  admissionAbortController!.signal.aborted ? Effect.void : Effect.fail(cause),
+                  admissionAbortController!.signal.aborted ? Effect.interrupt : Effect.fail(cause),
                 ),
                 Effect.ensuring(
                   Effect.all([
@@ -3303,6 +3312,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   ]).pipe(Effect.asVoid),
                 ),
               );
+              if (admissionAbortController?.signal.aborted) return yield* Effect.interrupt;
               if (state.activeTurn === turn && !turn.finalized && !turn.interrupted) {
                 const admissionAction = advanceOpenCodePromptAdmission(turn, "accepted");
                 if (admissionAction === "reconcile-idle") {

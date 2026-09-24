@@ -12251,7 +12251,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
           yield* Queue.offer(secondProcess, wakeResult);
           yield* changes.until(() => continuationRequests.length === 1);
-          assert.equal(continuationRequests[0]?.detail, WAKE_SUMMARY);
+          assert.isNull(continuationRequests[0]?.detail);
+          assert.deepEqual(
+            yield* runtime.bufferedExecutionSelection!(providerThread),
+            alternateModel,
+          );
           yield* runtime.startTurn(
             makeClaudeTestTurnInput({
               threadId,
