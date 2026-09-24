@@ -1668,5 +1668,54 @@ it("renders automatic completion as a work entry instead of a user bubble", () =
         },
       ],
     })[0]?.kind,
+  ).toBe("work");
+  const ordinaryUser = {
+    ...item,
+    type: "user_message" as const,
+    messageId: MessageId.make("ordinary-user"),
+    createdBy: "user" as const,
+    creationSource: "web" as const,
+    inputIntent: "turn_start" as const,
+    attachments: [],
+    text: "Delegated task node:task-1 reached a terminal state.",
+  };
+  expect(
+    deriveTimelineEntriesFromVisibleTurnItems({
+      optimisticMessages: [],
+      visibleTurnItems: [{ ...row, item: ordinaryUser }],
+    })[0]?.kind,
   ).toBe("message");
+  const legacyWake = {
+    ...ordinaryUser,
+    createdBy: "agent" as const,
+    creationSource: "server" as const,
+  };
+  const optimisticMessages = [
+    {
+      id: legacyWake.messageId,
+      role: "user" as const,
+      text: legacyWake.text,
+      runId: null,
+      streaming: false,
+      createdAt: "2026-09-09T00:00:00Z",
+      updatedAt: "2026-09-09T00:00:00Z",
+    },
+  ];
+  const legacyEntries = deriveTimelineEntriesFromVisibleTurnItems({
+    optimisticMessages,
+    visibleTurnItems: [{ ...row, item: legacyWake }],
+  });
+  expect(legacyEntries).toHaveLength(1);
+  expect(legacyEntries[0]?.kind).toBe("work");
+  const attributedEntries = deriveTimelineEntriesFromVisibleTurnItems({
+    optimisticMessages,
+    visibleTurnItems: [
+      { ...row, item: { ...legacyWake, senderThreadId: ThreadId.make("sender") } },
+    ],
+  });
+  expect(attributedEntries).toHaveLength(1);
+  expect(attributedEntries[0]).toMatchObject({
+    kind: "message",
+    message: { text: legacyWake.text, senderThreadId: "sender" },
+  });
 });
