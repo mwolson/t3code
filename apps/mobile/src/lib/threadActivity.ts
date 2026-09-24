@@ -3,7 +3,10 @@ import type {
   ThreadPendingUserInput,
 } from "@t3tools/client-runtime/state/thread-requests";
 import { linkRequestTargetName } from "@t3tools/client-runtime/link-request";
-import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
+import {
+  presentLegacyWakeItem,
+  turnItemIsWorkspacePreparation,
+} from "@t3tools/client-runtime/state/turn-item-presentation";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import {
@@ -2361,8 +2364,12 @@ export function buildThreadFeed(
   // is reused only while these match the build that produced it.
   // An answer that started a later run stays a normal message at that run's position.
   const foldedAnswerRunIdByMessageId = new Map<string, RunId | null>();
+  const legacyWakeMessageIds = new Set<string>();
   const delegatedChildrenByRun = new Map<RunId, Set<string>>();
   for (const { item } of visibleTurnItems) {
+    if (item.type === "user_message" && presentLegacyWakeItem(item).type === "notification") {
+      legacyWakeMessageIds.add(item.messageId);
+    }
     if (item.type === "user_input_request" && item.questionAnswer) {
       foldedAnswerRunIdByMessageId.set(`async-answer:${item.questionAnswer.requestId}`, item.runId);
     } else if (item.type === "subagent" && item.origin === "app_owned" && item.runId !== null) {
@@ -2410,7 +2417,7 @@ export function buildThreadFeed(
   }
   for (let index = restart?.row ?? 0; index < visibleTurnItems.length; index += 1) {
     const row = visibleTurnItems[index]!;
-    const item = row.item;
+    const item = presentLegacyWakeItem(row.item);
     if (turnItemIsWorkspacePreparation(item) && !item.deferredWork) continue;
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (
@@ -2514,7 +2521,7 @@ export function buildThreadFeed(
       entryRows.push(index);
       continue;
     }
-    const activity = toFeedActivity(row, attemptId);
+    const activity = toFeedActivity(item === row.item ? row : { ...row, item }, attemptId);
     const rowEntries: RawThreadFeedEntry[] = [
       { type: "activity", id: activity.id, createdAt, runId: item.runId, activity },
     ];
@@ -2540,6 +2547,7 @@ export function buildThreadFeed(
   }
   const retainedMessageIds = new Set([
     ...foldedAnswerRunIdByMessageId.keys(),
+    ...legacyWakeMessageIds,
     ...entries.flatMap((entry) => (entry.type === "message" ? [entry.id] : [])),
   ]);
   const appendLocalMessage = (message: LocalThreadMessage): RawThreadFeedEntry => {
