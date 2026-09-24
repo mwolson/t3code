@@ -598,9 +598,18 @@ it.effect.each([{ canRestart: false }, { canRestart: true }])(
           assert.deepEqual(changed.runs[0]?.modelSelection, runSelection);
           assert.deepEqual(changed.thread.modelSelection, composerSelection);
 
+          const nextModel = { ...composerSelection, model: "next-turn-model" };
+          yield* steer("steer-model", nextModel);
+          const modelChanged = yield* orchestrator.getThreadProjection(threadId);
+          assert.deepEqual(steered, ["steer-changed", "steer-model"]);
+          assert.equal(started.length, 1);
+          assert.deepEqual(modelChanged.attempts, changed.attempts);
+          assert.deepEqual(modelChanged.runs[0]?.modelSelection, runSelection);
+          assert.deepEqual(modelChanged.thread.modelSelection, nextModel);
+
           yield* steer("steer-reverted", runSelection);
           const reverted = yield* orchestrator.getThreadProjection(threadId);
-          assert.deepEqual(steered, ["steer-changed", "steer-reverted"]);
+          assert.deepEqual(steered, ["steer-changed", "steer-model", "steer-reverted"]);
           assert.lengthOf(reverted.attempts, 1);
           assert.deepEqual(reverted.thread.modelSelection, runSelection);
 
@@ -627,7 +636,12 @@ it.effect.each([{ canRestart: false }, { canRestart: true }])(
           });
           yield* steer("steer-back", runSelection);
           const back = yield* orchestrator.getThreadProjection(threadId);
-          assert.deepEqual(steered, ["steer-changed", "steer-reverted", "steer-back"]);
+          assert.deepEqual(steered, [
+            "steer-changed",
+            "steer-model",
+            "steer-reverted",
+            "steer-back",
+          ]);
           assert.equal(back.thread.providerInstanceId, instanceId);
           assert.deepEqual(back.thread.modelSelection, runSelection);
         }).pipe(Effect.provide(layer));

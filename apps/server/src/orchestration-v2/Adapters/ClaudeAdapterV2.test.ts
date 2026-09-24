@@ -1935,6 +1935,7 @@ describe("ClaudeAdapterV2 native fork", () => {
 });
 
 function makeFakeClaudeCli(answerSetServers = true) {
+  const registering = Promise.withResolvers<void>();
   const spawns: Array<SpawnOptions> = [];
   const controlRequests: Array<object> = [];
   const stdins: Array<NodeStream.PassThrough> = [];
@@ -1963,6 +1964,7 @@ function makeFakeClaudeCli(answerSetServers = true) {
         if (frame.type !== "control_request") continue;
         controlRequests.push(frame.request);
         const setServers = frame.request.subtype === "mcp_set_servers";
+        if (setServers) registering.resolve();
         if (setServers && !answerSetServers) continue;
         const response = {
           subtype: "success",
@@ -1980,7 +1982,7 @@ function makeFakeClaudeCli(answerSetServers = true) {
   };
   // The SDK closes the CLI by ending its stdin.
   const closed = () => stdins.length > 0 && stdins.every((stdin) => stdin.writableEnded);
-  return { spawn, spawns, controlRequests, closed };
+  return { spawn, spawns, controlRequests, closed, registering: registering.promise };
 }
 
 describe("ClaudeAdapterV2 MCP credential channel", () => {
@@ -2037,6 +2039,7 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
     Effect.gen(function* () {
       const cli = makeFakeClaudeCli(false);
       const opening = yield* openWith(cli).pipe(Effect.result, Effect.forkChild);
+      yield* Effect.promise(() => cli.registering);
       yield* TestClock.adjust("90 seconds");
       const opened = yield* Fiber.join(opening);
 
@@ -10343,7 +10346,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   it.effect(
-    "preserves buffered local_bash notification classification across model/policy query replacement",
+    "discards buffered local_bash notification evidence after same-thread model or policy query replacement",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -10475,10 +10478,28 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           assert.isFalse(yield* hasPendingBackgroundWork);
           assert.lengthOf(continuationRequests, 0);
+          assert.isNull(yield* runtime.bufferedExecutionSelection!(providerThread));
+          yield* Queue.offer(
+            secondProcess,
+            claudeSdkFrame({
+              type: "system",
+              subtype: "init",
+              session_id: WAKE_NATIVE_SESSION,
+              uuid: "unrelated-replacement-init",
+            }),
+          );
+          let quietInitYields = 0;
+          yield* awaitUntil(() => quietInitYields++ >= 50, "unrelated init settle");
+          assert.isFalse(yield* runtime.hasBufferedOutputForThread!(providerThread));
+          assert.lengthOf(continuationRequests, 0);
 
           yield* Queue.offer(secondProcess, wakeResult);
           yield* awaitUntil(() => continuationRequests.length === 1, "continuation after result");
-          assert.equal(continuationRequests[0]?.detail, WAKE_SUMMARY);
+          assert.isNull(continuationRequests[0]?.detail);
+          assert.deepEqual(
+            yield* runtime.bufferedExecutionSelection!(providerThread),
+            alternateModel,
+          );
           yield* runtime.startTurn(
             makeClaudeTestTurnInput({
               threadId,
@@ -10527,7 +10548,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   it.effect(
-    "does not opaque-misclassify a buffered subagent notification across model/policy query replacement",
+    "retains subagent classification through blocked replacement and native-buffer drain",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -10699,38 +10720,35 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* awaitUntil(() => continuationRequests.length === 1, "continuation after notify");
           assert.equal(continuationRequests[0]?.detail, SUBAGENT_SUMMARY);
 
-          const alternateModel = CLAUDE_TEST_RESTART_MODEL_SELECTION;
-          yield* runtime.startTurn(
-            makeClaudeTestTurnInput({
-              threadId,
-              providerThread: { ...providerThread, status: "active" },
-              now,
-              attemptId: RunAttemptId.make("attempt-claude-subagent-buffer-replace-user"),
-              text: "Switch model while the subagent completes.",
-              attachments: [],
-              providerTurnOrdinal: 2,
-              modelSelection: alternateModel,
-            }),
-          );
-          assert.equal(processQueues.length, 2);
-          const secondProcess = processQueues[1]!;
-          yield* Queue.offer(
-            secondProcess,
-            makeResultFrame({
-              uuid: "00000000-0000-4000-8000-000000000805",
-              result: "User turn finished after model switch.",
-            }),
-          );
           yield* awaitUntil(
-            () => events.filter((event) => event.type === "turn.terminal").length === 2,
-            "user turn terminal after replace",
+            () => subagentEvents().at(-1)?.subagent.status === "completed",
+            "subagent completion applied while idle",
           );
           assert.isFalse(yield* hasPendingBackgroundWork);
           assert.equal(subagentEvents().at(-1)?.subagent.status, "completed");
-          assert.lengthOf(continuationRequests, 1);
 
+          // A queued native completion must drain on its original process.
+          const alternateModel = CLAUDE_TEST_RESTART_MODEL_SELECTION;
+          const blocked = yield* Effect.exit(
+            runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId,
+                providerThread,
+                now,
+                attemptId: RunAttemptId.make("attempt-claude-subagent-buffer-replace-user"),
+                text: "Switch model while the subagent completes.",
+                attachments: [],
+                providerTurnOrdinal: 2,
+                modelSelection: alternateModel,
+              }),
+            ),
+          );
+          assert.isTrue(Exit.isFailure(blocked));
+          assert.equal(processQueues.length, 1);
+          assert.equal(firstProcess.state._tag, "Open");
+          assert.lengthOf(continuationRequests, 1);
           yield* Queue.offer(
-            secondProcess,
+            firstProcess,
             makeResultFrame({
               uuid: "00000000-0000-4000-8000-000000000806",
               result: "The subagent finished with SUB_BUFFER_REPLACE_DONE.",
@@ -10745,13 +10763,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               text: "Background task completed.",
               attachments: [],
               providerTurnOrdinal: 3,
-              modelSelection: alternateModel,
+              modelSelection: CLAUDE_TEST_MODEL_SELECTION,
               messageCreatedBy: "agent",
               messageCreationSource: "provider",
             }),
           );
           yield* awaitUntil(
-            () => events.filter((event) => event.type === "turn.terminal").length === 3,
+            () => events.filter((event) => event.type === "turn.terminal").length === 2,
             "continuation terminal after buffered subagent drain",
           );
 
@@ -10769,6 +10787,20 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           assert.equal(subagentNodeEvents.at(-1)?.node.status, "completed");
           assert.isFalse(yield* hasPendingBackgroundWork);
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              modelSelection: alternateModel,
+              attemptId: RunAttemptId.make("attempt-subagent-explicit-retry"),
+              text: "Explicit retry after drain.",
+              attachments: [],
+              providerTurnOrdinal: 4,
+            }),
+          );
+          assert.equal(processQueues.length, 2);
+          assert.equal(firstProcess.state._tag, "Done");
         }).pipe(
           Effect.provide(
             Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
@@ -10952,6 +10984,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
             prefix: "t3-claude-v2-replace-open-fail-",
           });
+          const closing = yield* Deferred.make<void>();
+          const releaseClose = yield* Deferred.make<void>();
           let openCount = 0;
           const processQueues: Array<Queue.Queue<SDKMessage>> = [];
           const events: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
@@ -10991,7 +11025,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                     backgroundTasks: () => Effect.succeed(false),
                     stopTask: () => Effect.void,
                     interrupt: Effect.void,
-                    close: Queue.shutdown(sdkMessages),
+                    close: Deferred.succeed(closing, undefined).pipe(
+                      Effect.andThen(Deferred.await(releaseClose)),
+                      Effect.andThen(Queue.shutdown(sdkMessages)),
+                    ),
                   };
                 });
               },
@@ -11063,8 +11100,61 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             )
             .pipe(Effect.exit);
           assert.isTrue(Exit.isFailure(failedStart));
-          assert.equal(openCount, 1);
+          assert.equal(openCount, 1, "running-work guard precedes the forced open failure");
+          assert.equal(processQueues[0]!.state._tag, "Open");
           assert.isTrue(yield* hasPendingBackgroundWork);
+          yield* Queue.offer(
+            processQueues[0]!,
+            claudeSdkFrame({
+              type: "system",
+              subtype: "background_tasks_changed",
+              tasks: [],
+              uuid: "00000000-0000-4000-8000-000000000910",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* awaitUntil(
+            () =>
+              providerThreadRosterEvents(events).at(-1)?.providerThread.pendingBackgroundTasks
+                ?.length === 0,
+            "task finished before failed open",
+          );
+          const replacing = yield* runtime
+            .startTurn(
+              makeClaudeTestTurnInput({
+                threadId,
+                providerThread,
+                now,
+                modelSelection: alternateModel,
+                attemptId: RunAttemptId.make("attempt-replace-after-finish"),
+                text: "Retry explicitly after completion.",
+                attachments: [],
+                providerTurnOrdinal: 3,
+              }),
+            )
+            .pipe(Effect.exit, Effect.forkChild({ startImmediately: true }));
+          yield* Deferred.await(closing);
+          const closingSelection = yield* runtime.liveExecutionSelection!(providerThread);
+          yield* Deferred.succeed(releaseClose, undefined);
+          const failedOpen = yield* Fiber.join(replacing);
+          assert.isNull(
+            closingSelection,
+            "a closing query is not live before its stream finalizer",
+          );
+          assert.isTrue(Exit.isFailure(failedOpen));
+          assert.equal(openCount, 2);
+          assert.equal(processQueues[0]!.state._tag, "Done");
+          // A safe replacement that fails after closing still clears process state.
+          yield* awaitUntil(
+            () =>
+              providerThreadRosterEvents(events).some(
+                (event) =>
+                  event.providerThread.status === "idle" &&
+                  (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
+              ),
+            "roster cleared after failed same-thread replacement open",
+          );
+          assert.isFalse(yield* hasPendingBackgroundWork);
         }).pipe(
           Effect.provide(
             Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
@@ -11203,7 +11293,50 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             )
             .pipe(Effect.exit);
           assert.isTrue(Exit.isFailure(failedStart));
+          assert.equal(openCount, 1, "buffer guard prevents closing the owner");
+          assert.isTrue(yield* hasPendingBackgroundWork);
+          assert.equal(processQueues[0]!.state._tag, "Open");
+          yield* Queue.offer(processQueues[0]!, wakeResult);
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-failed-replace-drain"),
+              text: "Drain, never resend.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          yield* awaitUntil(
+            () => events.filter((event) => event.type === "turn.terminal").length === 2,
+            "retained wake drained",
+          );
+          assert.isTrue(
+            events.some(
+              (event) =>
+                event.type === "message.updated" && event.message.text === WAKE_ASSISTANT_TEXT,
+            ),
+          );
           assert.isFalse(yield* hasPendingBackgroundWork);
+          const failedOpen = yield* Effect.exit(
+            runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId,
+                providerThread,
+                now,
+                modelSelection: alternateModel,
+                attemptId: RunAttemptId.make("attempt-failed-replace-after-drain"),
+                text: "Explicit replacement after drain.",
+                attachments: [],
+                providerTurnOrdinal: 3,
+              }),
+            ),
+          );
+          assert.isTrue(Exit.isFailure(failedOpen));
+          assert.equal(openCount, 2);
 
           yield* runtime.startTurn(
             makeClaudeTestTurnInput({
@@ -11241,7 +11374,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             }),
           );
           yield* awaitUntil(
-            () => events.filter((event) => event.type === "turn.terminal").length === 2,
+            () => events.filter((event) => event.type === "turn.terminal").length === 3,
             "retry turn terminal",
           );
           yield* Queue.offer(
@@ -13972,6 +14105,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }
           yield* awaitUntil(() => harness.terminalEvents().length === 2, "next turn terminal");
           yield* Queue.offer(harness.sdkMessages, wakeTurnInit);
+          if (reran) {
+            yield* Queue.offer(
+              harness.sdkMessages,
+              makeAssistantTextFrame({ uuid: "steer-reran-wake-output", text: "Audit complete." }),
+            );
+          }
           yield* awaitUntil(() => harness.continuationRequests.length === 1, "subagent wake");
           assert.equal(
             harness.continuationRequests[0]?.notification?.summary,
