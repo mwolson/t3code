@@ -16,9 +16,13 @@ export function claudeBackgroundTaskWakeInput(): OrchestratorFixtureInput {
   return {
     steps: [
       { type: "message", text: CLAUDE_BACKGROUND_TASK_WAKE_PROMPT },
-      // The wake turn arrives after the root settled, so it waits in the wake
-      // buffer until continuation run 2 drains it. The wake result is held
-      // until run 2 has attached, so it settles run 2 and not an idle stream.
+      { type: "await_run_status", targetRunIndex: 1, status: "completed" },
+      { type: "release_replay_gate", label: "notification:background-wake:1" },
+      // Hold all model output after the completion and native init. Admission
+      // must happen while Claude is still thinking.
+      { type: "await_run_status", targetRunIndex: 2, status: "running" },
+      { type: "capture_shell_snapshot", key: "wake-before-output" },
+      { type: "release_replay_gate", label: "output:background-wake:1" },
       {
         type: "await_run_status",
         targetRunIndex: 2,

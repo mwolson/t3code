@@ -775,6 +775,8 @@ describe("MuseAdapterV2", () => {
       yield* fake.emit("turn/started", { turnId: "report-1" });
       yield* Effect.yieldNow;
       assert.lengthOf(offers, 1);
+      assert.isTrue(yield* harness.runtime.hasBufferedOutputForThread!(harness.providerThread));
+      assert.isNull(yield* harness.runtime.bufferedExecutionSelection!(harness.providerThread));
       // The user sends a message first; Muse runs the report before it.
       const { nativeId } = yield* startConversation(harness, fake);
       yield* fake.emit("approval/requested", approval("report-1"));
@@ -792,6 +794,7 @@ describe("MuseAdapterV2", () => {
       yield* fake.emit("turn/completed", { turnId: nativeId, terminal: "completed" });
       const terminal = yield* harness.takeEvent("turn.terminal");
       assert.strictEqual(terminal.status, "completed");
+      assert.isFalse(yield* harness.runtime.hasBufferedOutputForThread!(harness.providerThread));
       // The user turn took it, so the continuation is not dispatched.
       const dispatched = yield* offers[0]!.dispatchIfCurrent!(Effect.succeed("run"));
       assert.isTrue(Option.isNone(dispatched));

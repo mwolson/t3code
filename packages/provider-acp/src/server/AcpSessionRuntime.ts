@@ -1293,6 +1293,7 @@ export class AcpSessionRuntime extends Context.Service<
      */
     readonly setMode: (
       modeId: string,
+      force?: boolean,
     ) => Effect.Effect<EffectAcpSchema.SetSessionModeResponse, EffectAcpErrors.AcpError>;
     /**
      * Updates a session configuration option and the runtime configuration snapshot.
@@ -1305,12 +1306,16 @@ export class AcpSessionRuntime extends Context.Service<
     readonly setConfigOption: (
       configId: string,
       value: string | boolean,
+      force?: boolean,
     ) => Effect.Effect<EffectAcpSchema.SetSessionConfigOptionResponse, EffectAcpErrors.AcpError>;
     /**
      * Selects the base model through the negotiated model configuration option.
      * @see https://agentclientprotocol.com/protocol/schema#session/set_config_option
      */
-    readonly setModel: (model: string) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+    readonly setModel: (
+      model: string,
+      force?: boolean,
+    ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
     /**
 
      * Sends a generic ACP extension request and records it through the request logger.
@@ -2120,6 +2125,7 @@ export const make = (
     const setConfigOption = (
       configId: string,
       value: string | boolean,
+      force = false,
     ): Effect.Effect<EffectAcpSchema.SetSessionConfigOptionResponse, EffectAcpErrors.AcpError> =>
       validateConfigOptionValue(configId, value).pipe(
         Effect.flatMap(() => getStartedState),
@@ -2127,7 +2133,7 @@ export const make = (
           Ref.get(configOptionsRef).pipe(
             Effect.flatMap((configOptions) => {
               const existing = findSessionConfigOption(configOptions, configId);
-              if (existing && configOptionCurrentValueMatches(existing, value)) {
+              if (!force && existing && configOptionCurrentValueMatches(existing, value)) {
                 return Effect.succeed({
                   configOptions,
                 } satisfies EffectAcpSchema.SetSessionConfigOptionResponse);
@@ -2747,10 +2753,10 @@ export const make = (
       // A session's mode is its `category: "mode"` config option. ACP v1 agents
       // that only advertise `modes` (gemini-cli) take `session/set_mode`
       // instead, which ACP v2 removed.
-      setMode: (modeId) =>
+      setMode: (modeId, force = false) =>
         Effect.gen(function* () {
           const modeState = yield* Ref.get(modeStateRef);
-          if (modeState?.currentModeId === modeId) {
+          if (!force && modeState?.currentModeId === modeId) {
             return {} satisfies EffectAcpSchema.SetSessionModeResponse;
           }
           const modeConfigOption = (yield* Ref.get(configOptionsRef))?.find(
@@ -2763,7 +2769,7 @@ export const make = (
             yield* updateCurrentModeId(modeId);
             return {} satisfies EffectAcpSchema.SetSessionModeResponse;
           }
-          const response = yield* setConfigOption(modeConfigOption?.id ?? "mode", modeId);
+          const response = yield* setConfigOption(modeConfigOption?.id ?? "mode", modeId, force);
           // The agent answers with its config options, so the mode it reports
           // is the mode it runs in, even when it kept another one.
           const reported = parseSessionModeState({ configOptions: response.configOptions });
@@ -2790,9 +2796,11 @@ export const make = (
           }),
         ),
       setConfigOption,
-      setModel: (model) =>
+      setModel: (model, force = false) =>
         getStartedState.pipe(
-          Effect.flatMap((started) => setConfigOption(started.modelConfigId ?? "model", model)),
+          Effect.flatMap((started) =>
+            setConfigOption(started.modelConfigId ?? "model", model, force),
+          ),
           Effect.asVoid,
         ),
 

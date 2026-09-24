@@ -25,6 +25,10 @@ export class ContextHandoffBudgetError extends Schema.TaggedError<ContextHandoff
     return "Insufficient context allowance for the provider handoff. Compact the target conversation or use a larger-context model; the current request has not been truncated.";
   }
 }
+import {
+  PROVIDER_BUFFERED_OUTPUT_MESSAGE,
+  PROVIDER_RUNNING_WORK_MESSAGE,
+} from "./ProviderAdapter.ts";
 
 export const MAX_PROVIDER_FAILURE_MESSAGE_LENGTH = 4_096;
 export const MAX_PROVIDER_FAILURE_CODE_LENGTH = 128;
@@ -44,6 +48,10 @@ function causeMessage(cause: unknown): string | undefined {
       }
       if (typeof cause !== "object") break;
       switch ((cause as Record<string, unknown>)._tag) {
+        case "ProviderAdapterRunningWorkError":
+          return PROVIDER_RUNNING_WORK_MESSAGE;
+        case "ProviderAdapterBufferedOutputError":
+          return PROVIDER_BUFFERED_OUTPUT_MESSAGE;
         case "ContextHandoffBudgetError":
           return new ContextHandoffBudgetError().message;
         case "ClaudeBackgroundWorkBlocksQueryReplacementError":
