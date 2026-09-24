@@ -12793,5 +12793,7 @@
   "99d51127f573296b": "Ett konto till",
   "8ec2c57414669b79": "Anslut en andra {tracker}-arbetsyta eller användare.",
   "99963c0142e17f00": "För det nya {tracker}-kontot.",
-  "6d8e4ebc889bace9": "Lägg till konto"
+  "6d8e4ebc889bace9": "Lägg till konto",
+  "da680b6dea6c1528": "{count, plural, =1 {Bakgrundsuppgiften slutfördes} other {# bakgrundsuppgifter slutfördes}}",
+  "374697e2e9d737f1": "{count, plural, =1 {Den delegerade uppgiften slutfördes} other {# delegerade uppgifter slutfördes}}"
 }

@@ -12786,5 +12786,7 @@
   "99d51127f573296b": "Outra conta",
   "8ec2c57414669b79": "Conecte um segundo espaço de trabalho ou usuário do {tracker}.",
   "99963c0142e17f00": "Para a nova conta do {tracker}.",
-  "6d8e4ebc889bace9": "Adicionar conta"
+  "6d8e4ebc889bace9": "Adicionar conta",
+  "da680b6dea6c1528": "{count, plural, =1 {Tarefa em segundo plano concluída} other {# tarefas em segundo plano concluídas}}",
+  "374697e2e9d737f1": "{count, plural, =1 {Tarefa delegada concluída} other {# tarefas delegadas concluídas}}"
 }

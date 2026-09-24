@@ -12795,5 +12795,7 @@
   "99d51127f573296b": "Another account",
   "8ec2c57414669b79": "Connect a second {tracker} workspace or user.",
   "99963c0142e17f00": "For the new {tracker} account.",
-  "6d8e4ebc889bace9": "Add account"
+  "6d8e4ebc889bace9": "Add account",
+  "da680b6dea6c1528": "{count, plural, =1 {Background task finished} other {# background tasks finished}}",
+  "374697e2e9d737f1": "{count, plural, =1 {Delegated task finished} other {# delegated tasks finished}}"
 }

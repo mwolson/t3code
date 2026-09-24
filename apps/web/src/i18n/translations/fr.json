@@ -12786,5 +12786,7 @@
   "99d51127f573296b": "Autre compte",
   "8ec2c57414669b79": "Connectez un second espace de travail ou utilisateur {tracker}.",
   "99963c0142e17f00": "Pour le nouveau compte {tracker}.",
-  "6d8e4ebc889bace9": "Ajouter un compte"
+  "6d8e4ebc889bace9": "Ajouter un compte",
+  "da680b6dea6c1528": "{count, plural, =1 {Tâche en arrière-plan terminée} other {# tâches en arrière-plan terminées}}",
+  "374697e2e9d737f1": "{count, plural, =1 {Tâche déléguée terminée} other {# tâches déléguées terminées}}"
 }
