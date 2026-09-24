@@ -37,6 +37,7 @@ import {
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
 import {
   ProviderAdapterTurnStartError,
+  ProviderAdapterBufferedOutputError,
   type ProviderAdapterV2Error,
   type ProviderAdapterV2HistoricalContext,
   type ProviderAdapterV2SessionRuntime,
@@ -593,7 +594,11 @@ export const layer: Layer.Layer<
         Effect.gen(function* () {
           const loaded = yield* Effect.result(load);
           if (loaded._tag === "Success") return loaded.success;
-          if (input.willRetry === true) return yield* loaded.failure;
+          if (
+            input.willRetry === true ||
+            Schema.is(ProviderAdapterBufferedOutputError)(loaded.failure)
+          )
+            return yield* loaded.failure;
           yield* settleStartFailure({
             signal: "provider-thread-load-failure",
             title: "Provider turn failed to start",
@@ -602,176 +607,202 @@ export const layer: Layer.Layer<
           return undefined;
         });
       let effectiveHandoffs = handoffs;
-      const loadedProviderThread = yield* Effect.gen(function* () {
-        if (nativeForkTransfer !== undefined) {
-          const sourceProjection = yield* projectionStore.getThreadRecords(
-            nativeForkTransfer.sourceThreadId,
-            ["runs", "providerThreads", "attempts", "providerTurns"],
-          );
-          const sourceRun = sourceProjection.runs.find(
-            (candidate) => candidate.id === nativeForkTransfer.sourcePoint.runId,
-          );
-          const sourceProviderThread = sourceProjection.providerThreads.find(
-            (candidate) => candidate.id === sourceRun?.providerThreadId,
-          );
-          const sourceAttempt = sourceProjection.attempts.find(
-            (candidate) => candidate.id === sourceRun?.activeAttemptId,
-          );
-          const sourceProviderTurn = sourceProjection.providerTurns.find(
-            (candidate) =>
-              candidate.id === sourceAttempt?.providerTurnId ||
-              candidate.runAttemptId === sourceAttempt?.id,
-          );
-          if (sourceRun === undefined || sourceProviderThread === undefined) {
-            return yield* new ProviderTurnStartError({
-              runId,
-              cause: `Native fork transfer ${nativeForkTransfer.id} has no source provider execution.`,
-            });
+      const bindingResult = yield* Effect.result(
+        Effect.gen(function* () {
+          if (nativeForkTransfer !== undefined) {
+            const sourceProjection = yield* projectionStore.getThreadRecords(
+              nativeForkTransfer.sourceThreadId,
+              ["runs", "providerThreads", "attempts", "providerTurns"],
+            );
+            const sourceRun = sourceProjection.runs.find(
+              (candidate) => candidate.id === nativeForkTransfer.sourcePoint.runId,
+            );
+            const sourceProviderThread = sourceProjection.providerThreads.find(
+              (candidate) => candidate.id === sourceRun?.providerThreadId,
+            );
+            const sourceAttempt = sourceProjection.attempts.find(
+              (candidate) => candidate.id === sourceRun?.activeAttemptId,
+            );
+            const sourceProviderTurn = sourceProjection.providerTurns.find(
+              (candidate) =>
+                candidate.id === sourceAttempt?.providerTurnId ||
+                candidate.runAttemptId === sourceAttempt?.id,
+            );
+            if (sourceRun === undefined || sourceProviderThread === undefined) {
+              return yield* new ProviderTurnStartError({
+                runId,
+                cause: `Native fork transfer ${nativeForkTransfer.id} has no source provider execution.`,
+              });
+            }
+            return yield* loadFromProvider(
+              session.forkThread({
+                sourceProviderThread,
+                sourceProviderTurns: sourceProjection.providerTurns,
+                targetThreadId: projection.thread.id,
+                modelSelection: run.modelSelection,
+                runtimePolicy: resolvedRuntimePolicy,
+                ...(sourceProviderTurn === undefined
+                  ? {}
+                  : { providerTurnId: sourceProviderTurn.id }),
+              }),
+            );
           }
-          return yield* loadFromProvider(
-            session.forkThread({
-              sourceProviderThread,
-              sourceProviderTurns: sourceProjection.providerTurns,
-              targetThreadId: projection.thread.id,
-              modelSelection: run.modelSelection,
-              runtimePolicy: resolvedRuntimePolicy,
-              ...(sourceProviderTurn === undefined
-                ? {}
-                : { providerTurnId: sourceProviderTurn.id }),
-            }),
+          if (providerThread.nativeThreadRef === null) {
+            // Hand the run's provider thread to the adapter so it adopts this
+            // row's identity when attaching native state. An adapter that mints
+            // its own row instead leaves two live rows per app thread, and
+            // `activeProviderThreadId` then flaps between them on every update.
+            return yield* loadFromProvider(
+              session.ensureThread({
+                threadId: projection.thread.id,
+                modelSelection: run.modelSelection,
+                runtimePolicy: resolvedRuntimePolicy,
+                providerSessionId,
+                existingProviderThread: providerThread,
+              }),
+            );
+          }
+          const uncertainDelivery = projection.contextHandoffs.some(
+            (handoff) =>
+              handoff.toProviderThreadId === providerThread.id &&
+              handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
+              handoff.delivery?.status === "pending",
           );
-        }
-        if (providerThread.nativeThreadRef === null) {
-          // Hand the run's provider thread to the adapter so it adopts this
-          // row's identity when attaching native state. An adapter that mints
-          // its own row instead leaves two live rows per app thread, and
-          // `activeProviderThreadId` then flaps between them on every update.
-          return yield* loadFromProvider(
+          const resumed = yield* Effect.result(
+            uncertainDelivery
+              ? Effect.fail(
+                  new ProviderAdapterTurnStartError({
+                    driver: session.driver,
+                    threadId: projection.thread.id,
+                    providerThreadId: providerThread.id,
+                    runId,
+                    cause: "Uncertain native history injection",
+                  }),
+                )
+              : session.resumeThread({
+                  providerThread,
+                  threadId: projection.thread.id,
+                  modelSelection: run.modelSelection,
+                  runtimePolicy: resolvedRuntimePolicy,
+                }),
+          );
+          if (resumed._tag === "Success") {
+            return resumed.success;
+          }
+
+          if (Schema.is(ProviderAdapterBufferedOutputError)(resumed.failure))
+            return yield* resumed.failure;
+          yield* Effect.logWarning("Provider resume failed; attempting a fresh native session", {
+            driver: session.driver,
+            providerThreadId: providerThread.id,
+            runId,
+            reason: uncertainDelivery ? "uncertain_history_delivery" : "resume_failed",
+            errorTag: resumed.failure._tag,
+          });
+          const replacement = yield* loadFromProvider(
             session.ensureThread({
               threadId: projection.thread.id,
               modelSelection: run.modelSelection,
               runtimePolicy: resolvedRuntimePolicy,
               providerSessionId,
-              existingProviderThread: providerThread,
+              // The native ref is dropped so the adapter binds a fresh native
+              // session instead of retrying the resume that just failed, while
+              // still adopting this row's identity.
+              existingProviderThread: { ...providerThread, nativeThreadRef: null },
             }),
           );
-        }
-        const uncertainDelivery = projection.contextHandoffs.some(
-          (handoff) =>
-            handoff.toProviderThreadId === providerThread.id &&
-            handoff.delivery?.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
-            handoff.delivery?.status === "pending",
-        );
-        const resumed = yield* Effect.result(
-          uncertainDelivery
-            ? Effect.fail(
-                new ProviderAdapterTurnStartError({
-                  driver: session.driver,
-                  threadId: projection.thread.id,
-                  providerThreadId: providerThread.id,
-                  runId,
-                  cause: "Uncertain native history injection",
-                }),
-              )
-            : session.resumeThread({
-                providerThread,
-                threadId: projection.thread.id,
-                modelSelection: run.modelSelection,
-                runtimePolicy: resolvedRuntimePolicy,
-              }),
-        );
-        if (resumed._tag === "Success") {
-          return resumed.success;
-        }
-
-        yield* Effect.logWarning("Provider resume failed; attempting a fresh native session", {
-          driver: session.driver,
-          providerThreadId: providerThread.id,
-          runId,
-          reason: uncertainDelivery ? "uncertain_history_delivery" : "resume_failed",
-          errorTag: resumed.failure._tag,
-        });
-        const replacement = yield* loadFromProvider(
-          session.ensureThread({
+          if (replacement === undefined) return undefined;
+          const transferId = yield* idAllocator.allocate.contextTransfer({
+            sourceThreadId: projection.thread.id,
+            targetThreadId: projection.thread.id,
+            type: "provider_resume_fallback",
+          });
+          const createdAt = yield* DateTime.now;
+          const handoff = yield* contextHandoffService.prepareProviderHandoff({
             threadId: projection.thread.id,
-            modelSelection: run.modelSelection,
-            runtimePolicy: resolvedRuntimePolicy,
-            providerSessionId,
-            // The native ref is dropped so the adapter binds a fresh native
-            // session instead of retrying the resume that just failed, while
-            // still adopting this row's identity.
-            existingProviderThread: { ...providerThread, nativeThreadRef: null },
-          }),
-        );
-        if (replacement === undefined) return undefined;
-        const transferId = yield* idAllocator.allocate.contextTransfer({
-          sourceThreadId: projection.thread.id,
-          targetThreadId: projection.thread.id,
-          type: "provider_resume_fallback",
-        });
-        const createdAt = yield* DateTime.now;
-        const handoff = yield* contextHandoffService.prepareProviderHandoff({
-          threadId: projection.thread.id,
-          targetRunId: run.id,
-          transferId,
-          fromProviderThreadIds: [providerThread.id],
-          toProviderThreadId: providerThread.id,
-          fromProviderInstanceId: providerThread.providerInstanceId,
-          toProviderInstanceId: run.providerInstanceId,
-          coveredRunOrdinals: { from: 1, to: Math.max(1, run.ordinal - 1) },
-          strategy: "full_thread_summary",
-          runs: projection.runs,
-          items: (yield* projectionStore.getTurnStartHistory(input.threadId)).filter(
-            (item) =>
-              item.runId === null ||
-              projection.runs.some(
-                (source) => source.id === item.runId && source.ordinal < run.ordinal,
-              ),
-          ),
-          createdAt,
-        });
-        effectiveHandoffs = [handoff, ...effectiveHandoffs];
-        yield* eventSink.write({
-          events: [
-            {
-              id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
-              type: "context-handoff.updated",
-              threadId: projection.thread.id,
-              runId: run.id,
-              providerInstanceId: run.providerInstanceId,
-              occurredAt: createdAt,
-              payload: handoff,
-            },
-            {
-              id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
-              type: "context-transfer.updated",
-              threadId: projection.thread.id,
-              runId: run.id,
-              providerInstanceId: run.providerInstanceId,
-              occurredAt: createdAt,
-              payload: {
-                id: transferId,
-                type: "provider_handoff",
-                sourceThreadId: projection.thread.id,
-                targetThreadId: projection.thread.id,
-                sourcePoint: { threadId: projection.thread.id },
-                basePoint: null,
-                sourceProviderInstanceId: providerThread.providerInstanceId,
-                targetProviderInstanceId: run.providerInstanceId,
-                targetRunId: run.id,
-                status: "resolved_portable",
-                resolution: { strategy: "portable_context", contextHandoffId: handoff.id },
-                createdBy: "system",
-                error: null,
-                createdAt,
-                updatedAt: createdAt,
-                consumedAt: null,
+            targetRunId: run.id,
+            transferId,
+            fromProviderThreadIds: [providerThread.id],
+            toProviderThreadId: providerThread.id,
+            fromProviderInstanceId: providerThread.providerInstanceId,
+            toProviderInstanceId: run.providerInstanceId,
+            coveredRunOrdinals: { from: 1, to: Math.max(1, run.ordinal - 1) },
+            strategy: "full_thread_summary",
+            runs: projection.runs,
+            items: (yield* projectionStore.getTurnStartHistory(input.threadId)).filter(
+              (item) =>
+                item.runId === null ||
+                projection.runs.some(
+                  (source) => source.id === item.runId && source.ordinal < run.ordinal,
+                ),
+            ),
+            createdAt,
+          });
+          effectiveHandoffs = [handoff, ...effectiveHandoffs];
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
+                type: "context-handoff.updated",
+                threadId: projection.thread.id,
+                runId: run.id,
+                providerInstanceId: run.providerInstanceId,
+                occurredAt: createdAt,
+                payload: handoff,
               },
-            },
-          ],
+              {
+                id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
+                type: "context-transfer.updated",
+                threadId: projection.thread.id,
+                runId: run.id,
+                providerInstanceId: run.providerInstanceId,
+                occurredAt: createdAt,
+                payload: {
+                  id: transferId,
+                  type: "provider_handoff",
+                  sourceThreadId: projection.thread.id,
+                  targetThreadId: projection.thread.id,
+                  sourcePoint: { threadId: projection.thread.id },
+                  basePoint: null,
+                  sourceProviderInstanceId: providerThread.providerInstanceId,
+                  targetProviderInstanceId: run.providerInstanceId,
+                  targetRunId: run.id,
+                  status: "resolved_portable",
+                  resolution: { strategy: "portable_context", contextHandoffId: handoff.id },
+                  createdBy: "system",
+                  error: null,
+                  createdAt,
+                  updatedAt: createdAt,
+                  consumedAt: null,
+                },
+              },
+            ],
+          });
+          return replacement;
+        }),
+      );
+      if (bindingResult._tag === "Failure") {
+        if (!Schema.is(ProviderAdapterBufferedOutputError)(bindingResult.failure))
+          return yield* bindingResult.failure;
+        yield* settleRunBeforeStart({
+          signal: "provider-buffered-output-owned",
+          status: "failed",
+          now: yield* DateTime.now,
+          providerInstanceId: run.providerInstanceId,
+          itemProviderThreadId: providerThread.id,
+          item: {
+            type: "error",
+            title: "Provider output must be delivered first",
+            failure: makeProviderFailure({
+              cause: bindingResult.failure,
+              class: "provider_error",
+              message: "Buffered provider output must be delivered before changing its binding.",
+            }),
+          },
         });
-        return replacement;
-      });
+        return;
+      }
+      const loadedProviderThread = bindingResult.success;
       // The last attempt already failed the run.
       if (loadedProviderThread === undefined) return;
       if (!(yield* isCurrentAttemptInStatus("starting"))) {

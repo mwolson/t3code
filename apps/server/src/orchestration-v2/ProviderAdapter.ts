@@ -354,7 +354,32 @@ export class ProviderAdapterProtocolError extends Schema.TaggedError<ProviderAda
   }
 }
 
+export const PROVIDER_BUFFERED_OUTPUT_MESSAGE =
+  "Earlier background output from this conversation has not been delivered yet. Try again after it arrives.";
+export const PROVIDER_RUNNING_WORK_MESSAGE =
+  "This change would replace a provider process with running background work. Wait for it to finish or explicitly Stop it before trying again.";
+
+export class ProviderAdapterBufferedOutputError extends Schema.TaggedError<ProviderAdapterBufferedOutputError>()(
+  "ProviderAdapterBufferedOutputError",
+  { driver: ProviderDriverKind, providerThreadId: ProviderThreadId },
+) {
+  override get message(): string {
+    return PROVIDER_BUFFERED_OUTPUT_MESSAGE;
+  }
+}
+
+export class ProviderAdapterRunningWorkError extends Schema.TaggedError<ProviderAdapterRunningWorkError>()(
+  "ProviderAdapterRunningWorkError",
+  { driver: ProviderDriverKind },
+) {
+  override get message(): string {
+    return PROVIDER_RUNNING_WORK_MESSAGE;
+  }
+}
+
 export const ProviderAdapterV2Error = Schema.Union([
+  ProviderAdapterBufferedOutputError,
+  ProviderAdapterRunningWorkError,
   ProviderAdapterCapabilitiesError,
   ProviderAdapterOpenSessionError,
   ProviderAdapterCloseSessionError,
@@ -394,6 +419,8 @@ export interface ProviderAdapterV2EnsureThreadInput {
 }
 
 export interface ProviderAdapterV2TurnInput {
+  /** The manager has no acknowledged selection for this resident binding. */
+  readonly reapplySelection?: boolean;
   readonly appThread: OrchestrationV2AppThread;
   readonly threadId: ThreadId;
   readonly runId: RunId;
@@ -493,6 +520,36 @@ export interface ProviderAdapterV2SessionRuntime {
    * Adapter runtimes may omit this and expose only their single-consumer event stream.
    */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
+  /** Resident native binding, including a detached binding awaiting replacement. */
+  readonly hasResidentBinding?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<boolean>;
+  /** Output retained by this native binding, not its running-work roster. */
+  readonly hasBufferedOutputForThread?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<boolean>;
+  /** Complete producing-turn selection retained with native output, even after query exit. */
+  readonly bufferedExecutionSelection?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<ModelSelection | null>;
+  /** Last acknowledged complete selection on the same still-live native query. */
+  readonly liveExecutionSelection?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<ModelSelection | null>;
+  /** A failed same-selection start cannot change native selection configuration. */
+  readonly preservesSelectionOnSameSelectionFailure?: boolean;
+  /** True only when every supported selection field is explicit in the next wire request. */
+  readonly reappliesFullSelection?: (selection: ModelSelection) => Effect.Effect<boolean>;
+  /** Continuations only deliver existing output and cannot acknowledge configuration. */
+  readonly continuationDrainsOutput?: boolean;
+  /** Settled configuration check after a real start succeeds. Deterministic
+   * degradation can acknowledge the request; buffered output keeps its applied label.
+   */
+  readonly selectionAcknowledged?: (selection: ModelSelection) => Effect.Effect<boolean>;
+  /** Residency-owned evidence; absent or null means selection is not established. */
+  readonly executionSelection?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<ModelSelection | null>;
   /**
    * Adapters whose native runtime can hold pending work outside an active
    * turn (for example Claude background tasks and their wake turns) report it
@@ -529,6 +586,14 @@ export interface ProviderAdapterV2SessionRuntime {
       readonly providerThread: OrchestrationV2ProviderThread;
     },
   ) => Effect.Effect<boolean, ProviderAdapterV2Error>;
+  /**
+   * Success acknowledges handling the full requested model/options for this operation,
+   * after native configuration or prompt acceptance, including lazy setup.
+   * Deterministically skipped/rejected options settle a request without claiming
+   * their values were applied. Indeterminate steps cannot acknowledge it.
+   * Merely caching the selection or scheduling setup does not acknowledge it.
+   * Failure/interruption may have partially applied it and establish no certainty.
+   */
   readonly startTurn: (
     input: ProviderAdapterV2TurnInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;

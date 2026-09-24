@@ -9588,6 +9588,18 @@ describe("AcpAdapterV2", () => {
         yield* hasPendingBackgroundWork,
         "the queued continuation must retain ownership of its buffered wake traffic",
       );
+      assert.isDefined(runtime.hasBufferedOutputForThread);
+      assert.isTrue(yield* runtime.hasBufferedOutputForThread!(providerThread));
+      assert.isFalse(
+        yield* runtime.hasBufferedOutputForThread!({
+          ...providerThread,
+          nativeThreadRef: {
+            driver: ACP_TEST_DRIVER,
+            nativeId: "other-session",
+            strength: "strong",
+          },
+        }),
+      );
 
       yield* runtime.startTurn(
         makeTurnInput({
@@ -9624,6 +9636,7 @@ describe("AcpAdapterV2", () => {
       }
       assert.equal(continuationTerminalStatus, "completed");
       assert.isTrue(bufferedTextSeen, "continuation must drain the wake buffer after the user run");
+      assert.isFalse(yield* runtime.hasBufferedOutputForThread!(providerThread));
       assert.isFalse(yield* hasPendingBackgroundWork);
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
