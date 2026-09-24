@@ -731,7 +731,9 @@ export function HomeScreen(props: HomeScreenProps) {
   };
 
   const hasAnyThreads =
-    props.threads.some((thread) => thread.archivedAt === null) || props.pendingTasks.length > 0;
+    props.threads.some(
+      (thread) => thread.archivedAt === null && thread.lineage.relationshipToParent !== "subagent",
+    ) || props.pendingTasks.length > 0;
   const selectedEnvironmentLabel =
     props.selectedEnvironmentId === null
       ? null
