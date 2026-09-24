@@ -3409,7 +3409,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         orchestrator.dispatch({
           type: "message.dispatch",
           createdBy: automatic ? "agent" : "user",
-          creationSource: automatic ? "provider" : "web",
+          creationSource: automatic ? "server" : "web",
           ...(automatic
             ? {
                 notification: {
@@ -3617,7 +3617,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         yield* orchestrator.dispatch({
           type: "message.dispatch",
           createdBy: automatic ? "agent" : "user",
-          creationSource: automatic ? "provider" : "web",
+          creationSource: automatic ? "server" : "web",
           ...(automatic
             ? {
                 notification: {
@@ -3806,7 +3806,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         orchestrator.dispatch({
           type: "message.dispatch",
           createdBy: wake ? "agent" : "user",
-          creationSource: wake ? "provider" : "web",
+          creationSource: wake ? "server" : "web",
           ...(wake
             ? {
                 notification: {

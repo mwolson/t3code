@@ -237,6 +237,57 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
 });
 
 describe("OpenCodeAdapterV2", () => {
+  it.effect.each(["success", "failure"] as const)(
+    "does not acknowledge selection when Stop wins prompt admission: %s",
+    (reply) =>
+      Effect.gen(function* () {
+        const nativeEvents = asyncEventStream();
+        const called = promiseGate<void>();
+        const harness = yield* makeOpenCodeRuntimeHarness(`cancel-admission-${reply}`, "root", {
+          event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+          session: {
+            create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+            promptAsync: async (_input: unknown, options: { signal: AbortSignal }) => {
+              called.resolve();
+              return new Promise((resolve, reject) => {
+                options.signal.addEventListener(
+                  "abort",
+                  () =>
+                    reply === "success" ? resolve({ data: true }) : reject(new Error("cancelled")),
+                  { once: true },
+                );
+              });
+            },
+            abort: async () => ({ data: true }),
+            children: async () => ({ data: [] }),
+          },
+        });
+        const running = yield* harness.runtime.events.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+          ),
+          Stream.runHead,
+          Effect.forkChild({ startImmediately: true }),
+        );
+        const starting = yield* harness
+          .startTurn()
+          .pipe(Effect.exit, Effect.forkChild({ startImmediately: true }));
+        yield* Effect.promise(() => called.promise);
+        const providerTurn = Option.getOrThrow(yield* Fiber.join(running));
+        if (providerTurn.type !== "provider_turn.updated")
+          return yield* Effect.die("Expected running provider turn");
+        yield* harness.runtime.interruptTurn({
+          providerThread: harness.providerThread,
+          providerTurnId: providerTurn.providerTurn.id,
+        });
+        assert.isTrue(
+          Exit.isFailure(yield* Fiber.join(starting)),
+          "cancelled admission cannot certify the requested selection",
+        );
+      }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
+  );
+
   it.effect.each(["completed", "failed", "unresolved", "unavailable", "reconnect"] as const)(
     "normalizes OpenCode step usage for %s turns",
     (ending) =>
@@ -1822,7 +1873,7 @@ describe("OpenCodeAdapterV2", () => {
           modelSelection,
           runtimePolicy: policy,
         })
-        .pipe(Effect.forkScoped);
+        .pipe(Effect.exit, Effect.forkScoped);
 
       yield* Effect.promise(() => promptStarted.promise);
       const running = yield* runtime.readThreadSnapshot({ providerThread });
@@ -1832,7 +1883,7 @@ describe("OpenCodeAdapterV2", () => {
         .pipe(Effect.forkScoped);
 
       yield* Effect.promise(() => abortCalled.promise);
-      yield* Fiber.join(start);
+      assert.isTrue(Exit.isFailure(yield* Fiber.join(start)));
       yield* Fiber.join(interrupt);
       yield* Effect.promise(() =>
         nativeEvents.push({

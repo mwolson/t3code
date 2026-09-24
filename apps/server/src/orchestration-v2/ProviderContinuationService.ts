@@ -104,7 +104,15 @@ export const layer = Layer.effectDiscard(
           }
           // No continuation turn will start to clear the adapter's sticky offer.
           if (request.clearIfCurrent !== undefined) {
-            yield* request.clearIfCurrent();
+            yield* request.clearIfCurrent({
+              suppressReofferWhile: threads.getThreadRecords(request.threadId, []).pipe(
+                Effect.map(
+                  (current) =>
+                    current.thread.archivedAt !== null || current.thread.deletedAt !== null,
+                ),
+                Effect.catchCause(() => Effect.succeed(true)),
+              ),
+            });
           } else if (request.dispatchIfCurrent !== undefined) {
             // Backward compatibility for request producers without an explicit
             // drop callback.
@@ -221,6 +229,10 @@ export const layer = Layer.effectDiscard(
                   ),
                   Effect.forkScoped,
                 );
+              } else if (request.clearIfCurrent !== undefined) {
+                // A failed native dispatch creates no turn to release its offer.
+                // The adapter bounds re-offers until new wake evidence arrives.
+                yield* request.clearIfCurrent();
               }
             }),
           ),

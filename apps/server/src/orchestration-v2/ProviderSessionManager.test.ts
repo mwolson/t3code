@@ -14,6 +14,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderSessionId,
+  ProviderTurnId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -46,6 +47,9 @@ import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
   ProviderAdapterEventStreamError,
+  ProviderAdapterBufferedOutputError,
+  ProviderAdapterRunningWorkError,
+  type ProviderAdapterV2TurnInput,
   type ProviderAdapterV2Event,
   ProviderAdapterProtocolError,
   type ProviderAdapterV2RuntimePolicy,
@@ -293,8 +297,12 @@ function makeProviderAdapter(
       readonly initialProviderItemIdentityVersion?: 2;
     }) => Effect.Effect<void>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+    readonly hasBufferedOutputForThread?: (
+      thread: OrchestrationV2ProviderThread,
+    ) => Effect.Effect<boolean>;
     readonly hangSessionScopeClose?: boolean;
     readonly beforeUnload?: Effect.Effect<void>;
+    readonly startTurn?: ProviderAdapterV2SessionRuntime["startTurn"];
   } = {},
 ): ProviderAdapterV2Shape {
   return {
@@ -359,13 +367,16 @@ function makeProviderAdapter(
           ...(options.hasPendingBackgroundWork === undefined
             ? {}
             : { hasPendingBackgroundWork: options.hasPendingBackgroundWork }),
+          ...(options.hasBufferedOutputForThread === undefined
+            ? {}
+            : { hasBufferedOutputForThread: options.hasBufferedOutputForThread }),
           ensureThread: () => unimplemented("ensureThread unused in test"),
           resumeThread: (threadInput) =>
             Ref.update(state, (current) => ({
               ...current,
               resumeCount: current.resumeCount + 1,
             })).pipe(Effect.as(threadInput.providerThread)),
-          startTurn: () => Effect.void,
+          startTurn: options.startTurn ?? (() => Effect.void),
           steerTurn: () => Effect.void,
           interruptTurn: () =>
             Ref.update(state, (current) => ({
@@ -409,8 +420,12 @@ function layerTest(input: {
   readonly failReleaseEventWrites?: boolean;
   readonly flakyReleaseWrites?: FlakyReleaseWrites;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+  readonly hasBufferedOutputForThread?: (
+    thread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<boolean>;
   readonly hangSessionScopeClose?: boolean;
   readonly beforeUnload?: Effect.Effect<void>;
+  readonly startTurn?: ProviderAdapterV2SessionRuntime["startTurn"];
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
 }) {
@@ -423,12 +438,16 @@ function layerTest(input: {
   const layerRegistry = ProviderAdapterRegistry.layerSingle(
     makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
+      ...(input.startTurn === undefined ? {} : { startTurn: input.startTurn }),
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
       ...(input.mcpConfigs === undefined ? {} : { mcpConfigs: input.mcpConfigs }),
       ...(input.beforeOpen === undefined ? {} : { beforeOpen: input.beforeOpen }),
       ...(input.hasPendingBackgroundWork === undefined
         ? {}
         : { hasPendingBackgroundWork: input.hasPendingBackgroundWork }),
+      ...(input.hasBufferedOutputForThread === undefined
+        ? {}
+        : { hasBufferedOutputForThread: input.hasBufferedOutputForThread }),
       ...(input.hangSessionScopeClose === undefined
         ? {}
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
@@ -470,6 +489,91 @@ function layerTest(input: {
   ).pipe(Layer.provide(NodeServices.layer));
 }
 
+it.effect.each(
+  (() => {
+    const cases = [];
+    for (const Refusal of [ProviderAdapterBufferedOutputError, ProviderAdapterRunningWorkError]) {
+      cases.push({ Refusal });
+    }
+    return cases;
+  })(),
+)(
+  "restores prior acknowledgment after $Refusal.name without adapter live evidence",
+  ({ Refusal }) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      let refuse = false;
+      yield* Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread:typed-refusal");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const binding = makeProviderThread({ idAllocator, threadId, providerSessionId, now });
+        const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+        const turn: ProviderAdapterV2TurnInput = {
+          appThread: (yield* projectionStore.getThreadProjection(threadId)).thread,
+          threadId,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId }),
+          providerThread: binding,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 1 }),
+            text: "first",
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        };
+        yield* runtime.startTurn(turn);
+        refuse = true;
+        const result = yield* Effect.exit(
+          runtime.startTurn({
+            ...turn,
+            modelSelection: { ...modelSelection, model: "other-model" },
+          }),
+        );
+        assert.equal(result._tag, "Failure");
+        assert.deepEqual(yield* runtime.executionSelection!(binding), modelSelection);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 1000,
+            startTurn: (input) =>
+              refuse
+                ? Effect.fail(
+                    new Refusal({
+                      driver: CODEX_DRIVER,
+                      providerThreadId: input.providerThread.id,
+                    }),
+                  )
+                : Effect.void,
+          }),
+        ),
+      );
+    }),
+);
+
 const fakeHttpServer = HttpServer.HttpServer.of({
   address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 43123),
   serve: (() => Effect.void) as HttpServer.HttpServer["Service"]["serve"],
@@ -487,6 +591,195 @@ const layerTestMcpRegistry = Layer.effect(
   Layer.provide(Layer.succeed(HttpServer.HttpServer, fakeHttpServer)),
   Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, fakeEnvironment)),
   Layer.provide(NodeServices.layer),
+);
+
+it.effect.each(
+  (() => {
+    const cases = [];
+    for (const scenario of [
+      "missing-row",
+      "moved-native",
+      "missing-evidence",
+      "current-stop",
+      "newer-start",
+    ] as const) {
+      cases.push({ scenario });
+    }
+    return cases;
+  })(),
+)("deferred buffer detach retains identity and releases credentials: $scenario", ({ scenario }) =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const mcpConfigs = yield* Ref.make<
+      ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+    >([]);
+    let buffered = false;
+    let parkProbe = false;
+    const probeEntered = yield* Deferred.make<void>();
+    const probeRelease = yield* Deferred.make<void>();
+    const probes: Array<string | null | undefined> = [];
+    yield* Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const registry = yield* McpSessionRegistry.McpSessionRegistry;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make(`thread:deferred:${scenario}`);
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const binding = makeProviderThread({ idAllocator, threadId, providerSessionId, now });
+      if (scenario !== "missing-evidence")
+        yield* runtime.resumeThread({ providerThread: binding, modelSelection, runtimePolicy });
+      if (scenario === "moved-native" || scenario === "missing-evidence") {
+        yield* eventSink.write({
+          events: [
+            {
+              id: yield* idAllocator.allocate.event({ threadId }),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload:
+                scenario === "moved-native"
+                  ? {
+                      ...binding,
+                      nativeThreadRef: {
+                        driver: CODEX_DRIVER,
+                        nativeId: "new-native",
+                        strength: "strong",
+                      },
+                      providerSessionId: null,
+                    }
+                  : binding,
+            },
+          ],
+        });
+      }
+      buffered = true;
+      const token = (yield* Ref.get(mcpConfigs))[0]!.authorizationHeader.replace(/^Bearer\s+/, "");
+      yield* manager.detach({ providerSessionId, threadId, preserveBufferedOutput: true });
+      yield* TestClock.adjust("30 millis");
+      assert.equal(
+        (yield* Ref.get(state)).closeCount,
+        0,
+        "owned buffer pins beyond normal idle cap",
+      );
+      assert.isDefined(yield* registry.resolve(token));
+      assert.isTrue(
+        probes.every((nativeId) => nativeId === "native-thread"),
+        "probe uses original native identity even after projection moves",
+      );
+      assert.isAbove(probes.length, 1);
+      if (scenario === "newer-start") {
+        parkProbe = true;
+        const sweep = yield* runtime.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        yield* Queue.offer((yield* Ref.get(state)).eventQueues.get(providerSessionId)!, {
+          type: "turn.terminal",
+          driver: CODEX_DRIVER,
+          providerThreadId: binding.id,
+          providerTurnId: ProviderTurnId.make("provider-turn:old-detach"),
+          runOrdinal: 1,
+          status: "completed",
+          failure: null,
+          threadDisposition: "reusable",
+        });
+        yield* Deferred.await(probeEntered);
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const runId = idAllocator.derive.run({ threadId, ordinal: 2 });
+        const newerBinding = {
+          ...binding,
+          nativeThreadRef: {
+            driver: CODEX_DRIVER,
+            nativeId: "new-native",
+            strength: "strong" as const,
+          },
+        };
+        yield* runtime.startTurn({
+          appThread: (yield* projectionStore.getThreadProjection(threadId)).thread,
+          threadId,
+          runId,
+          runOrdinal: 2,
+          providerTurnOrdinal: 2,
+          attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId }),
+          providerThread: newerBinding,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId, ordinal: 2 }),
+            text: "new explicit operation",
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+        buffered = false;
+        yield* Deferred.succeed(probeRelease, undefined);
+        yield* Fiber.join(sweep);
+        yield* TestClock.adjust("10 millis");
+        assert.isTrue(yield* runtime.hasResidentBinding!(newerBinding));
+        assert.deepEqual(yield* runtime.executionSelection!(newerBinding), modelSelection);
+        assert.equal(
+          (yield* Ref.get(state)).closeCount,
+          0,
+          "old deferred release cannot close a newer operation",
+        );
+        assert.isDefined(yield* registry.resolve(token));
+        return;
+      }
+      if (scenario === "current-stop") {
+        yield* manager.detach({ providerSessionId, threadId });
+      } else {
+        buffered = false;
+        yield* TestClock.adjust("10 millis");
+      }
+      assert.equal(
+        (yield* Ref.get(state)).closeCount,
+        1,
+        "drain or explicit Stop actually closes obsolete runtime",
+      );
+      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+      assert.isUndefined(
+        yield* registry.resolve(token),
+        "owner credential is revoked after process release",
+      );
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          mcpConfigs,
+          capabilities: ExclusiveCapabilities,
+          idleTimeoutMs: 10,
+          maxIdlePinMs: 20,
+          hasBufferedOutputForThread: (thread) =>
+            Effect.gen(function* () {
+              probes.push(thread.nativeThreadRef?.nativeId);
+              if (parkProbe && thread.nativeThreadRef?.nativeId === "native-thread") {
+                yield* Deferred.succeed(probeEntered, undefined);
+                yield* Deferred.await(probeRelease);
+                return false;
+              }
+              return buffered && thread.nativeThreadRef?.nativeId === "native-thread";
+            }),
+        }),
+      ),
+    );
+  }),
 );
 
 function makeBrowserAccessProject(projectId: ProjectId): Project {
