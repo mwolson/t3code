@@ -48,6 +48,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -254,7 +255,9 @@ export interface AcpAdapterV2Flavor {
     readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
     readonly startResult: AcpSessionRuntime.AcpSessionRuntimeStartResult;
     readonly modelSelection: ModelSelection;
+    readonly force?: boolean;
   }) => Effect.Effect<string | undefined, EffectAcpErrors.AcpError>;
+  readonly canForceModelSelection?: boolean;
   /** Native session mode to select for a runtime policy (e.g. Antigravity `yolo`). */
   readonly sessionModeForPolicy?: (
     policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
@@ -1346,6 +1349,35 @@ export function acpCarryoverTerminalShouldClearContinuation(input: {
   return !input.continuationOffered && input.wakeBufferLength === 0;
 }
 
+export function acpInitialAppliedSelection(
+  setup: AcpSessionRuntime.AcpSessionRuntimeStartResult["sessionSetupResult"],
+  selection: ModelSelection,
+  initialModeId: string | undefined,
+  attemptsModel: boolean,
+): Omit<ModelSelection, "model"> & { readonly model?: string } {
+  const initialModel =
+    setup.models?.currentModelId ??
+    setup.configOptions?.find((option) => option.category === "model")?.currentValue;
+  return {
+    instanceId: selection.instanceId,
+    ...(typeof initialModel === "string"
+      ? { model: initialModel }
+      : !attemptsModel
+        ? { model: selection.model }
+        : {}),
+    ...(selection.options === undefined
+      ? {}
+      : {
+          options: selection.options.flatMap((option) => {
+            const value =
+              setup.configOptions?.find((candidate) => candidate.id === option.id)?.currentValue ??
+              (option.id === ACP_SESSION_MODE_OPTION_ID ? initialModeId : undefined);
+            return value === undefined ? [] : [{ id: option.id, value }];
+          }),
+        }),
+  };
+}
+
 export function acpTurnStartShouldPreserveContinuation(input: {
   readonly continuationRequested: boolean;
   readonly isContinuationTurn: boolean;
@@ -1711,6 +1743,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const activeSessionSetup =
           yield* Ref.make<AcpSessionRuntime.AcpSessionRuntimeStartResult | null>(null);
         const activeSelection = yield* Ref.make<ModelSelection | null>(null);
+        const appliedSelections = yield* Ref.make<
+          ReadonlyMap<string, Omit<ModelSelection, "model"> & { readonly model?: string }>
+        >(new Map());
+        const configurationAcknowledged = yield* Ref.make(false);
         const activeInteractionMode = yield* Ref.make<ProviderInteractionMode | null>(null);
         const promptInstructionStates = yield* Ref.make(new Map<string, T3AcpInstructionState>());
         const runtimeRestartRequired = yield* Ref.make(false);
@@ -1991,6 +2027,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             offered,
           }));
         });
+        const wakeSelections = new WeakMap<EffectAcpSchema.SessionNotification, ModelSelection>();
         const continuationRequested = yield* Ref.make(false);
         const continuationGeneration = yield* Ref.make(0);
         const continuationPermit = yield* Semaphore.make(1);
@@ -3993,6 +4030,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             !isInTurnHandledAgentChatter &&
             acpPostSettleWakeShouldBuffer(notification, backgroundWorkRunning)
           ) {
+            const producingSelection = (yield* Ref.get(appliedSelections)).get(
+              notification.sessionId,
+            );
+            if (producingSelection?.model !== undefined)
+              wakeSelections.set(notification, {
+                ...producingSelection,
+                model: producingSelection.model,
+              });
             yield* Ref.update(wakeBuffer, (current) => [...current, notification]);
             buffered = true;
           }
@@ -4507,6 +4552,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             flavor.isProviderWakeNotification?.(notification) === true
           ) {
             if (hasDeferredBackgroundWork(context)) {
+              const producingSelection = (yield* Ref.get(appliedSelections)).get(
+                notification.sessionId,
+              );
+              if (producingSelection?.model !== undefined)
+                wakeSelections.set(notification, {
+                  ...producingSelection,
+                  model: producingSelection.model,
+                });
               yield* Ref.update(wakeBuffer, (current) => [...current, notification]);
               return;
             }
@@ -6278,23 +6331,139 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           return activated;
         });
 
+        const applyConfigurationStep = Effect.fnUntraced(function* <A, E>(
+          sessionId: string,
+          optionId: string,
+          value: string | boolean | ((result: A) => string | boolean | undefined),
+          operation: Effect.Effect<A, E>,
+          recordSelection = true,
+        ) {
+          const result = yield* Effect.exit(operation);
+          if (Exit.isFailure(result)) {
+            const error = Cause.findErrorOption(result.cause);
+            if (Option.isNone(error) || !Schema.is(EffectAcpErrors.AcpRequestError)(error.value)) {
+              yield* Effect.logWarning("orchestration-v2.acp-selection-step-indeterminate", {
+                driver,
+                sessionId,
+                optionId,
+              });
+            }
+            return yield* result;
+          }
+          const appliedValue = typeof value === "function" ? value(result.value) : value;
+          yield* Ref.update(appliedSelections, (current) => {
+            const previous = current.get(sessionId);
+            if (previous === undefined || !recordSelection || appliedValue === undefined)
+              return current;
+            const selection =
+              optionId === "model"
+                ? { ...previous, model: String(appliedValue) }
+                : {
+                    ...previous,
+                    options: [
+                      ...(previous.options ?? []).filter((option) => option.id !== optionId),
+                      { id: optionId, value: appliedValue },
+                    ],
+                  };
+            return new Map(current).set(sessionId, selection);
+          });
+          return result.value;
+        });
+
         const configureSession = Effect.fnUntraced(function* (
           startResult: AcpSessionRuntime.AcpSessionRuntimeStartResult,
           modelSelection: ModelSelection,
           runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+          force = false,
         ) {
           // A step failing below leaves the native config partly changed, so
           // the previously applied selection no longer describes the session.
           // Callers record the new selection only once this completes.
+          yield* Ref.set(configurationAcknowledged, false);
           yield* Ref.set(activeSelection, null);
           const requestedModel = flavor.resolveModelId?.(modelSelection) ?? modelSelection.model;
+          const attemptsModel =
+            flavor.applyModelSelection !== undefined ||
+            (requestedModel.length > 0 &&
+              !["auto", "default"].includes(requestedModel) &&
+              startResult.sessionSetupResult.configOptions?.some(
+                (option) => option.category === "model",
+              ) === true);
+          if (!(yield* Ref.get(appliedSelections)).has(startResult.sessionId)) {
+            const initialMode = yield* runtime.getModeState;
+            yield* Ref.update(appliedSelections, (current) =>
+              new Map(current).set(
+                startResult.sessionId,
+                acpInitialAppliedSelection(
+                  startResult.sessionSetupResult,
+                  modelSelection,
+                  initialMode?.currentModeId,
+                  attemptsModel,
+                ),
+              ),
+            );
+          }
+          const step = <A, E>(
+            id: string,
+            value: string | boolean | ((result: A) => string | boolean | undefined),
+            operation: Effect.Effect<A, E>,
+          ) => applyConfigurationStep(startResult.sessionId, id, value, operation);
+          const rememberOption = (id: string, value: string | boolean | undefined) =>
+            Ref.update(appliedSelections, (current) => {
+              const previous = current.get(startResult.sessionId);
+              if (
+                previous === undefined ||
+                value === undefined ||
+                previous.options?.some((option) => option.id === id)
+              )
+                return current;
+              return new Map(current).set(startResult.sessionId, {
+                ...previous,
+                options: [...(previous.options ?? []), { id, value }],
+              });
+            });
+          const setConfig = Effect.fnUntraced(function* (id: string, value: string | boolean) {
+            const previous = (yield* runtime.getConfigOptions).find(
+              (option) => option.id === id,
+            )?.currentValue;
+            yield* rememberOption(id, previous);
+            return yield* step(id, value, runtime.setConfigOption(id, value, force));
+          });
+          const setMode = Effect.fnUntraced(function* (mode: string) {
+            if (modelSelection.options?.some((option) => option.id === ACP_SESSION_MODE_OPTION_ID))
+              yield* rememberOption(
+                ACP_SESSION_MODE_OPTION_ID,
+                (yield* runtime.getModeState)?.currentModeId,
+              );
+            const prior = (yield* Ref.get(appliedSelections)).get(startResult.sessionId);
+            const nativeModeId = (yield* runtime.getConfigOptions).find(
+              (option) => option.category === "mode",
+            )?.id;
+            const modeId = prior?.options?.find(
+              (option) => option.id === ACP_SESSION_MODE_OPTION_ID || option.id === nativeModeId,
+            )?.id;
+            return yield* applyConfigurationStep(
+              startResult.sessionId,
+              modeId ?? ACP_SESSION_MODE_OPTION_ID,
+              mode,
+              runtime.setMode(mode, force),
+              modeId !== undefined,
+            );
+          });
           let appliedModel: string | undefined;
           if (flavor.applyModelSelection !== undefined) {
-            appliedModel = yield* flavor.applyModelSelection({
-              runtime,
-              startResult,
-              modelSelection,
-            });
+            // Record the selection's own model id, not the native id it maps to,
+            // so buffered output compares equal to the thread's selection.
+            appliedModel = yield* step(
+              "model",
+              modelSelection.model,
+              flavor.applyModelSelection({
+                runtime,
+                startResult,
+                modelSelection,
+                force,
+              }),
+            );
           } else if (
             requestedModel.length > 0 &&
             requestedModel !== "auto" &&
@@ -6305,7 +6474,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 (option) => option.category === "model",
               ) === true;
             if (hasModelConfig) {
-              yield* runtime.setModel(requestedModel);
+              yield* step("model", modelSelection.model, runtime.setModel(requestedModel, force));
             }
           }
           // Same-runtime switches compare against this stored setup, so keep
@@ -6386,20 +6555,21 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               );
               if (!advertisedValues.includes(selection.value)) continue;
             }
-            yield* runtime.setConfigOption(selection.id, selection.value).pipe(
+            yield* setConfig(selection.id, selection.value).pipe(
               Effect.catchTags({
-                AcpRequestError: (error) =>
-                  Effect.logWarning("ACP session rejected a configuration option value", {
+                AcpRequestError: (error) => {
+                  return Effect.logWarning("ACP session rejected a configuration option value", {
                     optionId: selection.id,
                     value: selection.value,
                     detail: error.message,
-                  }),
+                  });
+                },
               }),
             );
           }
           const policyMode = flavor.sessionModeForPolicy?.(runtimePolicy);
           if (policyMode !== undefined) {
-            yield* runtime.setMode(policyMode);
+            yield* setMode(policyMode);
           }
           const modeState = yield* runtime.getModeState;
           // The synthetic mode selection is skipped rather than failed when the
@@ -6409,9 +6579,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             modeSelection !== undefined &&
             typeof modeSelection.value === "string" &&
             modeState?.availableModes.some((mode) => mode.id === modeSelection.value) === true &&
-            modeState.currentModeId !== modeSelection.value
+            (force || modeState.currentModeId !== modeSelection.value)
           ) {
-            yield* runtime.setMode(modeSelection.value);
+            yield* setMode(modeSelection.value);
           }
           const effectiveModeState = yield* runtime.getModeState;
           const effectiveConfigOptions = yield* runtime.getConfigOptions;
@@ -6440,8 +6610,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const planMode = effectiveModeState?.availableModes.find(
               (mode) => mode.id === "plan" || mode.id === "architect",
             );
-            if (planMode !== undefined && effectiveModeState?.currentModeId !== planMode.id) {
-              yield* runtime.setMode(planMode.id);
+            if (
+              planMode !== undefined &&
+              (force || effectiveModeState?.currentModeId !== planMode.id)
+            ) {
+              yield* setMode(planMode.id);
             }
             for (const option of planSensitiveOptions) {
               const choices = option.options.flatMap((entry) =>
@@ -6450,8 +6623,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const requested = choices.find(
                 (choice) => choice === "plan" || choice === "architect",
               );
-              if (requested !== undefined && option.currentValue !== requested) {
-                yield* runtime.setConfigOption(option.id, requested);
+              if (requested !== undefined && (force || option.currentValue !== requested)) {
+                yield* setConfig(option.id, requested);
               }
             }
           } else {
@@ -6459,12 +6632,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             if (nativeBuild !== undefined) {
               if (
                 nativeBuild.modeId !== undefined &&
-                effectiveModeState?.currentModeId !== nativeBuild.modeId &&
+                (force || effectiveModeState?.currentModeId !== nativeBuild.modeId) &&
                 effectiveModeState?.availableModes.some(
                   (mode) => mode.id === nativeBuild.modeId,
                 ) === true
               ) {
-                yield* runtime.setMode(nativeBuild.modeId);
+                yield* setMode(nativeBuild.modeId);
               }
               for (const saved of nativeBuild.configOptions) {
                 const option = effectiveConfigOptions.find(
@@ -6474,13 +6647,19 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 const choices = option.options.flatMap((entry) =>
                   "value" in entry ? [entry.value] : entry.options.map((choice) => choice.value),
                 );
-                if (option.currentValue !== saved.value && choices.includes(saved.value)) {
-                  yield* runtime.setConfigOption(option.id, saved.value);
+                if (
+                  (force || option.currentValue !== saved.value) &&
+                  choices.includes(saved.value)
+                ) {
+                  yield* setConfig(option.id, saved.value);
                 }
               }
               nativeBuildConfigurationBySessionId.delete(startResult.sessionId);
             }
           }
+          // Skipped and explicitly rejected options are settled outcomes. Only
+          // a step without a response leaves planning evidence unknown.
+          yield* Ref.set(configurationAcknowledged, true);
           yield* (
             flavor.onSessionConfigurationUpdate?.(
               yield* runtime.getConfigOptions,
@@ -6867,6 +7046,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           if (!restartRequired) return false;
           yield* restartAcpRuntime(threadId);
           yield* Ref.set(runtimeRestartRequired, false);
+          yield* Ref.set(appliedSelections, new Map());
+          yield* Ref.set(configurationAcknowledged, false);
           yield* Ref.set(activeSessionId, null);
           yield* Ref.set(activeSessionSetup, null);
           yield* Ref.set(activeSelection, null);
@@ -6900,19 +7081,33 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const restartAfterInterrupt = yield* restartRuntimeAfterTeardownIfRequired(
               turnInput.threadId,
             );
+            const isContinuationTurn =
+              postSettleContinuationEnabled && acpIsProviderContinuationMessage(turnInput.message);
             const needsSessionActivation =
               (yield* Ref.get(activeSessionId)) !== requestedSessionId || restartAfterInterrupt;
-            if (needsSessionActivation) {
+            if (isContinuationTurn && needsSessionActivation) {
+              return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                driver,
+                detail: "Buffered output belongs to another native session",
+              });
+            }
+            if (!isContinuationTurn && needsSessionActivation) {
               const activated = yield* activateSession(requestedSessionId, turnInput.threadId);
               yield* Ref.set(activeSessionId, activated.sessionId);
               yield* Ref.set(activeSessionSetup, activated);
-              yield* configureSession(activated, turnInput.modelSelection, turnInput.runtimePolicy);
+              yield* configureSession(
+                activated,
+                turnInput.modelSelection,
+                turnInput.runtimePolicy,
+                turnInput.reapplySelection,
+              );
               yield* Ref.set(activeSelection, turnInput.modelSelection);
               yield* Ref.set(activeInteractionMode, turnInput.runtimePolicy.interactionMode);
-            } else {
+            } else if (!isContinuationTurn) {
               const configuredSelection = yield* Ref.get(activeSelection);
               const configuredInteractionMode = yield* Ref.get(activeInteractionMode);
               if (
+                turnInput.reapplySelection === true ||
                 configuredSelection === null ||
                 !modelSelectionsEqual(configuredSelection, turnInput.modelSelection) ||
                 configuredInteractionMode !== turnInput.runtimePolicy.interactionMode
@@ -6928,6 +7123,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   currentSessionSetup,
                   turnInput.modelSelection,
                   turnInput.runtimePolicy,
+                  turnInput.reapplySelection,
                 );
                 yield* Ref.set(activeSelection, turnInput.modelSelection);
                 yield* Ref.set(activeInteractionMode, turnInput.runtimePolicy.interactionMode);
@@ -6941,8 +7137,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             yield* Ref.set(handledBackgroundTaskIdsInActiveTurn, new Set());
             // Continuation turns attach to wake traffic the agent already produced
             // after the prior root turn settled; do not re-prompt the ACP session.
-            const isContinuationTurn =
-              postSettleContinuationEnabled && acpIsProviderContinuationMessage(turnInput.message);
             const isAppOwnedWakeTurn = acpIsAppOwnedWakeTurn(turnInput.message);
             // An app-owned wake reports on a sibling delegated child and owns
             // none of this session's background work, so it must not discard
@@ -7120,11 +7314,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 offered: noWakeReports.offered,
               }));
               const drainedWakeCount = yield* Ref.modify(wakeBuffer, (current) => {
-                const next: Array<EffectAcpSchema.SessionNotification> = [];
-                return [
-                  current.filter((notification) => notification.sessionId === requestedSessionId),
-                  next,
-                ] as const;
+                const boundary = current.findIndex((notification) => {
+                  const selection = wakeSelections.get(notification);
+                  return (
+                    notification.sessionId !== requestedSessionId ||
+                    selection === undefined ||
+                    !modelSelectionsEqual(selection, turnInput.modelSelection)
+                  );
+                });
+                const count = boundary < 0 ? current.length : boundary;
+                return [current.slice(0, count), current.slice(count)] as const;
               }).pipe(
                 Effect.tap((drained) =>
                   Effect.forEach(drained, handleSessionUpdate, {
@@ -7326,8 +7525,51 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           providerSessionId: input.providerSessionId,
           providerSession,
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          selectionAcknowledged: (selection) =>
+            Effect.gen(function* () {
+              const acknowledged = yield* Ref.get(activeSelection);
+              return (
+                (yield* Ref.get(configurationAcknowledged)) &&
+                acknowledged !== null &&
+                modelSelectionsEqual(acknowledged, selection)
+              );
+            }),
+          reappliesFullSelection: Effect.fnUntraced(function* (selection) {
+            const sessionId = yield* Ref.get(activeSessionId);
+            const applied =
+              sessionId === null ? undefined : (yield* Ref.get(appliedSelections)).get(sessionId);
+            return (
+              (flavor.applyModelSelection === undefined ||
+                flavor.canForceModelSelection === true) &&
+              !["auto", "default", "grok-build"].includes(selection.model) &&
+              applied !== undefined &&
+              (applied.options ?? []).every((option) =>
+                selection.options?.some((next) => next.id === option.id),
+              )
+            );
+          }),
           ...(postSettleContinuationEnabled
             ? {
+                continuationDrainsOutput: true,
+                bufferedExecutionSelection: (providerThread) =>
+                  Effect.gen(function* () {
+                    const first = (yield* Ref.get(wakeBuffer))[0];
+                    if (
+                      first === undefined ||
+                      first.sessionId !== providerThread.nativeThreadRef?.nativeId
+                    )
+                      return null;
+                    return wakeSelections.get(first) ?? null;
+                  }),
+                hasBufferedOutputForThread: (providerThread) =>
+                  Effect.gen(function* () {
+                    const sessionId = yield* Ref.get(activeSessionId);
+                    return (
+                      sessionId !== null &&
+                      providerThread.nativeThreadRef?.nativeId === sessionId &&
+                      (yield* Ref.get(wakeBuffer)).length > 0
+                    );
+                  }),
                 hasPendingBackgroundWork: Effect.gen(function* () {
                   if ((yield* Ref.get(wakeBuffer)).length > 0) return true;
                   if (yield* Ref.get(continuationRequested)) return true;
@@ -7562,6 +7804,20 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                             teardownState: (yield* Ref.get(runtimeTeardownState))._tag,
                           },
                         );
+                        if (
+                          context === null &&
+                          !containOrphanRuntime &&
+                          turnInput.requestRuntimeRestart === true &&
+                          turnInput.providerThread.nativeThreadRef?.nativeId ===
+                            (yield* Ref.get(activeSessionId))
+                        ) {
+                          yield* runtimeCallbackPermit.withPermit(
+                            Effect.gen(function* () {
+                              yield* awaitAdmittedNativeResponses;
+                              yield* quarantineStoppedRun();
+                            }),
+                          );
+                        }
                         if (containOrphanRuntime) {
                           const teardownBarrier = yield* Deferred.make<
                             void,

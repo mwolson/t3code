@@ -47,6 +47,12 @@ export function assertClaudeBackgroundTaskWakeOutput(
   ]);
 
   const [rootRun, wakeRun, userRun] = projection.runs;
+  assert.deepEqual(wakeRun?.modelSelection, rootRun?.modelSelection);
+  const thinkingShell = result.capturedShellSnapshots.get("wake-before-output");
+  const thinkingThread = thinkingShell?.threads.find(
+    (thread) => thread.id === projection.thread.id,
+  );
+  assert.equal(thinkingThread?.status, "running");
   assert.deepEqual(runAssistantTexts(projection, rootRun?.id), ["STARTED"]);
   assert.deepEqual(runAssistantTexts(projection, wakeRun?.id), ["WAKE_DONE"]);
   assert.deepEqual(runAssistantTexts(projection, userRun?.id), ["USER_REPLY"]);

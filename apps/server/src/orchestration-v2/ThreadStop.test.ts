@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import {
   CommandId,
   EventId,
@@ -16,6 +17,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
@@ -33,6 +35,7 @@ import * as EffectWorker from "./EffectWorker.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -234,6 +237,19 @@ it.effect.each(["thread.stop", "run.interrupt"] as const)(
       yield* createWatchingThread(threadId, 5);
       yield* send(threadId, "active", "start_immediately");
       yield* send(threadId, "user follow-up", "queue_after_active");
+      // The effect worker never starts a provider here. Supply the producing
+      // selection that a real adapter-buffered wake retains on its runtime.
+      const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const runtime: Pick<
+        ProviderAdapter.ProviderAdapterV2SessionRuntime,
+        "bufferedExecutionSelection"
+      > = { bufferedExecutionSelection: () => Effect.succeed(modelSelection) };
+      const sessionSpy = vi
+        .spyOn(sessions, "get")
+        .mockReturnValueOnce(
+          Effect.succeed(Option.some(runtime as ProviderAdapter.ProviderAdapterV2SessionRuntime)),
+        );
+      yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
       for (const creationSource of ["provider", "server"] as const) {
         yield* orchestrator.dispatch({
           type: "message.dispatch",

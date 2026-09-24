@@ -28,6 +28,7 @@ it.effect("logs successful task stops for replay and omits failed stops", () =>
     const stopTask = vi.fn(async (_taskId: string) => {});
     const query = vi.spyOn(ClaudeSdk, "query").mockReturnValue({
       stopTask,
+      initializationResult: async () => ({ commands: [], models: [] }),
     } as unknown as ClaudeSdk.Query);
     yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
     const threadId = ThreadId.make("thread-stop");
@@ -131,6 +132,9 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI pro
           'dir=$(dirname "$0")',
           'sleep 600 > "$dir/alive" &',
           'echo $! > "$dir/leftover.pid"',
+          "IFS= read -r request",
+          `request_id=$(printf '%s' "$request" | sed 's/.*"request_id":"\\([^"]*\\)".*/\\1/')`,
+          `printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"commands":[],"models":[]}}}\\n' "$request_id"`,
           "cat > /dev/null",
         ].join("\n"),
       );

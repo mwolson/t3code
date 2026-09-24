@@ -92,6 +92,25 @@ const modelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5.4",
 } satisfies ModelSelection;
+// Lifecycle fixtures do not start a provider. Retain the selection evidence
+// that a real adapter-buffered wake supplies for each notification dispatch.
+const captureProviderWakeSelection = Effect.fnUntraced(function* () {
+  const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const runtime: Pick<
+    ProviderAdapter.ProviderAdapterV2SessionRuntime,
+    "bufferedExecutionSelection" | "hasBufferedOutputForThread"
+  > = {
+    bufferedExecutionSelection: () => Effect.succeed(modelSelection),
+    hasBufferedOutputForThread: () => Effect.succeed(true),
+  };
+  const sessionSpy = vi
+    .spyOn(sessions, "get")
+    .mockReturnValueOnce(
+      Effect.succeed(Option.some(runtime as ProviderAdapter.ProviderAdapterV2SessionRuntime)),
+    );
+  yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
+});
+
 const alternateInstanceId = ProviderInstanceId.make("codex_alternate");
 
 const layerVcsDriverRegistryTest = VcsDriverRegistry.layer.pipe(
@@ -3534,6 +3553,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           modelSelection,
           dispatchMode: { type: "queue_after_active" },
         });
+      yield* captureProviderWakeSelection();
       yield* queueMessage("settle-automatic-notification", true);
 
       // Simulate a restart: the active run ends and recovery holds the queue.
@@ -3725,6 +3745,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           modelSelection,
           dispatchMode: { type: "start_immediately" },
         });
+        if (automatic) yield* captureProviderWakeSelection();
         yield* orchestrator.dispatch({
           type: "message.dispatch",
           createdBy: automatic ? "agent" : "user",
@@ -3793,6 +3814,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         yield* Effect.yieldNow;
 
         const activeCompletedAt = yield* DateTime.now;
+        if (automatic) yield* captureProviderWakeSelection();
         yield* eventSink.write({
           events: [
             {
@@ -3944,6 +3966,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         });
       yield* dispatch("prompt", false);
       yield* dispatch("queued", false);
+      yield* captureProviderWakeSelection();
       yield* dispatch("early-wake", true);
       // The early wake now runs ahead of the older queued prompt, as a
       // delegated result does when it jumps the queue.
@@ -3954,6 +3977,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         runId: (yield* runFor("queued")).id,
         beforeRunId: null,
       });
+      yield* captureProviderWakeSelection();
       yield* dispatch("late-wake", true);
       // A queued wake has no clock yet: what runs before it is still unknown.
       assert.isUndefined((yield* runFor("early-wake")).workStartedAt);
@@ -3993,6 +4017,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const millis = (value: DateTime.Utc | undefined) =>
         value === undefined ? undefined : DateTime.toEpochMillis(value);
 
+      yield* captureProviderWakeSelection();
       yield* settle("prompt", now);
       assert.equal(yield* Queue.take(startedRunIds), (yield* runFor("early-wake")).id);
       assert.equal(millis((yield* runFor("early-wake")).workStartedAt), millis(now));
@@ -4004,6 +4029,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       // The queued prompt starts long after it was requested; the wake after it
       // counts from that start, not from the request.
       const queuedStartedAt = DateTime.add(now, { minutes: 10 });
+      yield* captureProviderWakeSelection();
       yield* settle("queued", queuedStartedAt);
       assert.equal(yield* Queue.take(startedRunIds), (yield* runFor("late-wake")).id);
       assert.equal(millis((yield* runFor("late-wake")).workStartedAt), millis(queuedStartedAt));

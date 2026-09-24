@@ -6,6 +6,7 @@
  * @module provider-opencode/testing
  */
 export {
+  makeOpenCodeAdapterV2,
   OPENCODE_DEFAULT_INSTANCE_ID,
   OPENCODE_PROVIDER,
   OPENCODE_SDK_PROTOCOL,
