@@ -19,6 +19,21 @@ import * as Order from "effect/Order";
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 
+/** Home lists root threads, so child-only history leaves it empty. */
+export function hasHomeThreads(input: {
+  readonly threads: ReadonlyArray<EnvironmentThreadShell>;
+  readonly pendingTaskCount: number;
+  readonly settledCount: number;
+}): boolean {
+  return (
+    input.threads.some(
+      (thread) => thread.archivedAt === null && thread.lineage.relationshipToParent !== "subagent",
+    ) ||
+    input.pendingTaskCount > 0 ||
+    input.settledCount > 0
+  );
+}
+
 export type HomeProjectSortOrder = Exclude<SidebarProjectSortOrder, "manual">;
 
 export interface HomeProjectScope {
