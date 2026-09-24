@@ -9,9 +9,13 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { onTestFinished, vi } from "vite-plus/test";
+import { resolveNewTaskModelSelection } from "../lib/modelOptions";
 
 const composerDraftFileMocks = vi.hoisted(() => {
   let document = JSON.stringify({ schemaVersion: 1, drafts: {} });
+  let legacyDocument: string | null = null;
+  let legacyReadError: Error | null = null;
+  const legacyReads = vi.fn();
   let readError: Error | null = null;
   let writeError: Error | null = null;
   let releaseRead: (() => void) | null = null;
@@ -23,6 +27,13 @@ const composerDraftFileMocks = vi.hoisted(() => {
 
   return {
     readImage,
+    legacyReads,
+    setLegacyDocument(value: string | null) {
+      legacyDocument = value;
+    },
+    setLegacyReadError(error: Error | null) {
+      legacyReadError = error;
+    },
     blockRead() {
       readBarrier = new Promise<void>((resolve) => {
         releaseRead = resolve;
@@ -64,15 +75,32 @@ const composerDraftFileMocks = vi.hoisted(() => {
       }
     },
     File: class {
-      exists = true;
+      readonly legacy: boolean;
+      constructor(_directory: unknown, fileName: string) {
+        this.legacy = fileName === "model-option-memory.json";
+      }
+      get exists() {
+        return !this.legacy || legacyDocument !== null;
+      }
       parentDirectory = null;
 
       create() {}
 
-      moveSync() {}
+      moveSync() {
+        if (this.legacy) throw new Error("Legacy memory must remain read-only");
+      }
+
+      delete() {
+        if (this.legacy) throw new Error("Legacy memory must remain read-only");
+      }
 
       async text() {
         await readBarrier;
+        if (this.legacy) {
+          legacyReads();
+          if (legacyReadError) throw legacyReadError;
+          return legacyDocument!;
+        }
         if (readError) throw readError;
         return document;
       }
@@ -82,6 +110,7 @@ const composerDraftFileMocks = vi.hoisted(() => {
       }
 
       write(value: string) {
+        if (this.legacy) throw new Error("Legacy memory must remain read-only");
         if (writeError) {
           throw writeError;
         }
@@ -206,6 +235,9 @@ afterEach(() => {
   resetComposerDraftsLoadState();
   composerDraftFileMocks.setDocument({ schemaVersion: 1, drafts: {} });
   composerDraftFileMocks.setReadError(null);
+  composerDraftFileMocks.setLegacyDocument(null);
+  composerDraftFileMocks.setLegacyReadError(null);
+  composerDraftFileMocks.legacyReads.mockClear();
   composerDraftFileMocks.setWriteError(null);
   composerDraftFileMocks.setNextWriteBarrier(null);
   composerDraftFileMocks.setOnWrite(null);
@@ -1955,6 +1987,142 @@ describe("mobile composer drafts", () => {
       },
     });
   });
+
+  it("imports trial memory once, with per-model disk and in-flight choices winning", async () => {
+    vi.useFakeTimers();
+    const options = (value: string) => [{ id: "thinking", value }];
+    composerDraftFileMocks.setDocument({
+      schemaVersion: 1,
+      drafts: { "environment-1:saved": DRAFT },
+      modelOptionMemory: { pi: { a: options("high"), b: options("medium") } },
+    });
+    composerDraftFileMocks.setLegacyDocument(
+      JSON.stringify({
+        schemaVersion: 1,
+        byInstance: {
+          pi: { a: options("low"), b: options("low"), c: options("off"), empty: [] },
+          other: { a: options("max") },
+        },
+      }),
+    );
+    composerDraftFileMocks.blockRead();
+    ensureComposerDraftsLoaded();
+    appAtomRegistry.set(modelOptionMemoryAtom, { pi: { a: options("xhigh") } });
+    composerDraftFileMocks.releaseRead();
+    await waitForComposerDraftsLoaded();
+    const expected = {
+      pi: { a: options("xhigh"), b: options("medium"), c: options("off") },
+      other: { a: options("max") },
+    };
+    expect(appAtomRegistry.get(modelOptionMemoryAtom)).toEqual(expected);
+    // A failed migration write leaves saved drafts retryable.
+    composerDraftFileMocks.setWriteError(new Error("disk unavailable"));
+    await expect(flushComposerDrafts()).rejects.toMatchObject({ operation: "write" });
+    expect(
+      JSON.parse(composerDraftFileMocks.getDocument()).legacyModelOptionMemoryImported,
+    ).toBeUndefined();
+    composerDraftFileMocks.setWriteError(null);
+    await flushComposerDrafts();
+    expect(JSON.parse(composerDraftFileMocks.getDocument())).toMatchObject({
+      drafts: { "environment-1:saved": DRAFT },
+      modelOptionMemory: expected,
+      legacyModelOptionMemoryImported: true,
+    });
+    resetComposerDraftsLoadState();
+    appAtomRegistry.set(modelOptionMemoryAtom, {});
+    composerDraftFileMocks.legacyReads.mockClear();
+    await waitForComposerDraftsLoaded();
+    expect(appAtomRegistry.get(modelOptionMemoryAtom)).toEqual(expected);
+    expect(composerDraftFileMocks.legacyReads).not.toHaveBeenCalled();
+  });
+
+  it.each(["fresh", "existing", "explicit"] as const)(
+    "imports legacy options without replacing the %s draft selection or sticky priority",
+    async (kind) => {
+      vi.useFakeTimers();
+      const selection = {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "chosen",
+        options: [{ id: "reasoning", value: "high" }],
+      };
+      const draft = {
+        text: "Keep this prompt",
+        attachments: [],
+        modelSelection: selection,
+        interactionMode: "plan" as const,
+      };
+      const key = kind === "existing" ? "environment-1:thread" : "new-task:chosen";
+      composerDraftFileMocks.setDocument({
+        schemaVersion: 1,
+        drafts: kind === "fresh" ? {} : { [key]: draft },
+        stickyModelSelection: selection,
+      });
+      composerDraftFileMocks.setLegacyDocument(
+        JSON.stringify({
+          schemaVersion: 1,
+          byInstance: { codex: { chosen: [{ id: "reasoning", value: "low" }] } },
+        }),
+      );
+      await waitForComposerDraftsLoaded();
+      const restored = appAtomRegistry.get(composerDraftsAtom)[key];
+      expect(restored).toEqual(kind === "fresh" ? undefined : draft);
+      expect(appAtomRegistry.get(stickyComposerModelSelectionAtom)).toEqual(selection);
+      expect(appAtomRegistry.get(modelOptionMemoryAtom)).toEqual({
+        codex: { chosen: [{ id: "reasoning", value: "low" }] },
+      });
+      expect(
+        resolveNewTaskModelSelection({
+          draftSelection: restored?.modelSelection ?? null,
+          stickySelection: appAtomRegistry.get(stickyComposerModelSelectionAtom),
+          projectDefaultSelection: null,
+          modelOptions: [],
+        }),
+      ).toEqual(selection);
+      await flushComposerDrafts();
+      expect(JSON.parse(composerDraftFileMocks.getDocument()).stickyModelSelection).toEqual(
+        selection,
+      );
+    },
+  );
+
+  it.each(["json", "schema", "read"] as const)(
+    "preserves drafts and retries the import after a legacy %s failure",
+    async (failure) => {
+      vi.useFakeTimers();
+      composerDraftFileMocks.setDocument({
+        schemaVersion: 1,
+        drafts: { "environment-1:saved": DRAFT },
+      });
+      composerDraftFileMocks.setLegacyDocument(
+        failure === "json" ? "{" : JSON.stringify({ schemaVersion: 999, byInstance: {} }),
+      );
+      if (failure === "read") composerDraftFileMocks.setLegacyReadError(new Error("unavailable"));
+      setComposerDraftText("environment-1:new", "New edits");
+      await flushComposerDrafts();
+      expect(JSON.parse(composerDraftFileMocks.getDocument())).toMatchObject({
+        drafts: { "environment-1:saved": DRAFT, "environment-1:new": { text: "New edits" } },
+      });
+      expect(
+        JSON.parse(composerDraftFileMocks.getDocument()).legacyModelOptionMemoryImported,
+      ).toBeUndefined();
+      resetComposerDraftsLoadState();
+      composerDraftFileMocks.setLegacyReadError(null);
+      composerDraftFileMocks.setLegacyDocument(
+        JSON.stringify({
+          schemaVersion: 1,
+          byInstance: { pi: { a: [{ id: "thinking", value: "max" }] } },
+        }),
+      );
+      await flushComposerDrafts();
+      expect(JSON.parse(composerDraftFileMocks.getDocument()).legacyModelOptionMemoryImported).toBe(
+        true,
+      );
+      expect(appAtomRegistry.get(composerDraftsAtom)["environment-1:saved"]).toEqual(DRAFT);
+      expect(JSON.parse(composerDraftFileMocks.getDocument()).modelOptionMemory).toEqual({
+        pi: { a: [{ id: "thinking", value: "max" }] },
+      });
+    },
+  );
 
   it("waits for hydration before persisting the latest composer state", async () => {
     vi.useFakeTimers();
