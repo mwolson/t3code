@@ -230,21 +230,24 @@ export function makeGrokAcpAdapterFlavor(options: GrokAdapterV2Options): AcpAdap
     supportsImagePrompts: true,
     supportsCompaction: true,
     resolveModelId: (selection) => resolveGrokAcpBaseModelId(selection.model),
-    applyModelSelection: ({ runtime, startResult, modelSelection }) =>
+    canForceModelSelection: true,
+    applyModelSelection: ({ runtime, startResult, modelSelection, force }) =>
       Effect.gen(function* () {
         const legacy = startResult.initializeResult.protocolVersion === 1;
         const options = legacy ? [] : yield* runtime.getConfigOptions;
         const configuredModel = options.find((option) => option.category === "model")?.currentValue;
+        let currentModelId: string | undefined;
+        if (legacy)
+          currentModelId = currentGrokModelIdFromSessionSetup(startResult.sessionSetupResult);
+        else if (typeof configuredModel === "string") currentModelId = configuredModel;
+        const requestedModelId = resolveGrokAcpBaseModelId(modelSelection.model);
+        if (force === true && requestedModelId !== "grok-build") currentModelId = undefined;
         return yield* applyGrokAcpModelSelection({
           runtime: legacy
             ? runtime
-            : { setSessionModel: (model) => runtime.setModel(model).pipe(Effect.as({})) },
-          currentModelId: legacy
-            ? currentGrokModelIdFromSessionSetup(startResult.sessionSetupResult)
-            : typeof configuredModel === "string"
-              ? configuredModel
-              : undefined,
-          requestedModelId: resolveGrokAcpBaseModelId(modelSelection.model),
+            : { setSessionModel: (model) => runtime.setModel(model, force).pipe(Effect.as({})) },
+          currentModelId,
+          requestedModelId,
           mapError: (cause) => cause,
         });
       }),

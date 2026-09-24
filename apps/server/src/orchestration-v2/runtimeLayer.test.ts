@@ -2154,7 +2154,7 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
         orchestrator.dispatch({
           type: "message.dispatch",
           createdBy: automatic ? "agent" : "user",
-          creationSource: automatic ? "provider" : "web",
+          creationSource: automatic ? "server" : "web",
           ...(automatic
             ? {
                 notification: {
@@ -2363,7 +2363,7 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
           yield* orchestrator.dispatch({
             type: "message.dispatch",
             createdBy: automatic ? "agent" : "user",
-            creationSource: automatic ? "provider" : "web",
+            creationSource: automatic ? "server" : "web",
             ...(automatic
               ? {
                   notification: {

@@ -1287,6 +1287,7 @@ export class AcpSessionRuntime extends Context.Service<
      */
     readonly setMode: (
       modeId: string,
+      force?: boolean,
     ) => Effect.Effect<EffectAcpSchema.SetSessionModeResponse, EffectAcpErrors.AcpError>;
     /**
      * Updates a session configuration option and the runtime configuration snapshot.
@@ -1299,12 +1300,16 @@ export class AcpSessionRuntime extends Context.Service<
     readonly setConfigOption: (
       configId: string,
       value: string | boolean,
+      force?: boolean,
     ) => Effect.Effect<EffectAcpSchema.SetSessionConfigOptionResponse, EffectAcpErrors.AcpError>;
     /**
      * Selects the base model through the negotiated model configuration option.
      * @see https://agentclientprotocol.com/protocol/schema#session/set_config_option
      */
-    readonly setModel: (model: string) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+    readonly setModel: (
+      model: string,
+      force?: boolean,
+    ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
     /**
 
      * Sends a generic ACP extension request and records it through the request logger.
@@ -2110,6 +2115,7 @@ export const make = (
     const setConfigOption = (
       configId: string,
       value: string | boolean,
+      force = false,
     ): Effect.Effect<EffectAcpSchema.SetSessionConfigOptionResponse, EffectAcpErrors.AcpError> =>
       validateConfigOptionValue(configId, value).pipe(
         Effect.flatMap(() => getStartedState),
@@ -2117,7 +2123,7 @@ export const make = (
           Ref.get(configOptionsRef).pipe(
             Effect.flatMap((configOptions) => {
               const existing = findSessionConfigOption(configOptions, configId);
-              if (existing && configOptionCurrentValueMatches(existing, value)) {
+              if (!force && existing && configOptionCurrentValueMatches(existing, value)) {
                 return Effect.succeed({
                   configOptions,
                 } satisfies EffectAcpSchema.SetSessionConfigOptionResponse);
@@ -2733,16 +2739,16 @@ export const make = (
           ? promptDispatchSemaphore.withPermit(cancel)
           : cancel,
       ...(options.ownDetachedProcessGroup === true ? { terminateProcessGroup } : {}),
-      setMode: (modeId) =>
+      setMode: (modeId, force = false) =>
         Ref.get(modeStateRef).pipe(
           Effect.flatMap((modeState) => {
-            if (modeState?.currentModeId === modeId) {
+            if (!force && modeState?.currentModeId === modeId) {
               return Effect.succeed({} satisfies EffectAcpSchema.SetSessionModeResponse);
             }
             return Ref.get(configOptionsRef).pipe(
               Effect.flatMap((options) => {
                 const modeOption = options.find((option) => option.category === "mode");
-                return setConfigOption(modeOption?.id ?? "mode", modeId);
+                return setConfigOption(modeOption?.id ?? "mode", modeId, force);
               }),
               Effect.tap(() => updateCurrentModeId(modeId)),
               Effect.as({} satisfies EffectAcpSchema.SetSessionModeResponse),
@@ -2765,9 +2771,11 @@ export const make = (
           }),
         ),
       setConfigOption,
-      setModel: (model) =>
+      setModel: (model, force = false) =>
         getStartedState.pipe(
-          Effect.flatMap((started) => setConfigOption(started.modelConfigId ?? "model", model)),
+          Effect.flatMap((started) =>
+            setConfigOption(started.modelConfigId ?? "model", model, force),
+          ),
           Effect.asVoid,
         ),
 

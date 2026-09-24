@@ -180,12 +180,14 @@ it.effect(
         updatedAt: now,
         lastError: null,
       };
+      let ownedBuffer = false;
       const runtime: ProviderAdapterV2SessionRuntime = {
         instanceId: providerInstanceId,
         driver,
         providerSessionId: oldSessionId,
         providerSession,
         events: Stream.empty,
+        hasBufferedOutputForThread: () => Effect.sync(() => ownedBuffer),
         ensureThread: () => Effect.die("unused ensureThread"),
         resumeThread: () => Effect.die("unused resumeThread"),
         startTurn: () => Effect.die("unused startTurn"),
@@ -322,5 +324,33 @@ it.effect(
       assert.equal(interrupted?.providerSessionId, oldSessionId);
       assert.equal(interrupted?.id, providerThreadId);
       assert.equal(interrupted?.nativeThreadRef?.nativeId, "native-thread:restart-session");
+      yield* Ref.set(interruptedThread, null);
+      yield* Ref.update(projection, (current) => ({
+        ...current,
+        providerThreads: current.providerThreads.map((thread) => ({
+          ...thread,
+          providerSessionId: oldSessionId,
+        })),
+      }));
+      yield* Effect.gen(function* () {
+        const control = yield* ProviderTurnControlServiceV2;
+        const stop = control.interrupt({
+          threadId,
+          providerSessionId: oldSessionId,
+          providerThreadId,
+          providerTurnId,
+        });
+        yield* stop;
+        assert.isNull(
+          yield* Ref.get(interruptedThread),
+          "terminal turn without owned work is not interrupted again",
+        );
+        ownedBuffer = true;
+        yield* stop;
+        assert.isNotNull(
+          yield* Ref.get(interruptedThread),
+          "Stop reaches a terminal turn's owned buffer even without running work",
+        );
+      }).pipe(Effect.provide(controlLayer));
     }),
 );

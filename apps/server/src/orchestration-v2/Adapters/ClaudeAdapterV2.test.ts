@@ -3461,8 +3461,39 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           assert.isTrue(yield* hasPendingBackgroundWorkForThread(providerThreadA));
           assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadB));
 
-          // Starting B closes A's only live query. A can never emit a roster
-          // clear from a dead process, so openQuery must idle-clear A.
+          const blockedSibling = yield* Effect.exit(
+            runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: appThreadB,
+                providerThread: providerThreadB,
+                now,
+                attemptId: RunAttemptId.make("attempt-roster-blocked-b"),
+                text: "Do not kill A.",
+                attachments: [],
+              }),
+            ),
+          );
+          assert.isTrue(Exit.isFailure(blockedSibling));
+          assert.equal(processQueues.length, 1);
+          assert.equal(processA.queue.state._tag, "Open");
+          assert.isTrue(yield* hasPendingBackgroundWorkForThread(providerThreadA));
+          yield* Queue.offer(
+            processA.queue,
+            claudeSdkFrame({
+              type: "system",
+              subtype: "background_tasks_changed",
+              tasks: [],
+              uuid: "00000000-0000-4000-8000-000000000310",
+              session_id: nativeIds[0],
+            }),
+          );
+          yield* awaitUntil(
+            () =>
+              providerThreadRosterEvents(events).at(-1)?.providerThread.pendingBackgroundTasks
+                ?.length === 0,
+            "A task finished",
+          );
+          // Once A finishes, B may replace the idle process.
           yield* runtime.startTurn(
             makeClaudeTestTurnInput({
               threadId: appThreadB,
@@ -5512,8 +5543,40 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ...CLAUDE_TEST_MODEL_SELECTION,
           model: "claude-haiku-4-5-20251001",
         } satisfies ModelSelection;
-        // ProviderTurnStartService marks the thread active before startTurn;
-        // the process-reset clear must preserve that status.
+        const blockedChange = yield* Effect.exit(
+          runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              modelSelection: alternateModel,
+              attemptId: RunAttemptId.make("attempt-process-reset-blocked"),
+              text: "Do not kill the task.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+            }),
+          ),
+        );
+        assert.isTrue(Exit.isFailure(blockedChange));
+        assert.equal(processQueues.length, 1);
+        assert.equal(firstProcess.state._tag, "Open");
+        yield* Queue.offer(
+          firstProcess,
+          claudeSdkFrame({
+            type: "system",
+            subtype: "background_tasks_changed",
+            tasks: [],
+            uuid: "00000000-0000-4000-8000-000000000610",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* awaitUntil(
+          () =>
+            providerThreadRosterEvents(events).at(-1)?.providerThread.pendingBackgroundTasks
+              ?.length === 0,
+          "task finished before replace",
+        );
+        // The process-reset clear preserves the new turn's active status.
         const activeProviderThread = {
           ...providerThread,
           status: "active" as const,
@@ -5532,33 +5595,22 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         assert.equal(processQueues.length, 2);
 
-        // Process-scoped level resets to empty on CLI (re)start while the
-        // starting turn's provider thread remains active (not idle).
+        // Completion already emptied the roster. The reset need not emit a
+        // duplicate empty level; the replacement must still start and reset
+        // eligibility, without making completed work pending again.
         yield* awaitUntil(
           () =>
-            providerThreadRosterEvents(events).some(
+            events.filter(
               (event) =>
-                event.providerThread.status === "active" &&
-                (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0 &&
-                // Prefer the post-replace clear over the initial empty thread.
-                event.providerThread.updatedAt !== undefined,
-            ),
-          "roster cleared on process replace while remaining active",
+                event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+            ).length === 2,
+          "replacement running",
         );
-        // After replace, the in-memory Waiting probe must be false even if a
-        // late empty-level event was already present before background work.
         assert.isFalse(yield* hasPendingBackgroundWork);
-        const emptyActiveRosterEvents = providerThreadRosterEvents(events).filter(
-          (event) =>
-            event.providerThread.status === "active" &&
-            (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
-        );
-        assert.isAtLeast(emptyActiveRosterEvents.length, 1);
         assert.deepEqual(
-          emptyActiveRosterEvents.at(-1)?.providerThread.pendingBackgroundTasks ?? [],
+          providerThreadRosterEvents(events).at(-1)?.providerThread.pendingBackgroundTasks ?? [],
           [],
         );
-        assert.equal(emptyActiveRosterEvents.at(-1)?.providerThread.status, "active");
 
         // A late notification from the previous process must not wake after
         // eligibility was reset with the process. Offer on the new process
@@ -5868,7 +5920,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   );
 
   it.effect(
-    "does not opaque-misclassify a buffered subagent notification across model/policy query replacement",
+    "retains subagent classification through blocked replacement and native-buffer drain",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -6030,43 +6082,31 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* awaitUntil(() => continuationRequests.length === 1, "continuation after notify");
           assert.equal(continuationRequests[0]?.detail, SUBAGENT_SUMMARY);
 
-          // Model-changing user turn replaces the query while continuation stays
-          // queued. Process reset must not invent opaque classification for the
-          // buffered subagent notification.
+          // A queued native completion must drain on its original process.
           const alternateModel = {
             ...CLAUDE_TEST_MODEL_SELECTION,
             model: "claude-haiku-4-5-20251001",
           } satisfies ModelSelection;
-          yield* runtime.startTurn(
-            makeClaudeTestTurnInput({
-              threadId,
-              providerThread: { ...providerThread, status: "active" },
-              now,
-              attemptId: RunAttemptId.make("attempt-claude-subagent-buffer-replace-user"),
-              text: "Switch model while the subagent completes.",
-              attachments: [],
-              providerTurnOrdinal: 2,
-              modelSelection: alternateModel,
-            }),
+          const blocked = yield* Effect.exit(
+            runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId,
+                providerThread,
+                now,
+                attemptId: RunAttemptId.make("attempt-claude-subagent-buffer-replace-user"),
+                text: "Switch model while the subagent completes.",
+                attachments: [],
+                providerTurnOrdinal: 2,
+                modelSelection: alternateModel,
+              }),
+            ),
           );
-          assert.equal(processQueues.length, 2);
-          const secondProcess = processQueues[1]!;
-          yield* Queue.offer(
-            secondProcess,
-            makeResultFrame({
-              uuid: "00000000-0000-4000-8000-000000000805",
-              result: "User turn finished after model switch.",
-            }),
-          );
-          yield* awaitUntil(
-            () => events.filter((event) => event.type === "turn.terminal").length === 2,
-            "user turn terminal after replace",
-          );
-          assert.isTrue(yield* hasPendingBackgroundWork);
+          assert.isTrue(Exit.isFailure(blocked));
+          assert.equal(processQueues.length, 1);
+          assert.equal(firstProcess.state._tag, "Open");
           assert.lengthOf(continuationRequests, 1);
-
           yield* Queue.offer(
-            secondProcess,
+            firstProcess,
             makeResultFrame({
               uuid: "00000000-0000-4000-8000-000000000806",
               result: "The subagent finished with SUB_BUFFER_REPLACE_DONE.",
@@ -6081,13 +6121,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               text: "Background task completed.",
               attachments: [],
               providerTurnOrdinal: 3,
-              modelSelection: alternateModel,
+              modelSelection: CLAUDE_TEST_MODEL_SELECTION,
               messageCreatedBy: "agent",
               messageCreationSource: "provider",
             }),
           );
           yield* awaitUntil(
-            () => events.filter((event) => event.type === "turn.terminal").length === 3,
+            () => events.filter((event) => event.type === "turn.terminal").length === 2,
             "continuation terminal after buffered subagent drain",
           );
 
@@ -6103,6 +6143,20 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           assert.equal(subagentNodeEvents.at(-1)?.node.status, "completed");
           assert.isFalse(yield* hasPendingBackgroundWork);
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              modelSelection: alternateModel,
+              attemptId: RunAttemptId.make("attempt-subagent-explicit-retry"),
+              text: "Explicit retry after drain.",
+              attachments: [],
+              providerTurnOrdinal: 4,
+            }),
+          );
+          assert.equal(processQueues.length, 2);
+          assert.equal(firstProcess.state._tag, "Done");
         }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
       ),
   );
@@ -6117,6 +6171,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
             prefix: "t3-claude-v2-replace-open-fail-",
           });
+          const closing = yield* Deferred.make<void>();
+          const releaseClose = yield* Deferred.make<void>();
           let openCount = 0;
           const processQueues: Array<Queue.Queue<SDKMessage>> = [];
           const events: Array<ProviderAdapterV2Event> = [];
@@ -6151,7 +6207,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                     offer: () => Effect.void,
                     setModel: () => Effect.void,
                     interrupt: Effect.void,
-                    close: Queue.shutdown(sdkMessages),
+                    close: Deferred.succeed(closing, undefined).pipe(
+                      Effect.andThen(Deferred.await(releaseClose)),
+                      Effect.andThen(Queue.shutdown(sdkMessages)),
+                    ),
                   };
                 });
               },
@@ -6225,7 +6284,51 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             )
             .pipe(Effect.exit);
           assert.isTrue(Exit.isFailure(failedStart));
-          // Old process was closed before the failed open: roster must not stick.
+          assert.equal(openCount, 1, "running-work guard precedes the forced open failure");
+          assert.equal(processQueues[0]!.state._tag, "Open");
+          assert.isTrue(yield* hasPendingBackgroundWork);
+          yield* Queue.offer(
+            processQueues[0]!,
+            claudeSdkFrame({
+              type: "system",
+              subtype: "background_tasks_changed",
+              tasks: [],
+              uuid: "00000000-0000-4000-8000-000000000910",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* awaitUntil(
+            () =>
+              providerThreadRosterEvents(events).at(-1)?.providerThread.pendingBackgroundTasks
+                ?.length === 0,
+            "task finished before failed open",
+          );
+          const replacing = yield* runtime
+            .startTurn(
+              makeClaudeTestTurnInput({
+                threadId,
+                providerThread,
+                now,
+                modelSelection: alternateModel,
+                attemptId: RunAttemptId.make("attempt-replace-after-finish"),
+                text: "Retry explicitly after completion.",
+                attachments: [],
+                providerTurnOrdinal: 3,
+              }),
+            )
+            .pipe(Effect.exit, Effect.forkChild({ startImmediately: true }));
+          yield* Deferred.await(closing);
+          const closingSelection = yield* runtime.liveExecutionSelection!(providerThread);
+          yield* Deferred.succeed(releaseClose, undefined);
+          const failedOpen = yield* Fiber.join(replacing);
+          assert.isNull(
+            closingSelection,
+            "a closing query is not live before its stream finalizer",
+          );
+          assert.isTrue(Exit.isFailure(failedOpen));
+          assert.equal(openCount, 2);
+          assert.equal(processQueues[0]!.state._tag, "Done");
+          // A safe replacement that fails after closing still clears process state.
           yield* awaitUntil(
             () =>
               providerThreadRosterEvents(events).some(
@@ -6366,7 +6469,50 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             )
             .pipe(Effect.exit);
           assert.isTrue(Exit.isFailure(failedStart));
+          assert.equal(openCount, 1, "buffer guard prevents closing the owner");
+          assert.isTrue(yield* hasPendingBackgroundWork);
+          assert.equal(processQueues[0]!.state._tag, "Open");
+          yield* Queue.offer(processQueues[0]!, wakeResult);
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId,
+              providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-failed-replace-drain"),
+              text: "Drain, never resend.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          yield* awaitUntil(
+            () => events.filter((event) => event.type === "turn.terminal").length === 2,
+            "retained wake drained",
+          );
+          assert.isTrue(
+            events.some(
+              (event) =>
+                event.type === "message.updated" && event.message.text === WAKE_ASSISTANT_TEXT,
+            ),
+          );
           assert.isFalse(yield* hasPendingBackgroundWork);
+          const failedOpen = yield* Effect.exit(
+            runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId,
+                providerThread,
+                now,
+                modelSelection: alternateModel,
+                attemptId: RunAttemptId.make("attempt-failed-replace-after-drain"),
+                text: "Explicit replacement after drain.",
+                attachments: [],
+                providerTurnOrdinal: 3,
+              }),
+            ),
+          );
+          assert.isTrue(Exit.isFailure(failedOpen));
+          assert.equal(openCount, 2);
 
           yield* runtime.startTurn(
             makeClaudeTestTurnInput({
@@ -6402,7 +6548,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             }),
           );
           yield* awaitUntil(
-            () => events.filter((event) => event.type === "turn.terminal").length === 2,
+            () => events.filter((event) => event.type === "turn.terminal").length === 3,
             "retry turn terminal",
           );
           yield* Queue.offer(
