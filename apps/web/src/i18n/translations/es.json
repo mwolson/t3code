@@ -12365,5 +12365,7 @@
   "27d76249d09eb69f": "Guía de revisión lista",
   "faa3bb26abb39c93": "Falló la guía de revisión",
   "b7df38b7d8792d78": "Abrir guía",
-  "9e91e9a77b664e4e": "No se pudo iniciar una guía de revisión"
+  "9e91e9a77b664e4e": "No se pudo iniciar una guía de revisión",
+  "da680b6dea6c1528": "{count, plural, =1 {Tarea en segundo plano completada} other {# tareas en segundo plano completadas}}",
+  "374697e2e9d737f1": "{count, plural, =1 {Tarea delegada completada} other {# tareas delegadas completadas}}"
 }
