@@ -33,7 +33,10 @@ export interface ProviderContinuationRequest {
   readonly dispatchIfCurrent?: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
   ) => Effect.Effect<Option.Option<A>, E, R>;
-  readonly clearIfCurrent?: () => Effect.Effect<void>;
+  /** Releases a refused offer; re-checks temporary suppression before later offers. */
+  readonly clearIfCurrent?: (options?: {
+    readonly suppressReofferWhile?: Effect.Effect<boolean>;
+  }) => Effect.Effect<void>;
 }
 
 /**

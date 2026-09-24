@@ -265,22 +265,28 @@ export function makeGrokAcpAdapterFlavor(
         ? window
         : undefined;
     },
+    canForceModelSelection: true,
     applyModelSelection: Effect.fn("GrokAdapter.applyModelSelection")(function* ({
       runtime,
       startResult,
       modelSelection,
+      force,
     }) {
       const legacy = startResult.initializeResult.protocolVersion === 1;
       const options = legacy ? [] : yield* runtime.getConfigOptions;
       const configuredModel = findModelConfigOption(options)?.currentValue;
+      let currentModelId: string | undefined;
+      if (legacy)
+        currentModelId = currentGrokModelIdFromSessionSetup(startResult.sessionSetupResult);
+      else if (typeof configuredModel === "string") currentModelId = configuredModel;
+      const requestedModelId = resolveGrokAcpBaseModelId(modelSelection.model);
+      if (force === true && requestedModelId !== "grok-build") currentModelId = undefined;
       return yield* applyGrokAcpModelSelection({
         runtime: legacy
           ? runtime
-          : { setSessionModel: (model) => runtime.setModel(model).pipe(Effect.as({})) },
-        currentModelId: legacy
-          ? currentGrokModelIdFromSessionSetup(startResult.sessionSetupResult)
-          : configuredModel,
-        requestedModelId: resolveGrokAcpBaseModelId(modelSelection.model),
+          : { setSessionModel: (model) => runtime.setModel(model, force).pipe(Effect.as({})) },
+        currentModelId,
+        requestedModelId,
         mapError: (cause) => cause,
       });
     }),

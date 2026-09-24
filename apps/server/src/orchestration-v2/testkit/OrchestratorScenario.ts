@@ -35,6 +35,12 @@ export type OrchestratorV2ScenarioStep =
       readonly key?: string;
     }
   | {
+      /** Dispatches a command that must be refused; its error is kept under `key`. */
+      readonly type: "dispatch_refused";
+      readonly command: OrchestrationV2Command;
+      readonly key: string;
+    }
+  | {
       readonly type: "advance_clock";
       readonly duration: Duration.Input;
     }
@@ -87,6 +93,11 @@ export type OrchestratorV2ScenarioStep =
       readonly label: string;
     }
   | {
+      /** Waits until the replay holds the entry labelled `label`, and keeps holding it. */
+      readonly type: "await_replay_gate";
+      readonly label: string;
+    }
+  | {
       readonly type: "capture_shell_snapshot";
       readonly key: string;
     }
@@ -114,6 +125,8 @@ export interface OrchestratorV2ScenarioResult {
   readonly capturedShellSnapshots: ReadonlyMap<string, OrchestrationV2ThreadShellSnapshot>;
   /** Live output each command streamed (never persisted). Provider replays fill it in. */
   readonly commandOutput?: ReadonlyMap<TurnItemId, RecordedCommandOutput>;
+  /** The errors of `dispatch_refused` steps, by key. */
+  readonly refusedDispatches: ReadonlyMap<string, Orchestrator.OrchestratorV2Error>;
 }
 
 export class OrchestratorV2ScenarioStepError extends Schema.TaggedError<OrchestratorV2ScenarioStepError>()(
@@ -278,6 +291,7 @@ export function runOrchestratorV2Scenario(
         Fiber.Fiber<ReadonlyArray<OrchestrationV2StoredEvent>, Orchestrator.OrchestratorV2Error>
       >();
       const capturedShellSnapshots = new Map<string, OrchestrationV2ThreadShellSnapshot>();
+      const refusedDispatches = new Map<string, Orchestrator.OrchestratorV2Error>();
       let anonymousBackgroundDispatchIndex = 0;
 
       const awaitDispatch = (key: string) =>
@@ -603,17 +617,23 @@ export function runOrchestratorV2Scenario(
         }
       });
 
-      const releaseReplayGate = Effect.fn("scenario.releaseReplayGate")(function* (label: string) {
+      const awaitReplayGate = Effect.fn("scenario.awaitReplayGate")(function* (
+        label: string,
+        step: "await_replay_gate" | "release_replay_gate",
+      ) {
         const gate = options.replayGate;
         const reached =
           gate === undefined ? false : yield* Effect.promise(() => gate.waitForReached(label));
         if (!reached) {
           return yield* new OrchestratorV2ScenarioStepError({
             scenario: scenario.name,
-            step: `release_replay_gate:${label}:not_configured`,
+            step: `${step}:${label}:not_configured`,
           });
         }
-        gate?.release(label);
+      });
+      const releaseReplayGate = Effect.fn("scenario.releaseReplayGate")(function* (label: string) {
+        yield* awaitReplayGate(label, "release_replay_gate");
+        options.replayGate?.release(label);
       });
 
       for (const step of scenarioSteps(scenario)) {
@@ -634,6 +654,17 @@ export function runOrchestratorV2Scenario(
                 Effect.forkScoped,
               ),
             );
+            break;
+          }
+          case "dispatch_refused": {
+            const result = yield* Effect.result(orchestrator.dispatch(step.command));
+            if (result._tag === "Success") {
+              return yield* new OrchestratorV2ScenarioStepError({
+                scenario: scenario.name,
+                step: `dispatch_refused:${step.key}:accepted`,
+              });
+            }
+            refusedDispatches.set(step.key, result.failure);
             break;
           }
           case "advance_clock":
@@ -670,6 +701,9 @@ export function runOrchestratorV2Scenario(
             break;
           case "release_replay_gate":
             yield* releaseReplayGate(step.label);
+            break;
+          case "await_replay_gate":
+            yield* awaitReplayGate(step.label, "await_replay_gate");
             break;
           case "capture_shell_snapshot":
             capturedShellSnapshots.set(step.key, yield* orchestrator.getShellSnapshot());
@@ -725,6 +759,7 @@ export function runOrchestratorV2Scenario(
         projections,
         shellSnapshot,
         capturedShellSnapshots,
+        refusedDispatches,
       };
     }),
   ).pipe(
