@@ -3,7 +3,10 @@ import type {
   ThreadPendingUserInput,
   ThreadUserInputQuestion,
 } from "@t3tools/client-runtime/state/thread-requests";
-import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
+import {
+  presentLegacyWakeItem,
+  turnItemIsWorkspacePreparation,
+} from "@t3tools/client-runtime/state/turn-item-presentation";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
 import {
@@ -1666,8 +1669,12 @@ export function buildThreadFeed(
         : [],
     ),
   );
+  const legacyWakeMessageIds = new Set<string>();
   for (const row of visibleTurnItems) {
-    const item = row.item;
+    const item = presentLegacyWakeItem(row.item);
+    if (row.item.type === "user_message" && item.type === "notification") {
+      legacyWakeMessageIds.add(row.item.messageId);
+    }
     if (turnItemIsWorkspacePreparation(item)) continue;
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
@@ -1717,7 +1724,7 @@ export function buildThreadFeed(
       entries.push(entry);
       continue;
     }
-    const activity = toFeedActivity(row, attemptId);
+    const activity = toFeedActivity(item === row.item ? row : { ...row, item }, attemptId);
     const entry: RawThreadFeedEntry = {
       type: "activity",
       id: activity.id,
@@ -1730,6 +1737,7 @@ export function buildThreadFeed(
   }
   const retainedMessageIds = new Set([
     ...foldedAnswerMessageIds,
+    ...legacyWakeMessageIds,
     ...entries.flatMap((entry) => (entry.type === "message" ? [entry.id] : [])),
   ]);
   const appendLocalMessage = (message: LocalThreadMessage): RawThreadFeedEntry => {
