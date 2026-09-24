@@ -1,3 +1,4 @@
+import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   ModelSelection,
@@ -38,6 +39,9 @@ import { makeKeyedSerialExecutor } from "./KeyedSerialExecutor.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import {
   ProviderAdapterEventStreamError,
+  ProviderAdapterBufferedOutputError,
+  ProviderAdapterRunningWorkError,
+  ProviderAdapterTurnStartError,
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Error,
   type ProviderAdapterV2Event,
@@ -176,6 +180,7 @@ export interface ProviderSessionManagerV2Shape {
      * potential re-attach.
      */
     readonly revokeMcpCredential?: boolean;
+    readonly preserveBufferedOutput?: boolean;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
 }
 
@@ -184,7 +189,27 @@ export class ProviderSessionManagerV2 extends Context.Service<
   ProviderSessionManagerV2Shape
 >()("t3/orchestration-v2/ProviderSessionManager/ProviderSessionManagerV2") {}
 
+interface ExecutionSelectionEvidence {
+  readonly providerThread?: OrchestrationV2ProviderThread;
+  readonly providerThreadId: string;
+  readonly nativeThreadId: string | null;
+  readonly selection: ModelSelection | null;
+  readonly bufferedRunOrdinal?: number;
+  readonly operation?: symbol | undefined;
+  readonly runAttemptId?: string;
+  readonly providerTurnId?: string;
+  readonly loadKey?: string;
+}
+
 interface LiveSessionEntry {
+  readonly executionSelections: ReadonlyMap<ThreadId, ExecutionSelectionEvidence>;
+  readonly preservedOutputThreadIds: ReadonlyMap<
+    ThreadId,
+    {
+      readonly binding: OrchestrationV2ProviderThread;
+      readonly operation: symbol | undefined;
+    }
+  >;
   readonly attachedThreadIds: ReadonlySet<ThreadId>;
   readonly loadedProviderThreadKeyByThread: ReadonlyMap<ThreadId, string>;
   /**
@@ -859,6 +884,49 @@ export const layerWithOptions = (
           ),
         );
 
+      const finishDeferredDetaches = Effect.fnUntraced(function* (entry: LiveSessionEntry) {
+        const ownedEntry = (yield* Ref.get(sessions)).get(
+          sessionKey(entry.runtime.providerSessionId),
+        );
+        if (ownedEntry?.runtime !== entry.runtime) return;
+        for (const [threadId, retained] of ownedEntry.preservedOutputThreadIds) {
+          const buffered = yield* (
+            entry.runtime.hasBufferedOutputForThread?.(retained.binding) ?? Effect.succeed(false)
+          );
+          if (buffered) continue;
+          yield* Ref.update(sessions, (current) => {
+            const key = sessionKey(entry.runtime.providerSessionId);
+            const latest = current.get(key);
+            if (
+              latest?.runtime !== entry.runtime ||
+              latest.preservedOutputThreadIds.get(threadId) !== retained
+            )
+              return current;
+            const preservedOutputThreadIds = new Map(latest.preservedOutputThreadIds);
+            preservedOutputThreadIds.delete(threadId);
+            const executionSelections = new Map(latest.executionSelections);
+            const evidence = executionSelections.get(threadId);
+            const attachedThreadIds = new Set(latest.attachedThreadIds);
+            attachedThreadIds.delete(threadId);
+            const loadedProviderThreadKeyByThread = new Map(latest.loadedProviderThreadKeyByThread);
+            loadedProviderThreadKeyByThread.delete(threadId);
+            if (evidence !== undefined)
+              executionSelections.set(threadId, {
+                ...evidence,
+                selection: null,
+                operation: undefined,
+              });
+            return new Map(current).set(key, {
+              ...latest,
+              executionSelections,
+              preservedOutputThreadIds,
+              attachedThreadIds,
+              loadedProviderThreadKeyByThread,
+            });
+          });
+        }
+      });
+
       // Annotated to break the releaseIfStillIdle <-> scheduleIdleReleaseInternal
       // inference cycle introduced by the pin re-arm below.
       const releaseIfStillIdle = (input: {
@@ -876,6 +944,14 @@ export const layerWithOptions = (
           ) {
             return;
           }
+          yield* finishDeferredDetaches(entry).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("orchestration-v2.driver-session.deferred-detach-failed", {
+                providerSessionId: entry.runtime.providerSessionId,
+                cause,
+              }),
+            ),
+          );
           // Capture runtime identity before yielding: a replacement session
           // can reuse the same providerSessionId while this fiber is parked.
           const probedRuntime = entry.runtime;
@@ -885,10 +961,20 @@ export const layerWithOptions = (
               : yield* probedRuntime.hasPendingBackgroundWork.pipe(
                   Effect.catchCause(() => Effect.succeed(false)),
                 );
-          if (hasPendingWork) {
+          const afterProbe = (yield* Ref.get(sessions)).get(key);
+          if (
+            afterProbe?.runtime !== probedRuntime ||
+            afterProbe.busyCount > 0 ||
+            afterProbe.idleGeneration !== input.generation
+          )
+            return;
+          if (hasPendingWork || afterProbe.preservedOutputThreadIds.size > 0) {
             const now = yield* Clock.currentTimeMillis;
-            const pinnedSinceMs = entry.pinnedSinceMs ?? now;
-            if (now - pinnedSinceMs < maxIdlePinMs) {
+            const pinnedSinceMs = afterProbe.pinnedSinceMs ?? now;
+            if (
+              now - pinnedSinceMs < maxIdlePinMs ||
+              afterProbe.preservedOutputThreadIds.size > 0
+            ) {
               const shouldContinuePin = yield* Ref.modify(sessions, (latest) => {
                 const latestEntry = latest.get(key);
                 if (
@@ -1266,9 +1352,223 @@ export const layerWithOptions = (
         >,
       ): ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
+        const selectionEvidence = Effect.fnUntraced(function* (threadId: ThreadId) {
+          const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+          return entry?.runtime === runtime ? entry.executionSelections.get(threadId) : undefined;
+        });
+        const setSelectionEvidence = (
+          threadId: ThreadId,
+          evidence: ExecutionSelectionEvidence,
+          expectedOperation?: symbol,
+        ) =>
+          Ref.update(sessions, (current) => {
+            const key = sessionKey(providerSessionId);
+            const entry = current.get(key);
+            if (
+              entry?.runtime !== runtime ||
+              (expectedOperation !== undefined &&
+                entry.executionSelections.get(threadId)?.operation !== expectedOperation)
+            )
+              return current;
+            return new Map(current).set(key, {
+              ...entry,
+              executionSelections: new Map(entry.executionSelections).set(threadId, evidence),
+            });
+          });
         const subscribeEvents = makeEventSubscription(eventSubscribers);
+        const observeSelection = Effect.fnUntraced(function* <A, E>(
+          threadId: ThreadId,
+          operation: Effect.Effect<A, E>,
+          evidence: ExecutionSelectionEvidence,
+          acceptedSelection: ModelSelection | null,
+          drainOnly = false,
+        ) {
+          const token = Symbol();
+          const previous = yield* selectionEvidence(threadId);
+          yield* setSelectionEvidence(threadId, { ...evidence, operation: token });
+          const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+          const retained = entry?.preservedOutputThreadIds.get(threadId);
+          if (entry?.runtime === runtime && retained !== undefined) {
+            const preservedOutputThreadIds = new Map(entry.preservedOutputThreadIds);
+            if (
+              evidence.bufferedRunOrdinal !== undefined &&
+              retained.binding.id === evidence.providerThreadId &&
+              retained.binding.nativeThreadRef?.nativeId === evidence.nativeThreadId
+            ) {
+              preservedOutputThreadIds.set(threadId, { ...retained, operation: token });
+            } else {
+              preservedOutputThreadIds.delete(threadId);
+            }
+            yield* Ref.update(sessions, (current) =>
+              current.get(sessionKey(providerSessionId)) === entry
+                ? new Map(current).set(sessionKey(providerSessionId), {
+                    ...entry,
+                    preservedOutputThreadIds,
+                  })
+                : current,
+            );
+          }
+          const result = yield* Effect.exit(operation);
+          const current = yield* selectionEvidence(threadId);
+          if (current?.operation === token) {
+            let selection = Exit.isSuccess(result) ? acceptedSelection : null;
+            if (drainOnly) {
+              selection = previous?.selection ?? null;
+            } else if (selection !== null && runtime.selectionAcknowledged !== undefined) {
+              if (!(yield* runtime.selectionAcknowledged(selection))) selection = null;
+            }
+            if (!drainOnly && Exit.isFailure(result) && !Cause.hasInterrupts(result.cause)) {
+              const failure = Cause.findErrorOption(result.cause);
+              const error =
+                Option.isSome(failure) && Schema.is(ProviderAdapterTurnStartError)(failure.value)
+                  ? failure.value.cause
+                  : Option.getOrUndefined(failure);
+              const refused =
+                Schema.is(ProviderAdapterRunningWorkError)(error) ||
+                Schema.is(ProviderAdapterBufferedOutputError)(error);
+              const sameSelection =
+                runtime.preservesSelectionOnSameSelectionFailure === true &&
+                previous?.selection != null &&
+                acceptedSelection !== null &&
+                modelSelectionsEqual(previous.selection, acceptedSelection);
+              if (refused || sameSelection) selection = previous?.selection ?? null;
+              if (selection === null && evidence.providerThread !== undefined)
+                selection = yield* (
+                  runtime.liveExecutionSelection?.(evidence.providerThread) ?? Effect.succeed(null)
+                );
+            }
+            if ((yield* selectionEvidence(threadId))?.operation === token) {
+              yield* setSelectionEvidence(
+                threadId,
+                {
+                  ...current,
+                  ...(Exit.isFailure(result) &&
+                  selection !== null &&
+                  previous?.selection != null &&
+                  modelSelectionsEqual(selection, previous.selection)
+                    ? previous
+                    : {}),
+                  operation: token,
+                  selection,
+                },
+                token,
+              );
+            }
+          }
+          return yield* result;
+        });
+        const protectBufferedOutput = Effect.fnUntraced(function* (
+          thread: OrchestrationV2ProviderThread | undefined,
+          selection?: ModelSelection,
+          policy?: ProviderAdapterV2RuntimePolicy,
+          starting = false,
+        ) {
+          if (thread === undefined || thread.appThreadId === null) return;
+          const buffered = yield* (
+            runtime.hasBufferedOutputForThread?.(thread) ?? Effect.succeed(false)
+          );
+          if (!buffered) return;
+          const evidence = yield* selectionEvidence(thread.appThreadId);
+          const bufferedSelection = yield* (
+            runtime.bufferedExecutionSelection?.(thread) ?? Effect.succeed(null)
+          );
+          if (
+            starting &&
+            bufferedSelection !== null &&
+            selection !== undefined &&
+            modelSelectionsEqual(bufferedSelection, selection)
+          )
+            return;
+          if (
+            starting &&
+            evidence?.selection !== null &&
+            evidence?.loadKey ===
+              providerThreadLoadKey({
+                providerThread: thread,
+                ...(selection === undefined ? {} : { modelSelection: selection }),
+                ...(policy === undefined ? {} : { runtimePolicy: policy }),
+              })
+          )
+            return;
+          return yield* new ProviderAdapterBufferedOutputError({
+            driver: runtime.driver,
+            providerThreadId: thread.id,
+          });
+        });
+        const rememberBinding = Effect.fnUntraced(function* (
+          thread: OrchestrationV2ProviderThread,
+        ) {
+          if (thread.appThreadId === null) return;
+          const previous = yield* selectionEvidence(thread.appThreadId);
+          if (
+            previous?.providerThreadId !== thread.id ||
+            previous.nativeThreadId !== (thread.nativeThreadRef?.nativeId ?? null)
+          ) {
+            yield* setSelectionEvidence(thread.appThreadId, {
+              providerThread: thread,
+              providerThreadId: thread.id,
+              nativeThreadId: thread.nativeThreadRef?.nativeId ?? null,
+              selection: null,
+            });
+          }
+        });
+        const invalidateBinding = (threadId: ThreadId) =>
+          Ref.update(sessions, (current) => {
+            const key = sessionKey(providerSessionId);
+            const entry = current.get(key);
+            if (entry?.runtime !== runtime) return current;
+            const executionSelections = new Map(entry.executionSelections);
+            const preservedOutputThreadIds = new Map(entry.preservedOutputThreadIds);
+            preservedOutputThreadIds.delete(threadId);
+            const previous = executionSelections.get(threadId);
+            if (previous !== undefined)
+              executionSelections.set(threadId, {
+                ...previous,
+                selection: null,
+                operation: undefined,
+              });
+            return new Map(current).set(key, {
+              ...entry,
+              executionSelections,
+              preservedOutputThreadIds,
+            });
+          });
         return {
           ...runtime,
+          // Only a binding this runtime loaded, resumed or ran has a selection
+          // that can be uncertain. A thread merely attached when the session
+          // opened (as a rollback opens one) is still a fresh attachment: its
+          // next turn applies the selection like any first turn.
+          hasResidentBinding: (thread) =>
+            Effect.gen(function* () {
+              const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+              return (
+                entry?.runtime === runtime &&
+                thread.appThreadId !== null &&
+                thread.providerSessionId === providerSessionId &&
+                entry.executionSelections.has(thread.appThreadId)
+              );
+            }),
+          executionSelection: (thread) =>
+            Effect.gen(function* () {
+              const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+              if (
+                entry?.runtime !== runtime ||
+                thread.appThreadId === null ||
+                thread.providerSessionId !== providerSessionId ||
+                thread.providerInstanceId !== runtime.instanceId ||
+                thread.driver !== runtime.driver ||
+                (thread.nativeThreadRef !== null &&
+                  thread.nativeThreadRef.driver !== runtime.driver) ||
+                !entry.attachedThreadIds.has(thread.appThreadId)
+              )
+                return null;
+              const evidence = yield* selectionEvidence(thread.appThreadId);
+              return evidence?.providerThreadId === thread.id &&
+                evidence.nativeThreadId === (thread.nativeThreadRef?.nativeId ?? null)
+                ? evidence.selection
+                : null;
+            }),
           subscribeEvents,
           events: Stream.unwrap(
             subscribeEvents.pipe(Effect.map((subscription) => subscription.events)),
@@ -1282,7 +1582,16 @@ export const layerWithOptions = (
                 providerInstanceId: runtime.instanceId,
               }),
             ).pipe(
+              Effect.andThen(
+                protectBufferedOutput(
+                  input.existingProviderThread,
+                  input.modelSelection,
+                  input.runtimePolicy,
+                ),
+              ),
+              Effect.andThen(invalidateBinding(input.threadId)),
               Effect.andThen(runtime.ensureThread(input)),
+              Effect.tap(rememberBinding),
               Effect.tap((providerThread) =>
                 markProviderThreadLoaded({
                   providerSessionId,
@@ -1319,8 +1628,32 @@ export const layerWithOptions = (
                 isProviderThreadLoaded({ providerSessionId, threadId, providerThreadKey }),
               ),
               Effect.flatMap((loaded) =>
-                loaded ? Effect.succeed(input.providerThread) : runtime.resumeThread(input),
+                Effect.gen(function* () {
+                  const buffered = yield* (
+                    runtime.bufferedExecutionSelection?.(input.providerThread) ??
+                      Effect.succeed(null)
+                  );
+                  return (
+                    loaded ||
+                    (buffered !== null &&
+                      input.modelSelection !== undefined &&
+                      modelSelectionsEqual(buffered, input.modelSelection))
+                  );
+                }),
               ),
+              Effect.flatMap((loaded) =>
+                loaded
+                  ? Effect.succeed(input.providerThread)
+                  : protectBufferedOutput(
+                      input.providerThread,
+                      input.modelSelection,
+                      input.runtimePolicy,
+                    ).pipe(
+                      Effect.andThen(invalidateBinding(threadId)),
+                      Effect.andThen(runtime.resumeThread(input)),
+                    ),
+              ),
+              Effect.tap(rememberBinding),
               Effect.tap((providerThread) =>
                 markProviderThreadLoaded({
                   providerSessionId,
@@ -1347,7 +1680,9 @@ export const layerWithOptions = (
                 providerInstanceId: runtime.instanceId,
               }),
             ).pipe(
+              Effect.andThen(invalidateBinding(input.targetThreadId)),
               Effect.andThen(runtime.forkThread(input)),
+              Effect.tap(rememberBinding),
               Effect.tap((providerThread) =>
                 markProviderThreadLoaded({
                   providerSessionId,
@@ -1365,22 +1700,61 @@ export const layerWithOptions = (
               ),
             ),
           startTurn: (input) =>
-            observeActivity(
-              providerSessionId,
-              ensureThreadAttached({
-                providerSessionId,
-                threadId: input.threadId,
-                providerInstanceId: runtime.instanceId,
-              }),
-            ).pipe(
-              Effect.andThen(observeActivity(providerSessionId, markBusy(providerSessionId))),
-              Effect.andThen(runtime.startTurn(input)),
-              Effect.catch((error) =>
-                observeActivity(providerSessionId, markIdle(providerSessionId)).pipe(
-                  Effect.andThen(Effect.fail(error)),
+            Effect.gen(function* () {
+              const previous = yield* selectionEvidence(input.threadId);
+              const reapplySelection =
+                previous?.runAttemptId !== undefined && previous.selection == null;
+              return yield* protectBufferedOutput(
+                input.providerThread,
+                input.modelSelection,
+                input.runtimePolicy,
+                true,
+              ).pipe(
+                Effect.andThen(
+                  observeActivity(
+                    providerSessionId,
+                    ensureThreadAttached({
+                      providerSessionId,
+                      threadId: input.threadId,
+                      providerInstanceId: runtime.instanceId,
+                    }),
+                  ).pipe(
+                    Effect.andThen(observeActivity(providerSessionId, markBusy(providerSessionId))),
+                    Effect.andThen(
+                      observeSelection(
+                        input.threadId,
+                        runtime.startTurn({ ...input, reapplySelection }),
+                        {
+                          providerThread: input.providerThread,
+                          providerThreadId: input.providerThread.id,
+                          nativeThreadId: input.providerThread.nativeThreadRef?.nativeId ?? null,
+                          selection: null,
+                          runAttemptId: input.attemptId,
+                          loadKey: providerThreadLoadKey({
+                            providerThread: input.providerThread,
+                            modelSelection: input.modelSelection,
+                            runtimePolicy: input.runtimePolicy,
+                          }),
+                          ...(input.message.createdBy === "agent" &&
+                          input.message.creationSource === "provider"
+                            ? { bufferedRunOrdinal: input.runOrdinal }
+                            : {}),
+                        },
+                        input.modelSelection,
+                        runtime.continuationDrainsOutput === true &&
+                          input.message.createdBy === "agent" &&
+                          input.message.creationSource === "provider",
+                      ),
+                    ),
+                    Effect.catch((error) =>
+                      observeActivity(providerSessionId, markIdle(providerSessionId)).pipe(
+                        Effect.andThen(Effect.fail(error)),
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ),
+              );
+            }),
           steerTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(runtime.steerTurn(input)),
@@ -1432,54 +1806,103 @@ export const layerWithOptions = (
             ) {
               stoppedByProvider = true;
             }
-            return observeActivity(
-              entry.runtime.providerSessionId,
-              event.type === "turn.terminal"
-                ? markIdle(entry.runtime.providerSessionId)
-                : touchActivity(entry.runtime.providerSessionId),
-            ).pipe(
-              Effect.andThen(
-                event.type === "provider_session.updated"
-                  ? persistProviderSessionUpdate(entry, event)
-                  : Effect.void,
-              ),
-              Effect.andThen(
-                Effect.gen(function* () {
-                  // Some providers can block before a run subscriber exists
-                  // (project trust, login, or session-switch hooks). Persist
-                  // their runless request artifacts directly so the normal T3
-                  // request UI can answer them and unblock session setup.
-                  const threadId = sessionScopedRuntimeRequestThreadId(event);
-                  if (threadId !== undefined) {
-                    yield* Effect.gen(function* () {
-                      const current = (yield* Ref.get(sessions)).get(
-                        sessionKey(entry.runtime.providerSessionId),
-                      );
-                      if (current?.runtime !== entry.runtime) return;
-                      yield* providerEventIngestor
-                        .ingestNormalized({
-                          providerSessionId: entry.runtime.providerSessionId,
-                          providerInstanceId: entry.runtime.instanceId,
-                          threadId,
-                          event,
-                        })
-                        .pipe(
-                          Effect.mapError(
-                            (cause) =>
-                              new ProviderAdapterEventStreamError({
-                                driver: entry.runtime.driver,
-                                providerSessionId: entry.runtime.providerSessionId,
-                                cause,
-                              }),
-                          ),
-                        );
-                    }).pipe(entry.requestEventPermit.withPermits(1));
-                    return;
+            const recordEvidence = Ref.update(sessions, (current) => {
+              const key = sessionKey(entry.runtime.providerSessionId);
+              const latest = current.get(key);
+              if (latest?.runtime !== entry.runtime) return current;
+              const executionSelections = new Map(latest.executionSelections);
+              if (event.type === "provider_turn.updated") {
+                for (const [threadId, evidence] of executionSelections) {
+                  if (
+                    evidence.providerThreadId === event.providerTurn.providerThreadId &&
+                    evidence.runAttemptId === event.providerTurn.runAttemptId
+                  ) {
+                    executionSelections.set(threadId, {
+                      ...evidence,
+                      providerTurnId: event.providerTurn.id,
+                    });
                   }
-                  yield* publishToSubscribers(entry.eventSubscribers, { type: "event", event });
-                }),
-              ),
-            );
+                }
+              }
+              if (event.type === "turn.terminal") {
+                for (const [threadId, evidence] of executionSelections) {
+                  if (
+                    evidence.providerThreadId === event.providerThreadId &&
+                    evidence.providerTurnId === event.providerTurnId
+                  ) {
+                    const { bufferedRunOrdinal: _bufferedRunOrdinal, ...completed } = evidence;
+                    executionSelections.set(threadId, completed);
+                  }
+                }
+              }
+              return new Map(current).set(key, { ...latest, executionSelections });
+            });
+            return recordEvidence
+              .pipe(
+                Effect.andThen(
+                  observeActivity(
+                    entry.runtime.providerSessionId,
+                    event.type === "turn.terminal"
+                      ? markIdle(entry.runtime.providerSessionId)
+                      : touchActivity(entry.runtime.providerSessionId),
+                  ),
+                ),
+              )
+              .pipe(
+                Effect.andThen(
+                  event.type === "turn.terminal"
+                    ? finishDeferredDetaches(entry).pipe(
+                        Effect.catchCause((cause) =>
+                          Effect.logWarning(
+                            "orchestration-v2.driver-session.deferred-detach-failed",
+                            { providerSessionId: entry.runtime.providerSessionId, cause },
+                          ),
+                        ),
+                      )
+                    : Effect.void,
+                ),
+                Effect.andThen(
+                  event.type === "provider_session.updated"
+                    ? persistProviderSessionUpdate(entry, event)
+                    : Effect.void,
+                ),
+                Effect.andThen(
+                  Effect.gen(function* () {
+                    // Some providers can block before a run subscriber exists
+                    // (project trust, login, or session-switch hooks). Persist
+                    // their runless request artifacts directly so the normal T3
+                    // request UI can answer them and unblock session setup.
+                    const threadId = sessionScopedRuntimeRequestThreadId(event);
+                    if (threadId !== undefined) {
+                      yield* Effect.gen(function* () {
+                        const current = (yield* Ref.get(sessions)).get(
+                          sessionKey(entry.runtime.providerSessionId),
+                        );
+                        if (current?.runtime !== entry.runtime) return;
+                        yield* providerEventIngestor
+                          .ingestNormalized({
+                            providerSessionId: entry.runtime.providerSessionId,
+                            providerInstanceId: entry.runtime.instanceId,
+                            threadId,
+                            event,
+                          })
+                          .pipe(
+                            Effect.mapError(
+                              (cause) =>
+                                new ProviderAdapterEventStreamError({
+                                  driver: entry.runtime.driver,
+                                  providerSessionId: entry.runtime.providerSessionId,
+                                  cause,
+                                }),
+                            ),
+                          );
+                      }).pipe(entry.requestEventPermit.withPermits(1));
+                      return;
+                    }
+                    yield* publishToSubscribers(entry.eventSubscribers, { type: "event", event });
+                  }),
+                ),
+              );
           }),
           Effect.exit,
           Effect.flatMap((exit) =>
@@ -1660,11 +2083,14 @@ export const layerWithOptions = (
               const eventSubscribers = yield* Ref.make<
                 ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
               >(new Map());
+              const executionSelections = new Map<ThreadId, ExecutionSelectionEvidence>();
               const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
               const now = yield* Clock.currentTimeMillis;
               const entry: LiveSessionEntry = {
                 attachedThreadIds: new Set([input.threadId]),
                 loadedProviderThreadKeyByThread: new Map(),
+                executionSelections,
+                preservedOutputThreadIds: new Map(),
                 mcpCredentialIdByThread:
                   mcpCredentialId === undefined
                     ? new Map()
@@ -1776,6 +2202,80 @@ export const layerWithOptions = (
             const key = sessionKey(input.providerSessionId);
             const currentEntry = (yield* Ref.get(sessions)).get(key);
             let detachedProviderThreads: ReadonlyArray<OrchestrationV2ProviderThread> = [];
+            if (input.preserveBufferedOutput === true && currentEntry !== undefined) {
+              const evidence = currentEntry.executionSelections.get(input.threadId);
+              const projectedBinding =
+                evidence?.providerThread ??
+                (yield* projectionStore.getThreadRecords(input.threadId, [
+                  "providerThreads",
+                ])).providerThreads.find(
+                  (thread) =>
+                    thread.id === evidence?.providerThreadId ||
+                    thread.providerSessionId === input.providerSessionId,
+                );
+              const binding =
+                projectedBinding === undefined
+                  ? undefined
+                  : {
+                      ...projectedBinding,
+                      providerSessionId: input.providerSessionId,
+                      nativeThreadRef:
+                        evidence?.nativeThreadId == null
+                          ? projectedBinding.nativeThreadRef
+                          : {
+                              driver: currentEntry.runtime.driver,
+                              nativeId: evidence.nativeThreadId,
+                              strength: "strong" as const,
+                            },
+                    };
+              const buffered =
+                currentEntry.executionSelections.get(input.threadId)?.bufferedRunOrdinal !==
+                undefined;
+              const owned =
+                binding === undefined
+                  ? false
+                  : yield* (
+                      currentEntry.runtime.hasBufferedOutputForThread?.(binding) ??
+                        Effect.succeed(false)
+                    );
+              if ((buffered || owned) && binding !== undefined) {
+                const latest = (yield* Ref.get(sessions)).get(key);
+                if (
+                  latest?.runtime !== currentEntry.runtime ||
+                  latest.executionSelections.get(input.threadId)?.operation !== evidence?.operation
+                )
+                  return;
+                yield* Ref.update(sessions, (current) => {
+                  const active = current.get(key);
+                  if (
+                    active?.runtime !== currentEntry.runtime ||
+                    active.executionSelections.get(input.threadId)?.operation !==
+                      evidence?.operation
+                  )
+                    return current;
+                  return new Map(current).set(key, {
+                    ...active,
+                    preservedOutputThreadIds: new Map(active.preservedOutputThreadIds).set(
+                      input.threadId,
+                      { binding, operation: evidence?.operation },
+                    ),
+                  });
+                });
+                yield* scheduleIdleRelease(input.providerSessionId);
+                return;
+              }
+              const running =
+                binding === undefined
+                  ? false
+                  : yield* (
+                      currentEntry.runtime.hasPendingBackgroundWorkForThread?.(binding) ??
+                        Effect.succeed(false)
+                    );
+              if (running)
+                return yield* new ProviderAdapterRunningWorkError({
+                  driver: currentEntry.runtime.driver,
+                });
+            }
             if (currentEntry?.supportsMultipleProviderThreads === true) {
               const projection = yield* Effect.option(
                 projectionStore.getThreadRecords(input.threadId, [
@@ -1829,6 +2329,20 @@ export const layerWithOptions = (
                 entry.loadedProviderThreadKeyByThread,
               );
               loadedProviderThreadKeyByThread.delete(input.threadId);
+              const executionSelections = new Map(entry.executionSelections);
+              const preservedOutputThreadIds = new Map(entry.preservedOutputThreadIds);
+              if (input.preserveBufferedOutput === true) {
+                const evidence = executionSelections.get(input.threadId);
+                if (evidence !== undefined)
+                  executionSelections.set(input.threadId, {
+                    ...evidence,
+                    selection: null,
+                    operation: undefined,
+                  });
+              } else {
+                executionSelections.delete(input.threadId);
+              }
+              preservedOutputThreadIds.delete(input.threadId);
               // For a plain (workspace-change) detach, the credential id stays
               // recorded: the thread may re-attach and reuse it, and
               // releaseEntry revokes it when the provider process finally goes
@@ -1844,6 +2358,8 @@ export const layerWithOptions = (
                   : entry.mcpCredentialIdByThread;
               const updatedEntry = {
                 ...entry,
+                executionSelections,
+                preservedOutputThreadIds,
                 attachedThreadIds,
                 loadedProviderThreadKeyByThread,
                 mcpCredentialIdByThread,

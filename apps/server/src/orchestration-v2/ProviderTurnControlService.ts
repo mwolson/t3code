@@ -179,7 +179,11 @@ export const layer: Layer.Layer<
           if (
             loaded.providerTurn.status !== "running" &&
             (session.value.hasPendingBackgroundWorkForThread === undefined ||
-              !(yield* session.value.hasPendingBackgroundWorkForThread(loaded.providerThread)))
+              !(yield* session.value.hasPendingBackgroundWorkForThread(loaded.providerThread))) &&
+            !(yield* (
+              session.value.hasBufferedOutputForThread?.(loaded.providerThread) ??
+                Effect.succeed(false)
+            ))
           )
             return;
           yield* session.value.interruptTurn({
