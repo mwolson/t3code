@@ -24,7 +24,10 @@ import type {
   ThreadPendingUserInput,
 } from "@t3tools/client-runtime/state/thread-requests";
 import type { ThreadRunSummary, ThreadRuntimeSummary } from "@t3tools/client-runtime/state/shell";
-import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
+import {
+  presentLegacyWakeItem,
+  turnItemIsWorkspacePreparation,
+} from "@t3tools/client-runtime/state/turn-item-presentation";
 
 import {
   isImageAttachment,
@@ -576,8 +579,12 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
         : [],
     ),
   );
-  for (const row of input.visibleTurnItems) {
-    const { item } = row;
+  for (const sourceRow of input.visibleTurnItems) {
+    const item = presentLegacyWakeItem(sourceRow.item);
+    const row = item === sourceRow.item ? sourceRow : { ...sourceRow, item };
+    if (sourceRow.item.type === "user_message" && item.type === "notification") {
+      committedMessageIds.add(sourceRow.item.messageId);
+    }
     if (turnItemIsWorkspacePreparation(item)) continue;
     // Task progress belongs in the composer, not between conversation entries.
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
