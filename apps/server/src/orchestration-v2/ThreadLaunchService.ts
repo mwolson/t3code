@@ -87,6 +87,12 @@ export interface ThreadLaunchInput {
   };
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  /**
+   * Runs after the thread exists and before its initial message is dispatched, so
+   * a caller can durably record ownership before any work starts. A failure stops
+   * the launch and leaves the thread idle.
+   */
+  readonly onThreadCreated?: (threadId: ThreadId) => Effect.Effect<void, Error>;
 }
 
 export interface ThreadLaunchResult {
@@ -106,6 +112,7 @@ export class ThreadLaunchError extends Schema.TaggedError<ThreadLaunchError>()(
       "run-setup-script",
       "create-thread",
       "update-thread",
+      "record-creation",
       "dispatch-message",
       "release-run",
       "fail-run",
@@ -715,6 +722,11 @@ const make = Effect.gen(function* () {
             .threadId ?? candidateThreadId;
         if (project.id !== input.projectId) {
           return yield* mapError(input, "resolve-project", threadId)("Project identity changed.");
+        }
+        if (input.onThreadCreated !== undefined) {
+          yield* input
+            .onThreadCreated(threadId)
+            .pipe(Effect.mapError(mapError(input, "record-creation", threadId)));
         }
 
         let runId: RunId | null = null;

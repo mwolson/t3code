@@ -17,6 +17,7 @@ import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementSer
 import * as ServerConfig from "../../../config.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import { ProjectHandlersLive } from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -65,6 +66,9 @@ it.effect("attributes a launched thread's first message to the calling thread", 
         },
       }),
       Layer.mock(Project.ProjectService)({}),
+      Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
+        launchedThreadGrant: () => Effect.succeed(() => Effect.void),
+      }),
       NodeServices.layer,
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-source-link-" }).pipe(
         Layer.provide(NodeServices.layer),
