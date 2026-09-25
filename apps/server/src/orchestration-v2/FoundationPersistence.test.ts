@@ -454,10 +454,40 @@ it.effect("commits other threads' writes ahead of a thread's queued provider sna
     const [busy, independent] = ["busy", "independent"].map((id) =>
       makeThread(ThreadId.make(id), now),
     );
+    const runId = RunId.make("independent-run");
+    const attemptId = RunAttemptId.make("independent-attempt");
     yield* sink.write({
-      events: [busy!, independent!].map((thread) =>
-        threadCreatedEvent({ id: `created:${thread.id}`, thread, now }),
-      ),
+      events: [
+        ...[busy!, independent!].map((thread) =>
+          threadCreatedEvent({ id: `created:${thread.id}`, thread, now }),
+        ),
+        {
+          id: EventId.make("independent-run-created"),
+          type: "run.created",
+          threadId: independent!.id,
+          runId,
+          providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: runId,
+            threadId: independent!.id,
+            ordinal: 1,
+            providerInstanceId,
+            modelSelection,
+            providerThreadId: null,
+            userMessageId: MessageId.make("independent-message"),
+            rootNodeId: null,
+            activeAttemptId: attemptId,
+            status: "starting",
+            queuePosition: null,
+            requestedAt: now,
+            startedAt: null,
+            completedAt: null,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        },
+      ],
     });
     const highWater = yield* sink.latestSequence();
     const busyNode = nodeComparisonEvent(busy!, now);
@@ -535,12 +565,25 @@ it.effect("commits other threads' writes ahead of a thread's queued provider sna
       },
       "busy-child",
     );
+    const transactional = yield* sink
+      .writeIfRunCurrent({
+        threadId: independent!.id,
+        runId,
+        activeAttemptId: attemptId,
+        expectedStatus: "starting",
+        events: [],
+        eventsInTransaction: Effect.succeed([
+          { ...busyNode, id: EventId.make("busy-transactional") },
+        ]),
+      })
+      .pipe(Effect.forkScoped({ startImmediately: true }));
     yield* TestClock.adjust(0);
     yield* Deferred.succeed(release, undefined);
     yield* Fiber.join(provider);
     yield* Fiber.join(sameThread);
     yield* Fiber.join(otherThread);
     yield* Fiber.join(childOfBusy);
+    assert.isTrue((yield* Fiber.join(transactional)).committed);
     const store = yield* EventStore.EventStoreV2;
     const events = yield* store.read({ afterSequence: highWater }).pipe(Stream.runCollect);
     assert.deepEqual(
@@ -552,6 +595,7 @@ it.effect("commits other threads' writes ahead of a thread's queued provider sna
         "busy-provider-3",
         "busy-command",
         "busy-child",
+        "busy-transactional",
       ],
     );
   }).pipe(Effect.scoped, Effect.provide(Layer.fresh(layerTest))),
@@ -2133,16 +2177,34 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           scopeId: CheckpointScopeId.make("scope:foundation-current-capture"),
         },
       };
-      assert.isTrue(
-        (yield* eventSink.writeIfRunCurrent({
-          threadId,
-          runId,
-          activeAttemptId: attemptId,
-          expectedStatus: "starting",
-          events: [],
-          effects: [captureEffect],
-        })).committed,
-      );
+      // Events can be built from rows read inside the transaction that stores them.
+      const current = yield* eventSink.writeIfRunCurrent({
+        threadId,
+        runId,
+        activeAttemptId: attemptId,
+        expectedStatus: "starting",
+        events: [],
+        eventsInTransaction: projectionStore.getRun(threadId, runId).pipe(
+          Effect.map((run) =>
+            run === undefined
+              ? []
+              : [
+                  {
+                    id: EventId.make("event:foundation-stale-provider-start:reread"),
+                    type: "run.updated" as const,
+                    threadId,
+                    runId,
+                    providerInstanceId,
+                    occurredAt: now,
+                    payload: run,
+                  },
+                ],
+          ),
+        ),
+        effects: [captureEffect],
+      });
+      assert.isTrue(current.committed);
+      assert.lengthOf(current.storedEvents, 1);
       assert.isTrue(Option.isSome(yield* outbox.get(captureEffect.id)));
       yield* outbox.awaitAvailable;
       const staleCaptureEffect = { ...captureEffect, id: "effect:foundation-stale-capture" };
@@ -2159,6 +2221,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           activeAttemptId: attemptId,
           expectedStatus: "starting",
           effects: [staleCaptureEffect],
+          eventsInTransaction: Effect.die("a refused write must build no events"),
           events: [
             {
               id: EventId.make("event:foundation-stale-provider-start:running"),
