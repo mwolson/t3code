@@ -13,7 +13,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
-  type ProviderSessionId,
+  ProviderSessionId,
   ProviderTurnId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -25,6 +25,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -418,6 +419,7 @@ function makeTestLayer(input: {
   }) => Effect.Effect<void>;
   readonly failReleaseEventWrites?: boolean;
   readonly flakyReleaseWrites?: FlakyReleaseWrites;
+  readonly failProjectionReads?: Ref.Ref<boolean>;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hasBufferedOutputForThread?: (
     thread: OrchestrationV2ProviderThread,
@@ -453,6 +455,32 @@ function makeTestLayer(input: {
       ...(input.beforeUnload === undefined ? {} : { beforeUnload: input.beforeUnload }),
     }),
   );
+  const releaseStoresLayer =
+    input.failProjectionReads === undefined
+      ? TestStoresLayer
+      : Layer.effect(
+          ProjectionStore.ProjectionStoreV2,
+          Effect.gen(function* () {
+            const delegate = yield* ProjectionStore.ProjectionStoreV2;
+            const failReads = input.failProjectionReads!;
+            return ProjectionStore.ProjectionStoreV2.of({
+              ...delegate,
+              getThreadProviderContext: (threadId, targetInstanceId) =>
+                Ref.get(failReads).pipe(
+                  Effect.flatMap((fail) =>
+                    fail
+                      ? Effect.fail(
+                          new ProjectionStore.ProjectionStoreReadError({
+                            threadId,
+                            cause: "private error detail",
+                          }),
+                        )
+                      : delegate.getThreadProviderContext(threadId, targetInstanceId),
+                  ),
+                ),
+            });
+          }),
+        ).pipe(Layer.provide(TestStoresLayer));
   const providerEventIngestorTestLayer = ProviderEventIngestor.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -479,7 +507,7 @@ function makeTestLayer(input: {
           IdAllocator.layer,
           providerEventIngestorTestLayer,
           TestMcpRegistryLayer,
-          TestStoresLayer,
+          releaseStoresLayer,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
         ),
@@ -2471,6 +2499,169 @@ it.effect(
 
       yield* effect.pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 1000 })));
     }),
+);
+
+it("preserves error occurrences on teardown and stamps a new runtime failure", () => {
+  const now = DateTime.makeUnsafe("2026-09-20T01:00:00Z");
+  const later = DateTime.makeUnsafe("2026-09-20T02:00:00Z");
+  const session = {
+    ...makeProviderSession({
+      providerSessionId: ProviderSessionId.make("session:occurrence"),
+      now,
+    }),
+    lastError: "Failed",
+    lastErrorAt: now,
+  };
+  for (const reason of ["idle_timeout", "manual_shutdown", "server_shutdown"] as const) {
+    const released = ProviderSessionManager.releasedProviderSession({
+      session,
+      now: later,
+      reason,
+    });
+    assert.equal(released.lastError, "Failed");
+    assert.deepStrictEqual(released.lastErrorAt, now);
+  }
+  const failed = ProviderSessionManager.releasedProviderSession({
+    session,
+    now: later,
+    reason: "runtime_error",
+    detail: "Failed",
+  });
+  assert.deepStrictEqual(failed.lastErrorAt, later);
+});
+
+it("only preserves a Pi terminal error on clean stream end", () => {
+  const now = DateTime.makeUnsafe("2026-09-20T01:00:00Z");
+  const later = DateTime.makeUnsafe("2026-09-20T02:00:00Z");
+  for (const driver of ["opencode", "pi"] as const) {
+    for (const status of ["error", "ready"] as const) {
+      const session = {
+        ...makeProviderSession({
+          providerSessionId: ProviderSessionId.make("session:stream-end"),
+          now,
+        }),
+        driver: ProviderDriverKind.make(driver),
+        status,
+        lastError: "Earlier turn failed",
+        lastErrorAt: null,
+      };
+      const released = ProviderSessionManager.releasedProviderSession({
+        session,
+        now: later,
+        reason: "runtime_error",
+        runtimeErrorCause: "stream_end",
+        detail: "Provider event stream ended.",
+      });
+      const preserve = driver === "pi" && status === "error";
+      assert.equal(
+        released.lastError,
+        preserve ? "Earlier turn failed" : "Provider event stream ended.",
+      );
+      assert.deepStrictEqual(released.lastErrorAt, preserve ? null : later);
+    }
+  }
+});
+
+it.effect("ProviderSessionManagerV2 warns on projection read failure and still releases", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const failProjectionReads = yield* Ref.make(false);
+    const messages: Array<{ level: string; message: unknown }> = [];
+    const logger = Logger.make(({ logLevel, message }) => {
+      messages.push({ level: logLevel, message });
+    });
+    yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("release-read-failure");
+      const providerSessionId = ProviderSessionId.make("release-read-failure-session");
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* Ref.set(failProjectionReads, true);
+      yield* manager.release({ providerSessionId, reason: "idle_timeout" });
+      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+      assert.deepStrictEqual(
+        messages.filter((entry) => entry.level === "Warn"),
+        [
+          {
+            level: "Warn",
+            message: [
+              "orchestration-v2.driver-session.release-projection-read-failed",
+              {
+                threadId,
+                providerSessionId,
+                reason: "idle_timeout",
+              },
+            ],
+          },
+        ],
+      );
+    }).pipe(
+      Effect.provide(
+        makeTestLayer({ state, idleTimeoutMs: 60_000, failProjectionReads }).pipe(
+          Layer.provideMerge(Logger.layer([logger], { mergeWithExisting: false })),
+        ),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 preserves the latest projected error during idle release", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const projectId = yield* idAllocator.allocate.project({ fixtureName: "error-preservation" });
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "error-preservation",
+        projectId,
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* eventSink.write({
+        events: [
+          {
+            id: yield* idAllocator.allocate.event({ threadId, providerSessionId }),
+            type: "provider-session.updated",
+            threadId,
+            driver: CODEX_DRIVER,
+            providerInstanceId: modelSelection.instanceId,
+            occurredAt: now,
+            payload: {
+              ...runtime.providerSession,
+              status: "error",
+              lastError: "Projected error",
+              lastErrorAt: now,
+            },
+          },
+        ],
+      });
+      yield* manager.release({ providerSessionId, reason: "idle_timeout" });
+      const after = yield* projectionStore.getThreadProviderContext(threadId);
+      assert.equal(after.providerSessions.at(-1)?.lastError, "Projected error");
+      assert.deepStrictEqual(after.providerSessions.at(-1)?.lastErrorAt, now);
+    }).pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 60_000 })));
+  }),
 );
 
 it.effect("ProviderSessionManagerV2 uses the same release path for runtime failures", () =>
