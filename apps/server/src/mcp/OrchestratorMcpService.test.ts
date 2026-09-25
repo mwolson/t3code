@@ -18,9 +18,12 @@ import {
   ThreadId,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadProjection,
+  type Project,
   type ServerProvider,
 } from "@t3tools/contracts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Option from "effect/Option";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -64,6 +67,270 @@ const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
 );
 
 describe("OrchestratorMcpService", () => {
+  it.effect("rejects a relative or unknown project directory before creating a thread", () =>
+    Effect.gen(function* () {
+      const parentThreadId = ThreadId.make("thread:mcp-project-relative-parent");
+      const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const parentProjection = {
+        thread: {
+          deletedAt: null,
+          id: parentThreadId,
+          projectId: ProjectId.make("project:parent"),
+          title: "Parent",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "main",
+          worktreePath: "/workspace/parent",
+        },
+        runs: [
+          {
+            id: RunId.make("run:mcp-project-relative-parent"),
+            ordinal: 1,
+            status: "running",
+            rootNodeId: NodeId.make("node:mcp-project-relative-root"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+          },
+        ],
+        subagents: [],
+        turnItems: [],
+        contextTransfers: [],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const dependencies = Layer.mergeAll(
+        NodeServices.layer,
+        ServerSettings.layerTest(),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
+          assertProviderInstanceEnabled: () => Effect.void,
+          getThreadRecords: () => Effect.succeed(parentProjection),
+          dispatch: (command) =>
+            Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+              Effect.as({} as never),
+            ),
+        }),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed([
+            {
+              instanceId: ProviderInstanceId.make("codex"),
+              driver: "codex",
+              enabled: true,
+              installed: true,
+              version: "test",
+              status: "ready",
+              auth: { status: "authenticated" },
+              checkedAt: "2026-06-17T00:00:00.000Z",
+              models: [{ slug: "gpt-5.4", name: "gpt-5.4", isCustom: false, capabilities: null }],
+              slashCommands: [],
+              skills: [],
+            } as unknown as ServerProvider,
+          ]),
+        }),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        Layer.mock(ProjectService.ProjectService)({
+          getByWorkspaceRoot: () => Effect.succeed(Option.none()),
+        }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([ProviderInstanceId.make("codex")]),
+        }),
+      );
+      const scope: McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:mcp-project-relative"),
+        client: undefined,
+        requestNamespace: "provider-session:mcp-project-relative",
+        thread: {
+          threadId: parentThreadId,
+          providerSessionId: "provider-session:mcp-project-relative",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const error = yield* service
+          .createThreads(scope, {
+            threads: [{ title: "Other workspace", projectDirectory: "other" }],
+            clientRequestId: "create-relative-project",
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.match(error.message, /absolute path/);
+        const unknown = yield* service
+          .createThreads(scope, {
+            threads: [{ title: "Unknown workspace", projectDirectory: "/workspace/unknown" }],
+            clientRequestId: "create-unknown-project",
+          })
+          .pipe(Effect.flip);
+        assert.equal(unknown.code, "invalid_request");
+        assert.match(unknown.message, /not a known T3 project/);
+        assert.deepEqual(yield* Ref.get(dispatched), []);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
+    }),
+  );
+
+  it.effect("creates at the root of a known project by absolute or home-relative path", () =>
+    Effect.gen(function* () {
+      const parentThreadId = ThreadId.make("thread:mcp-project-known-parent");
+      const otherProjectId = ProjectId.make("project:other");
+      const dispatched = yield* Ref.make<ReadonlyArray<OrchestrationV2ServerCommand>>([]);
+      const parentProjection = {
+        thread: {
+          deletedAt: null,
+          id: parentThreadId,
+          projectId: ProjectId.make("project:parent"),
+          title: "Parent",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "main",
+          worktreePath: "/workspace/parent",
+        },
+        runs: [
+          {
+            id: RunId.make("run:mcp-project-known-parent"),
+            ordinal: 1,
+            status: "running",
+            rootNodeId: NodeId.make("node:mcp-project-known-root"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+          },
+        ],
+        subagents: [],
+        turnItems: [],
+        contextTransfers: [],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const otherProject = {
+        id: otherProjectId,
+        title: "Other",
+        workspaceRoot: "/workspace/other",
+        defaultModelSelection: null,
+        scripts: [],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        deletedAt: null,
+      } as Project;
+      const dependencies = Layer.mergeAll(
+        NodeServices.layer,
+        ServerSettings.layerTest(),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
+          assertProviderInstanceEnabled: () => Effect.void,
+          getThreadRecords: (threadId) =>
+            Effect.succeed(
+              threadId === parentThreadId
+                ? parentProjection
+                : ({
+                    thread: {
+                      id: threadId,
+                      projectId: otherProjectId,
+                      title: "Other workspace",
+                      deletedAt: null,
+                      createdBy: "agent",
+                      creationSource: "mcp",
+                      modelSelection: parentProjection.thread.modelSelection,
+                      worktreePath: "/workspace/other",
+                    },
+                    runs: [],
+                  } as unknown as OrchestrationV2ThreadProjection),
+            ),
+          dispatch: (command) =>
+            Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+              Effect.as({} as never),
+            ),
+        }),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed([
+            {
+              instanceId: ProviderInstanceId.make("codex"),
+              driver: "codex",
+              enabled: true,
+              installed: true,
+              version: "test",
+              status: "ready",
+              auth: { status: "authenticated" },
+              checkedAt: "2026-06-17T00:00:00.000Z",
+              models: [{ slug: "gpt-5.4", name: "gpt-5.4", isCustom: false, capabilities: null }],
+              slashCommands: [],
+              skills: [],
+            } as unknown as ServerProvider,
+          ]),
+        }),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([ProviderInstanceId.make("codex")]),
+        }),
+        Layer.mock(ProjectService.ProjectService)({
+          getByWorkspaceRoot: (workspaceRoot) =>
+            Effect.succeed(
+              workspaceRoot === "/workspace/other" ? Option.some(otherProject) : Option.none(),
+            ),
+        }),
+      );
+      const scope: McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:mcp-project-known"),
+        client: undefined,
+        requestNamespace: "provider-session:mcp-project-known",
+        thread: {
+          threadId: parentThreadId,
+          providerSessionId: "provider-session:mcp-project-known",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const result = yield* service.createThreads(scope, {
+          threads: [{ title: "Other workspace", projectDirectory: "/workspace/other" }],
+          clientRequestId: "create-known-project",
+        });
+        assert.equal(result.threads[0]?.title, "Other workspace");
+        const command = (yield* Ref.get(dispatched)).find(
+          (entry) => entry.type === "thread.create",
+        ) as {
+          type: string;
+          projectId?: string;
+          worktreePath?: string | null;
+          branch?: string | null;
+        };
+        assert.equal(command.type, "thread.create");
+        assert.equal(command.projectId, otherProjectId);
+        assert.equal(command.worktreePath, null);
+        assert.equal(command.branch, null);
+        yield* service.createThreads(scope, {
+          threads: [{ title: "Home-relative project", projectDirectory: "~/other" }],
+          clientRequestId: "create-home-project",
+        });
+        assert.include(
+          (yield* Ref.get(dispatched)).findLast((entry) => entry.type === "thread.create"),
+          {
+            projectId: otherProjectId,
+            branch: null,
+            worktreePath: null,
+          },
+        );
+        yield* service.createThreads(scope, {
+          threads: [{ title: "Inherited checkout" }],
+          clientRequestId: "inherited-checkout",
+        });
+        const inheritedCommand = (yield* Ref.get(dispatched)).findLast(
+          (entry) => entry.type === "thread.create",
+        );
+        assert.include(inheritedCommand, {
+          projectId: ProjectId.make("project:parent"),
+          branch: "main",
+          worktreePath: "/workspace/parent",
+        });
+      }).pipe(
+        Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))),
+        Effect.provideService(HostProcess.HomeDirectory, "/workspace"),
+      );
+    }),
+  );
+
   it.effect("retries terminal acknowledgement with a fresh command id", () =>
     Effect.gen(function* () {
       const parentThreadId = ThreadId.make("thread:mcp-ack-parent");
@@ -972,6 +1239,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         id: parentThreadId,
         projectId,
         title: "MCP parent",
+        deletedAt: null,
         createdBy: "user",
         creationSource: "web",
         modelSelection,
@@ -1673,14 +1941,23 @@ describe("OrchestratorMcpService provider resolution", () => {
   );
 
   it.live.each([
-    { name: "parent instance", parentEnabled: true, model: "gpt-5.4" },
-    { name: "alternate instance", parentEnabled: false, model: "gpt-5.5" },
+    { name: "parent instance", parentEnabled: true, model: "gpt-5.4", crossProject: false },
+    { name: "alternate instance", parentEnabled: false, model: "gpt-5.5", crossProject: false },
+    {
+      name: "other project alternate instance",
+      parentEnabled: false,
+      model: "gpt-5.5",
+      crossProject: true,
+    },
   ])(
     "replays accepted creation on the $name without authorizing new disabled work",
-    ({ parentEnabled, model }) =>
+    ({ parentEnabled, model, crossProject }) =>
       Effect.scoped(
         Effect.gen(function* () {
           const altInstanceId = ProviderInstanceId.make("codex-alt");
+          const destinationProjectId = crossProject
+            ? ProjectId.make("project:destination")
+            : projectId;
           const driver = ProviderDriverKind.make("codex");
           const cwd = yield* checkpointWorkspace("mcp-create-retry");
           const layerRegistry = ProviderAdapterRegistry.layerFromAdapters(
@@ -1706,7 +1983,9 @@ describe("OrchestratorMcpService provider resolution", () => {
               [altInstanceId]: { driver: "codex", enabled: true },
             },
             projectSettingsOverrides: {
-              [projectId]: { providerInstances: { [codexInstanceId]: { enabled: parentEnabled } } },
+              [destinationProjectId]: {
+                providerInstances: { [codexInstanceId]: { enabled: parentEnabled } },
+              },
             },
           });
           const layerThreads = ThreadManagementService.layer.pipe(
@@ -1731,7 +2010,14 @@ describe("OrchestratorMcpService provider resolution", () => {
                   providerSnapshot({ instanceId: codexInstanceId, driver, model: "gpt-5.4" }),
                   providerSnapshot({ instanceId: altInstanceId, driver, model: "gpt-5.5" }),
                 ]),
-                Layer.mock(ProjectService.ProjectService)({}),
+                Layer.mock(ProjectService.ProjectService)({
+                  getByWorkspaceRoot: (directory) =>
+                    Effect.succeed(
+                      directory === cwd
+                        ? Option.some({ id: destinationProjectId, deletedAt: null } as Project)
+                        : Option.none(),
+                    ),
+                }),
                 Layer.mock(SecretRequests.SecretRequests)({}),
                 Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
               ),
@@ -1767,7 +2053,12 @@ describe("OrchestratorMcpService provider resolution", () => {
               dispatchMode: { type: "start_immediately" },
             });
             const request = {
-              threads: [{ target: { driverKind: driver, model } }],
+              threads: [
+                {
+                  target: { driverKind: driver, model },
+                  ...(crossProject ? { projectDirectory: cwd } : {}),
+                },
+              ],
               clientRequestId: "create-retry",
             };
             const first = yield* service.createThreads(scope, request);
@@ -1778,6 +2069,18 @@ describe("OrchestratorMcpService provider resolution", () => {
             assert.equal(first.threads.length, 1);
             assert.equal(child.providerInstanceId, selection.instanceId);
             assert.equal(child.model, selection.model);
+            const created = yield* orchestrator.getThreadProjection(child.threadId);
+            assert.equal(created.thread.projectId, destinationProjectId);
+            assert.equal(created.thread.worktreePath, crossProject ? null : cwd);
+            assert.equal(created.thread.lineage.parentThreadId, null);
+            const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+            assert.equal(
+              parent.turnItems.filter(
+                (item) => item.type === "thread_created" && item.targetThreadId === child.threadId,
+              ).length,
+              1,
+            );
+
             assert.deepEqual(yield* service.createThreads(scope, request), first);
 
             // The creation receipt exists, but this prompt has not been accepted yet.
@@ -1797,7 +2100,7 @@ describe("OrchestratorMcpService provider resolution", () => {
 
             yield* settings.updateSettings({
               projectSettingsOverrides: {
-                [projectId]: {
+                [destinationProjectId]: {
                   providerInstances: {
                     [codexInstanceId]: { enabled: false },
                     [altInstanceId]: { enabled: false },
