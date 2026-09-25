@@ -29,10 +29,14 @@ function currentDelegatedCompletionDelivery(
   const alreadyDispatched = projection.messages.some(
     (message) => message.id === completion.messageId,
   );
+  // A queued offer can outlive its reservation: reading every result empties
+  // it, and rolling back the owner run discards what it would deliver.
   if (
     sourceRun?.delegatedCompletion?.disposition !== "open" ||
+    sourceRun.status === "rolled_back" ||
     delivery === null ||
     delivery === undefined ||
+    delivery.taskIds.length === 0 ||
     delivery.generation !== completion.generation ||
     delivery.messageId !== completion.messageId ||
     (alreadyDispatched && !isUndeliveredMailboxSteer(projection, completion.messageId))
