@@ -23,6 +23,7 @@ import {
   RunAttemptId,
   RunId,
   ScheduledTaskId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
   ProjectId,
@@ -1243,7 +1244,7 @@ function makeLocalCommandHarness(input: {
         ),
   );
   const writeIfRunCurrent = vi.fn<EventSink.EventSinkV2["Service"]["writeIfRunCurrent"]>(
-    ({ events: incoming, activeAttemptId, expectedStatus }) =>
+    ({ events: incoming, eventsInTransaction, activeAttemptId, expectedStatus }) =>
       "writeFailure" in input
         ? Effect.fail(
             new EventSink.EventSinkWriteError({
@@ -1251,17 +1252,20 @@ function makeLocalCommandHarness(input: {
               cause: input.writeFailure,
             }),
           )
-        : Effect.sync(() => {
+        : Effect.gen(function* () {
             const current = projection.runs.find((candidate) => candidate.id === runId);
             const committed =
               current !== undefined &&
               current.activeAttemptId === activeAttemptId &&
               current.status === expectedStatus;
             if (committed) {
-              for (const event of incoming) {
+              const inTransaction =
+                eventsInTransaction === undefined ? [] : yield* Effect.orDie(eventsInTransaction);
+              for (const event of [...incoming, ...inTransaction]) {
                 expect(isDomainEvent(event)).toBe(true);
                 events.push(event);
-                projection = ProjectionStore.applyToProjection(projection, event);
+                if (event.threadId === threadId)
+                  projection = ProjectionStore.applyToProjection(projection, event);
               }
             }
             return { committed, storedEvents: [] };
@@ -1507,6 +1511,128 @@ effectIt.effect(
       rootNodeId: NodeId.make("superseded-root"),
       status: "superseded" as const,
     };
+    const inheritedMessageId = MessageId.make("inherited-streaming-message");
+    const inheritedRequestId = RuntimeRequestId.make("inherited-request");
+    // A native subagent's record can end before the rows routed to its child thread do.
+    const nativeSubagent = (
+      name: string,
+      status: "completed" | "running",
+      owner: { readonly threadId: ThreadId; readonly runId: RunId | null } = {
+        threadId: projection.thread.id,
+        runId: projection.runs.at(-1)!.id,
+      },
+    ) => ({
+      id: NodeId.make(`subagent:${name}`),
+      ...owner,
+      parentNodeId: previousAttempt.rootNodeId,
+      origin: "provider_native" as const,
+      createdBy: "agent" as const,
+      driver: projection.providerThreads[0]!.driver,
+      providerInstanceId: projection.providerThreads[0]!.providerInstanceId,
+      providerThreadId: projection.providerThreads[0]!.id,
+      childThreadId: ThreadId.make(`child:${name}`),
+      nativeTaskRef: null,
+      prompt: "child task",
+      title: null,
+      model: null,
+      status,
+      result: null,
+      startedAt: projection.updatedAt,
+      completedAt: status === "completed" ? projection.updatedAt : null,
+      updatedAt: projection.updatedAt,
+    });
+    const endedSubagent = nativeSubagent("ended", "completed");
+    const liveSubagent = nativeSubagent("live", "running");
+    // This one's last rows land after the failed start is read and before it is written.
+    const settlingSubagent = nativeSubagent("settling", "completed");
+    let settlingRowsLanded = false;
+    // The ended subagent's own subagent, and one a run of its child thread started.
+    const nestedSubagent = nativeSubagent("nested", "completed", {
+      threadId: endedSubagent.childThreadId,
+      runId: null,
+    });
+    const independentSubagent = nativeSubagent("independent", "completed", {
+      threadId: endedSubagent.childThreadId,
+      runId: RunId.make("run:child-thread-own"),
+    });
+    const childRecords = (childThreadId: ThreadId) => {
+      const nodeId = NodeId.make(`${childThreadId}:root`);
+      const messageId = MessageId.make(`${childThreadId}:message`);
+      const requestId = RuntimeRequestId.make(`${childThreadId}:request`);
+      const providerTurnId = ProviderTurnId.make(`${childThreadId}:turn`);
+      const landed = childThreadId === settlingSubagent.childThreadId && settlingRowsLanded;
+      const open = landed ? ("completed" as const) : ("running" as const);
+      return {
+        ...projection,
+        thread: { ...projection.thread, id: childThreadId },
+        runs: [],
+        attempts: [],
+        subagents:
+          childThreadId === endedSubagent.childThreadId
+            ? [nestedSubagent, independentSubagent]
+            : [],
+        nodes: [
+          {
+            ...projection.nodes[0]!,
+            id: nodeId,
+            threadId: childThreadId,
+            runId: null,
+            rootNodeId: nodeId,
+            status: open,
+            countsForRun: false,
+          },
+        ],
+        providerTurns: [
+          { ...externalTurn, id: providerTurnId, nodeId, runAttemptId: null, status: open },
+        ],
+        messages: [
+          {
+            ...projection.messages[0]!,
+            id: messageId,
+            threadId: childThreadId,
+            runId: null,
+            nodeId,
+            role: "assistant" as const,
+            streaming: !landed,
+          },
+        ],
+        turnItems: [
+          {
+            id: TurnItemId.make(`${childThreadId}:item`),
+            threadId: childThreadId,
+            runId: null,
+            nodeId,
+            providerThreadId: null,
+            providerTurnId,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: open,
+            title: null,
+            startedAt: projection.updatedAt,
+            completedAt: null,
+            updatedAt: projection.updatedAt,
+            type: "assistant_message" as const,
+            messageId,
+            text: landed ? "child final" : "child partial",
+            streaming: !landed,
+          },
+        ],
+        runtimeRequests: [
+          {
+            id: requestId,
+            nodeId,
+            providerTurnId,
+            nativeRequestRef: null,
+            kind: "user_input" as const,
+            status: landed ? ("resolved" as const) : ("pending" as const),
+            responseCapability: { type: "message" as const },
+            createdAt: projection.updatedAt,
+            resolvedAt: null,
+          },
+        ],
+      } satisfies OrchestrationV2ThreadProjection;
+    };
     const externalTurn = {
       id: ProviderTurnId.make("still-running-provider-turn"),
       providerThreadId: projection.providerThreads[0]!.id,
@@ -1525,7 +1651,66 @@ effectIt.effect(
         { ...projection.attempts[0]!, attemptOrdinal: 2, reason: "steering_restart" },
       ],
       providerTurns: [externalTurn],
+      subagents: [endedSubagent, liveSubagent, settlingSubagent],
+      // The superseded attempt left a reply streaming and a question unanswered.
+      messages: [
+        ...projection.messages,
+        {
+          ...projection.messages[0]!,
+          id: inheritedMessageId,
+          nodeId: previousAttempt.rootNodeId,
+          role: "assistant",
+          streaming: true,
+        },
+      ],
+      turnItems: [
+        {
+          id: TurnItemId.make("inherited-question"),
+          threadId: projection.thread.id,
+          runId: projection.runs.at(-1)!.id,
+          nodeId: previousAttempt.rootNodeId,
+          providerThreadId: projection.providerThreads[0]!.id,
+          providerTurnId: externalTurn.id,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          status: "waiting",
+          title: null,
+          startedAt: projection.updatedAt,
+          completedAt: null,
+          updatedAt: projection.updatedAt,
+          type: "user_input_request",
+          requestId: inheritedRequestId,
+          questions: [],
+        },
+      ],
+      runtimeRequests: [
+        {
+          id: inheritedRequestId,
+          nodeId: previousAttempt.rootNodeId,
+          providerTurnId: externalTurn.id,
+          nativeRequestRef: null,
+          kind: "user_input",
+          status: "pending",
+          responseCapability: { type: "message" },
+          createdAt: projection.updatedAt,
+          resolvedAt: null,
+        },
+      ],
     });
+
+    harness.getThreadRecords.mockImplementation((id) =>
+      Effect.sync(() =>
+        id === projection.thread.id ? harness.projection() : (childRecords(id) as never),
+      ),
+    );
+    const write = harness.writeIfRunCurrent.getMockImplementation()!;
+    harness.writeIfRunCurrent.mockImplementation((input) =>
+      Effect.suspend(() => {
+        settlingRowsLanded = true;
+        return write(input);
+      }),
+    );
 
     return Effect.gen(function* () {
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
@@ -1545,6 +1730,7 @@ effectIt.effect(
       });
       expect(harness.projection().nodes[0]).toMatchObject({ status: "failed", startedAt: null });
       expect(harness.projection().turnItems).toMatchObject([
+        { type: "user_input_request", status: "failed" },
         {
           type: "error",
           status: "failed",
@@ -1559,6 +1745,35 @@ effectIt.effect(
       expect(harness.open).not.toHaveBeenCalled();
       expect(harness.startRootRun).not.toHaveBeenCalled();
       expect(harness.projection().providerTurns).toEqual([externalTurn]);
+      // The run will never start, so nothing else can close what it inherited.
+      expect(
+        harness.projection().messages.find((message) => message.id === inheritedMessageId),
+      ).toMatchObject({ streaming: false });
+      expect(harness.projection().runtimeRequests).toMatchObject([
+        { status: "cancelled", responseCapability: { type: "not_resumable" } },
+      ]);
+      // The ended subagent's child output has no other owner; a live subagent still owns its own.
+      const childEvents = (subagent: typeof endedSubagent) =>
+        harness.events
+          .filter((event) => event.threadId === subagent.childThreadId)
+          .map((event) => ({ type: event.type, payload: event.payload }));
+      const closed = [
+        { type: "node.updated", payload: { status: "completed" } },
+        { type: "turn-item.updated", payload: { status: "completed", streaming: false } },
+        { type: "provider-turn.updated", payload: { status: "completed" } },
+        { type: "message.updated", payload: { streaming: false } },
+        {
+          type: "runtime-request.updated",
+          payload: { status: "cancelled", responseCapability: { type: "not_resumable" } },
+        },
+      ];
+      expect(childEvents(endedSubagent)).toMatchObject(closed);
+      expect(childEvents(liveSubagent)).toEqual([]);
+      // Rows that finished before the write keep their final reply and their answer.
+      expect(childEvents(settlingSubagent)).toEqual([]);
+      // A run of the child thread owns its subagents; only the runless one is the ended subagent's.
+      expect(childEvents(nestedSubagent)).toMatchObject(closed);
+      expect(childEvents(independentSubagent)).toEqual([]);
     }).pipe(Effect.provide(layerStartEffectWorker(harness)));
   },
 );
