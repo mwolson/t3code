@@ -20,8 +20,10 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
   RunAttemptId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -30,6 +32,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Scheduler from "effect/Scheduler";
@@ -43,24 +46,53 @@ import * as Statement from "effect/unstable/sql/Statement";
 import { LIVE_STREAM_MAX_ITEMS, LiveStreamBufferError } from "../orchestration/LiveStreamBudget.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import { CheckpointRollbackServiceV2 } from "./CheckpointRollbackService.ts";
+import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
+import { GitWorkflowService } from "../git/GitWorkflowService.ts";
+import { ProjectService } from "../project/ProjectService.ts";
+import { ProviderAuthService } from "../provider/Services/ProviderAuthService.ts";
 import { CommandReceiptStoreV2, layer as commandReceiptStoreLayer } from "./CommandReceiptStore.ts";
-import { EffectOutboxV2, layer as effectOutboxLayer } from "./EffectOutbox.ts";
+import { EffectOutboxV2, EffectOutboxError, layer as effectOutboxLayer } from "./EffectOutbox.ts";
 import {
+  executorLayer as effectExecutorLayer,
   layerWithOptions as effectWorkerLayerWithOptions,
   OrchestrationEffectExecutionError,
   OrchestrationEffectExecutorV2,
   OrchestrationEffectWorkerV2,
   runDaemonWithOptions as runEffectWorkerDaemonWithOptions,
 } from "./EffectWorker.ts";
-import { EventSinkV2, layer as eventSinkLayer } from "./EventSink.ts";
+import { EventSinkV2, EventSinkWriteError, layer as eventSinkLayer } from "./EventSink.ts";
 import { EventStoreReadEventsError, EventStoreV2, layer as eventStoreLayer } from "./EventStore.ts";
-import { layer as idAllocatorLayer } from "./IdAllocator.ts";
+import { IdAllocatorV2, layer as idAllocatorLayer } from "./IdAllocator.ts";
 import {
   ProjectionMaintenanceV2,
   layer as projectionMaintenanceLayer,
 } from "./ProjectionMaintenance.ts";
-import { ProjectionStoreV2, layer as projectionStoreLayer } from "./ProjectionStore.ts";
+import {
+  ProjectionStoreReadError,
+  ProjectionStoreV2,
+  layer as projectionStoreLayer,
+} from "./ProjectionStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import { ProviderSessionManagerV2, ProviderSessionOpenError } from "./ProviderSessionManager.ts";
+import { ProviderTurnControlServiceV2 } from "./ProviderTurnControlService.ts";
+import {
+  layer as providerTurnStartServiceLayer,
+  ProviderTurnStartServiceV2,
+} from "./ProviderTurnStartService.ts";
+import { RunExecutionServiceV2 } from "./RunExecutionService.ts";
+import { RunFinalizationService } from "./RunFinalizationService.ts";
+import { RuntimePolicyV2, layer as runtimePolicyLayer } from "./RuntimePolicy.ts";
+import { RuntimeRequestServiceV2 } from "./RuntimeRequestService.ts";
+import { ThreadTitleRegenerationService } from "./ThreadTitleRegenerationService.ts";
+import { ThreadManagementService } from "./ThreadManagementService.ts";
+
+const deadLetterStartupDependencies = Layer.mergeAll(
+  FileSystem.layerNoop({}),
+  Layer.mock(GitWorkflowService)({}),
+  Layer.mock(ProjectService)({}),
+  Layer.mock(ProviderAuthService)({}),
+);
 
 const isLiveStreamBufferError = Schema.is(LiveStreamBufferError);
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -1455,6 +1487,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
         OrchestrationEffectExecutorV2,
         OrchestrationEffectExecutorV2.of({
           execute: () => Ref.update(executionCount, (count) => count + 1),
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({ workerId: "recovery-worker" }).pipe(
@@ -1872,6 +1905,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
                 Deferred.succeed(interrupted, undefined).pipe(Effect.ignore),
               ),
             ),
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
@@ -1938,7 +1972,10 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       });
       const executorLayer = Layer.succeed(
         OrchestrationEffectExecutorV2,
-        OrchestrationEffectExecutorV2.of({ execute: () => Effect.void }),
+        OrchestrationEffectExecutorV2.of({
+          execute: () => Effect.void,
+          compensateDeadLetter: () => Effect.void,
+        }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
         workerId: "settlement-race-worker",
@@ -1994,6 +2031,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
         OrchestrationEffectExecutorV2,
         OrchestrationEffectExecutorV2.of({
           execute: () => Ref.update(executionCount, (count) => count + 1),
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
@@ -2329,6 +2367,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
               }
               yield* Deferred.succeed(completed, undefined);
             }),
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
@@ -2399,6 +2438,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
               Effect.andThen(Deferred.await(gate.release)),
             );
           },
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
@@ -2498,6 +2538,7 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
                   : Effect.void,
               ),
             ),
+          compensateDeadLetter: () => Effect.void,
         }),
       );
       const workerLayer = effectWorkerLayerWithOptions({
@@ -2945,6 +2986,1477 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       assert.lengthOf((yield* projectionStore.getThreadProjection(threadId)).turnItems, 151);
     }),
   );
+
+  for (const failureMode of [
+    "start-dead-letter",
+    "restart-dead-letter",
+    "repair-read-retry",
+    "repair-write-retry",
+    "repair-outbox-retry",
+    "repair-lease-reclaim",
+    "restart-open-failure",
+    "restart-open-retry-exhaustion",
+  ] as const) {
+    const effectType =
+      failureMode === "start-dead-letter" ? "provider-turn.start" : "provider-turn.restart";
+    const eagerOpenFailure =
+      failureMode === "restart-open-failure" || failureMode === "restart-open-retry-exhaustion";
+    it.effect(`settles inherited work after ${failureMode}`, () =>
+      Effect.gen(function* () {
+        const eventSink = yield* EventSinkV2;
+        const projectionStore = yield* ProjectionStoreV2;
+        const idAllocator = yield* IdAllocatorV2;
+        const outbox = yield* EffectOutboxV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread:foundation-dead-letter-run-failure");
+        const runId = RunId.make("run:foundation-dead-letter-run-failure");
+        const attemptId = RunAttemptId.make("run-attempt:foundation-dead-letter-run-failure");
+        const rootNodeId = NodeId.make("node:foundation-dead-letter-run-failure");
+        const providerThreadId = ProviderThreadId.make(
+          "provider-thread:foundation-dead-letter-run-failure",
+        );
+        const subagentNodeId = NodeId.make("node:foundation-dead-letter-run-failure:subagent");
+        const openItemId = TurnItemId.make("turn-item:foundation-dead-letter-run-failure:open");
+        const streamingMessageId = MessageId.make(
+          "message:foundation-dead-letter-run-failure:streaming",
+        );
+        const parentRequestId = RuntimeRequestId.make(
+          "runtime-request:foundation-dead-letter-run-failure:parent",
+        );
+        // Child A: provider-native linked child (no runs of its own, rows carry
+        // runId null) that itself links grandchild C. Child B: app-owned
+        // delegation with its own live run, which the sweep must not touch.
+        const childAThreadId = ThreadId.make("thread:foundation-dead-letter:child-a");
+        const childBThreadId = ThreadId.make("thread:foundation-dead-letter:child-b");
+        const childCThreadId = ThreadId.make("thread:foundation-dead-letter:child-c");
+        const subagentBNodeId = NodeId.make("node:foundation-dead-letter-run-failure:subagent-b");
+        const childANodeId = NodeId.make("node:foundation-dead-letter:child-a:root");
+        const childASubagentNodeId = NodeId.make("node:foundation-dead-letter:child-a:subagent");
+        const childAItemId = TurnItemId.make("turn-item:foundation-dead-letter:child-a:open");
+        const childAMessageId = MessageId.make("message:foundation-dead-letter:child-a:streaming");
+        const childARequestId = RuntimeRequestId.make(
+          "runtime-request:foundation-dead-letter:child-a",
+        );
+        const childAProviderTurnId = ProviderTurnId.make(
+          "provider-turn:foundation-dead-letter:child-a",
+        );
+        const childAProviderThreadId = ProviderThreadId.make(
+          "provider-thread:foundation-dead-letter:child-a",
+        );
+        const childCItemId = TurnItemId.make("turn-item:foundation-dead-letter:child-c:open");
+        const childBRunId = RunId.make("run:foundation-dead-letter:child-b");
+        const childBAttemptId = RunAttemptId.make("run-attempt:foundation-dead-letter:child-b");
+        const childBNodeId = NodeId.make("node:foundation-dead-letter:child-b:root");
+        const childBItemId = TurnItemId.make("turn-item:foundation-dead-letter:child-b:open");
+        const childBRequestId = RuntimeRequestId.make(
+          "runtime-request:foundation-dead-letter:child-b",
+        );
+        const childBProviderTurnId = ProviderTurnId.make(
+          "provider-turn:foundation-dead-letter:child-b",
+        );
+        const childBProviderThreadId = ProviderThreadId.make(
+          "provider-thread:foundation-dead-letter:child-b",
+        );
+        const thread = makeThread(threadId, now);
+        const startingRun: OrchestrationV2Run = {
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId,
+          userMessageId: MessageId.make("message:foundation-dead-letter-run-failure"),
+          rootNodeId,
+          activeAttemptId: attemptId,
+          status: "starting",
+          queuePosition: null,
+          requestedAt: now,
+          startedAt: null,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+        };
+        yield* eventSink.write({
+          events: [
+            threadCreatedEvent({ id: "event:foundation-dead-letter:thread", thread, now }),
+            {
+              id: EventId.make("event:foundation-dead-letter:provider-thread"),
+              type: "provider-thread.updated",
+              threadId,
+              driver: providerDriver,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: providerThreadId,
+                driver: providerDriver,
+                providerInstanceId,
+                providerSessionId: null,
+                appThreadId: threadId,
+                ownerNodeId: null,
+                nativeThreadRef: null,
+                nativeConversationHeadRef: null,
+                status: "active",
+                firstRunOrdinal: 1,
+                lastRunOrdinal: 1,
+                handoffIds: [],
+                forkedFrom: null,
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:run"),
+              type: "run.created",
+              threadId,
+              runId,
+              nodeId: rootNodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: startingRun,
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:attempt"),
+              type: "run-attempt.created",
+              threadId,
+              runId,
+              nodeId: rootNodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: attemptId,
+                runId,
+                attemptOrdinal: 1,
+                rootNodeId,
+                providerInstanceId,
+                providerThreadId,
+                providerTurnId: null,
+                reason: "initial",
+                status: "pending",
+                startedAt: null,
+                completedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:node"),
+              type: "node.updated",
+              threadId,
+              runId,
+              nodeId: rootNodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: rootNodeId,
+                threadId,
+                runId,
+                parentNodeId: null,
+                rootNodeId,
+                kind: "root_turn",
+                status: "pending",
+                countsForRun: true,
+                providerThreadId,
+                providerTurnId: null,
+                nativeItemRef: null,
+                runtimeRequestId: null,
+                checkpointScopeId: null,
+                startedAt: null,
+                completedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:parent-request"),
+              type: "runtime-request.updated",
+              threadId,
+              runId,
+              nodeId: rootNodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: parentRequestId,
+                nodeId: rootNodeId,
+                providerTurnId: null,
+                nativeRequestRef: null,
+                kind: "command",
+                status: "pending",
+                responseCapability: {
+                  type: "live",
+                  providerSessionId: ProviderSessionId.make(
+                    "provider-session:foundation-dead-letter:parent-request",
+                  ),
+                },
+                createdAt: now,
+                resolvedAt: null,
+              },
+            },
+            // Open run-owned work inherited from an interrupted attempt: the
+            // compensation must cascade these instead of stranding them under
+            // the failed run.
+            {
+              id: EventId.make("event:foundation-dead-letter:subagent-node"),
+              type: "node.updated",
+              threadId,
+              runId,
+              nodeId: subagentNodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: subagentNodeId,
+                threadId,
+                runId,
+                parentNodeId: rootNodeId,
+                rootNodeId,
+                kind: "subagent",
+                status: "running",
+                countsForRun: false,
+                providerThreadId,
+                providerTurnId: null,
+                nativeItemRef: null,
+                runtimeRequestId: null,
+                checkpointScopeId: null,
+                startedAt: now,
+                completedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:subagent"),
+              type: "subagent.updated",
+              threadId,
+              runId,
+              nodeId: subagentNodeId,
+              driver: providerDriver,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: subagentNodeId,
+                threadId,
+                runId,
+                parentNodeId: rootNodeId,
+                origin: "app_owned",
+                createdBy: "agent",
+                driver: providerDriver,
+                providerInstanceId,
+                providerThreadId,
+                childThreadId: childAThreadId,
+                nativeTaskRef: null,
+                prompt: "child task",
+                title: null,
+                model: null,
+                // The lifetime link can settle before its routed child rows.
+                status: "completed",
+                result: null,
+                startedAt: now,
+                completedAt: now,
+                updatedAt: now,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:open-item"),
+              type: "turn-item.updated",
+              threadId,
+              runId,
+              nodeId: subagentNodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: openItemId,
+                threadId,
+                runId,
+                nodeId: subagentNodeId,
+                providerThreadId,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 1,
+                status: "running",
+                title: null,
+                startedAt: now,
+                completedAt: null,
+                updatedAt: now,
+                type: "assistant_message",
+                messageId: streamingMessageId,
+                text: "partial",
+                streaming: true,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:streaming-message"),
+              type: "message.updated",
+              threadId,
+              runId,
+              occurredAt: now,
+              payload: {
+                createdBy: "agent",
+                creationSource: "provider",
+                id: streamingMessageId,
+                threadId,
+                runId,
+                nodeId: subagentNodeId,
+                role: "assistant",
+                text: "partial",
+                attachments: [],
+                streaming: true,
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:subagent-b"),
+              type: "subagent.updated",
+              threadId,
+              runId,
+              nodeId: subagentBNodeId,
+              driver: providerDriver,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: subagentBNodeId,
+                threadId,
+                runId,
+                parentNodeId: rootNodeId,
+                origin: "app_owned",
+                createdBy: "agent",
+                driver: providerDriver,
+                providerInstanceId,
+                providerThreadId: null,
+                childThreadId: childBThreadId,
+                nativeTaskRef: null,
+                prompt: "delegated task",
+                title: null,
+                model: null,
+                status: "running",
+                result: null,
+                startedAt: now,
+                completedAt: null,
+                updatedAt: now,
+              },
+            },
+            threadCreatedEvent({
+              id: "event:foundation-dead-letter:child-a:thread",
+              thread: makeThread(childAThreadId, now),
+              now,
+            }),
+            {
+              id: EventId.make("event:foundation-dead-letter:child-a:node"),
+              type: "node.updated",
+              threadId: childAThreadId,
+              nodeId: childANodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childANodeId,
+                threadId: childAThreadId,
+                runId: null,
+                parentNodeId: null,
+                rootNodeId: childANodeId,
+                kind: "root_turn",
+                status: "running",
+                countsForRun: false,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                runtimeRequestId: null,
+                checkpointScopeId: null,
+                startedAt: now,
+                completedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:child-a:provider-turn"),
+              type: "provider-turn.updated",
+              threadId: childAThreadId,
+              nodeId: childANodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childAProviderTurnId,
+                providerThreadId: childAProviderThreadId,
+                nodeId: childANodeId,
+                runAttemptId: null,
+                nativeTurnRef: null,
+                ordinal: 1,
+                status: "running",
+                startedAt: now,
+                completedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:child-a:request"),
+              type: "runtime-request.updated",
+              threadId: childAThreadId,
+              nodeId: childANodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childARequestId,
+                nodeId: childANodeId,
+                providerTurnId: childAProviderTurnId,
+                nativeRequestRef: null,
+                kind: "user_input",
+                status: "pending",
+                responseCapability: {
+                  type: "live",
+                  providerSessionId: ProviderSessionId.make(
+                    "provider-session:foundation-dead-letter:child-a-request",
+                  ),
+                },
+                createdAt: now,
+                resolvedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:child-a:item"),
+              type: "turn-item.updated",
+              threadId: childAThreadId,
+              nodeId: childANodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childAItemId,
+                threadId: childAThreadId,
+                runId: null,
+                nodeId: childANodeId,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 1,
+                status: "running",
+                title: null,
+                startedAt: now,
+                completedAt: null,
+                updatedAt: now,
+                type: "assistant_message",
+                messageId: childAMessageId,
+                text: "child partial",
+                streaming: true,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:child-a:message"),
+              type: "message.updated",
+              threadId: childAThreadId,
+              occurredAt: now,
+              payload: {
+                createdBy: "agent",
+                creationSource: "provider",
+                id: childAMessageId,
+                threadId: childAThreadId,
+                runId: null,
+                nodeId: childANodeId,
+                role: "assistant",
+                text: "child partial",
+                attachments: [],
+                streaming: true,
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:child-a:subagent"),
+              type: "subagent.updated",
+              threadId: childAThreadId,
+              nodeId: childASubagentNodeId,
+              driver: providerDriver,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childASubagentNodeId,
+                threadId: childAThreadId,
+                runId: null,
+                parentNodeId: childANodeId,
+                origin: "provider_native",
+                createdBy: "agent",
+                driver: providerDriver,
+                providerInstanceId,
+                providerThreadId: null,
+                childThreadId: childCThreadId,
+                nativeTaskRef: null,
+                prompt: "grandchild task",
+                title: null,
+                model: null,
+                status: "running",
+                result: null,
+                startedAt: now,
+                completedAt: null,
+                updatedAt: now,
+              },
+            },
+            threadCreatedEvent({
+              id: "event:foundation-dead-letter:child-c:thread",
+              thread: makeThread(childCThreadId, now),
+              now,
+            }),
+            {
+              id: EventId.make("event:foundation-dead-letter:child-c:item"),
+              type: "turn-item.updated",
+              threadId: childCThreadId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childCItemId,
+                threadId: childCThreadId,
+                runId: null,
+                nodeId: null,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 1,
+                status: "running",
+                title: null,
+                startedAt: now,
+                completedAt: null,
+                updatedAt: now,
+                type: "reasoning",
+                text: "grandchild partial",
+                streaming: false,
+              },
+            },
+            threadCreatedEvent({
+              id: "event:foundation-dead-letter:child-b:thread",
+              thread: makeThread(childBThreadId, now),
+              now,
+            }),
+            {
+              id: EventId.make("event:foundation-dead-letter:child-b:run"),
+              type: "run.created",
+              threadId: childBThreadId,
+              runId: childBRunId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childBRunId,
+                threadId: childBThreadId,
+                ordinal: 1,
+                providerInstanceId,
+                modelSelection,
+                providerThreadId: childBProviderThreadId,
+                userMessageId: MessageId.make("message:foundation-dead-letter:child-b:user"),
+                rootNodeId: childBNodeId,
+                activeAttemptId: childBAttemptId,
+                status: "running",
+                queuePosition: null,
+                requestedAt: now,
+                startedAt: now,
+                completedAt: null,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:child-b:attempt"),
+              type: "run-attempt.created",
+              threadId: childBThreadId,
+              runId: childBRunId,
+              nodeId: childBNodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childBAttemptId,
+                runId: childBRunId,
+                attemptOrdinal: 1,
+                rootNodeId: childBNodeId,
+                providerInstanceId,
+                providerThreadId: childBProviderThreadId,
+                providerTurnId: childBProviderTurnId,
+                reason: "initial",
+                status: "running",
+                startedAt: now,
+                completedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:child-b:node"),
+              type: "node.updated",
+              threadId: childBThreadId,
+              runId: childBRunId,
+              nodeId: childBNodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childBNodeId,
+                threadId: childBThreadId,
+                runId: childBRunId,
+                parentNodeId: null,
+                rootNodeId: childBNodeId,
+                kind: "root_turn",
+                status: "running",
+                countsForRun: true,
+                providerThreadId: childBProviderThreadId,
+                providerTurnId: childBProviderTurnId,
+                nativeItemRef: null,
+                runtimeRequestId: null,
+                checkpointScopeId: null,
+                startedAt: now,
+                completedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:child-b:provider-turn"),
+              type: "provider-turn.updated",
+              threadId: childBThreadId,
+              runId: childBRunId,
+              nodeId: childBNodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childBProviderTurnId,
+                providerThreadId: childBProviderThreadId,
+                nodeId: childBNodeId,
+                runAttemptId: childBAttemptId,
+                nativeTurnRef: null,
+                ordinal: 1,
+                status: "running",
+                startedAt: now,
+                completedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:child-b:request"),
+              type: "runtime-request.updated",
+              threadId: childBThreadId,
+              runId: childBRunId,
+              nodeId: childBNodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childBRequestId,
+                nodeId: childBNodeId,
+                providerTurnId: childBProviderTurnId,
+                nativeRequestRef: null,
+                kind: "command",
+                status: "pending",
+                responseCapability: {
+                  type: "live",
+                  providerSessionId: ProviderSessionId.make(
+                    "provider-session:foundation-dead-letter:child-b-request",
+                  ),
+                },
+                createdAt: now,
+                resolvedAt: null,
+              },
+            },
+            {
+              id: EventId.make("event:foundation-dead-letter:child-b:item"),
+              type: "turn-item.updated",
+              threadId: childBThreadId,
+              runId: childBRunId,
+              nodeId: childBNodeId,
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: childBItemId,
+                threadId: childBThreadId,
+                runId: childBRunId,
+                nodeId: childBNodeId,
+                providerThreadId: childBProviderThreadId,
+                providerTurnId: childBProviderTurnId,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 1,
+                status: "running",
+                title: null,
+                startedAt: now,
+                completedAt: null,
+                updatedAt: now,
+                type: "reasoning",
+                text: "delegated child working",
+                streaming: false,
+              },
+            },
+          ],
+        });
+
+        const liveChild = yield* projectionStore.getThreadProjection(childBThreadId);
+        const runlessNodeId = NodeId.make("node:live-child:session-request");
+        const runlessRequestId = RuntimeRequestId.make("request:live-child:session-request");
+        yield* eventSink.write({
+          events: [
+            {
+              id: yield* idAllocator.allocate.event({ threadId: childBThreadId }),
+              type: "node.updated",
+              threadId: childBThreadId,
+              occurredAt: now,
+              payload: {
+                ...liveChild.nodes[0]!,
+                id: runlessNodeId,
+                runId: null,
+                kind: "approval_request",
+                countsForRun: false,
+                runtimeRequestId: runlessRequestId,
+              },
+            },
+            {
+              id: yield* idAllocator.allocate.event({ threadId: childBThreadId }),
+              type: "runtime-request.updated",
+              threadId: childBThreadId,
+              occurredAt: now,
+              payload: {
+                ...liveChild.runtimeRequests[0]!,
+                id: runlessRequestId,
+                nodeId: runlessNodeId,
+                providerTurnId: null,
+              },
+            },
+          ],
+        });
+
+        if (eagerOpenFailure) {
+          const seeded = yield* projectionStore.getThreadProjection(threadId);
+          const scopeId = CheckpointScopeId.make("checkpoint-scope:failed-restart");
+          const payloads = [
+            {
+              type: "provider-thread.updated",
+              payload: {
+                ...seeded.providerThreads[0]!,
+                providerSessionId: ProviderSessionId.make("failed-restart-session"),
+              },
+            },
+            {
+              type: "run-attempt.updated",
+              payload: { ...seeded.attempts[0]!, attemptOrdinal: 2, reason: "steering_restart" },
+            },
+            {
+              type: "node.updated",
+              payload: {
+                ...seeded.nodes.find((node) => node.id === rootNodeId)!,
+                checkpointScopeId: scopeId,
+              },
+            },
+            {
+              type: "checkpoint-scope.created",
+              payload: {
+                id: scopeId,
+                threadId,
+                runId,
+                nodeId: rootNodeId,
+                parentScopeId: null,
+                providerThreadId,
+                kind: "root_run",
+                ordinalWithinParent: 0,
+                advancesAppRunCount: true,
+                cwd: "/workspace",
+                createdAt: now,
+              },
+            },
+            {
+              type: "message.updated",
+              payload: {
+                id: startingRun.userMessageId,
+                threadId,
+                runId,
+                nodeId: rootNodeId,
+                ordinal: 100,
+                role: "user",
+                text: "Continue",
+                attachments: [],
+                streaming: false,
+                createdBy: "user",
+                creationSource: "web",
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+          ] as const;
+          yield* eventSink.write({
+            events: yield* Effect.forEach(
+              payloads,
+              Effect.fnUntraced(function* (event) {
+                return {
+                  ...event,
+                  id: yield* idAllocator.allocate.event({ threadId }),
+                  threadId,
+                  runId,
+                  occurredAt: now,
+                };
+              }),
+            ),
+          });
+        }
+        const openCalls = yield* Ref.make(0);
+        const sessionManager = Layer.mock(ProviderSessionManagerV2)({
+          open: () =>
+            Ref.update(openCalls, (count) => count + 1).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new ProviderSessionOpenError({
+                    providerSessionId: ProviderSessionId.make("failed-restart-session"),
+                    instanceId: providerInstanceId,
+                    cause: "Restart session unavailable",
+                  }),
+                ),
+              ),
+            ),
+        });
+        const effectId = "effect:foundation-dead-letter-run-failure";
+        yield* outbox.enqueue([
+          {
+            id: effectId,
+            commandId: CommandId.make("command:foundation-dead-letter-run-failure"),
+            threadId,
+            request:
+              effectType === "provider-turn.start"
+                ? { type: effectType, runId }
+                : {
+                    type: effectType,
+                    runId,
+                    providerThreadId,
+                    providerSessionId: ProviderSessionId.make("dead-letter:restart-session"),
+                    providerTurnId: ProviderTurnId.make("dead-letter:previous-turn"),
+                    interruptedAttemptId: RunAttemptId.make("dead-letter:previous-attempt"),
+                  },
+          },
+        ]);
+        const beforeDeadLetter = yield* projectionStore.getThreadProjection(threadId);
+
+        const childReadEntered = yield* Deferred.make<void>();
+        const resumeChildRead = yield* Deferred.make<void>();
+        let injected = false;
+        const repairingStore = ProjectionStoreV2.of({
+          ...projectionStore,
+          getThreadProjection: (id) =>
+            Effect.gen(function* () {
+              if (id === childAThreadId && !injected) {
+                if (failureMode === "repair-read-retry") {
+                  injected = true;
+                  return yield* new ProjectionStoreReadError({ threadId: id });
+                }
+                if (failureMode === "repair-lease-reclaim") {
+                  injected = true;
+                  yield* Deferred.succeed(childReadEntered, undefined);
+                  yield* Deferred.await(resumeChildRead);
+                }
+              }
+              return yield* projectionStore.getThreadProjection(id);
+            }),
+        });
+        const repairingSink = EventSinkV2.of({
+          ...eventSink,
+          writeIfRunCurrent: (input) =>
+            Effect.gen(function* () {
+              if (failureMode === "repair-write-retry" && !injected) {
+                injected = true;
+                return yield* new EventSinkWriteError({ eventCount: input.events.length });
+              }
+              return yield* eventSink.writeIfRunCurrent(input);
+            }),
+        });
+        // Missing bindings exhaust the worker. A valid restart binding reaches
+        // open and settles immediately, so its worker succeeds without compensation.
+        const providerTurnStartLive = providerTurnStartServiceLayer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(EventSinkV2, repairingSink),
+              Layer.succeed(ProjectionStoreV2, repairingStore),
+              deadLetterStartupDependencies,
+              Layer.succeed(IdAllocatorV2, idAllocator),
+              Layer.mock(ContextHandoffServiceV2)({}),
+              sessionManager,
+              Layer.mock(RunExecutionServiceV2)({}),
+              runtimePolicyLayer,
+            ),
+          ),
+        );
+        const executorProvided = effectExecutorLayer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              providerTurnStartLive,
+              Layer.mock(ProviderTurnControlServiceV2)({
+                interruptAndAwaitTerminal: () => Effect.void,
+              }),
+              Layer.mock(ProviderSessionManagerV2)({}),
+              Layer.mock(CheckpointRollbackServiceV2)({}),
+              Layer.mock(RuntimeRequestServiceV2)({}),
+              Layer.mock(RunFinalizationService)({}),
+              Layer.mock(ThreadTitleRegenerationService)({}),
+              Layer.mock(ThreadManagementService)({}),
+              ServerSettings.layerTest(),
+            ),
+          ),
+        );
+        const executions = yield* Ref.make(0);
+        const countedExecutor = Layer.effect(
+          OrchestrationEffectExecutorV2,
+          Effect.gen(function* () {
+            const delegate = yield* OrchestrationEffectExecutorV2;
+            return OrchestrationEffectExecutorV2.of({
+              ...delegate,
+              execute: (effect, options) =>
+                Ref.update(executions, (n) => n + 1).pipe(
+                  Effect.andThen(delegate.execute(effect, options)),
+                ),
+            });
+          }),
+        ).pipe(Layer.provide(executorProvided));
+        const repairingOutbox = EffectOutboxV2.of({
+          ...outbox,
+          fail: (input) =>
+            Effect.gen(function* () {
+              if (failureMode === "repair-outbox-retry" && !injected) {
+                injected = true;
+                return yield* new EffectOutboxError({
+                  operation: "fail",
+                  effectId: input.effectId,
+                });
+              }
+              return yield* outbox.fail(input);
+            }),
+        });
+        const workerLayer = (workerId: string) =>
+          effectWorkerLayerWithOptions({
+            workerId,
+            maxAttempts: failureMode === "restart-open-retry-exhaustion" ? 2 : 1,
+            leaseDurationMs: 1000,
+          }).pipe(
+            Layer.provide(
+              Layer.merge(Layer.succeed(EffectOutboxV2, repairingOutbox), countedExecutor),
+            ),
+          );
+        const runWorker = (workerId: string) =>
+          OrchestrationEffectWorkerV2.pipe(
+            Effect.flatMap((worker) => worker.runOnce),
+            Effect.provide(workerLayer(workerId)),
+          );
+        if (failureMode === "restart-open-retry-exhaustion") {
+          assert.isTrue(yield* runWorker("first"));
+          const retrying = yield* projectionStore.getThreadProjection(threadId);
+          assert.equal(retrying.runs[0]?.status, "starting");
+          assert.isFalse(retrying.turnItems.some((item) => item.type === "error"));
+          assert.equal(
+            (yield* projectionStore.getThreadProjection(childAThreadId)).nodes[0]?.status,
+            "running",
+          );
+          yield* TestClock.adjust("100 millis");
+          assert.isTrue(yield* runWorker("last"));
+        } else if (failureMode === "repair-lease-reclaim") {
+          const first = yield* runWorker("first").pipe(Effect.result, Effect.forkChild);
+          yield* Deferred.await(childReadEntered);
+          yield* TestClock.adjust("2 seconds");
+          // Expiry alone cannot reclaim: SQL only claims pending rows.
+          assert.isFalse(yield* runWorker("second"));
+          const recovery = yield* outbox.reconcileAfterProcessLoss;
+          assert.equal(recovery.requeued, 1);
+          assert.equal(recovery.cancelled, 0);
+          const second = yield* runWorker("second").pipe(
+            Effect.ensuring(Deferred.succeed(resumeChildRead, undefined)),
+          );
+          assert.isTrue(second);
+          const settledSequence = yield* eventSink.latestSequence();
+          const firstResult = yield* Fiber.join(first);
+          assert.equal(firstResult._tag, "Failure");
+          assert.equal(yield* eventSink.latestSequence(), settledSequence);
+        } else if (
+          failureMode === "repair-read-retry" ||
+          failureMode === "repair-write-retry" ||
+          failureMode === "repair-outbox-retry"
+        ) {
+          const first = yield* runWorker("first").pipe(Effect.result);
+          assert.equal(first._tag, "Failure");
+          assert.equal(
+            (yield* projectionStore.getThreadProjection(threadId)).runs[0]?.status,
+            failureMode === "repair-outbox-retry" ? "failed" : "starting",
+          );
+          const pending = yield* outbox.get(effectId);
+          assert.isTrue(Option.isSome(pending));
+          if (Option.isSome(pending)) assert.equal(pending.value.status, "pending");
+          const recovery = yield* outbox.reconcileAfterProcessLoss;
+          assert.equal(recovery.cancelled, 0);
+          // New worker/service scopes over the same SQL state emulate reconstruction.
+          assert.isFalse(yield* runWorker("restarted"));
+          yield* TestClock.adjust("100 millis");
+          assert.isTrue(yield* runWorker("restarted"));
+        } else {
+          assert.isTrue(yield* runWorker("first"));
+        }
+        assert.equal(
+          yield* Ref.get(executions),
+          failureMode === "restart-open-retry-exhaustion" ? 2 : 1,
+        );
+
+        const storedEffect = yield* outbox.get(effectId);
+        assert.isTrue(Option.isSome(storedEffect));
+        if (Option.isSome(storedEffect)) {
+          assert.equal(
+            storedEffect.value.status,
+            eagerOpenFailure ? "succeeded" : "failed",
+            storedEffect.value.lastError ?? undefined,
+          );
+        }
+        const expectedOpenCalls =
+          failureMode === "restart-open-retry-exhaustion" ? 2 : Number(eagerOpenFailure);
+        assert.equal(yield* Ref.get(openCalls), expectedOpenCalls);
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        const run = projection.runs.find((candidate) => candidate.id === runId);
+        assert.equal(run?.status, "failed");
+        assert.isTrue(run !== undefined && run.completedAt !== null);
+        assert.equal(
+          projection.attempts.find((candidate) => candidate.id === attemptId)?.status,
+          "failed",
+        );
+        assert.equal(
+          projection.nodes.find((candidate) => candidate.id === rootNodeId)?.status,
+          "failed",
+        );
+        const parentRequest = projection.runtimeRequests.find(
+          (candidate) => candidate.id === parentRequestId,
+        );
+        assert.equal(parentRequest?.status, "cancelled");
+        assert.equal(parentRequest?.responseCapability.type, "not_resumable");
+        assert.isNotNull(parentRequest?.resolvedAt);
+        assert.equal(
+          (yield* projectionStore.getThreadShell(threadId))?.pendingRuntimeRequest,
+          null,
+        );
+        const errorItem = projection.turnItems.find((item) => item.type === "error");
+        assert.isDefined(errorItem);
+        if (errorItem?.type === "error") {
+          assert.equal(errorItem.status, "failed");
+          assert.include(
+            errorItem.failure.message,
+            eagerOpenFailure
+              ? "Restart session unavailable"
+              : "Starting the provider turn failed permanently",
+          );
+        }
+        assert.equal(
+          projection.subagents.find((candidate) => candidate.id === subagentNodeId)?.status,
+          "completed",
+        );
+        assert.equal(
+          projection.nodes.find((candidate) => candidate.id === subagentNodeId)?.status,
+          "failed",
+        );
+        const parentOpenItem = projection.turnItems.find((item) => item.id === openItemId);
+        assert.equal(parentOpenItem?.status, "failed");
+        assert.isTrue(
+          parentOpenItem?.type === "assistant_message" && parentOpenItem.streaming === false,
+        );
+        assert.equal(
+          projection.messages.find((message) => message.id === streamingMessageId)?.streaming,
+          false,
+        );
+        assert.equal(
+          projection.providerThreads.find((candidate) => candidate.id === providerThreadId)?.status,
+          "idle",
+        );
+        const terminalStatuses: ReadonlySet<string> = new Set([
+          "cancelled",
+          "completed",
+          "failed",
+          "interrupted",
+        ]);
+        assert.isTrue(projection.runs.every((candidate) => terminalStatuses.has(candidate.status)));
+
+        // Linked child threads: provider-native child A (runId-null rows) and
+        // its nested grandchild C are swept; app-owned child B with its own
+        // live run is left alone.
+        const childA = yield* projectionStore.getThreadProjection(childAThreadId);
+        assert.equal(childA.nodes.find((node) => node.id === childANodeId)?.status, "failed");
+        const childAItem = childA.turnItems.find((item) => item.id === childAItemId);
+        assert.equal(childAItem?.status, "failed");
+        assert.isTrue(childAItem?.type === "assistant_message" && childAItem.streaming === false);
+        assert.equal(
+          childA.subagents.find((candidate) => candidate.id === childASubagentNodeId)?.status,
+          "failed",
+        );
+        assert.equal(
+          childA.messages.find((message) => message.id === childAMessageId)?.streaming,
+          false,
+        );
+        const childARequest = childA.runtimeRequests.find(
+          (candidate) => candidate.id === childARequestId,
+        );
+        assert.equal(childARequest?.status, "cancelled");
+        assert.equal(childARequest?.responseCapability.type, "not_resumable");
+        assert.isNotNull(childARequest?.resolvedAt);
+        assert.equal(
+          childA.providerTurns.find((candidate) => candidate.id === childAProviderTurnId)?.status,
+          "cancelled",
+        );
+        assert.equal(
+          (yield* projectionStore.getThreadShell(childAThreadId))?.pendingRuntimeRequest,
+          null,
+        );
+        const childC = yield* projectionStore.getThreadProjection(childCThreadId);
+        assert.equal(childC.turnItems.find((item) => item.id === childCItemId)?.status, "failed");
+        const childB = yield* projectionStore.getThreadProjection(childBThreadId);
+        assert.equal(childB.nodes.find((node) => node.id === runlessNodeId)?.status, "running");
+        assert.equal(
+          childB.runtimeRequests.find((request) => request.id === runlessRequestId)?.status,
+          "pending",
+        );
+        assert.equal(
+          childB.runs.find((candidate) => candidate.id === childBRunId)?.status,
+          "running",
+        );
+        assert.equal(
+          childB.nodes.find((candidate) => candidate.id === childBNodeId)?.status,
+          "running",
+        );
+        assert.equal(
+          childB.attempts.find((candidate) => candidate.id === childBAttemptId)?.status,
+          "running",
+        );
+        assert.equal(childB.turnItems.find((item) => item.id === childBItemId)?.status, "running");
+        assert.equal(
+          childB.providerTurns.find((candidate) => candidate.id === childBProviderTurnId)?.status,
+          "running",
+        );
+        assert.equal(
+          childB.runtimeRequests.find((candidate) => candidate.id === childBRequestId)?.status,
+          "pending",
+        );
+        assert.equal(
+          (yield* projectionStore.getThreadShell(childBThreadId))?.pendingRuntimeRequest?.id,
+          childBRequestId,
+        );
+        assert.equal(
+          projection.subagents.find((candidate) => candidate.id === subagentBNodeId)?.status,
+          "failed",
+        );
+
+        // A replayed compensation is a no-op once the run left `starting`: the
+        // writeIfRunCurrent guard rejects the write instead of duplicating
+        // terminal events.
+        yield* ProviderTurnStartServiceV2.pipe(
+          Effect.flatMap((service) =>
+            service.failFromDeadLetter({ threadId, runId, error: "replayed dead letter" }),
+          ),
+          Effect.provide(providerTurnStartLive),
+        );
+        const replayed = yield* projectionStore.getThreadProjection(threadId);
+        assert.lengthOf(
+          replayed.turnItems.filter((item) => item.type === "error"),
+          1,
+        );
+        assert.equal(
+          DateTime.formatIso(replayed.runs[0]!.completedAt!),
+          DateTime.formatIso(run!.completedAt!),
+        );
+        // A compensation that read the old attempt must not fail a replacement
+        // which reached starting before the guarded write.
+        const replacement = {
+          ...startingRun,
+          activeAttemptId: RunAttemptId.make("dead-letter:replacement"),
+        };
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make("dead-letter:replacement-run"),
+              type: "run.updated",
+              threadId,
+              runId,
+              occurredAt: now,
+              payload: replacement,
+            },
+          ],
+        });
+        const beforeStaleCompensation = yield* eventSink.latestSequence();
+        yield* ProviderTurnStartServiceV2.pipe(
+          Effect.flatMap((service) =>
+            service.failFromDeadLetter({
+              threadId,
+              runId,
+              expectedAttemptId: attemptId,
+              error: "obsolete durable repair",
+            }),
+          ),
+          Effect.provide(providerTurnStartLive),
+        );
+        assert.equal(yield* eventSink.latestSequence(), beforeStaleCompensation);
+        const staleSnapshotStore = ProjectionStoreV2.of({
+          ...projectionStore,
+          getThreadProjection: (id) =>
+            id === threadId
+              ? Effect.succeed(beforeDeadLetter)
+              : projectionStore.getThreadProjection(id),
+        });
+        const staleStartLayer = providerTurnStartServiceLayer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(EventSinkV2, eventSink),
+              Layer.succeed(ProjectionStoreV2, staleSnapshotStore),
+              Layer.succeed(IdAllocatorV2, idAllocator),
+              deadLetterStartupDependencies,
+              Layer.mock(ContextHandoffServiceV2)({}),
+              Layer.mock(ProviderSessionManagerV2)({}),
+              Layer.mock(RunExecutionServiceV2)({}),
+              Layer.mock(RuntimePolicyV2)({}),
+            ),
+          ),
+        );
+        yield* ProviderTurnStartServiceV2.pipe(
+          Effect.flatMap((service) =>
+            service.failFromDeadLetter({ threadId, runId, error: "stale failure" }),
+          ),
+          Effect.provide(staleStartLayer),
+        );
+        assert.equal(yield* eventSink.latestSequence(), beforeStaleCompensation);
+        assert.equal(
+          (yield* projectionStore.getThreadProjection(threadId)).runs[0]?.activeAttemptId,
+          replacement.activeAttemptId,
+        );
+      }).pipe(Effect.provide(Layer.fresh(TestLayer))),
+    );
+  }
+
+  it.effect("retries failed child reads but skips a truly missing child", () =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSinkV2;
+      const projectionStore = yield* ProjectionStoreV2;
+      const idAllocator = yield* IdAllocatorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:foundation-dead-letter-child-read-failure");
+      const runId = RunId.make("run:foundation-dead-letter-child-read-failure");
+      const attemptId = RunAttemptId.make("run-attempt:foundation-dead-letter-child-read-failure");
+      const rootNodeId = NodeId.make("node:foundation-dead-letter-child-read-failure");
+      const subagentNodeId = NodeId.make("node:foundation-dead-letter-child-read-failure:subagent");
+      const providerThreadId = ProviderThreadId.make(
+        "provider-thread:foundation-dead-letter-child-read-failure",
+      );
+      const childThreadId = ThreadId.make("thread:foundation-dead-letter-child-read-failure:child");
+      yield* eventSink.write({
+        events: [
+          threadCreatedEvent({
+            id: "event:foundation-dead-letter-child-read-failure:thread",
+            thread: makeThread(threadId, now),
+            now,
+          }),
+          {
+            id: EventId.make("event:foundation-dead-letter-child-read-failure:provider-thread"),
+            type: "provider-thread.updated",
+            threadId,
+            driver: providerDriver,
+            providerInstanceId,
+            occurredAt: now,
+            payload: {
+              id: providerThreadId,
+              driver: providerDriver,
+              providerInstanceId,
+              providerSessionId: null,
+              appThreadId: threadId,
+              ownerNodeId: null,
+              nativeThreadRef: null,
+              nativeConversationHeadRef: null,
+              status: "active",
+              firstRunOrdinal: 1,
+              lastRunOrdinal: 1,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          {
+            id: EventId.make("event:foundation-dead-letter-child-read-failure:run"),
+            type: "run.created",
+            threadId,
+            runId,
+            nodeId: rootNodeId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: {
+              id: runId,
+              threadId,
+              ordinal: 1,
+              providerInstanceId,
+              modelSelection,
+              providerThreadId,
+              userMessageId: MessageId.make(
+                "message:foundation-dead-letter-child-read-failure:user",
+              ),
+              rootNodeId,
+              activeAttemptId: attemptId,
+              status: "starting",
+              queuePosition: null,
+              requestedAt: now,
+              startedAt: null,
+              completedAt: null,
+              checkpointId: null,
+              contextHandoffId: null,
+            },
+          },
+          {
+            id: EventId.make("event:foundation-dead-letter-child-read-failure:attempt"),
+            type: "run-attempt.created",
+            threadId,
+            runId,
+            nodeId: rootNodeId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: {
+              id: attemptId,
+              runId,
+              attemptOrdinal: 1,
+              rootNodeId,
+              providerInstanceId,
+              providerThreadId,
+              providerTurnId: null,
+              reason: "initial",
+              status: "pending",
+              startedAt: null,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make("event:foundation-dead-letter-child-read-failure:node"),
+            type: "node.updated",
+            threadId,
+            runId,
+            nodeId: rootNodeId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: {
+              id: rootNodeId,
+              threadId,
+              runId,
+              parentNodeId: null,
+              rootNodeId,
+              kind: "root_turn",
+              status: "pending",
+              countsForRun: true,
+              providerThreadId,
+              providerTurnId: null,
+              nativeItemRef: null,
+              runtimeRequestId: null,
+              checkpointScopeId: null,
+              startedAt: null,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make("event:foundation-dead-letter-child-read-failure:subagent"),
+            type: "subagent.updated",
+            threadId,
+            runId,
+            nodeId: subagentNodeId,
+            driver: providerDriver,
+            providerInstanceId,
+            occurredAt: now,
+            payload: {
+              id: subagentNodeId,
+              threadId,
+              runId,
+              parentNodeId: rootNodeId,
+              origin: "provider_native",
+              createdBy: "agent",
+              driver: providerDriver,
+              providerInstanceId,
+              providerThreadId,
+              childThreadId,
+              nativeTaskRef: null,
+              prompt: "child task",
+              title: null,
+              model: null,
+              status: "running",
+              result: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+
+      let failRead = true;
+      const failingProjectionStore = ProjectionStoreV2.of({
+        ...projectionStore,
+        getThreadProjection: (readThreadId) =>
+          readThreadId === childThreadId && failRead
+            ? Effect.fail(new ProjectionStoreReadError({ threadId: readThreadId }))
+            : projectionStore.getThreadProjection(readThreadId),
+      });
+      const providerTurnStartLive = providerTurnStartServiceLayer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(EventSinkV2, eventSink),
+            Layer.succeed(ProjectionStoreV2, failingProjectionStore),
+            deadLetterStartupDependencies,
+            Layer.succeed(IdAllocatorV2, idAllocator),
+            Layer.mock(ContextHandoffServiceV2)({}),
+            Layer.mock(ProviderSessionManagerV2)({}),
+            Layer.mock(RunExecutionServiceV2)({}),
+            Layer.mock(RuntimePolicyV2)({}),
+          ),
+        ),
+      );
+
+      const repair = ProviderTurnStartServiceV2.pipe(
+        Effect.flatMap((service) =>
+          service.failFromDeadLetter({ threadId, runId, error: "dead letter" }),
+        ),
+        Effect.provide(providerTurnStartLive),
+      );
+      assert.equal((yield* Effect.result(repair))._tag, "Failure");
+      assert.equal(
+        (yield* projectionStore.getThreadProjection(threadId)).runs[0]?.status,
+        "starting",
+      );
+      const outbox = yield* EffectOutboxV2;
+      const effectId = "effect:repair-through-runtime-recovery";
+      yield* outbox.enqueue([
+        {
+          id: effectId,
+          commandId: CommandId.make(effectId),
+          threadId,
+          request: { type: "provider-turn.start", runId },
+        },
+      ]);
+      yield* outbox.claimNext({ workerId: "before-restart", leaseDurationMs: 1000 });
+      assert.isTrue(
+        yield* outbox.beginRepair({
+          effectId,
+          workerId: "before-restart",
+          runId,
+          error: "exhausted",
+        }),
+      );
+      assert.deepEqual(yield* outbox.getRepairRunIds(threadId), [runId]);
+      const repairRun = (yield* projectionStore.getThreadProjection(threadId)).runs[0]!;
+      const changeAttempt = (activeAttemptId: RunAttemptId) =>
+        eventSink.write({
+          events: [
+            {
+              id: EventId.make(`repair-attempt:${activeAttemptId}`),
+              type: "run.updated",
+              threadId,
+              runId,
+              occurredAt: now,
+              payload: { ...repairRun, activeAttemptId },
+            },
+          ],
+        });
+      yield* changeAttempt(RunAttemptId.make("repair-attempt:newer"));
+      assert.deepEqual(yield* outbox.getRepairRunIds(threadId), []);
+      yield* changeAttempt(attemptId);
+      assert.deepEqual(yield* outbox.getRepairRunIds(threadId), [runId]);
+      const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+        Effect.provide(ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true })),
+      );
+      const recovered = yield* recovery.recover;
+      assert.equal(recovered.requeuedEffects, 1);
+      assert.equal(recovered.terminalizedRuns, 0);
+      assert.equal(
+        (yield* projectionStore.getThreadProjection(threadId)).runs[0]?.status,
+        "starting",
+      );
+      failRead = false;
+      yield* repair;
+      const projection = yield* projectionStore.getThreadProjection(threadId);
+      assert.equal(projection.runs.find((candidate) => candidate.id === runId)?.status, "failed");
+      assert.equal(
+        projection.attempts.find((candidate) => candidate.id === attemptId)?.status,
+        "failed",
+      );
+      assert.equal(
+        projection.nodes.find((candidate) => candidate.id === rootNodeId)?.status,
+        "failed",
+      );
+      assert.equal(
+        projection.subagents.find((candidate) => candidate.id === subagentNodeId)?.status,
+        "failed",
+      );
+    }).pipe(Effect.provide(Layer.fresh(TestLayer))),
+  );
 });
 
 it.live("keeps claiming new work after repeated idle periods", () =>
@@ -2960,6 +4472,7 @@ it.live("keeps claiming new work after repeated idle periods", () =>
             ? Effect.die(`Missing completion signal for ${effect.id}`)
             : Deferred.succeed(completion, undefined).pipe(Effect.asVoid);
         },
+        compensateDeadLetter: () => Effect.void,
       }),
     );
     const workerLayer = effectWorkerLayerWithOptions({
