@@ -19,6 +19,7 @@ import * as ServerConfig from "../../../config.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import { ProjectHandlersLive } from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -68,6 +69,9 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       }),
       Layer.mock(Project.ProjectService)({}),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
+      Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
+        launchedThreadGrant: () => Effect.succeed(() => Effect.void),
+      }),
       NodeServices.layer,
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-source-link-" }).pipe(
         Layer.provide(NodeServices.layer),
@@ -132,6 +136,9 @@ it.effect("launches a scratch thread into the Scratch project", () =>
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
         namedProjectsRoot: "/projects",
         ensureScratchProject: Effect.succeed({ projectId: scratchProjectId }),
+      }),
+      Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
+        launchedThreadGrant: () => Effect.succeed(() => Effect.void),
       }),
       NodeServices.layer,
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-scratch-launch-" }).pipe(
@@ -227,6 +234,7 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
             };
           }),
       }),
+      Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
       NodeServices.layer,
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-named-project-" }).pipe(
         Layer.provide(NodeServices.layer),
