@@ -2951,6 +2951,290 @@ describe("AcpAdapterV2", () => {
     );
   }
 
+  const makeGrokReasoningHarness = (input: {
+    readonly name: string;
+    readonly protocolVersion: 1 | 2;
+    readonly failLegacyWrite?: (meta: unknown) => EffectAcpErrors.AcpError | undefined;
+  }) =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const legacyWrites: Array<{ model: string; meta: unknown }> = [];
+      const configWrites: Array<{ id: string; value: unknown }> = [];
+      const modelWrites: Array<string> = [];
+      let update: Parameters<
+        AcpSessionRuntime.AcpSessionRuntime["Service"]["handleSessionUpdate"]
+      >[0] = () => Effect.void;
+      const instanceId = ProviderInstanceId.make(input.name);
+      const adapter = makeGrokAdapterV2({
+        instanceId,
+        settings: DEFAULT_GROK_SETTINGS,
+        environment: {},
+        hostPlatform: yield* HostProcessPlatform,
+        childProcessSpawner,
+        crypto: yield* Crypto.Crypto,
+        fileSystem: yield* FileSystem.FileSystem,
+        idAllocator: yield* IdAllocatorV2,
+        serverConfig: yield* ServerConfig,
+        selfInvocation: yield* resolveSelfInvocation(),
+        // Post-settle output is labelled with the acknowledged configuration.
+        continuationRequests: { offer: () => Effect.void },
+        makeRuntime: makeMockRuntime({
+          childProcessSpawner,
+          mockAgentPath,
+          wrapRuntime: (native) => ({
+            ...native,
+            start: () =>
+              native.start().pipe(
+                Effect.map((started) => ({
+                  ...started,
+                  initializeResult: {
+                    ...started.initializeResult,
+                    protocolVersion: input.protocolVersion,
+                  },
+                  sessionSetupResult: {
+                    ...started.sessionSetupResult,
+                    models: {
+                      currentModelId: "composer-2",
+                      availableModels: [
+                        {
+                          modelId: "composer-2",
+                          name: "Composer",
+                          _meta: { reasoningEffort: "low" },
+                        },
+                      ],
+                    },
+                  },
+                })),
+              ),
+            handleSessionUpdate: (handler) =>
+              Effect.sync(() => {
+                update = handler;
+              }).pipe(Effect.andThen(native.handleSessionUpdate(handler))),
+            getConfigOptions: native.getConfigOptions.pipe(
+              Effect.map((options) => [
+                ...options,
+                {
+                  id: "reasoningEffort",
+                  name: "Reasoning",
+                  type: "select" as const,
+                  currentValue: "low",
+                  options: ["low", "high"].map((value) => ({ value, name: value })),
+                },
+                {
+                  id: "speed",
+                  name: "Speed",
+                  type: "select" as const,
+                  currentValue: "normal",
+                  options: ["normal", "fast"].map((value) => ({ value, name: value })),
+                },
+              ]),
+            ),
+            setSessionModel: (model, meta) =>
+              Effect.gen(function* () {
+                legacyWrites.push({ model, meta });
+                const failure = input.failLegacyWrite?.(meta);
+                if (failure !== undefined) return yield* failure;
+                return {};
+              }),
+            setModel: (model, force) =>
+              Effect.sync(() => {
+                modelWrites.push(model);
+              }).pipe(Effect.andThen(native.setModel(model, force))),
+            setConfigOption: (id, value) =>
+              Effect.sync(() => {
+                configWrites.push({ id, value });
+                return { configOptions: [] };
+              }),
+          }),
+        }),
+      });
+      const threadId = ThreadId.make(input.name);
+      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const selection = (
+        value: string,
+        extra: ReadonlyArray<{ readonly id: string; readonly value: string }> = [],
+      ) => ({
+        instanceId,
+        model: "composer-2",
+        options: [{ id: "reasoningEffort", value }, ...extra],
+      });
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make(input.name),
+        modelSelection: selection("low"),
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection: selection("low"),
+        runtimePolicy,
+      });
+      let ordinal = 0;
+      const turn = (
+        effort: string,
+        extra: ReadonlyArray<{ readonly id: string; readonly value: string }> = [],
+      ) =>
+        Effect.gen(function* () {
+          ordinal += 1;
+          const started = yield* Effect.exit(
+            runtime.startTurn(
+              makeTurnInput({
+                threadId,
+                providerThread,
+                instanceId,
+                runtimePolicy,
+                now: yield* DateTime.now,
+                ordinal,
+                modelSelection: selection(effort, extra),
+              }),
+            ),
+          );
+          if (Exit.isSuccess(started)) {
+            yield* runtime.events.pipe(
+              Stream.filter((event) => event.type === "turn.terminal"),
+              Stream.runHead,
+            );
+          }
+          return started;
+        });
+      // Output the agent produces after the turn settles carries the label of
+      // the configuration its session had acknowledged.
+      const bufferedLabel = Effect.gen(function* () {
+        const sessionId = providerThread.nativeThreadRef?.nativeId;
+        if (sessionId == null) return yield* Effect.die("provider thread has no native session");
+        yield* update({
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: `post-settle ${ordinal}` },
+          },
+        });
+        return yield* runtime.bufferedExecutionSelection!(providerThread);
+      });
+      return {
+        instanceId,
+        legacyWrites,
+        configWrites,
+        modelWrites,
+        runtime,
+        selection,
+        turn,
+        bufferedLabel,
+      };
+    });
+
+  for (const protocolVersion of [1, 2] as const) {
+    it.live(
+      `Grok applies and attributes low -> high -> low reasoning on protocol ${protocolVersion}`,
+      () =>
+        Effect.gen(function* () {
+          const harness = yield* makeGrokReasoningHarness({
+            name: `grok-reasoning-${protocolVersion}`,
+            protocolVersion,
+          });
+          for (const effort of ["high", "low"]) {
+            assert.isTrue(Exit.isSuccess(yield* harness.turn(effort)));
+          }
+          if (protocolVersion === 1) {
+            assert.deepEqual(
+              harness.legacyWrites.map((write) => write.meta),
+              [{ reasoningEffort: "low" }, { reasoningEffort: "high" }, { reasoningEffort: "low" }],
+            );
+            assert.isTrue(harness.legacyWrites.every((write) => write.model === "composer-2"));
+            // The consumed option never leaks into the config API.
+            assert.deepEqual(harness.configWrites, []);
+            assert.deepEqual(harness.modelWrites, []);
+          } else {
+            assert.deepEqual(harness.legacyWrites, []);
+            assert.deepEqual(harness.modelWrites, ["composer-2"]);
+            assert.deepEqual(
+              harness.configWrites,
+              ["low", "high", "low"].map((value) => ({ id: "reasoningEffort", value })),
+            );
+          }
+          // Both paths settle and attribute reasoning like any other configuration step.
+          assert.isTrue(yield* harness.runtime.selectionAcknowledged!(harness.selection("low")));
+          assert.deepEqual(yield* harness.bufferedLabel, harness.selection("low"));
+        }).pipe(Effect.provide(testLayer), Effect.scoped),
+    );
+  }
+
+  it.live("Grok legacy reasoning consumes only a valid explicit effort", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeGrokReasoningHarness({
+        name: "grok-reasoning-scope",
+        protocolVersion: 1,
+      });
+      assert.isTrue(
+        Exit.isSuccess(yield* harness.turn("not valid!", [{ id: "speed", value: "fast" }])),
+      );
+      // An invalid effort is consumed without a write and is not attributed;
+      // other options still reach the config API.
+      assert.deepEqual(
+        harness.legacyWrites.map((write) => write.meta),
+        [{ reasoningEffort: "low" }],
+      );
+      assert.deepEqual(harness.configWrites, [{ id: "speed", value: "fast" }]);
+      assert.deepEqual(yield* harness.bufferedLabel, {
+        instanceId: harness.instanceId,
+        model: "composer-2",
+        options: [
+          { id: "reasoningEffort", value: "low" },
+          { id: "speed", value: "fast" },
+        ],
+      });
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  for (const failure of ["error-response", "indeterminate"] as const) {
+    it.live(`Grok legacy reasoning keeps its acknowledged effort after an ${failure}`, () =>
+      Effect.gen(function* () {
+        let failHigh = true;
+        const harness = yield* makeGrokReasoningHarness({
+          name: `grok-reasoning-${failure}`,
+          protocolVersion: 1,
+          failLegacyWrite: (meta) => {
+            if (!failHigh || (meta as { reasoningEffort?: unknown })?.reasoningEffort !== "high")
+              return undefined;
+            return failure === "error-response"
+              ? new EffectAcpErrors.AcpRequestError({
+                  code: -32602,
+                  errorMessage: "fixture rejected reasoning effort",
+                  operation: "receive-response",
+                })
+              : new EffectAcpErrors.AcpTransportError({
+                  operation: "call-rpc",
+                  method: "session/set_model",
+                  cause: "fixture lost response",
+                });
+          },
+        });
+        assert.isTrue(Exit.isFailure(yield* harness.turn("high")));
+        assert.deepEqual(
+          harness.legacyWrites.map((write) => write.meta),
+          [{ reasoningEffort: "low" }, { reasoningEffort: "high" }],
+        );
+        assert.deepEqual(harness.configWrites, []);
+        assert.isFalse(yield* harness.runtime.selectionAcknowledged!(harness.selection("high")));
+        // An unacknowledged write is not applied: output keeps the prior effort.
+        assert.deepEqual(yield* harness.bufferedLabel, harness.selection("low"));
+        failHigh = false;
+        assert.isTrue(Exit.isSuccess(yield* harness.turn("high")));
+        assert.isTrue(yield* harness.runtime.selectionAcknowledged!(harness.selection("high")));
+        assert.deepEqual(yield* harness.bufferedLabel, harness.selection("high"));
+        assert.deepEqual(harness.configWrites, []);
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+    );
+  }
+
   it.live("Grok reapplies an explicit return to the session's setup-time model", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;

@@ -230,15 +230,27 @@ export interface AcpAdapterV2Flavor {
   readonly resolveModelId?: (selection: ModelSelection) => string | undefined;
   /**
    * Replaces the default model application on session setup. Returns the model
-   * the session now runs on. Antigravity resolves its provider-default alias
-   * against the account's catalog instead of sending it to the agent.
+   * the session now runs on and the options it consumed outside the config
+   * API; consumed options the agent acknowledged are recorded as applied with
+   * the model step. Antigravity resolves its provider-default alias against the
+   * account's catalog instead of sending it to the agent.
    */
   readonly applyModelSelection?: (input: {
     readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
     readonly startResult: AcpSessionRuntimeStartResult;
     readonly modelSelection: ModelSelection;
     readonly force?: boolean;
-  }) => Effect.Effect<string | undefined, EffectAcpErrors.AcpError>;
+  }) => Effect.Effect<
+    {
+      readonly modelId: string | undefined;
+      readonly consumedOptionIds?: ReadonlyArray<string>;
+      readonly appliedOptions?: ReadonlyArray<{
+        readonly id: string;
+        readonly value: string | boolean;
+      }>;
+    },
+    EffectAcpErrors.AcpError
+  >;
   readonly canForceModelSelection?: boolean;
   /** Native session mode to select for a runtime policy (e.g. Antigravity `yolo`). */
   readonly sessionModeForPolicy?: (policy: ProviderAdapterV2RuntimePolicy) => string | undefined;
@@ -6008,10 +6020,11 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             );
           });
           let appliedModel: string | undefined;
+          let consumedOptionIds: ReadonlyArray<string> = [];
           if (flavor.applyModelSelection !== undefined) {
-            appliedModel = yield* step(
+            const applied = yield* step(
               "model",
-              (applied) => applied,
+              (result) => result.modelId,
               flavor.applyModelSelection({
                 runtime,
                 startResult,
@@ -6019,6 +6032,22 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
                 force,
               }),
             );
+            appliedModel = applied.modelId;
+            consumedOptionIds = applied.consumedOptionIds ?? [];
+            // The model step's response acknowledges options sent with it.
+            for (const option of applied.appliedOptions ?? []) {
+              yield* Ref.update(appliedSelections, (current) => {
+                const previous = current.get(startResult.sessionId);
+                if (previous === undefined) return current;
+                return new Map(current).set(startResult.sessionId, {
+                  ...previous,
+                  options: [
+                    ...(previous.options ?? []).filter((entry) => entry.id !== option.id),
+                    { id: option.id, value: option.value },
+                  ],
+                });
+              });
+            }
           } else if (
             requestedModel.length > 0 &&
             requestedModel !== "auto" &&
@@ -6055,7 +6084,9 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               };
             });
           }
-          const optionSelections = modelSelection.options ?? [];
+          const optionSelections = (modelSelection.options ?? []).filter(
+            (selection) => !consumedOptionIds.includes(selection.id),
+          );
           const configOptions = yield* runtime.getConfigOptions;
           const availableConfigIds = new Set(configOptions.map((option) => option.id));
           const hasNativeConfigWithSyntheticModeId = availableConfigIds.has(

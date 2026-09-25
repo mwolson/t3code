@@ -242,14 +242,40 @@ export function makeGrokAcpAdapterFlavor(options: GrokAdapterV2Options): AcpAdap
         else if (typeof configuredModel === "string") currentModelId = configuredModel;
         const requestedModelId = resolveGrokAcpBaseModelId(modelSelection.model);
         if (force === true && requestedModelId !== "grok-build") currentModelId = undefined;
-        return yield* applyGrokAcpModelSelection({
+        const requestedEffort = modelSelection.options?.find(
+          (option) => option.id === "reasoningEffort",
+        )?.value;
+        let acknowledgedEffort: unknown;
+        const modelId = yield* applyGrokAcpModelSelection({
           runtime: legacy
-            ? runtime
+            ? {
+                setSessionModel: (model, meta) =>
+                  runtime.setSessionModel(model, meta).pipe(
+                    Effect.tap(() =>
+                      Effect.sync(() => {
+                        acknowledgedEffort = meta?.reasoningEffort;
+                      }),
+                    ),
+                  ),
+              }
             : { setSessionModel: (model) => runtime.setModel(model, force).pipe(Effect.as({})) },
           currentModelId,
           requestedModelId,
+          // Setup-time reasoning metadata is not live state. Reapply explicit
+          // legacy effort so low -> high -> low cannot skip the last write.
+          requestedReasoningEffort:
+            legacy && typeof requestedEffort === "string" ? requestedEffort : undefined,
           mapError: (cause) => cause,
         });
+        if (!legacy) return { modelId };
+        // Protocol 1 carries reasoning on the model write, never the config API.
+        return {
+          modelId,
+          consumedOptionIds: ["reasoningEffort"],
+          ...(typeof acknowledgedEffort === "string"
+            ? { appliedOptions: [{ id: "reasoningEffort", value: acknowledgedEffort }] }
+            : {}),
+        };
       }),
     makeRuntime:
       options.makeRuntime ??
