@@ -6,11 +6,11 @@ import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
 
 const handlers = {
-  orchestrator_capabilities: () =>
+  orchestrator_capabilities: (input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.capabilities(scope);
+      return yield* service.capabilities(scope, input);
     }),
   delegate_task: (input) =>
     Effect.gen(function* () {
