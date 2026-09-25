@@ -39,6 +39,8 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -84,6 +86,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(Path.layer),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
 );
@@ -1643,6 +1646,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         id: parentThreadId,
         projectId,
         title: "MCP parent",
+        deletedAt: null,
         createdBy: "user",
         creationSource: "web",
         modelSelection,
@@ -2902,6 +2906,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           thread: {
             id: childThreadId,
             title: "Child",
+            deletedAt: null,
             modelSelection: { instanceId: codexInstanceId, model: "gpt-5.4" },
           },
           runs: [],
@@ -3362,12 +3367,21 @@ describe("OrchestratorMcpService provider resolution", () => {
   );
 
   it.effect.each([
-    { name: "parent instance", parentEnabled: true, model: "gpt-5.4" },
-    { name: "alternate instance", parentEnabled: false, model: "gpt-5.5" },
+    { name: "parent instance", parentEnabled: true, model: "gpt-5.4", crossProject: false },
+    { name: "alternate instance", parentEnabled: false, model: "gpt-5.5", crossProject: false },
+    {
+      name: "other project alternate instance",
+      parentEnabled: false,
+      model: "gpt-5.5",
+      crossProject: true,
+    },
   ])(
     "replays accepted creation on the $name without authorizing new disabled work",
-    ({ parentEnabled, model }) =>
+    ({ parentEnabled, model, crossProject }) =>
       Effect.gen(function* () {
+        const destinationProjectId = crossProject
+          ? ProjectId.make("project:destination")
+          : projectId;
         const altInstanceId = ProviderInstanceId.make("codex-alt");
         const driver = ProviderDriverKind.make("codex");
         const cwd = yield* checkpointWorkspace("mcp-create-retry");
@@ -3393,7 +3407,9 @@ describe("OrchestratorMcpService provider resolution", () => {
             [altInstanceId]: { driver: "codex", enabled: true },
           },
           projectSettingsOverrides: {
-            [projectId]: { providerInstances: { [codexInstanceId]: { enabled: parentEnabled } } },
+            [destinationProjectId]: {
+              providerInstances: { [codexInstanceId]: { enabled: parentEnabled } },
+            },
           },
         });
         const layerThreads = ThreadManagementService.layer.pipe(
@@ -3419,7 +3435,15 @@ describe("OrchestratorMcpService provider resolution", () => {
                 providerSnapshot({ instanceId: codexInstanceId, driver, model: "gpt-5.4" }),
                 providerSnapshot({ instanceId: altInstanceId, driver, model: "gpt-5.5" }),
               ]),
-              Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
+              Layer.mock(ProjectService.ProjectService)({
+                getById: () => Effect.succeedNone,
+                getByWorkspaceRoot: (directory) =>
+                  Effect.succeed(
+                    directory === cwd
+                      ? Option.some({ id: destinationProjectId, deletedAt: null } as Project)
+                      : Option.none(),
+                  ),
+              }),
               Layer.mock(SecretRequests.SecretRequests)({}),
               Layer.mock(RemoteDelegation.RemoteDelegation)({}),
               Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
@@ -3456,9 +3480,35 @@ describe("OrchestratorMcpService provider resolution", () => {
             dispatchMode: { type: "start_immediately" },
           });
           const request = {
-            threads: [{ target: { driverKind: driver, model } }],
+            threads: [
+              {
+                target: { driverKind: driver, model },
+                ...(crossProject ? { projectDirectory: cwd } : {}),
+              },
+            ],
             clientRequestId: "create-retry",
           };
+          if (crossProject) {
+            for (const projectDirectory of ["relative", "/unknown-project"]) {
+              const error = yield* service
+                .createThreads(scope, {
+                  threads: [{ projectDirectory }],
+                  clientRequestId: projectDirectory,
+                })
+                .pipe(Effect.flip);
+              assert.equal(error.code, "invalid_request");
+            }
+            const home = yield* service
+              .createThreads(scope, {
+                threads: [{ projectDirectory: "~/", target: request.threads[0]!.target }],
+                clientRequestId: "home-project",
+              })
+              .pipe(Effect.provideService(HostProcess.HomeDirectory, cwd));
+            const createdAtHome = yield* orchestrator.getThreadProjection(
+              home.threads[0]!.threadId,
+            );
+            assert.equal(createdAtHome.thread.projectId, destinationProjectId);
+          }
           const first = yield* service.createThreads(scope, request);
           const child = first.threads[0]!;
           const selection = parentEnabled
@@ -3467,6 +3517,17 @@ describe("OrchestratorMcpService provider resolution", () => {
           assert.equal(first.threads.length, 1);
           assert.equal(child.providerInstanceId, selection.instanceId);
           assert.equal(child.model, selection.model);
+          const created = yield* orchestrator.getThreadProjection(child.threadId);
+          assert.equal(created.thread.projectId, destinationProjectId);
+          assert.equal(created.thread.worktreePath, crossProject ? null : cwd);
+          assert.equal(created.thread.lineage.parentThreadId, null);
+          const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+          assert.equal(
+            parent.turnItems.filter(
+              (item) => item.type === "thread_created" && item.targetThreadId === child.threadId,
+            ).length,
+            1,
+          );
           assert.deepEqual(yield* service.createThreads(scope, request), first);
 
           // The creation receipt exists, but this prompt has not been accepted yet.
@@ -3520,7 +3581,7 @@ describe("OrchestratorMcpService provider resolution", () => {
 
           yield* settings.updateSettings({
             projectSettingsOverrides: {
-              [projectId]: {
+              [destinationProjectId]: {
                 providerInstances: {
                   [codexInstanceId]: { enabled: false },
                   [altInstanceId]: { enabled: false },
