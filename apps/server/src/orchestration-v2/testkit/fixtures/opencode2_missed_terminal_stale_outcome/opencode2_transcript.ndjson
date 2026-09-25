@@ -1,0 +1,19 @@
+{"type":"transcript_start","provider":"opencode","protocol":"opencode2-sdk.sse","version":"2.0.15","scenario":"opencode2_missed_terminal_stale_outcome","metadata":{"source":"derived-from-live-run","capturedAt":"2026-09-29","nativeSessionId":"ses_opencode2_missed_terminal_stale_outcome","model":"opencode/big-pickle","description":"The prompt is admitted but T3 sees no execution start or output, and OpenCode reports the session idle. Its last outcome can only belong to an earlier execution, so T3 must not complete this turn from it; after the stall budget it fails the turn and stops the session. Driven by OpenCodeAdapterV2.stall.test.ts under TestClock, not by the scenario runner."}}
+{"type":"expect_outbound","label":"event.subscribe","frame":{"type":"event.subscribe"}}
+{"type":"expect_outbound","label":"session.create","frame":{"type":"session.create","input":{"model":{"id":"big-pickle","providerID":"opencode"},"agent":"build","location":{"directory":"<workspace>"}}}}
+{"type":"emit_inbound","label":"session.create.response","frame":{"type":"sdk.response","operation":"session.create","data":{"id":"ses_opencode2_missed_terminal_stale_outcome","projectID":"global","model":{"id":"big-pickle","providerID":"opencode"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1790000000000,"updated":1790000000000},"title":"T3 OpenCode 2 stale outcome replay","location":{"directory":"/private/tmp/t3-opencode2-missed-terminal-stale-outcome"}}}}
+{"type":"expect_outbound","label":"session.prompt","frame":{"type":"session.prompt","input":{"sessionID":"ses_opencode2_missed_terminal_stale_outcome","prompt":{"text":"Respond exactly: stale outcome must not complete"}}}}
+{"type":"emit_inbound","label":"session.prompt.response","frame":{"type":"sdk.response","operation":"session.prompt","data":{"id":"input_opencode2_missed_terminal_stale_outcome"}}}
+{"type":"emit_inbound","label":"session.inbox.enqueued","frame":{"type":"sdk.event","event":{"id":"event_opencode2_missed_terminal_stale_outcome_1","created":1790000000010,"type":"session.inbox.enqueued","data":{"sessionID":"ses_opencode2_missed_terminal_stale_outcome","inputID":"input_opencode2_missed_terminal_stale_outcome","input":{"id":"input_opencode2_missed_terminal_stale_outcome","type":"user"}}}}}
+{"type":"expect_outbound","label":"probe.1","frame":{"type":"session.active"}}
+{"type":"emit_inbound","label":"probe.1.response","frame":{"type":"sdk.response","operation":"session.active","data":{}}}
+{"type":"expect_outbound","label":"resubscribe.1","frame":{"type":"event.subscribe"}}
+{"type":"emit_inbound","label":"resubscribe.1.connected","frame":{"type":"sdk.event","event":{"id":"event_opencode2_missed_terminal_stale_outcome_2","created":1790000000020,"type":"server.connected","data":{}}}}
+{"type":"expect_outbound","label":"probe.2","frame":{"type":"session.active"}}
+{"type":"emit_inbound","label":"probe.2.response","frame":{"type":"sdk.response","operation":"session.active","data":{}}}
+{"type":"expect_outbound","label":"resubscribe.2","frame":{"type":"event.subscribe"}}
+{"type":"emit_inbound","label":"resubscribe.2.connected","frame":{"type":"sdk.event","event":{"id":"event_opencode2_missed_terminal_stale_outcome_3","created":1790000000030,"type":"server.connected","data":{}}}}
+{"type":"expect_outbound","label":"probe.3","frame":{"type":"session.active"}}
+{"type":"emit_inbound","label":"probe.3.response","frame":{"type":"sdk.response","operation":"session.active","data":{}}}
+{"type":"expect_outbound","label":"session.interrupt","frame":{"type":"session.interrupt","input":{"sessionID":"ses_opencode2_missed_terminal_stale_outcome"}}}
+{"type":"emit_inbound","label":"session.interrupt.response","frame":{"type":"sdk.response","operation":"session.interrupt","data":{"interrupted":true}}}

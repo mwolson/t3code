@@ -22,7 +22,10 @@ import {
   ThreadCommandExecutor,
   layer as threadCommandExecutorLayer,
 } from "../orchestration-v2/ThreadCommandExecutor.ts";
-import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
+import {
+  historicalProviderSessionIds,
+  planThreadDeletion,
+} from "../orchestration-v2/ThreadDeletion.ts";
 import * as ProjectionProjects from "../persistence/Services/ProjectionProjects.ts";
 import { ProjectEnrichmentService, type ProjectEnrichment } from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -417,6 +420,7 @@ export const make = Effect.gen(function* () {
                   "runtimeRequests",
                   "subagents",
                   "providerSessions",
+                  "providerThreads",
                 ]);
                 if (
                   projection.thread.deletedAt !== null ||
@@ -433,6 +437,10 @@ export const make = Effect.gen(function* () {
                 const plan = yield* planThreadDeletion({
                   command,
                   projection,
+                  historicalProviderSessions: yield* threadProjections.getProviderSessionsByIds(
+                    thread.id,
+                    historicalProviderSessionIds(projection),
+                  ),
                   attachmentIds: yield* threadProjections.getThreadAttachmentIds(thread.id),
                   now,
                   idAllocator,

@@ -56,7 +56,7 @@ import { CursorDriver, type CursorDriverEnv } from "../Drivers/CursorDriver.ts";
 import { GrokDriver, type GrokDriverEnv } from "../Drivers/GrokDriver.ts";
 import { OpenCodeDriver, type OpenCodeDriverEnv } from "../Drivers/OpenCodeDriver.ts";
 import * as ModelManifest from "../ModelManifest.ts";
-import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
+import { layer as openCode2RuntimeLayer } from "../opencode2Runtime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
 import { ProviderOrchestrationAdapterInfrastructureLive } from "./ProviderOrchestrationAdapterInfrastructure.ts";
@@ -134,6 +134,7 @@ const makeGrokConfig = (overrides: Partial<GrokSettings>): GrokSettings => ({
 
 const makeOpenCodeConfig = (overrides: Partial<OpenCodeSettings>): OpenCodeSettings => ({
   enabled: false,
+  backgroundSubagents: true,
   binaryPath: "opencode",
   serverUrl: "",
   serverPassword: "",
@@ -438,18 +439,16 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
 
 describe("ProviderInstanceRegistryLive — all drivers slice", () => {
   // All drivers need `NodeServices` (ChildProcessSpawner + FileSystem +
-  // Path). `OpenCodeDriver.create` additionally yields `OpenCodeRuntime`
-  // at construction time, so we wire `OpenCodeRuntimeLive` into the stack.
-  // `OpenCodeRuntimeLive` bundles its own `NetService.layer` via
-  // `Layer.provide`, so the only external requirement it still exposes is
-  // `ChildProcessSpawner` — resolved here by piping it through
-  // `provideMerge(NodeServices.layer)`.
+  // Path). `OpenCodeDriver.create` additionally yields `OpenCode2Runtime`
+  // at construction time, so we wire `openCode2RuntimeLayer` into the stack.
+  // The runtime needs only `ChildProcessSpawner`, to start an absent host
+  // service, and `NodeServices` supplies it.
   //
-  // The nested `provideMerge`s read bottom-up: `NodeServices.layer`
-  // provides `OpenCodeRuntimeLive`'s deps while keeping its own outputs
-  // surfaced; that merged layer then provides `ServerConfig.layerTest`'s
-  // `FileSystem` dep while keeping everything else surfaced to the test.
-  const infraLayer = OpenCodeRuntimeLive.pipe(Layer.provideMerge(NodeServices.layer));
+  // The nested `provideMerge`s read bottom-up: `NodeServices.layer` stays
+  // surfaced beside the runtime; that merged layer then provides
+  // `ServerConfig.layerTest`'s `FileSystem` dep while keeping everything else
+  // surfaced to the test.
+  const infraLayer = openCode2RuntimeLayer.pipe(Layer.provideMerge(NodeServices.layer));
   const baseLayer = AntigravityInstallation.layer.pipe(
     Layer.provideMerge(ServerSecretStore.layer),
     Layer.provideMerge(

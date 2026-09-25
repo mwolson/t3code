@@ -11,12 +11,24 @@ session or catalog state.
 
 ## Process and account isolation
 
-T3-managed OpenCode chat uses one server per thread. Its MCP registrations are directory-scoped, while
-T3's MCP connection is thread-scoped. Sharing a chat server between threads in one directory would
-let them replace each other's connection. Catalog and text-generation work can share the
-[instance-owned helper](../../apps/server/src/provider/OpenCodeServerOwner.ts), which closes
-after an idle period. External OpenCode servers remain externally owned and can require an
-external restart to pick up configuration changes.
+Built-in OpenCode uses the user's OpenCode 2 service, not a T3-owned per-thread server.
+The [runtime](../../apps/server/src/provider/opencode2Runtime.ts) reads the host service
+registration and checks the credentials, process id and exact 2.0.15 version before attaching.
+It runs `opencode service start` only when the service is positively absent: no registration, or
+a registration whose loopback URL refuses connections and whose recorded process is gone. That
+command's own start helper can replace a registration it finds incompatible, and T3 cannot
+compare and start atomically, so every other uncertain state (a live process that does not answer,
+a timeout, rejected credentials, a malformed or mismatched registration) fails closed. One start
+at a time is shared by concurrent callers, and the new registration must pass the same identity
+checks; T3 does not start again in the same attempt. T3 never stops, restarts or signals the
+service, and session disposal must never terminate it. The started service does not inherit the
+AppImage mount or Electron's Node mode from the T3 process. T3 does not rewrite the service's directory-scoped MCP configuration per thread,
+so T3's orchestration tools are unavailable in OpenCode 2 threads.
+An explicitly configured external endpoint remains externally owned too.
+
+The OpenCode 2 client exposes no account quota API. Report usage limits as unsupported
+rather than reading an OpenCode 1 `auth.json` account that may not belong to the host daemon.
+Per-turn token usage is separate and comes from native assistant-step events.
 
 OpenCode also stores persistent approval grants per directory. Automatic full-access replies use
 `once` so they cannot widen a supervised thread's permissions on a shared external server.

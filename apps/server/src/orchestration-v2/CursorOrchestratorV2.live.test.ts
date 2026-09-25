@@ -28,7 +28,7 @@ import {
   NoOpProviderEventLoggers,
   ProviderEventLoggers,
 } from "../provider/Layers/ProviderEventLoggers.ts";
-import { OpenCodeRuntimeLive } from "../provider/opencodeRuntime.ts";
+import { layer as openCode2RuntimeLayer } from "../provider/opencode2Runtime.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -76,7 +76,7 @@ const providerInstanceRegistryLayer = ProviderInstanceRegistryHydrationLive.pipe
       ),
       NodeServices.layer,
       FetchHttpClient.layer,
-      OpenCodeRuntimeLive.pipe(Layer.provide(PlatformTestLayer)),
+      openCode2RuntimeLayer.pipe(Layer.provide(PlatformTestLayer)),
       Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers),
       ModelManifest.layerTest,
       AntigravityInstallation.layer.pipe(

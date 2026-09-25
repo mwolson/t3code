@@ -3,6 +3,9 @@ import {
   CheckpointScopeId,
   CommandId,
   MessageId,
+  OrchestrationV2ProviderSessionJson,
+  OrchestrationV2ProviderThreadJson,
+  ProviderInstanceId,
   ProviderSessionId,
   RunAttemptId,
   ProviderApprovalDecision,
@@ -35,6 +38,11 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     /** Set on terminal detaches (thread archive/delete): revoke the thread's MCP credentials. */
     revokeMcpCredential: Schema.optional(Schema.Boolean),
     preserveBufferedOutput: Schema.optional(Schema.Boolean),
+    /** Delete the native thread only after local teardown completes. */
+    deleteProviderThread: Schema.optional(Schema.Boolean),
+    providerInstanceId: Schema.optional(ProviderInstanceId),
+    providerSession: Schema.optional(OrchestrationV2ProviderSessionJson),
+    providerThreads: Schema.optional(Schema.Array(OrchestrationV2ProviderThreadJson)),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.repair"),

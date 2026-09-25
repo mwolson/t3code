@@ -910,21 +910,29 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
-    binaryPath: makeBinaryPathSetting("opencode").pipe(
+    backgroundSubagents: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
       Schema.annotateKey({
-        title: "Binary path",
-        description: "Path to the OpenCode binary.",
+        title: "Background subagents (experimental)",
+        description:
+          "Applies when T3 Code starts the OpenCode 2 service because it is not running. T3 Code never changes or restarts a running service; enable background subagents on it with OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS.",
         providerSettingsForm: {
-          placeholder: "opencode",
+          control: "switch",
           clearWhenEmpty: "omit",
         },
       }),
+    ),
+    // Runs only `opencode service start`, when the host OpenCode 2 service is
+    // not running. Empty means `opencode` from T3's PATH.
+    binaryPath: makeBinaryPathSetting("opencode").pipe(
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
     serverUrl: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
         title: "Server URL",
-        description: "Leave blank to let T3 Code spawn the server when needed.",
+        description:
+          "Leave blank to use the OpenCode 2 service on this machine. T3 Code starts it when it is not running. T3 Code's orchestration tools (delegation and thread management) are unavailable in OpenCode 2 threads.",
         providerSettingsForm: {
           placeholder: "http://127.0.0.1:4096",
           clearWhenEmpty: "omit",
@@ -949,10 +957,12 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "serverUrl", "serverPassword"],
+    order: ["backgroundSubagents", "serverUrl", "serverPassword"],
   },
 );
 export type OpenCodeSettings = typeof OpenCodeSettings.Type;
+export const OpenCode2Settings = OpenCodeSettings;
+export type OpenCode2Settings = OpenCodeSettings;
 
 /**
  * A read-only quota source outside this environment's provider CLIs. The
@@ -1530,6 +1540,7 @@ const PiSettingsPatch = Schema.Struct({
 
 const OpenCodeSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
+  backgroundSubagents: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
   serverUrl: Schema.optionalKey(TrimmedString),
   serverPassword: Schema.optionalKey(TrimmedString),

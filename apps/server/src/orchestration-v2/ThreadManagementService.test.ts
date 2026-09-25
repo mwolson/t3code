@@ -354,6 +354,118 @@ it.effect("preserves failed legacy materialization when reading checkpoint conte
   }).pipe(Effect.provide(testLayer));
 });
 
+for (const explicit of [false, true]) {
+  for (const evidence of ["provider-roster", "turn-item", "foreground"] as const) {
+    it.effect(`Stop selects ${evidence} work through the service (explicit=${explicit})`, () =>
+      Effect.gen(function* () {
+        const projectId = ProjectId.make("project:thread-management:stop");
+        const threadId = ThreadId.make("thread:thread-management:stop");
+        const runId = RunId.make("run:thread-management:settled");
+        const foregroundId = RunId.make("run:thread-management:foreground");
+        const commandId = CommandId.make("command:thread-management:stop");
+        const reason = "Stop the remaining work";
+        const commands: OrchestrationV2Command[] = [];
+        let hasBackgroundWork = true;
+        let reads = 0;
+        const settledRun = { id: runId, ordinal: 1, status: "completed" as const };
+        const foregroundRun = { id: foregroundId, ordinal: 2, status: "running" as const };
+        const dispatch = { sequence: 1, storedEvents: [] };
+        const service = yield* ThreadManagementService.pipe(
+          Effect.provide(
+            layer.pipe(
+              Layer.provide(
+                Layer.mock(OrchestratorV2)({
+                  getThreadRecords: (selectedThreadId, fields, filter) => {
+                    reads += 1;
+                    expect(selectedThreadId).toBe(threadId);
+                    expect(fields).toEqual([
+                      "runs",
+                      "providerTurns",
+                      "providerThreads",
+                      "turnItems",
+                    ]);
+                    expect(filter).toEqual({
+                      turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
+                    });
+                    // Only the fields consumed by selection are supplied at this storage boundary.
+                    return Effect.succeed({
+                      thread: {
+                        id: threadId,
+                        projectId,
+                        deletedAt: null,
+                        activeProviderThreadId: "provider-thread:stop",
+                      },
+                      runs: [
+                        settledRun,
+                        ...(evidence === "foreground" ? [foregroundRun] : []),
+                        {
+                          id: RunId.make("run:thread-management:queued"),
+                          ordinal: 3,
+                          status: "queued",
+                        },
+                      ],
+                      providerTurns: [],
+                      providerThreads: [
+                        {
+                          id: "provider-thread:stop",
+                          status: evidence === "foreground" ? "active" : "idle",
+                          pendingBackgroundTasks:
+                            hasBackgroundWork && evidence !== "turn-item"
+                              ? [{ taskId: "native-shell", taskType: "shell" }]
+                              : [],
+                        },
+                      ],
+                      turnItems:
+                        hasBackgroundWork && evidence === "turn-item"
+                          ? [
+                              {
+                                id: "item:stop",
+                                runId,
+                                type: "command_execution",
+                                status: "running",
+                                title: "Background shell",
+                                input: "sleep 60",
+                              },
+                            ]
+                          : [],
+                    } as unknown as OrchestrationV2ThreadProjection);
+                  },
+                  dispatch: (command) => {
+                    commands.push(command);
+                    return Effect.succeed(dispatch);
+                  },
+                }),
+              ),
+            ),
+          ),
+        );
+        const input = { projectId, threadId, commandId, reason, ...(explicit ? { runId } : {}) };
+        const result = yield* service.interruptThread(input);
+        if (evidence === "foreground" && explicit) {
+          expect(result).toEqual({ type: "already_terminal", run: settledRun });
+          expect(commands).toEqual([]);
+        } else {
+          const selectedRun = evidence === "foreground" ? foregroundRun : settledRun;
+          expect(result).toEqual({ type: "interrupt_requested", run: selectedRun, dispatch });
+          expect(commands).toEqual([
+            { type: "run.interrupt", threadId, runId: selectedRun.id, commandId, reason },
+          ]);
+        }
+        if (evidence !== "foreground") {
+          hasBackgroundWork = false;
+          const expected = explicit
+            ? { type: "already_terminal", run: settledRun }
+            : { type: "no_active_run" };
+          expect(yield* service.interruptThread(input)).toEqual(expected);
+          expect(yield* service.interruptThread(input)).toEqual(expected);
+          expect(commands).toHaveLength(1);
+          expect(reads).toBe(3);
+        }
+      }),
+    );
+  }
+}
+
 for (const scenario of [
   { finalStatus: "completed" as const, timedOut: false },
   { finalStatus: "failed" as const, timedOut: false },

@@ -24,7 +24,8 @@ import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 import { isCommandMissingCause } from "./providerSnapshot.ts";
 
-const OPENCODE_VERSION = "2.0.15";
+/** The only OpenCode 2 release this runtime attaches to. */
+export const OPENCODE_VERSION = "2.0.15";
 
 export const OpenCodeRuntimeOperation = Schema.Literals([
   "agent.list",
@@ -39,6 +40,7 @@ export const OpenCodeRuntimeOperation = Schema.Literals([
   "model.list",
   "server.info",
   "service.start",
+  "session.active",
   "session.command",
   "session.compact",
   "session.context",
@@ -456,10 +458,16 @@ export function openCodeAuthorizationHeader(password: string): string {
 }
 
 /** The server's synthetic default is not an explicit model variant. */
-const OPENCODE_DEFAULT_VARIANT = "default";
+export const OPENCODE_DEFAULT_VARIANT = "default";
 export function normalizeOpenCodeVariant(variant: string | undefined): string | undefined {
   return variant === OPENCODE_DEFAULT_VARIANT ? undefined : variant;
 }
+
+/**
+ * Synthetic agent-option id meaning "defer to the Build/Plan toggle". Custom
+ * primary agents are listed beside it; a real agent named "auto" is excluded.
+ */
+export const OPENCODE_AUTO_AGENT = "auto";
 
 const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;

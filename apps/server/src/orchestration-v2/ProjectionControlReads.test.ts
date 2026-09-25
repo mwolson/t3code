@@ -27,6 +27,7 @@ import {
   layer,
   layerMemory,
 } from "./ProjectionStore.ts";
+import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import {
   layer as controlLayer,
@@ -197,6 +198,53 @@ function fixtureEvents(now: DateTime.Utc): ReadonlyArray<OrchestrationV2DomainEv
 for (const storage of ["sqlite", "memory"] as const) {
   const storeLayer =
     storage === "sqlite" ? layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)) : layerMemory;
+  it.effect(
+    `${storage}: retained session lookup is scoped and never revives detached bindings`,
+    () =>
+      Effect.gen(function* () {
+        const store = yield* ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        yield* Effect.forEach(fixtureEvents(now), (event) => store.apply(event), { discard: true });
+        yield* store.apply({
+          id: EventId.make("retained:attach"),
+          threadId,
+          occurredAt: now,
+          type: "provider-session.attached",
+          payload: {
+            id: providerSessionId,
+            driver,
+            providerInstanceId,
+            status: "stopped",
+            cwd: "/workspace",
+            model: "gpt-6",
+            capabilities: CodexProviderCapabilitiesV2,
+            createdAt: now,
+            updatedAt: now,
+            lastError: null,
+          },
+        });
+        yield* store.apply({
+          id: EventId.make("retained:detach"),
+          threadId,
+          occurredAt: now,
+          type: "provider-session.detached",
+          payload: { providerSessionId, detachedAt: now, reason: "Archived" },
+        });
+        assert.deepEqual(
+          (yield* store.getProviderSessionsByIds(threadId, [providerSessionId])).map(
+            (session) => session.id,
+          ),
+          [providerSessionId],
+        );
+        assert.deepEqual(
+          yield* store.getProviderSessionsByIds(ThreadId.make("other-owner"), [providerSessionId]),
+          [],
+        );
+        assert.deepEqual(yield* store.getProviderSessionsByIds(threadId, []), []);
+        assert.deepEqual((yield* store.getThreadProviderContext(threadId)).providerSessions, []);
+        assert.deepEqual((yield* store.getThreadProjection(threadId)).providerSessions, []);
+      }).pipe(Effect.provide(storeLayer)),
+  );
   it.effect(`${storage}: finds the active root turn without an attempt reverse link`, () =>
     Effect.gen(function* () {
       const store = yield* ProjectionStoreV2;

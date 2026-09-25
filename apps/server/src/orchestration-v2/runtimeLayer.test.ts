@@ -18,6 +18,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
   RunId,
@@ -3579,4 +3580,405 @@ it.layer(TestLayer)("usage-limit recovery", (it) => {
       );
     }),
   );
+});
+
+it.layer(TestLayer)("settled native Stop SQL boundaries", (it) => {
+  for (const route of ["ordinary", "mcp"] as const) {
+    for (const evidence of [
+      "child",
+      "command",
+      "shell",
+      "earlier",
+      "idle",
+      "rolled-back",
+      "queued",
+      "old-target",
+    ] as const) {
+      it.effect(`${route} Stop reads ${evidence} work through narrowed SQL records`, () =>
+        Effect.gen(function* () {
+          const orchestrator = yield* OrchestratorV2;
+          const sink = yield* EventSinkV2;
+          const outbox = yield* EffectOutboxV2;
+          const threadId = ThreadId.make(`native-stop-sql:${route}:${evidence}`);
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${threadId}:create`),
+            threadId,
+            projectId: ProjectId.make(`${threadId}:project`),
+            title: "Native Stop SQL",
+            modelSelection,
+            createdBy: "user",
+            creationSource: "web",
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: process.cwd(),
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`${threadId}:message`),
+            threadId,
+            messageId: MessageId.make(`${threadId}:message`),
+            text: "Seed root",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+            dispatchMode: { type: "start_immediately" },
+          });
+          const initial = yield* orchestrator.getThreadProjection(threadId);
+          const run = initial.runs[0]!;
+          const providerThread = initial.providerThreads[0]!;
+          const node = initial.nodes.find((candidate) => candidate.id === run.rootNodeId)!;
+          const now = yield* DateTime.now;
+          const providerTurnId = ProviderTurnId.make(`${threadId}:turn`);
+          const common = { threadId, occurredAt: now };
+          yield* sink.write({
+            events: [
+              {
+                ...common,
+                id: EventId.make(`${threadId}:provider`),
+                type: "provider-thread.updated",
+                payload: {
+                  ...providerThread,
+                  providerSessionId: ProviderSessionId.make(`${threadId}:session`),
+                  nativeThreadRef: { driver, nativeId: `${threadId}:native`, strength: "strong" },
+                  lastRunOrdinal: 1,
+                  status: "idle",
+                },
+              },
+              {
+                ...common,
+                id: EventId.make(`${threadId}:root`),
+                type: "node.updated",
+                payload: { ...node, status: "completed", completedAt: now },
+              },
+              {
+                ...common,
+                id: EventId.make(`${threadId}:completed`),
+                type: "run.updated",
+                payload: { ...run, status: "completed", completedAt: now },
+              },
+              {
+                ...common,
+                id: EventId.make(`${threadId}:turn-event`),
+                type: "provider-turn.updated",
+                payload: {
+                  id: providerTurnId,
+                  providerThreadId: providerThread.id,
+                  nodeId: node.id,
+                  runAttemptId: run.activeAttemptId,
+                  nativeTurnRef: null,
+                  ordinal: 1,
+                  status: "completed",
+                  startedAt: now,
+                  completedAt: now,
+                },
+              },
+              {
+                ...common,
+                id: EventId.make(`${threadId}:work`),
+                type: "turn-item.updated",
+                payload: {
+                  id: TurnItemId.make(`${threadId}:work`),
+                  threadId,
+                  runId: run.id,
+                  nodeId: node.id,
+                  providerThreadId: providerThread.id,
+                  providerTurnId,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 2,
+                  title: "Native work",
+                  startedAt: now,
+                  completedAt: null,
+                  updatedAt: now,
+                  status: evidence === "idle" ? "idle" : "running",
+                  ...(evidence === "child"
+                    ? {
+                        type: "subagent",
+                        subagentId: NodeId.make(`${threadId}:child`),
+                        origin: "provider_native",
+                        driver,
+                        providerInstanceId: modelSelection.instanceId,
+                        childThreadId: null,
+                        prompt: "Native child only",
+                        result: null,
+                      }
+                    : evidence === "command"
+                      ? { type: "command_execution", input: "background shell" }
+                      : { type: "dynamic_tool", toolName: "shell", input: {} }),
+                },
+              },
+            ],
+          });
+          let targetRun = run;
+          if (evidence === "earlier" || evidence === "rolled-back") {
+            targetRun = {
+              ...run,
+              id: RunId.make(`${threadId}:later`),
+              ordinal: 2,
+              status: "completed",
+            };
+            yield* sink.write({
+              events: [
+                {
+                  ...common,
+                  id: EventId.make(`${threadId}:later-created`),
+                  type: "run.created",
+                  payload: targetRun,
+                },
+                ...(evidence === "rolled-back"
+                  ? [
+                      {
+                        ...common,
+                        id: EventId.make(`${threadId}:rollback`),
+                        type: "run.updated" as const,
+                        payload: { ...run, status: "rolled_back" as const },
+                      },
+                    ]
+                  : []),
+              ],
+            });
+          }
+          if (evidence === "queued" || evidence === "old-target") {
+            yield* sink.write({
+              events: [
+                {
+                  ...common,
+                  id: EventId.make(`${threadId}:next`),
+                  type: "run.created",
+                  payload: {
+                    ...run,
+                    id: RunId.make(`${threadId}:next`),
+                    ordinal: 2,
+                    status: evidence === "queued" ? "queued" : "running",
+                  },
+                },
+              ],
+            });
+          }
+          const commandId = CommandId.make(`${threadId}:stop`);
+          const sessions = yield* ProviderSessionManagerV2;
+          const getSession = vi.spyOn(sessions, "get").mockReturnValue(
+            Effect.succeed(
+              Option.some({
+                providerSession: { capabilities: CodexProviderCapabilitiesV2 },
+              } as ProviderAdapterV2SessionRuntime),
+            ),
+          );
+          const management = yield* ThreadManagementService;
+          yield* Effect.gen(function* () {
+            if (route === "ordinary") {
+              yield* orchestrator.dispatch({
+                type: "run.interrupt",
+                commandId,
+                threadId,
+                runId: targetRun.id,
+              });
+            } else {
+              yield* management.interruptThread({
+                commandId,
+                threadId,
+                projectId: ProjectId.make(`${threadId}:project`),
+                runId: targetRun.id,
+              });
+            }
+          }).pipe(Effect.ensuring(Effect.sync(() => getSession.mockRestore())));
+          const effects = yield* outbox.listByCommandId(commandId);
+          assert.equal(
+            effects.some((effect) => effect.request.type === "provider-turn.interrupt"),
+            evidence !== "idle" && evidence !== "rolled-back" && evidence !== "old-target",
+          );
+          const result = yield* orchestrator.getThreadProjection(threadId);
+          assert.equal(
+            result.runs.find((candidate) => candidate.id === targetRun.id)?.status,
+            "completed",
+          );
+        }),
+      );
+    }
+  }
+
+  it.effect("provider-native Stop without a running native target records a no-op", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* OrchestratorV2;
+      const sink = yield* EventSinkV2;
+      const outbox = yield* EffectOutboxV2;
+      const threadId = ThreadId.make("native-stop-sql:provider-native:no-target");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId: ProjectId.make(`${threadId}:project`),
+        title: "Native Stop without targets",
+        modelSelection,
+        createdBy: "user",
+        creationSource: "web",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      const commandId = CommandId.make(`${threadId}:stop`);
+      yield* orchestrator.dispatch({
+        type: "run.interrupt",
+        commandId,
+        threadId,
+        intent: "provider_native_only",
+      });
+      const stored = yield* sink.readByCommandId({ commandId }).pipe(Stream.runCollect);
+      assert.deepEqual(
+        Array.from(stored, ({ event }) => event.type),
+        ["run.interrupt-noop"],
+      );
+      assert.isEmpty(yield* outbox.listByCommandId(commandId));
+    }),
+  );
+});
+
+it.layer(ProjectDeletionTestLayer)("retained native deletion SQL", (it) => {
+  for (const route of ["direct", "project"] as const) {
+    it.effect(
+      `${route} deletion keeps archived native metadata and once-only command receipts`,
+      () =>
+        Effect.gen(function* () {
+          const projects = yield* ProjectService.ProjectService;
+          const orchestrator = yield* OrchestratorV2;
+          const sink = yield* EventSinkV2;
+          const threadId = ThreadId.make(`retained-delete:${route}`);
+          const projectId = ProjectId.make(`${threadId}:project`);
+          const providerSessionId = ProviderSessionId.make(`${threadId}:session`);
+          const providerThreadId = ProviderThreadId.make(`${threadId}:native`);
+          yield* projects.create({
+            commandId: CommandId.make(`${projectId}:create`),
+            projectId,
+            title: "Retained native deletion",
+            workspaceRoot: `${process.env.TMPDIR}/retained-delete-${route}`,
+          });
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`${threadId}:create`),
+            createdBy: "user",
+            creationSource: "web",
+            threadId,
+            projectId,
+            title: "Retained native deletion",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          });
+          const now = yield* DateTime.now;
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`${threadId}:attach`),
+                threadId,
+                occurredAt: now,
+                type: "provider-session.attached",
+                payload: {
+                  id: providerSessionId,
+                  driver,
+                  providerInstanceId: modelSelection.instanceId,
+                  status: "ready",
+                  cwd: process.cwd(),
+                  model: modelSelection.model,
+                  capabilities: CodexProviderCapabilitiesV2,
+                  createdAt: now,
+                  updatedAt: now,
+                  lastError: null,
+                },
+              },
+              {
+                id: EventId.make(`${threadId}:native`),
+                threadId,
+                occurredAt: now,
+                type: "provider-thread.updated",
+                payload: {
+                  id: providerThreadId,
+                  driver,
+                  providerInstanceId: modelSelection.instanceId,
+                  providerSessionId,
+                  appThreadId: threadId,
+                  ownerNodeId: null,
+                  nativeThreadRef: {
+                    driver,
+                    nativeId: "retained-native-conversation",
+                    strength: "strong",
+                  },
+                  nativeConversationHeadRef: null,
+                  status: "idle",
+                  firstRunOrdinal: null,
+                  lastRunOrdinal: null,
+                  handoffIds: [],
+                  forkedFrom: null,
+                  createdAt: now,
+                  updatedAt: now,
+                },
+              },
+            ],
+          });
+          yield* orchestrator.dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make(`${threadId}:archive`),
+            threadId,
+          });
+          assert.deepEqual(
+            (yield* orchestrator.getThreadProjection(threadId)).providerSessions,
+            [],
+          );
+          const deletionCommandId = CommandId.make(`${threadId}:delete`);
+          const threadCommandId =
+            route === "direct"
+              ? deletionCommandId
+              : CommandId.make(`${deletionCommandId}:delete-thread:${threadId}`);
+          const commit = sink.commitCommand;
+          const nativeDeletes: Array<NonNullable<Parameters<typeof commit>[0]["effects"]>[number]> =
+            [];
+          const spy = vi.spyOn(sink, "commitCommand").mockImplementation((input) => {
+            if (input.commandId === threadCommandId) {
+              nativeDeletes.push(
+                ...(input.effects ?? []).filter(
+                  (effect) => effect.request.type === "provider-session.detach",
+                ),
+              );
+            }
+            return commit(input);
+          });
+          yield* Effect.gen(function* () {
+            if (route === "direct") {
+              yield* orchestrator.dispatch({
+                type: "thread.delete",
+                commandId: deletionCommandId,
+                threadId,
+              });
+            } else {
+              yield* projects.delete({ commandId: deletionCommandId, projectId, force: true });
+            }
+            assert.equal(nativeDeletes.length, 1);
+            assert.deepInclude(nativeDeletes[0], { threadId });
+            const request = nativeDeletes[0]!.request;
+            if (request.type !== "provider-session.detach")
+              return yield* Effect.die("wrong effect");
+            assert.isTrue(request.deleteProviderThread);
+            assert.equal(request.providerSession?.id, providerSessionId);
+            assert.equal(
+              request.providerThreads?.[0]?.nativeThreadRef?.nativeId,
+              "retained-native-conversation",
+            );
+            const replay = yield* orchestrator.dispatch({
+              type: "thread.delete",
+              commandId: threadCommandId,
+              threadId,
+            });
+            assert.equal(
+              replay.storedEvents.filter((stored) => stored.event.type === "thread.deleted").length,
+              1,
+            );
+            assert.equal(nativeDeletes.length, 1);
+          }).pipe(Effect.ensuring(Effect.sync(() => spy.mockRestore())));
+        }),
+    );
+  }
 });

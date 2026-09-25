@@ -7,6 +7,7 @@ import {
   threadRuntimeHasInterruptibleRun,
 } from "@t3tools/client-runtime/state/thread-execution";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { deriveInterruptibleRun } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { Alert } from "react-native";
 
 import {
@@ -440,9 +441,16 @@ export function useThreadComposerState() {
   }, [editedRunId, selectedThreadKey, selectedThreadRuns]);
 
   const activeThreadBusy = threadRuntimeIsActive(selectedThreadRuntime);
+  const backgroundStopRunId =
+    selectedThreadProjection === null
+      ? null
+      : (deriveInterruptibleRun({
+          ...selectedThreadProjection.projection,
+          activeProviderThreadId: selectedThreadProjection.projection.thread.activeProviderThreadId,
+        })?.id ?? null);
   const interruptibleRunId = threadRuntimeHasInterruptibleRun(selectedThreadRuntime)
     ? (selectedThreadRuntime?.activeRunId ?? null)
-    : null;
+    : backgroundStopRunId;
 
   const cancelQueuedRunEdit = useCallback(() => {
     if (selectedThreadKey === null || savingQueuedEditRef.current) return;

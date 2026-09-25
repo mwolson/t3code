@@ -180,6 +180,11 @@ export interface ProviderSessionManagerV2Shape {
      */
     readonly revokeMcpCredential?: boolean;
     readonly preserveBufferedOutput?: boolean;
+    /** True only when the application thread is permanently deleted. */
+    readonly deleteProviderThread?: boolean;
+    readonly providerInstanceId?: ProviderInstanceId;
+    readonly providerSession?: OrchestrationV2ProviderSession;
+    readonly providerThreads?: ReadonlyArray<OrchestrationV2ProviderThread>;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
 }
 
@@ -2239,6 +2244,42 @@ export const layerWithOptions = (
         release: releaseEntry,
         detach: (input) =>
           Effect.gen(function* () {
+            const deleteNativeThreads = Effect.gen(function* () {
+              if (input.deleteProviderThread !== true) return;
+              const providerThreads = input.providerThreads ?? [];
+              const providerSession = input.providerSession;
+              if (
+                input.providerInstanceId !== undefined &&
+                providerSession !== undefined &&
+                providerThreads.length > 0
+              ) {
+                const adapter = yield* registry.get(input.providerInstanceId).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderSessionLookupError({
+                        providerSessionId: input.providerSessionId,
+                        cause,
+                      }),
+                  ),
+                );
+                const deleteDetachedThread = adapter.deleteDetachedThread;
+                if (deleteDetachedThread !== undefined) {
+                  yield* Effect.scoped(
+                    Effect.forEach(
+                      providerThreads,
+                      (providerThread) =>
+                        deleteDetachedThread({
+                          providerSession,
+                          providerThread,
+                        }),
+                      { concurrency: 1, discard: true },
+                    ),
+                  );
+                }
+              }
+            });
+            // Teardown must complete even if native deletion fails permanently.
+            // Keep the deletion error retryable in the durable effect outbox.
             const key = sessionKey(input.providerSessionId);
             const currentEntry = (yield* Ref.get(sessions)).get(key);
             if (input.preserveBufferedOutput === true && currentEntry !== undefined) {
@@ -2419,21 +2460,21 @@ export const layerWithOptions = (
             if (input.revokeMcpCredential === true) {
               yield* clearMcpSession(input.threadId);
             }
-            if (Option.isNone(detached)) {
-              return;
+            if (Option.isSome(detached)) {
+              if (
+                detached.value.attachedThreadIds.size === 0 &&
+                !detached.value.supportsMultipleProviderThreads
+              ) {
+                yield* releaseEntry({
+                  providerSessionId: input.providerSessionId,
+                  reason: "manual_shutdown",
+                  ...(input.detail === undefined ? {} : { detail: input.detail }),
+                });
+              } else {
+                yield* scheduleIdleRelease(input.providerSessionId);
+              }
             }
-            if (
-              detached.value.attachedThreadIds.size === 0 &&
-              !detached.value.supportsMultipleProviderThreads
-            ) {
-              yield* releaseEntry({
-                providerSessionId: input.providerSessionId,
-                reason: "manual_shutdown",
-                ...(input.detail === undefined ? {} : { detail: input.detail }),
-              });
-              return;
-            }
-            yield* scheduleIdleRelease(input.providerSessionId);
+            yield* deleteNativeThreads;
           }).pipe(
             Effect.catchCause((cause) =>
               Effect.fail(

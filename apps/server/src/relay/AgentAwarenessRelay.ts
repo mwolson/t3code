@@ -109,6 +109,8 @@ export function shouldPublishAgentAwarenessEvent(
     case "provider-session.detached":
     case "provider-thread.updated":
     case "provider-turn.updated":
+    case "provider-turn.interrupt-requested":
+    case "run.interrupt-noop":
     case "message.updated":
     case "turn-item.updated":
     case "plan.updated":

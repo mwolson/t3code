@@ -528,6 +528,13 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly hasBufferedOutputForThread?: (
     providerThread: OrchestrationV2ProviderThread,
   ) => Effect.Effect<boolean>;
+  /**
+   * Releases the buffered-output hold of a dispatched provider continuation
+   * whose queued run was cancelled before its turn started.
+   */
+  readonly releaseCancelledContinuation?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<void>;
   /** Complete producing-turn selection retained with native output, even after query exit. */
   readonly bufferedExecutionSelection?: (
     providerThread: OrchestrationV2ProviderThread,
@@ -631,6 +638,14 @@ export interface ProviderAdapterV2SessionRuntime {
 export interface ProviderAdapterV2Shape {
   readonly instanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
+  /**
+   * Remove a provider-native thread when no managed provider session remains
+   * alive. The caller supplies a scope for any temporary provider connection.
+   */
+  readonly deleteDetachedThread?: (input: {
+    readonly providerSession: OrchestrationV2ProviderSession;
+    readonly providerThread: OrchestrationV2ProviderThread;
+  }) => Effect.Effect<void, ProviderAdapterV2Error, Scope.Scope>;
   readonly getCapabilities: () => Effect.Effect<
     OrchestrationV2ProviderCapabilities,
     ProviderAdapterV2Error

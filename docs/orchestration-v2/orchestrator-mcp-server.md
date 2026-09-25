@@ -143,6 +143,16 @@ forking uses portable context when native `session/fork` is unavailable, and
 subagents use orchestrator-owned child threads. Registry agents do not receive
 provider-specific extensions; those remain in flavors such as Grok.
 
+### OpenCode 2
+
+T3 connects to the user's OpenCode 2 service, starting it only when it is not
+running, and never changes its configuration. The adapter therefore does not register the
+`t3-code` server or the shared orchestration instructions on that service, and
+the orchestration tools (delegation and thread management) are unavailable in
+OpenCode 2 threads. Configuring the server on the service by hand cannot work:
+the bearer credential is scoped to one provider session and is never persisted.
+Other MCP servers configured on the service stay available.
+
 ### Pi V2
 
 Pi core has no MCP client. When a provider session credential exists, the

@@ -249,7 +249,7 @@ export function buildServerProvider(input: {
   };
 }
 
-export const collectStreamAsString = <E>(
+const collectStreamAsString = <E>(
   stream: Stream.Stream<Uint8Array, E>,
   options?: { readonly maxBytes?: number | undefined },
 ): Effect.Effect<string, E> =>
