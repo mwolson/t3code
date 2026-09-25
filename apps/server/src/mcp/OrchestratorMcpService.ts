@@ -59,6 +59,8 @@ import {
   type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -70,6 +72,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -198,6 +201,8 @@ export class OrchestratorMcpService extends Context.Service<
   OrchestratorMcpServiceShape
 >()("t3/mcp/OrchestratorMcpService") {}
 
+const isProjectOperationError = Schema.is(ProjectService.ProjectOperationError);
+
 const isThreadManagementError = Schema.is(ThreadManagementService.ThreadManagementError);
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
@@ -227,6 +232,45 @@ function threadManagementFailure(error: unknown): OrchestratorMcpFailure {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+interface ResolvedProjectCheckout {
+  readonly projectId: OrchestrationV2ThreadProjection["thread"]["projectId"];
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+}
+
+function expandedAbsoluteProjectDirectory(
+  value: string,
+  path: Path.Path,
+  homeDirectory: string,
+): string | null {
+  const expanded = expandHomePath(value.trim(), homeDirectory);
+  return path.isAbsolute(expanded) ? path.resolve(expanded) : null;
+}
+
+function unknownProjectDirectory(path: string): OrchestratorMcpFailure {
+  return failure("invalid_request", `Project directory '${path}' is not a known T3 project.`);
+}
+
+function isMissingWorkspaceRoot(error: ProjectService.ProjectOperationError): boolean {
+  if (error.operation !== "normalize-workspace") {
+    return false;
+  }
+  const cause = error.cause;
+  if (cause === null || typeof cause !== "object" || !("_tag" in cause)) {
+    return false;
+  }
+  return (
+    cause._tag === "WorkspaceRootNotExistsError" || cause._tag === "WorkspaceRootNotDirectoryError"
+  );
+}
+
+function projectDirectoryResolveFailure(absolute: string, error: unknown): OrchestratorMcpFailure {
+  if (isProjectOperationError(error) && !isMissingWorkspaceRoot(error)) {
+    return failure("orchestration_error", `Unable to resolve project directory '${absolute}'.`);
+  }
+  return unknownProjectDirectory(absolute);
 }
 
 function scheduledTaskWorkspaceStrategy(
@@ -917,6 +961,7 @@ function timelineItem(input: {
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
+  const path = yield* Path.Path;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
@@ -1129,6 +1174,36 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(threadManagementFailure));
       return { parent, target, shell } as const;
     });
+
+  const resolveProjectDirectory = Effect.fnUntraced(function* (
+    parent: Pick<OrchestrationV2ThreadProjection, "thread">,
+    projectDirectory: string | undefined,
+  ): Effect.fn.Return<ResolvedProjectCheckout, OrchestratorMcpFailure> {
+    if (projectDirectory === undefined) {
+      return {
+        projectId: parent.thread.projectId,
+        branch: parent.thread.branch,
+        worktreePath: parent.thread.worktreePath,
+      };
+    }
+    const absolute = expandedAbsoluteProjectDirectory(
+      projectDirectory,
+      path,
+      yield* HostProcess.HomeDirectory,
+    );
+    if (absolute === null) {
+      return yield* failure(
+        "invalid_request",
+        "projectDirectory must be an absolute path, or a home-relative ~/ path, to a known T3 project.",
+      );
+    }
+    const project = yield* projects
+      .getByWorkspaceRoot(absolute)
+      .pipe(Effect.mapError((error) => projectDirectoryResolveFailure(absolute, error)));
+    if (Option.isNone(project) || project.value.deletedAt !== null)
+      return yield* unknownProjectDirectory(absolute);
+    return { projectId: project.value.id, branch: null, worktreePath: null };
+  });
 
   const loadProviders = providerRegistry.getProviders;
 
@@ -2296,6 +2371,7 @@ const make = Effect.gen(function* () {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "create_threads");
         const parentRun = ThreadManagementService.latestActiveRun(parent);
         if (
+          parent.thread.deletedAt !== null ||
           parentRun === undefined ||
           parentRun.rootNodeId === null ||
           parentRun.providerInstanceId !== scope.thread.providerInstanceId
@@ -2312,8 +2388,10 @@ const make = Effect.gen(function* () {
           input.threads,
           (request, index) =>
             Effect.gen(function* () {
+              const checkout = yield* resolveProjectDirectory(parent, request.projectDirectory);
+              const destination = { thread: { ...parent.thread, ...checkout } };
               const target = yield* resolveTargetRechecking({
-                parent,
+                parent: destination,
                 target: request.target,
                 providers,
               });
@@ -2332,7 +2410,7 @@ const make = Effect.gen(function* () {
                 index,
               });
               yield* assertTargetEnabledForProject(
-                parent,
+                destination,
                 stableCommandId({ scope, requestKey: key, operation: "create-thread", index }),
                 target,
               );
@@ -2354,13 +2432,13 @@ const make = Effect.gen(function* () {
                     index,
                   }),
                   threadId,
-                  projectId: parent.thread.projectId,
+                  projectId: checkout.projectId,
                   title,
                   modelSelection: target.modelSelection,
                   runtimeMode,
                   interactionMode,
-                  branch: parent.thread.branch,
-                  worktreePath: parent.thread.worktreePath,
+                  branch: checkout.branch,
+                  worktreePath: checkout.worktreePath,
                 })
                 .pipe(
                   Effect.mapError((error) =>
@@ -2370,6 +2448,14 @@ const make = Effect.gen(function* () {
                     ),
                   ),
                 );
+              // A retried request replays the stable create, which also succeeds for a thread deleted since.
+              const createdProjection = yield* loadProjection(threadId);
+              if (createdProjection.thread.deletedAt !== null) {
+                return yield* failure(
+                  "thread_not_found",
+                  `Thread ${threadId} is no longer available.`,
+                );
+              }
               if (request.prompt !== undefined) {
                 yield* threadManagement
                   .dispatch({
@@ -2706,6 +2792,7 @@ export const layer: Layer.Layer<
   OrchestratorMcpService,
   never,
   | Crypto.Crypto
+  | Path.Path
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService
   | GitVcsDriver.GitVcsDriver
