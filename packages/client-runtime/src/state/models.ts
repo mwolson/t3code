@@ -108,6 +108,7 @@ export interface ThreadRuntimeSummary {
   readonly providerInstanceId: ProviderInstanceId;
   readonly providerName: string | null;
   readonly lastError: string | null;
+  readonly lastErrorAt?: string | null;
   readonly lastErrorClass?: OrchestrationV2ProviderFailureClass | null;
   readonly lastErrorCode?: string | null;
   readonly usageLimitResetAt?: string | null;
@@ -245,6 +246,7 @@ function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary 
     providerInstanceId: thread.providerInstanceId,
     providerName: null,
     lastError: thread.lastError ?? null,
+    lastErrorAt: thread.lastErrorAt ?? null,
     lastErrorClass: thread.lastErrorClass ?? null,
     lastErrorCode: thread.lastErrorCode ?? null,
     usageLimitResetAt: thread.usageLimitResetAt ?? null,

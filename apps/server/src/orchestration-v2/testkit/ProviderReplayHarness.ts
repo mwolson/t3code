@@ -257,6 +257,7 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
   | CommandOutputRecorder.CommandOutputRecorder
+  | ProjectionStore.ProjectionStoreV2
   | ProviderSessionManager.ProviderSessionManagerV2,
   Error | MigrationError | PlatformError.PlatformError | SqlError
 > {
@@ -294,6 +295,7 @@ export function layerWithRegistry<Error>(
   | EffectOutbox.EffectOutboxV2
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
+  | ProjectionStore.ProjectionStoreV2
   | ProviderSessionManager.ProviderSessionManagerV2
   | CommandOutputRecorder.CommandOutputRecorder
   | ThreadCommandExecutor.ThreadCommandExecutor,
@@ -568,6 +570,7 @@ export function layerWithRegistry<Error>(
     layerContinuationWorkerProvided,
     layerCommandOutputHubProvided,
     ThreadCommandExecutor.layer,
+    layerStores,
   ).pipe(
     Layer.provide(ProviderTurnStartServiceTestkit.layer),
     Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
