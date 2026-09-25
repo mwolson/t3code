@@ -16,10 +16,12 @@ import {
   ProviderTurnId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ScheduledTaskId,
+  RunId,
   ThreadId,
   TurnItemId,
   type ModelSelection,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2Run,
 } from "@t3tools/contracts";
 import {
   expandAssistantCitationsForProvider,
@@ -31,6 +33,8 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import type * as Scope from "effect/Scope";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
@@ -40,6 +44,8 @@ import * as EventSink from "./EventSink.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ProviderContinuationService from "./ProviderContinuationService.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -4195,3 +4201,892 @@ it.effect("a side chat that opens with /goal gets its context on the next questi
     }).pipe(Effect.provide(layer));
   }),
 );
+
+// Transcripts cannot reject steering while the turn still projects as running, so these
+// settlement cases keep the real orchestrator, projection, outbox and continuation worker
+// and control only the adapter boundary. Retry time is virtual; ordering uses barriers.
+
+const runningSelection = { instanceId, model: "running-model" };
+const desiredSelection = {
+  instanceId,
+  model: "next-turn-model",
+  options: [{ id: "effort", value: "high" }],
+};
+const desiredSelectionMessageId = MessageId.make("message:desired-selection");
+const settlementThreadId = ThreadId.make("thread:completion-settlement");
+const markerRunId = RunId.make("run:completion-settlement-marker");
+
+interface SettlementAdapterControls {
+  readonly events: Queue.Queue<ProviderAdapter.ProviderAdapterV2Event>;
+  readonly started: Array<ProviderAdapter.ProviderAdapterV2TurnInput>;
+  readonly steered: Array<MessageId>;
+  sessionOpens: number;
+  interrupts: number;
+}
+
+it.effect("recovers a completion whose steering retries exhausted before the parent settled", () =>
+  runSettlementScenario("exhausted-before-terminal", (h) =>
+    Effect.gen(function* () {
+      const parent = yield* h.startRun("message:parent");
+      yield* h.saveDesiredSelection(parent.runId);
+      const { messageId, taskId } = yield* h.reserveSteer(parent.runId);
+      yield* h.exhaustSteering();
+      assert.deepEqual(h.controls.steered, [messageId, messageId, messageId, messageId, messageId]);
+      const stalled = yield* h.projection();
+      assert.equal(stalled.runs.length, 1);
+      assert.equal(h.task(stalled, taskId)?.completionDelivery?.state, "claimed");
+      const siblingIds = yield* h.addPendingSiblings(parent.runId, 3);
+      const userMessages = stalled.messages.filter((message) => message.createdBy === "user");
+
+      yield* h.finishTurn(parent, "completed");
+      yield* h.settled();
+      assert.deepEqual(
+        h.offers.map((offer) => offer.delegatedCompletion),
+        [{ parentRunId: parent.runId, generation: 1, messageId }],
+        "the terminal boundary reoffers the exhausted reservation",
+      );
+
+      yield* h.startContinuationWorker();
+      const wake = yield* h.awaitDispatchedTurn(2);
+      assert.equal(wake.message.messageId, messageId);
+      assert.include(wake.message.text, String(taskId));
+      for (const siblingId of siblingIds) assert.notInclude(wake.message.text, String(siblingId));
+      assert.deepEqual(wake.modelSelection, desiredSelection);
+      const recovered = yield* h.projection();
+      assert.deepEqual(recovered.thread.modelSelection, desiredSelection);
+      assert.deepEqual(h.run(recovered, parent.runId)?.modelSelection, runningSelection);
+      assert.equal(recovered.messages.filter((message) => message.id === messageId).length, 1);
+      assert.equal(
+        recovered.messages.find((message) => message.id === messageId)?.runId,
+        wake.runId,
+      );
+      assert.equal(recovered.turnItems.filter((item) => item.type === "notification").length, 1);
+
+      // A duplicate terminal event and a duplicate request reuse the same identity.
+      yield* h.repeatRunEvent(parent.runId);
+      yield* h.settled();
+      assert.equal(h.offers.length, 1);
+      yield* Queue.offer(h.requests, h.offers[0]!);
+
+      yield* h.finishTurn(wake, "completed");
+      const siblingsWake = yield* h.awaitDispatchedTurn(3);
+      assert.equal(h.controls.started.length, 3);
+      assert.equal(h.offers[1]?.delegatedCompletion?.generation, 2);
+      assert.notEqual(siblingsWake.message.messageId, messageId);
+      for (const siblingId of siblingIds)
+        assert.include(siblingsWake.message.text, String(siblingId));
+      assert.notInclude(siblingsWake.message.text, String(taskId));
+      assert.deepEqual(siblingsWake.modelSelection, desiredSelection);
+
+      yield* h.finishTurn(siblingsWake, "completed");
+      yield* h.settled();
+      const delivered = yield* h.projection();
+      const cohort = h.run(delivered, parent.runId)?.delegatedCompletion;
+      assert.equal(cohort?.delivery, null);
+      assert.deepEqual(
+        delivered.subagents.map((task) => task.completionDelivery?.state),
+        ["delivered", "delivered", "delivered", "delivered"],
+      );
+      assert.deepEqual(
+        delivered.messages.filter((message) => message.createdBy === "user"),
+        userMessages,
+        "recovery needs no new user input",
+      );
+      assert.deepEqual(delivered.thread.modelSelection, desiredSelection);
+      assert.equal(h.controls.sessionOpens, 1);
+      assert.equal(h.controls.interrupts, 0);
+
+      // Late or repeated acknowledgments of the recovered delivery change nothing.
+      yield* h.orchestrator.dispatch({
+        type: "notification.delivery.accept",
+        commandId: CommandId.make("late-acceptance"),
+        threadId: settlementThreadId,
+        messageId,
+      });
+      const afterLateAcceptance = yield* h.projection();
+      assert.deepEqual(afterLateAcceptance.subagents, delivered.subagents);
+      assert.deepEqual(afterLateAcceptance.runs, delivered.runs);
+      for (const task of delivered.subagents) {
+        yield* h.orchestrator.dispatch({
+          type: "delegated_task.completion-delivery.acknowledge",
+          commandId: CommandId.make(`read-result:${task.id}`),
+          parentThreadId: settlementThreadId,
+          taskId: task.id,
+          observedByRunId: siblingsWake.runId,
+        });
+      }
+      yield* h.repeatRunEvent(parent.runId);
+      yield* h.settled();
+      assert.equal(h.controls.started.length, 3);
+      assert.isTrue(
+        (yield* h.projection()).subagents.every(
+          (task) => task.completionDelivery?.state === "acknowledged",
+        ),
+      );
+    }),
+  ),
+);
+
+it.effect("drops a queued recovery offer whose parent is rolled back before dispatch", () =>
+  runSettlementScenario("rollback-after-offer", (h) =>
+    Effect.gen(function* () {
+      const parent = yield* h.startRun("message:parent");
+      const { messageId, taskId } = yield* h.reserveSteer(parent.runId);
+      yield* h.exhaustSteering();
+      yield* h.finishTurn(parent, "completed");
+      yield* h.settled();
+      assert.deepEqual(
+        h.offers.map((offer) => offer.delegatedCompletion),
+        [{ parentRunId: parent.runId, generation: 1, messageId }],
+      );
+      const completed = yield* h.projection();
+
+      yield* h.rollBack(parent.runId);
+      yield* h.settled();
+      assert.equal(h.offers.length, 1, "the rollback event does not offer again");
+      assert.equal(
+        yield* h.dispatchStaleCompletion(parent.runId, messageId, [taskId]),
+        "Delegated completion delivery is no longer dispatchable.",
+      );
+
+      // The worker handles requests serially, so reading a repeated request
+      // proves the queued offer was handled.
+      yield* h.startContinuationWorker();
+      yield* Queue.offer(h.requests, h.offers[0]!);
+      yield* h.awaitContinuationReads(2);
+      assert.deepEqual(h.dispatchAttempts, [], "the queued offer is dropped, not dispatched");
+      assert.equal(h.offers.length, 1, "the dropped offer is not retried");
+      assert.equal(h.controls.started.length, 1);
+      const rolledBack = yield* h.projection();
+      assert.deepEqual(
+        rolledBack.runs.map((run) => run.id),
+        completed.runs.map((run) => run.id),
+      );
+      assert.equal(h.run(rolledBack, parent.runId)?.status, "rolled_back");
+      assert.deepEqual(
+        h.run(rolledBack, parent.runId)?.delegatedCompletion,
+        h.run(completed, parent.runId)?.delegatedCompletion,
+      );
+      assert.equal(h.task(rolledBack, taskId)?.completionDelivery?.state, "claimed");
+      assert.equal(
+        rolledBack.messages.find((message) => message.id === messageId)?.runId,
+        parent.runId,
+      );
+
+      // Reading the result later does not release the discarded cohort to a sibling.
+      const [siblingId] = yield* h.addPendingSiblings(parent.runId, 1);
+      yield* h.orchestrator.dispatch({
+        type: "delegated_task.completion-delivery.acknowledge",
+        commandId: CommandId.make("read-after-rollback"),
+        parentThreadId: settlementThreadId,
+        taskId,
+        observedByRunId: parent.runId,
+      });
+      const read = yield* h.projection();
+      assert.deepEqual(h.run(read, parent.runId)?.delegatedCompletion?.delivery, {
+        generation: 1,
+        messageId,
+        taskIds: [],
+      });
+      assert.equal(h.task(read, siblingId!)?.completionDelivery?.state, "pending");
+      assert.equal(h.offers.length, 1);
+      assert.equal(h.controls.started.length, 1);
+    }),
+  ),
+);
+
+it.effect("reserves waiting siblings when the settled steer's result is read", () =>
+  runSettlementScenario("release-settled", (h) =>
+    Effect.gen(function* () {
+      const parent = yield* h.startRun("message:parent");
+      const { messageId, taskId } = yield* h.reserveSteer(parent.runId);
+      const siblingIds = yield* h.addPendingSiblings(parent.runId, 2);
+      yield* h.exhaustSteering();
+      yield* h.finishTurn(parent, "completed");
+      yield* h.settled();
+
+      yield* h.resolveResult("acknowledge", taskId, parent.runId);
+      const released = yield* h.projection();
+      const delivery = h.run(released, parent.runId)?.delegatedCompletion?.delivery;
+      assert.equal(delivery?.generation, 2);
+      assert.notEqual(delivery?.messageId, messageId);
+      assert.deepEqual(delivery?.taskIds, siblingIds);
+      for (const siblingId of siblingIds)
+        assert.equal(h.task(released, siblingId)?.completionDelivery?.state, "claimed");
+      assert.deepEqual(
+        h.offers.map((offer) => offer.delegatedCompletion),
+        [
+          { parentRunId: parent.runId, generation: 1, messageId },
+          { parentRunId: parent.runId, generation: 2, messageId: delivery!.messageId },
+        ],
+      );
+
+      yield* h.startContinuationWorker();
+      const wake = yield* h.awaitDispatchedTurn(2);
+      assert.equal(wake.message.messageId, delivery?.messageId);
+      for (const siblingId of siblingIds) assert.include(wake.message.text, String(siblingId));
+      assert.notInclude(wake.message.text, String(taskId));
+      yield* h.finishTurn(wake, "completed");
+      yield* h.settled();
+      const delivered = yield* h.projection();
+      for (const siblingId of siblingIds)
+        assert.equal(h.task(delivered, siblingId)?.completionDelivery?.state, "delivered");
+      assert.equal(h.run(delivered, parent.runId)?.delegatedCompletion?.delivery, null);
+      assert.equal(h.dispatches.length, 1);
+      assert.equal(h.controls.started.length, 2);
+    }),
+  ),
+);
+
+it.effect("delivers a waiting sibling once after a steer read while live settles", () =>
+  runSettlementScenario("live-read-then-settle", (h) =>
+    Effect.gen(function* () {
+      const parent = yield* h.startRun("message:parent");
+      const { messageId, taskId } = yield* h.reserveSteer(parent.runId);
+      const [siblingId] = yield* h.addPendingSiblings(parent.runId, 1);
+      yield* h.exhaustSteering();
+      yield* h.resolveResult("acknowledge", taskId, parent.runId);
+      const userMessages = (yield* h.projection()).messages.filter(
+        (message) => message.createdBy === "user",
+      );
+      assert.deepEqual(
+        h.run(yield* h.projection(), parent.runId)?.delegatedCompletion?.delivery,
+        { generation: 1, messageId, taskIds: [] },
+        "the live steer keeps its emptied reservation",
+      );
+      assert.equal(
+        yield* h.dispatchStaleCompletion(parent.runId, messageId, [taskId]),
+        "Delegated completion delivery is no longer dispatchable.",
+        "an emptied reservation starts no wake",
+      );
+
+      yield* h.finishTurn(parent, "completed");
+      yield* h.settled();
+      const released = yield* h.projection();
+      const delivery = h.run(released, parent.runId)?.delegatedCompletion?.delivery;
+      assert.equal(delivery?.generation, 2);
+      assert.notEqual(delivery?.messageId, messageId);
+      assert.deepEqual(delivery?.taskIds, [siblingId!]);
+      assert.equal(h.task(released, siblingId!)?.completionDelivery?.state, "claimed");
+      assert.deepEqual(
+        h.offers.map((offer) => offer.delegatedCompletion),
+        [{ parentRunId: parent.runId, generation: 2, messageId: delivery!.messageId }],
+      );
+
+      yield* h.startContinuationWorker();
+      const wake = yield* h.awaitDispatchedTurn(2);
+      assert.equal(wake.message.messageId, delivery?.messageId);
+      assert.include(wake.message.text, String(siblingId));
+      assert.notInclude(wake.message.text, String(taskId));
+      yield* h.finishTurn(wake, "completed");
+      yield* h.settled();
+      const delivered = yield* h.projection();
+      assert.equal(h.task(delivered, siblingId!)?.completionDelivery?.state, "delivered");
+      assert.equal(h.task(delivered, taskId)?.completionDelivery?.state, "acknowledged");
+      const cohort = h.run(delivered, parent.runId)?.delegatedCompletion;
+      assert.equal(cohort?.delivery, null);
+
+      // A repeated settlement leaves the delivered cohort alone.
+      yield* h.repeatRunEvent(parent.runId);
+      yield* h.settled();
+      const repeated = yield* h.projection();
+      assert.deepEqual(h.run(repeated, parent.runId)?.delegatedCompletion, cohort);
+      assert.deepEqual(repeated.subagents, delivered.subagents);
+      assert.equal(h.offers.length, 1);
+      assert.equal(h.dispatches.length, 1);
+      assert.equal(h.controls.started.length, 2, "one wake, and no empty wake");
+      assert.deepEqual(
+        repeated.messages.filter((message) => message.createdBy === "user"),
+        userMessages,
+        "recovery needs no new user input",
+      );
+    }),
+  ),
+);
+
+const runSettlementScenario = <E>(
+  name: string,
+  body: (harness: SettlementHarness) => Effect.Effect<void, E, Scope.Scope>,
+) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const cwd = yield* checkpointWorkspace(`completion-settlement-${name}`);
+      const controls: SettlementAdapterControls = {
+        events: yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>(),
+        started: [],
+        steered: [],
+        sessionOpens: 0,
+        interrupts: 0,
+      };
+      const requests =
+        yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+      const offers: Array<ProviderContinuationRequests.ProviderContinuationRequest> = [];
+      const markerChecks = yield* Queue.unbounded<void>();
+      yield* Effect.gen(function* () {
+        const harness = yield* makeSettlementHarness(controls, requests, offers, markerChecks, cwd);
+        yield* body(harness);
+      }).pipe(
+        Effect.provide(
+          ProviderReplayHarness.layerWithRegistry(
+            { name: `completion-settlement-${name}` },
+            ProviderAdapterRegistry.layerSingle(makeSettlementAdapter(cwd, controls)),
+            {
+              runEffectWorker: false,
+              wrapProjectionStore: (store) => ({
+                ...store,
+                getRunMessage: (threadId, runId) =>
+                  store
+                    .getRunMessage(threadId, runId)
+                    .pipe(
+                      Effect.tap(() =>
+                        runId === markerRunId ? Queue.offer(markerChecks, undefined) : Effect.void,
+                      ),
+                    ),
+              }),
+            },
+          ),
+        ),
+        Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+          offer: (request) =>
+            Effect.sync(() => offers.push(request)).pipe(
+              Effect.andThen(Queue.offer(requests, request)),
+            ),
+          take: Queue.take(requests),
+        }),
+      );
+    }),
+  );
+
+type SettlementHarness = Effect.Success<ReturnType<typeof makeSettlementHarness>>;
+
+const makeSettlementHarness = Effect.fnUntraced(function* (
+  controls: SettlementAdapterControls,
+  requests: Queue.Queue<ProviderContinuationRequests.ProviderContinuationRequest>,
+  offers: ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>,
+  markerChecks: Queue.Queue<void>,
+  cwd: string,
+) {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+  const sink = yield* EventSink.EventSinkV2;
+  const dispatches: Array<CommandId> = [];
+  const dispatchAttempts: Array<CommandId> = [];
+  const dispatched = yield* Queue.unbounded<void>();
+  const continuationReads = yield* Queue.unbounded<void>();
+
+  let markers = 0;
+  yield* orchestrator.dispatch({
+    type: "thread.create",
+    commandId: CommandId.make(`create:${settlementThreadId}`),
+    threadId: settlementThreadId,
+    projectId: ProjectId.make("project:completion-settlement"),
+    title: "Completion settlement",
+    modelSelection: runningSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: cwd,
+    createdBy: "user",
+    creationSource: "web",
+  });
+
+  const projection = () =>
+    orchestrator.getThreadProjection(settlementThreadId).pipe(
+      Effect.map((current) => ({
+        ...current,
+        runs: current.runs.filter((run) => run.id !== markerRunId),
+      })),
+    );
+  const run = (
+    current: { readonly runs: ReadonlyArray<OrchestrationV2Run> },
+    runId: RunId,
+  ): OrchestrationV2Run | undefined => current.runs.find((candidate) => candidate.id === runId);
+  const task = (current: Effect.Success<ReturnType<typeof projection>>, taskId: NodeId) =>
+    current.subagents.find((candidate) => candidate.id === taskId);
+
+  const watch = Effect.fnUntraced(function* (
+    predicate: (event: OrchestrationV2DomainEvent) => boolean,
+  ) {
+    const afterSequence = yield* sink.latestSequence();
+    return yield* sink.stream({ afterSequence }).pipe(
+      Stream.map((stored) => stored.event),
+      Stream.filter(predicate),
+      Stream.take(1),
+      Stream.runDrain,
+      Effect.forkScoped,
+    );
+  });
+
+  // The run reactor serializes updates within one thread. Reading the rolled-back
+  // marker's input proves all earlier reactions for this thread finished.
+  const settled = Effect.fnUntraced(function* () {
+    markers += 1;
+    const current = yield* orchestrator.getThreadProjection(settlementThreadId);
+    const marker = current.runs.find((run) => run.id === markerRunId);
+    const { delegatedCompletion: _cohort, ...base } = marker ?? current.runs[0]!;
+    const now = yield* DateTime.now;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`event:marker:${markers}`),
+          type: "run.updated",
+          threadId: settlementThreadId,
+          runId: markerRunId,
+          occurredAt: now,
+          payload: {
+            ...base,
+            id: markerRunId,
+            userMessageId: MessageId.make("message:completion-settlement-marker"),
+            ordinal: marker?.ordinal ?? Math.max(...current.runs.map((run) => run.ordinal)) + 1,
+            status: "rolled_back",
+            completedAt: now,
+          },
+        },
+      ],
+    });
+    yield* Queue.take(markerChecks);
+  });
+
+  // Acknowledges (reads) or disposes one delegated result.
+  const resolveResult = (
+    release: "acknowledge" | "dispose",
+    taskId: NodeId,
+    observedByRunId: RunId,
+  ) =>
+    orchestrator.dispatch(
+      release === "acknowledge"
+        ? {
+            type: "delegated_task.completion-delivery.acknowledge",
+            commandId: CommandId.make(`acknowledge:${taskId}`),
+            parentThreadId: settlementThreadId,
+            taskId,
+            observedByRunId,
+          }
+        : {
+            type: "delegated_task.completion-delivery.dispose",
+            commandId: CommandId.make(`dispose:${taskId}`),
+            parentThreadId: settlementThreadId,
+            taskId,
+          },
+    );
+
+  const startRun = Effect.fnUntraced(function* (id: string) {
+    const running = yield* watch(
+      (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
+    );
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make(`dispatch:${id}`),
+      threadId: settlementThreadId,
+      messageId: MessageId.make(id),
+      text: id,
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* worker.drain();
+    yield* Fiber.join(running);
+    return controls.started.at(-1)!;
+  });
+
+  const finishTurn = Effect.fnUntraced(function* (
+    turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+    status: "completed" | "interrupted",
+  ) {
+    const current = yield* orchestrator.getThreadProjection(turnInput.threadId);
+    const providerTurn = current.providerTurns.find(
+      (candidate) => candidate.runAttemptId === turnInput.attemptId,
+    )!;
+    const reached = yield* watch(
+      (event) =>
+        event.type === "run.updated" &&
+        event.payload.id === turnInput.runId &&
+        event.payload.status === (status === "completed" ? "waiting" : status),
+    );
+    yield* Queue.offer(controls.events, {
+      type: "provider_turn.updated",
+      driver,
+      providerTurn: { ...providerTurn, status, completedAt: yield* DateTime.now },
+    });
+    yield* Queue.offer(controls.events, {
+      type: "turn.terminal",
+      driver,
+      providerThreadId: providerTurn.providerThreadId,
+      providerTurnId: providerTurn.id,
+      runOrdinal: turnInput.runOrdinal,
+      status,
+      failure: null,
+      threadDisposition: "reusable",
+    });
+    yield* Fiber.join(reached);
+    yield* worker.drain();
+    assert.equal(
+      run(yield* orchestrator.getThreadProjection(turnInput.threadId), turnInput.runId)?.status,
+      status,
+    );
+  });
+
+  const saveDesiredSelection = Effect.fnUntraced(function* (runId: RunId) {
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("desired-selection"),
+      threadId: settlementThreadId,
+      messageId: desiredSelectionMessageId,
+      text: "use the new model next turn",
+      attachments: [],
+      modelSelection: desiredSelection,
+      dispatchMode: { type: "steer_active", targetRunId: runId },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* worker.drain();
+    const selected = yield* projection();
+    assert.deepEqual(selected.thread.modelSelection, desiredSelection);
+    assert.deepEqual(run(selected, runId)?.modelSelection, runningSelection);
+  });
+
+  // Seeds the claimed first result of an open cohort, then routes its durable
+  // mailbox message through the orchestrator, which steers the active run.
+  const reserveSteer = Effect.fnUntraced(function* (ownerRunId: RunId) {
+    const messageId = MessageId.make("message:completion-steer");
+    const taskId = NodeId.make("task:first");
+    const current = yield* projection();
+    const owner = run(current, ownerRunId)!;
+    const ownerTurn = controls.started.find((turn) => turn.runId === ownerRunId)!;
+    const now = yield* DateTime.now;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("event:cohort"),
+          type: "run.updated",
+          threadId: settlementThreadId,
+          runId: ownerRunId,
+          occurredAt: now,
+          payload: {
+            ...owner,
+            delegatedCompletion: {
+              disposition: "open",
+              nextGeneration: 2,
+              delivery: { generation: 1, messageId, taskIds: [taskId] },
+            },
+          },
+        },
+        {
+          id: EventId.make("event:first-task"),
+          type: "subagent.updated",
+          threadId: settlementThreadId,
+          runId: ownerRunId,
+          nodeId: taskId,
+          occurredAt: now,
+          payload: {
+            id: taskId,
+            threadId: settlementThreadId,
+            runId: ownerRunId,
+            parentNodeId: ownerTurn.rootNodeId,
+            origin: "app_owned",
+            createdBy: "agent",
+            driver,
+            providerInstanceId: instanceId,
+            providerThreadId: null,
+            childThreadId: null,
+            nativeTaskRef: null,
+            prompt: "Do background work",
+            title: "First result",
+            model: null,
+            completionWake: "always",
+            completionDelivery: { state: "claimed", observedByRunId: null },
+            status: "completed",
+            result: "done",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+          },
+        },
+      ],
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("completion-delivery"),
+      threadId: settlementThreadId,
+      messageId,
+      text: "Delegated task completed.",
+      attachments: [],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "server",
+      delegatedCompletion: { parentRunId: ownerRunId, generation: 1, taskIds: [taskId] },
+    });
+    return { messageId, taskId };
+  });
+
+  // Siblings that finished while the first delivery was in flight wait as pending.
+  const addPendingSiblings = Effect.fnUntraced(function* (ownerRunId: RunId, count: number) {
+    const first = (yield* projection()).subagents.find(
+      (candidate) => candidate.runId === ownerRunId,
+    )!;
+    const now = yield* DateTime.now;
+    const ids = Array.from({ length: count }, (_, index) =>
+      NodeId.make(`task:sibling-${index + 1}`),
+    );
+    yield* sink.write({
+      events: ids.map((id) => ({
+        id: EventId.make(`event:${id}`),
+        type: "subagent.updated" as const,
+        threadId: settlementThreadId,
+        runId: ownerRunId,
+        nodeId: id,
+        occurredAt: now,
+        payload: {
+          ...first,
+          id,
+          title: `Sibling ${id}`,
+          completionDelivery: { state: "pending" as const, observedByRunId: null },
+        },
+      })),
+    });
+    return ids;
+  });
+
+  // Drives every real outbox retry, moving virtual time only to scheduled boundaries.
+  const exhaustSteering = Effect.fnUntraced(function* () {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      yield* worker.drain();
+      const next = yield* worker.nextClaimableAt();
+      if (Option.isSome(next)) yield* TestClock.setTime(DateTime.toEpochMillis(next.value));
+    }
+    assert.isTrue(Option.isNone(yield* worker.nextClaimableAt()));
+  });
+
+  const repeatRunEvent = Effect.fnUntraced(function* (runId: RunId) {
+    const current = run(yield* projection(), runId)!;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`event:repeat:${runId}:${yield* sink.latestSequence()}`),
+          type: "run.updated",
+          threadId: settlementThreadId,
+          runId,
+          occurredAt: yield* DateTime.now,
+          payload: current,
+        },
+      ],
+    });
+  });
+
+  // CheckpointRollbackService spreads the discarded run and keeps its cohort.
+  const rollBack = Effect.fnUntraced(function* (runId: RunId) {
+    const current = run(yield* projection(), runId)!;
+    const now = yield* DateTime.now;
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`event:rollback:${runId}`),
+          type: "run.updated",
+          threadId: settlementThreadId,
+          runId,
+          occurredAt: now,
+          payload: { ...current, status: "rolled_back", completedAt: now },
+        },
+      ],
+    });
+  });
+
+  // Sends what the continuation worker builds from a read taken before the
+  // reservation changed, and returns why the orchestrator refused it.
+  const dispatchStaleCompletion = (
+    parentRunId: RunId,
+    messageId: MessageId,
+    taskIds: ReadonlyArray<NodeId>,
+  ) =>
+    orchestrator
+      .dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`stale-completion:${messageId}`),
+        threadId: settlementThreadId,
+        messageId,
+        text: "Delegated task completed.",
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+        delegatedCompletion: { parentRunId, generation: 1, taskIds },
+      })
+      .pipe(
+        Effect.as("dispatched"),
+        Effect.catchTags({
+          OrchestratorDispatchError: (error) => Effect.succeed(String(error.cause)),
+        }),
+      );
+
+  const startContinuationWorker = () =>
+    Layer.build(
+      ProviderContinuationService.layer.pipe(
+        Layer.provide(IdAllocator.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadRecords: (id, fields, filter) =>
+              orchestrator
+                .getThreadRecords(id, fields, filter)
+                .pipe(Effect.tap(() => Queue.offer(continuationReads, undefined))),
+            dispatch: (command) =>
+              Effect.sync(() => dispatchAttempts.push(command.commandId)).pipe(
+                Effect.andThen(orchestrator.dispatch(command)),
+                Effect.tap(() =>
+                  Effect.sync(() => dispatches.push(command.commandId)).pipe(
+                    Effect.andThen(Queue.offer(dispatched, undefined)),
+                  ),
+                ),
+              ),
+          }),
+        ),
+      ),
+    );
+
+  // Waits for the next continuation dispatch to start provider turn `count`.
+  // An earlier drain may already have started it, so check before joining.
+  const awaitDispatchedTurn = Effect.fnUntraced(function* (count: number) {
+    yield* Queue.take(dispatched);
+    const isRunning = (event: OrchestrationV2DomainEvent) =>
+      event.type === "provider-turn.updated" &&
+      event.payload.status === "running" &&
+      event.payload.runAttemptId === controls.started[count - 1]?.attemptId;
+    const running = yield* watch(isRunning);
+    yield* worker.drain();
+    const turn = controls.started[count - 1];
+    const alreadyRunning =
+      turn !== undefined &&
+      (yield* projection()).providerTurns.some(
+        (candidate) => candidate.runAttemptId === turn.attemptId && candidate.status === "running",
+      );
+    yield* alreadyRunning ? Fiber.interrupt(running) : Fiber.join(running);
+    assert.equal(controls.started.length, count);
+    return controls.started[count - 1]!;
+  });
+
+  const awaitContinuationReads = Effect.fnUntraced(function* (count: number) {
+    for (let read = 0; read < count; read += 1) yield* Queue.take(continuationReads);
+  });
+
+  return {
+    controls,
+    requests,
+    offers,
+    dispatches,
+    dispatchAttempts,
+    orchestrator,
+    projection,
+    run,
+    task,
+    settled,
+    resolveResult,
+    startRun,
+    finishTurn,
+    saveDesiredSelection,
+    reserveSteer,
+    addPendingSiblings,
+    exhaustSteering,
+    repeatRunEvent,
+    rollBack,
+    dispatchStaleCompletion,
+    startContinuationWorker,
+    awaitDispatchedTurn,
+    awaitContinuationReads,
+  };
+});
+
+function makeSettlementAdapter(
+  cwd: string,
+  controls: SettlementAdapterControls,
+): ProviderAdapter.ProviderAdapterV2["Service"] {
+  return {
+    instanceId,
+    driver,
+    getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+    planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+    openSession: (input) =>
+      Effect.gen(function* () {
+        controls.sessionOpens += 1;
+        const now = yield* DateTime.now;
+        return {
+          instanceId,
+          driver,
+          providerSessionId: input.providerSessionId,
+          providerSession: {
+            id: input.providerSessionId,
+            driver,
+            providerInstanceId: instanceId,
+            status: "ready",
+            cwd,
+            model: runningSelection.model,
+            capabilities: CodexProviderCapabilitiesV2,
+            createdAt: now,
+            updatedAt: now,
+            lastError: null,
+          },
+          events: Stream.fromQueue(controls.events),
+          ensureThread: ({ threadId: appThreadId }) =>
+            Effect.succeed({
+              id: ProviderThreadId.make(`provider-thread:${appThreadId}`),
+              driver,
+              providerInstanceId: instanceId,
+              providerSessionId: input.providerSessionId,
+              appThreadId,
+              ownerNodeId: null,
+              nativeThreadRef: { driver, nativeId: "native-thread", strength: "strong" },
+              nativeConversationHeadRef: null,
+              status: "idle",
+              firstRunOrdinal: null,
+              lastRunOrdinal: null,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+            }),
+          resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
+          startTurn: (turn) =>
+            Effect.gen(function* () {
+              controls.started.push(turn);
+              yield* Queue.offer(controls.events, {
+                type: "provider_turn.updated",
+                driver,
+                providerTurn: {
+                  id: ProviderTurnId.make(`provider-turn:${turn.attemptId}`),
+                  providerThreadId: turn.providerThread.id,
+                  nodeId: turn.rootNodeId,
+                  runAttemptId: turn.attemptId,
+                  nativeTurnRef: {
+                    driver,
+                    nativeId: `native:${turn.attemptId}`,
+                    strength: "strong",
+                  },
+                  ordinal: turn.providerTurnOrdinal,
+                  status: "running",
+                  startedAt: yield* DateTime.now,
+                  completedAt: null,
+                },
+              });
+            }),
+          steerTurn: (turn) =>
+            Effect.gen(function* () {
+              if (turn.message.messageId === desiredSelectionMessageId) return;
+              controls.steered.push(turn.message.messageId);
+              return yield* new ProviderAdapter.ProviderAdapterSteerRunError({
+                driver,
+                providerThreadId: turn.providerThread.id,
+                providerTurnId: turn.providerTurnId,
+                cause: "Pi turn is not active.",
+              });
+            }),
+          interruptTurn: () =>
+            Effect.sync(() => {
+              controls.interrupts += 1;
+            }),
+          respondToRuntimeRequest: () => Effect.void,
+          readThreadSnapshot: () => Effect.die("unused"),
+          rollbackThread: () => Effect.die("unused"),
+          forkThread: () => Effect.die("unused"),
+        };
+      }),
+  };
+}
