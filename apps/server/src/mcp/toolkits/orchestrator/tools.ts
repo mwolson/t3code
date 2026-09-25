@@ -1,4 +1,5 @@
 import {
+  OrchestratorMcpCapabilitiesInput,
   OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpCreateThreadsResult,
@@ -39,9 +40,10 @@ const threadMetadataDependencies = [
   ThreadMetadataMcpService,
 ];
 
-const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
+export const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   description:
-    "List the V2 provider instances, models, inherited runtime settings, and app-owned orchestration features available to this T3 thread. For a separate top-level thread in a new or existing worktree, use t3_thread_launch with workspaceStrategy.",
+    "List V2 provider summaries, inherited runtime settings, and app-owned orchestration features for this T3 thread. The no-argument response omits model catalogs. Pass providerInstanceId to read that provider's paginated models, continue with modelCursor=modelsNextCursor, or add an exact model with includeModelOptions=true to inspect its option descriptors. For a separate top-level thread in a new or existing worktree, use t3_thread_launch with workspaceStrategy.",
+  parameters: OrchestratorMcpCapabilitiesInput,
   success: OrchestratorMcpCapabilitiesResult,
   failure: OrchestratorMcpFailure,
   failureMode: "return",
