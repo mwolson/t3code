@@ -18,6 +18,7 @@ import * as ServerConfig from "../../../config.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ScratchWorkspace from "../../../project/ScratchWorkspace.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import { ProjectHandlersLive } from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -67,6 +68,9 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       }),
       Layer.mock(Project.ProjectService)({}),
       Layer.mock(ScratchWorkspace.ScratchWorkspace)({}),
+      Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
+        launchedThreadGrant: () => Effect.succeed(() => Effect.void),
+      }),
       NodeServices.layer,
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-source-link-" }).pipe(
         Layer.provide(NodeServices.layer),
@@ -130,6 +134,9 @@ it.effect("launches a scratch thread into the Scratch project", () =>
       Layer.mock(Project.ProjectService)({}),
       Layer.mock(ScratchWorkspace.ScratchWorkspace)({
         ensureProject: Effect.succeed({ projectId: scratchProjectId }),
+      }),
+      Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({
+        launchedThreadGrant: () => Effect.succeed(() => Effect.void),
       }),
       NodeServices.layer,
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-scratch-launch-" }).pipe(

@@ -228,7 +228,8 @@ type DelegateTaskInput = {
 ```
 
 Provider, model, runtime mode, and interaction mode inherit from the parent
-when omitted. A driver-only target inherits the parent's provider instance
+when omitted. Delegated children always inherit the parent thread's project.
+A driver-only target inherits the parent's provider instance
 when it can run child tasks, and otherwise selects an available instance of
 that driver; an explicit `providerInstanceId` is honored exactly and fails
 when unavailable. Selecting a different provider without a model uses that
@@ -297,15 +298,18 @@ type CreateThreadsInput = {
     };
     runtimeMode?: "inherit" | "approval-required" | "auto-accept-edits" | "full-access";
     interactionMode?: "inherit" | "plan" | "default";
+    projectDirectory?: string;
   }>;
   clientRequestId?: string;
 };
 ```
 
-Each entry independently resolves provider, model, and modes. The new threads
-inherit the parent's project, branch, and worktree path, but they have no
-sub-agent lineage. Entries with a prompt immediately dispatch a run; entries
-without a prompt remain idle.
+Each entry independently resolves provider, model, and modes. Without
+`projectDirectory`, it inherits the parent's project, branch, and worktree.
+An absolute or `~/` directory must match a registered, available project root;
+that selection starts at the target root with no inherited branch or worktree.
+Unknown and relative paths are rejected. Entries have no subagent lineage;
+a prompt immediately dispatches a run, otherwise the thread remains idle.
 
 ### `t3_thread_launch`
 
@@ -323,12 +327,25 @@ its own under the environment's Scratch project. For stacked PRs, use the parent
 no retry key, so inspect existing threads after a failed or lost response before
 launching again. `create_threads` remains the batch option for a shared checkout.
 
+An MCP caller's launch records the new thread in the caller's durable timeline
+before the thread's first message is dispatched. That record lets the caller
+read, send, wait, or interrupt the thread even when `projectId` names another
+known project. Run-link failures get four attempts with short exponential delays
+and fresh command IDs, without resubmitting the accepted message. If all attempts
+fail, launch still returns the accepted thread and run IDs and status. The durable
+creation record keeps access and listing available after process loss. This does
+not broaden project listing or metadata access; delegation stays in the caller's
+project. Deleting the caller ends grant access, checked against durable deletion
+state on every request, including after restart or replay.
+
 ### `t3_thread_list`
 
-Lists durable thread shells in the calling thread's project, newest first.
+Lists durable thread shells in the calling thread's project and exact threads
+it created through `create_threads` or `t3_thread_launch`, newest first.
 Callers can filter by title, run status, and whether app-owned sub-agent threads
-are included. Results are bounded and offset-paginated. Deleted threads and
-threads from other projects are never exposed.
+are included. Results are bounded and offset-paginated. Archived, deleted and
+unrelated cross-project threads are excluded. Each item has its own `projectId`;
+the top-level `projectId` identifies the caller's project.
 
 ### `t3_thread_read`
 
@@ -428,9 +445,16 @@ results use the latest assistant content from the final work turn.
   mode. It may not escalate privileges.
 - A child interaction mode may stay equal to or narrow from `default` to
   `plan`. It may not escalate from `plan` to `default`.
-- General thread management is limited to the calling thread's project. Send
-  additionally enforces the same runtime and interaction privilege ceiling as
-  child creation.
+- `create_threads` inherits this thread's project unless `projectDirectory`
+  names another known T3 project workspace. Absolute paths and home-relative
+  `~/` paths are accepted. Unknown or relative paths are rejected. Delegated
+  subagents always inherit the parent project.
+- `t3_thread_list` stays in the calling thread's project. Read, send, wait, and
+  interrupt may follow a top-level thread this parent recorded creating through
+  `create_threads` or `t3_thread_launch`, even when that thread lives in another
+  known project.
+- Send additionally enforces the same runtime and interaction privilege ceiling
+  as child creation.
 - Provider instances must be enabled, installed, available, authenticated, and
   backed by a V2 adapter.
 - A requested model must be advertised by the selected provider when the

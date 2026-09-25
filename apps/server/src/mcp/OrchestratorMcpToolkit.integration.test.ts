@@ -1,4 +1,15 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { vi } from "vite-plus/test";
+import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import {
+  ProjectionStoreV2,
+  ProjectionStoreReadError,
+  layer as projectionStoreLayer,
+} from "../orchestration-v2/ProjectionStore.ts";
+import {
+  CommandReceiptStoreV2,
+  layer as commandReceiptStoreLayer,
+} from "../orchestration-v2/CommandReceiptStore.ts";
 import { describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
@@ -41,6 +52,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
@@ -72,6 +84,18 @@ import {
   materializeReplayTranscriptWorkspace,
 } from "../orchestration-v2/testkit/ReplayTranscriptNdjson.ts";
 import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
+import * as ServerConfig from "../config.ts";
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
+import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
+import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as ScratchWorkspace from "../project/ScratchWorkspace.ts";
+import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
+import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -79,6 +103,18 @@ import { delegatedTaskRun, hasPendingChildRuns } from "./OrchestratorMcpService.
 
 const parentThreadId = ThreadId.make("thread:mcp-orchestrator-parent");
 const projectId = ProjectId.make("project:mcp-orchestrator");
+const otherProjectId = ProjectId.make("project:mcp-other");
+const otherProjectDirectory = "/workspace/mcp-other";
+const otherProject = {
+  id: otherProjectId,
+  title: "Other",
+  workspaceRoot: otherProjectDirectory,
+  defaultModelSelection: null,
+  scripts: [],
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  deletedAt: null,
+} as const;
 const codexInstanceId = ProviderInstanceId.make("codex");
 const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
 const codexModel = "gpt-5.4";
@@ -481,9 +517,9 @@ const unusedScheduledTaskStubLayer = Layer.succeed(
 );
 
 describe("orchestrator MCP toolkit", () => {
-  it.live(
-    "delegates cross-provider tasks, polls and cancels children, and creates ordinary threads",
-    () =>
+  it.live.each(["grant", "run-link", "run-link-exhausted"] as const)(
+    "delegates cross-provider tasks, polls and cancels children, and repairs ordinary thread creation (%s)",
+    (faultStage) =>
       Effect.scoped(
         Effect.gen(function* () {
           const cwd = yield* checkpointWorkspace("orchestrator-mcp-toolkit");
@@ -640,15 +676,66 @@ describe("orchestrator MCP toolkit", () => {
               runNow: () => Effect.die("ScheduledTaskService.runNow is unused in this test"),
             }),
           );
-          const testLayer = Layer.merge(
+          // Root launches only resolve the project and release the prepared run.
+          const threadLaunchLayer = ThreadLaunch.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                WorktreeSetupTracker.layer,
+                Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({
+                  get: () => Effect.succeed(null),
+                }),
+                Layer.mock(TerminalManager.TerminalManager)({}),
+                Layer.mock(GitWorkflow.GitWorkflowService)({}),
+                Layer.succeed(ProjectSetupScriptRunner.ProjectSetupScriptRunner, {
+                  runForThread: () => Effect.succeed({ status: "no-script" as const }),
+                }),
+                Layer.mock(TextGeneration.TextGeneration)({}),
+                ServerSettings.layerTest(),
+                IdAllocator.layer,
+              ),
+            ),
+          );
+          const testLayer = Layer.mergeAll(
             McpHttpServer.OrchestratorToolkitRegistrationLive,
             McpHttpServer.ThreadToolkitRegistrationLive,
+            McpHttpServer.ProjectRegistrationLive,
           ).pipe(
             Layer.provideMerge(McpServer.McpServer.layer),
+            Layer.provideMerge(threadLaunchLayer),
             Layer.provideMerge(orchestrationLayer),
+            Layer.provideMerge(
+              Layer.merge(projectionStoreLayer, commandReceiptStoreLayer).pipe(
+                Layer.provide(SqlitePersistenceMemory),
+              ),
+            ),
             Layer.provide(registryLayer),
             Layer.provide(providerRegistryLayer),
             Layer.provide(scheduledTaskStubLayer),
+            // No thread here is a scratch thread, so none gets a scratch folder.
+            Layer.provide(
+              Layer.mock(ScratchWorkspace.ScratchWorkspace)({
+                folderForThread: () => Effect.succeed(Option.none()),
+              }),
+            ),
+            Layer.provide(
+              Layer.mock(ProjectService.ProjectService)({
+                getByWorkspaceRoot: (workspaceRoot) =>
+                  Effect.succeed(
+                    workspaceRoot === otherProjectDirectory
+                      ? Option.some(otherProject)
+                      : Option.none(),
+                  ),
+                getById: (id) =>
+                  Effect.succeed(
+                    id === otherProjectId
+                      ? Option.some(otherProject)
+                      : id === projectId
+                        ? Option.some({ ...otherProject, id: projectId, workspaceRoot: cwd })
+                        : Option.none(),
+                  ),
+              }),
+            ),
+            Layer.provide(ServerConfig.layerTest(cwd, { prefix: "t3-mcp-orchestrator-toolkit-" })),
             Layer.provide(NodeServices.layer),
           );
 
@@ -1855,6 +1942,616 @@ describe("orchestrator MCP toolkit", () => {
               message: expect.stringContaining("more than once"),
             });
 
+            const unknownProjectCall = yield* invoke("create_threads", {
+              threads: [
+                { prompt: createdThreadPrompt, projectDirectory: "/definitely-not-a-t3-project" },
+              ],
+              clientRequestId: "start-unknown-project-1",
+            });
+            expect(unknownProjectCall.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+              code: "invalid_request",
+              message: expect.stringContaining("not a known T3 project"),
+            });
+
+            const projectionStore = yield* ProjectionStoreV2;
+            const receiptStore = yield* CommandReceiptStoreV2;
+            const eventSink = yield* EventSink.EventSinkV2;
+            const originalRead = projectionStore.getThreadRecords;
+            let rejectRecord = true;
+            let recordReads = 0;
+            const readFault = vi
+              .spyOn(projectionStore, "getThreadRecords")
+              .mockImplementation((threadId, subsets, options) => {
+                if (
+                  threadId === parentThreadId &&
+                  subsets.join(",") === "runs,nodes,turnItems,attempts,providerTurns"
+                ) {
+                  recordReads += 1;
+                  if (rejectRecord && recordReads === (faultStage === "grant" ? 1 : 2)) {
+                    rejectRecord = false;
+                    return Effect.fail(
+                      new ProjectionStoreReadError({
+                        threadId,
+                        cause: "injected creation-record read failure",
+                      }),
+                    );
+                  }
+                }
+                return originalRead(threadId, subsets, options);
+              });
+            const rejectedWrites = vi.spyOn(eventSink, "commitRejectedCommand");
+            const repairRequest = {
+              threads: [{ prompt: createdThreadPrompt, projectDirectory: otherProjectDirectory }],
+              clientRequestId: "known-project-record-repair",
+            };
+            const rejectedCreate = yield* invoke("create_threads", repairRequest).pipe(
+              Effect.ensuring(Effect.sync(() => readFault.mockRestore())),
+            );
+            expect(rejectedCreate.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+              code: "orchestration_error",
+            });
+            expect(rejectRecord).toBe(false);
+            const rejectedWrite = rejectedWrites.mock.calls.find(
+              ([input]) => input.commandType === "thread.created.record",
+            )?.[0];
+            expect(rejectedWrite).toBeDefined();
+            const rejectedReceipt = yield* receiptStore.getByCommandId(rejectedWrite!.commandId);
+            expect(Option.isSome(rejectedReceipt) && rejectedReceipt.value.status).toBe("rejected");
+            rejectedWrites.mockRestore();
+            const failedTargets = (yield* orchestrator.getShellSnapshot()).threads.filter(
+              (thread) => thread.projectId === otherProjectId,
+            );
+            expect(failedTargets).toHaveLength(1);
+            const repairTargetId = failedTargets[0]!.id;
+            expect((yield* orchestrator.getThreadProjection(repairTargetId)).runs).toHaveLength(
+              faultStage === "grant" ? 0 : 1,
+            );
+            const beforeRepair = yield* orchestrator.getThreadProjection(parentThreadId);
+            expect(
+              beforeRepair.turnItems.some(
+                (item) => item.type === "thread_created" && item.targetThreadId === repairTargetId,
+              ),
+            ).toBe(faultStage !== "grant");
+            const repairResults = yield* Effect.all(
+              [invoke("create_threads", repairRequest), invoke("create_threads", repairRequest)],
+              { concurrency: 2 },
+            );
+            for (const result of repairResults) {
+              expect(result.isError).toBe(false);
+              expect(result.structuredContent).toMatchObject({
+                threads: [{ threadId: repairTargetId }],
+              });
+              expect(
+                (yield* decodeCreateThreadsResult(result.structuredContent)).threads[0]?.threadId,
+              ).toBe(repairTargetId);
+            }
+            const repeatedRepair = yield* invoke("create_threads", repairRequest);
+            expect(repeatedRepair.isError).toBe(false);
+            const repairedTarget = yield* orchestrator.getThreadProjection(repairTargetId);
+            expect(repairedTarget.runs).toHaveLength(1);
+            expect(
+              repairedTarget.messages.filter((message) => message.role === "user"),
+            ).toHaveLength(1);
+            expect(
+              (yield* orchestrator.getThreadProjection(parentThreadId)).turnItems.filter(
+                (item) => item.type === "thread_created" && item.targetThreadId === repairTargetId,
+              ),
+            ).toHaveLength(1);
+            const repairedItem = (yield* orchestrator.getThreadProjection(
+              parentThreadId,
+            )).turnItems.find(
+              (item) => item.type === "thread_created" && item.targetThreadId === repairTargetId,
+            );
+            expect(repairedItem).toMatchObject({ targetRunId: repairedTarget.runs[0]!.id });
+            if (faultStage !== "grant") {
+              const initialItem = beforeRepair.turnItems.find(
+                (item) => item.type === "thread_created" && item.targetThreadId === repairTargetId,
+              )!;
+              expect(repairedItem).toMatchObject({
+                id: initialItem.id,
+                ordinal: initialItem.ordinal,
+                startedAt: initialItem.startedAt,
+              });
+            }
+            const repairedRead = yield* invoke("t3_thread_read", { threadId: repairTargetId });
+            expect(repairedRead.structuredContent).toHaveProperty(
+              "thread.threadId",
+              repairTargetId,
+            );
+            expect(
+              Option.getOrThrow(yield* receiptStore.getByCommandId(rejectedWrite!.commandId))
+                .status,
+            ).toBe("rejected");
+            const repairedWait = yield* invoke("t3_thread_wait", {
+              threadId: repairTargetId,
+              timeoutMs: 5000,
+            });
+            expect(repairedWait.structuredContent).toMatchObject({ status: "completed" });
+            expect(
+              (yield* Ref.get(capturedTurns)).filter((turn) => turn.threadId === repairTargetId),
+            ).toHaveLength(1);
+            const missingParentRepair = yield* invokeAs(
+              { ...invocation, threadId: ThreadId.make("missing-creation-parent") },
+              "create_threads",
+              repairRequest,
+            );
+            expect(missingParentRepair.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+            });
+            const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+            yield* threadManagement.dispatch({
+              type: "thread.delete",
+              threadId: repairTargetId,
+              commandId: CommandId.make("delete-repair-target"),
+            });
+            const deletedRecord = yield* threadManagement
+              .dispatch({
+                type: "thread.created.record",
+                commandId: CommandId.make("record-deleted-repair-target"),
+                parentThreadId,
+                parentRunId: repairedItem!.runId!,
+                parentNodeId: repairedItem!.nodeId!,
+                targetThreadId: repairTargetId,
+                targetRunId: null,
+              })
+              .pipe(Effect.flip);
+            expect(deletedRecord).toMatchObject({
+              _tag: "OrchestratorDispatchError",
+              commandType: "thread.created.record",
+              cause: "Cannot record creation for a deleted parent or target thread.",
+            });
+            const deletedRepair = yield* invoke("create_threads", repairRequest);
+            expect(deletedRepair.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+              code: "thread_not_found",
+            });
+            expect((yield* orchestrator.getThreadProjection(repairTargetId)).runs).toHaveLength(1);
+            const deletedRead = yield* invoke("t3_thread_read", { threadId: repairTargetId });
+            expect(deletedRead.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+              code: "thread_not_found",
+            });
+
+            const knownProjectCall = yield* invoke("create_threads", {
+              threads: [{ prompt: createdThreadPrompt, projectDirectory: otherProjectDirectory }],
+              clientRequestId: "start-known-project-1",
+            });
+            expect(knownProjectCall.isError).toBe(false);
+            const knownProjectThread = (yield* decodeCreateThreadsResult(
+              knownProjectCall.structuredContent,
+            ).pipe(Effect.orDie)).threads[0]!;
+            const knownProjectChild = yield* orchestrator.getThreadProjection(
+              knownProjectThread.threadId,
+            );
+            expect(knownProjectChild.thread.projectId).toBe(otherProjectId);
+            expect(knownProjectChild.thread.worktreePath).toBeNull();
+            expect(knownProjectChild.thread.branch).toBeNull();
+            expect(
+              knownProjectChild.messages.find((message) => message.role === "user"),
+            ).toMatchObject({
+              senderThreadId: parentThreadId,
+            });
+            const unrelatedProjectThreadId = ThreadId.make("thread:unrelated-known-project");
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make("command:create-unrelated-known-project"),
+              threadId: unrelatedProjectThreadId,
+              projectId: otherProjectId,
+              title: "Not created by this caller",
+              branch: null,
+              worktreePath: null,
+              createdBy: "user",
+              creationSource: "web",
+              modelSelection: codexSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            });
+            for (const tool of [
+              "t3_thread_read",
+              "t3_thread_send",
+              "t3_thread_wait",
+              "t3_thread_interrupt",
+            ] as const) {
+              const denied = yield* invoke(tool, {
+                threadId: unrelatedProjectThreadId,
+                ...(tool === "t3_thread_send" ? { message: "not authorized" } : {}),
+              });
+              expect(denied.structuredContent).toMatchObject({ code: "thread_not_found" });
+            }
+            const projectListing = yield* invoke("t3_thread_list", {});
+            const projectListed = yield* decodeThreadListResult(projectListing.structuredContent);
+            expect(
+              projectListed.threads.some(
+                (thread) => thread.threadId === knownProjectThread.threadId,
+              ),
+            ).toBe(true);
+            expect(
+              projectListed.threads.some((thread) => thread.threadId === unrelatedProjectThreadId),
+            ).toBe(false);
+
+            const knownReadCall = yield* invoke("t3_thread_read", {
+              threadId: knownProjectThread.threadId,
+              view: "messages",
+            });
+            expect(knownReadCall.isError).toBe(false);
+            const knownRead = yield* decodeThreadReadResult(knownReadCall.structuredContent).pipe(
+              Effect.orDie,
+            );
+            expect(knownRead.thread.projectId).toBe(otherProjectId);
+            expect(knownRead.thread.worktreePath).toBeNull();
+
+            const knownWaitCall = yield* invoke("t3_thread_wait", {
+              threadId: knownProjectThread.threadId,
+            });
+            expect(knownWaitCall.isError).toBe(false);
+            expect(knownWaitCall.structuredContent).toMatchObject({
+              threadId: knownProjectThread.threadId,
+            });
+
+            const knownSendCall = yield* invoke("t3_thread_send", {
+              threadId: knownProjectThread.threadId,
+              message: "Confirm the other workspace.",
+              mode: "queue",
+              clientRequestId: "send-known-project-1",
+            });
+            expect(knownSendCall.isError).toBe(false);
+            const afterCrossProjectSend = yield* orchestrator.getThreadProjection(
+              knownProjectThread.threadId,
+            );
+            expect(
+              afterCrossProjectSend.messages.find(
+                (message) => message.text === "Confirm the other workspace.",
+              )?.senderThreadId,
+            ).toBe(parentThreadId);
+
+            const knownInterruptCall = yield* invoke("t3_thread_interrupt", {
+              threadId: knownProjectThread.threadId,
+              clientRequestId: "interrupt-known-project-1",
+            });
+            expect(knownInterruptCall.isError).toBe(false);
+            expect(knownInterruptCall.structuredContent).toMatchObject({
+              threadId: knownProjectThread.threadId,
+            });
+
+            // t3_thread_launch records the same caller grant as create_threads, before the
+            // launched thread's first message.
+            const seenThreadIds = new Set(
+              (yield* orchestrator.getShellSnapshot()).threads.map((thread) => thread.id),
+            );
+            const newOtherProjectThreads = Effect.gen(function* () {
+              const shells = (yield* orchestrator.getShellSnapshot()).threads.filter(
+                (thread) => thread.projectId === otherProjectId && !seenThreadIds.has(thread.id),
+              );
+              for (const shell of shells) seenThreadIds.add(shell.id);
+              return shells;
+            });
+            const launchGrant = (threadId: ThreadId) =>
+              orchestrator
+                .getThreadProjection(parentThreadId)
+                .pipe(
+                  Effect.map((projection) =>
+                    projection.turnItems.find(
+                      (item) => item.type === "thread_created" && item.targetThreadId === threadId,
+                    ),
+                  ),
+                );
+            const unregisteredLaunch = yield* invoke("t3_thread_launch", {
+              projectId: "project:mcp-unregistered",
+              title: "Unregistered project launch",
+              message: createdThreadPrompt,
+            });
+            expect(unregisteredLaunch.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+            });
+            expect(
+              (yield* orchestrator.getShellSnapshot()).threads.some(
+                (thread) => !seenThreadIds.has(thread.id),
+              ),
+            ).toBe(false);
+
+            let rejectLaunchRecord = true;
+            let launchRecordReads = 0;
+            const linkAttemptTimes: number[] = [];
+            const launchReadFault = vi
+              .spyOn(projectionStore, "getThreadRecords")
+              .mockImplementation((threadId, subsets, options) => {
+                if (
+                  threadId === parentThreadId &&
+                  subsets.join(",") === "runs,nodes,turnItems,attempts,providerTurns"
+                ) {
+                  launchRecordReads += 1;
+                  if (launchRecordReads > 1) linkAttemptTimes.push(performance.now());
+                  const failAttempt =
+                    faultStage === "grant"
+                      ? launchRecordReads === 1
+                      : launchRecordReads > 1 &&
+                        (faultStage === "run-link-exhausted" || launchRecordReads < 5);
+                  if (failAttempt) {
+                    rejectLaunchRecord = false;
+                    return Effect.fail(
+                      new ProjectionStoreReadError({
+                        threadId,
+                        cause: "injected launch-record read failure",
+                      }),
+                    );
+                  }
+                }
+                return originalRead(threadId, subsets, options);
+              });
+            const launchRejectedWrites = vi.spyOn(eventSink, "commitRejectedCommand");
+            const linkWarnings: unknown[] = [];
+            const linkLogger = Logger.make(({ logLevel, message }) => {
+              if (logLevel === "Warn") linkWarnings.push(message);
+            });
+            const faultedLaunch = yield* invoke("t3_thread_launch", {
+              projectId: otherProjectId,
+              title: "Faulted launch",
+              message: createdThreadPrompt,
+            }).pipe(
+              Effect.provide(Logger.layer([linkLogger], { mergeWithExisting: false })),
+              Effect.ensuring(Effect.sync(() => launchReadFault.mockRestore())),
+            );
+            if (faultStage === "grant") {
+              expect(faultedLaunch.structuredContent).toMatchObject({
+                _tag: "OrchestratorMcpFailure",
+                code: "orchestration_error",
+                message: expect.stringContaining("Unable to record the launched thread"),
+              });
+            } else {
+              expect(faultedLaunch.structuredContent).toMatchObject({
+                projectId: otherProjectId,
+                runId: expect.any(String),
+              });
+            }
+            expect(rejectLaunchRecord).toBe(false);
+            expect(launchRecordReads).toBe(faultStage === "grant" ? 1 : 5);
+            for (let index = 1; index < linkAttemptTimes.length; index += 1) {
+              expect(
+                linkAttemptTimes[index]! - linkAttemptTimes[index - 1]!,
+              ).toBeGreaterThanOrEqual(20 * 2 ** (index - 1));
+            }
+            const launchRejectedWrite = launchRejectedWrites.mock.calls.find(
+              ([input]) => input.commandType === "thread.created.record",
+            )?.[0];
+            launchRejectedWrites.mockRestore();
+            expect(launchRejectedWrite).toBeDefined();
+            const faultedTargets = yield* newOtherProjectThreads;
+            expect(faultedTargets).toHaveLength(1);
+            const faultedTargetId = faultedTargets[0]!.id;
+            expect(linkWarnings).toEqual(
+              faultStage === "run-link-exhausted"
+                ? [
+                    [
+                      "orchestrator-mcp.thread-launch.run-link-failed",
+                      {
+                        threadId: faultedTargetId,
+                        runId: expect.any(String),
+                        code: "orchestration_error",
+                      },
+                    ],
+                  ]
+                : [],
+            );
+            // Grant refusal precedes dispatch; run-link retry must not dispatch again.
+            const faultedTarget = yield* orchestrator.getThreadProjection(faultedTargetId);
+            expect(
+              faultedTarget.messages.filter((message) => message.role === "user"),
+            ).toHaveLength(faultStage === "grant" ? 0 : 1);
+            const faultedGrant = yield* launchGrant(faultedTargetId);
+            const faultedRead = yield* invoke("t3_thread_read", { threadId: faultedTargetId });
+            if (faultStage === "grant") {
+              expect(faultedTarget.runs).toHaveLength(0);
+              expect(faultedGrant).toBeUndefined();
+              expect(faultedRead.structuredContent).toMatchObject({ code: "thread_not_found" });
+            } else {
+              expect(faultedTarget.runs).toHaveLength(1);
+              expect(faultedLaunch.structuredContent).toMatchObject({
+                threadId: faultedTargetId,
+                runId: faultedTarget.runs[0]!.id,
+                status: expect.any(String),
+              });
+              expect(faultedGrant).toMatchObject({
+                targetRunId: faultStage === "run-link-exhausted" ? null : faultedTarget.runs[0]!.id,
+              });
+              const faultedListing = yield* decodeThreadListResult(
+                (yield* invoke("t3_thread_list", { titleContains: "Faulted launch" }))
+                  .structuredContent,
+              );
+              expect(faultedListing.threads.map((thread) => thread.threadId)).toEqual([
+                faultedTargetId,
+              ]);
+              expect(faultedRead.structuredContent).toHaveProperty(
+                "thread.threadId",
+                faultedTargetId,
+              );
+              const faultedWait = yield* invoke("t3_thread_wait", {
+                threadId: faultedTargetId,
+                timeoutMs: 5000,
+              });
+              expect(faultedWait.structuredContent).toMatchObject({
+                threadId: faultedTargetId,
+                status: "completed",
+              });
+              const faultedSend = yield* invoke("t3_thread_send", {
+                threadId: faultedTargetId,
+                message: "Confirm access after link failure.",
+                mode: "queue",
+                clientRequestId: "send-faulted-launch",
+              });
+              expect(faultedSend.structuredContent).toMatchObject({ threadId: faultedTargetId });
+              const faultedInterrupt = yield* invoke("t3_thread_interrupt", {
+                threadId: faultedTargetId,
+                clientRequestId: "interrupt-faulted-launch",
+              });
+              expect(faultedInterrupt.structuredContent).toMatchObject({
+                threadId: faultedTargetId,
+              });
+            }
+            expect(
+              Option.getOrThrow(yield* receiptStore.getByCommandId(launchRejectedWrite!.commandId))
+                .status,
+            ).toBe("rejected");
+
+            const launcher = yield* ThreadLaunch.ThreadLaunchService;
+            const originalLaunch = launcher.launch;
+            let deletedLaunch: ThreadLaunch.ThreadLaunchResult | undefined;
+            const deleteBeforeLink = vi.spyOn(launcher, "launch").mockImplementation((input) =>
+              originalLaunch(input).pipe(
+                Effect.tap((result) =>
+                  Effect.gen(function* () {
+                    deletedLaunch = result;
+                    yield* orchestrator
+                      .dispatch({
+                        type: "thread.delete",
+                        commandId: CommandId.make("command:delete-launch-before-link"),
+                        threadId: result.threadId,
+                      })
+                      .pipe(Effect.orDie);
+                  }),
+                ),
+              ),
+            );
+            const deletedLaunchWarnings: unknown[] = [];
+            const deletedLaunchCall = yield* invoke("t3_thread_launch", {
+              projectId: otherProjectId,
+              title: "Deleted before run link",
+              message: createdThreadPrompt,
+            }).pipe(
+              Effect.provide(
+                Logger.layer(
+                  [
+                    Logger.make(({ logLevel, message }) => {
+                      if (logLevel === "Warn") deletedLaunchWarnings.push(message);
+                    }),
+                  ],
+                  { mergeWithExisting: false },
+                ),
+              ),
+              Effect.ensuring(Effect.sync(() => deleteBeforeLink.mockRestore())),
+            );
+            expect(deletedLaunch?.projection.runs).toHaveLength(1);
+            expect(deletedLaunchCall.structuredContent).toMatchObject({
+              _tag: "OrchestratorMcpFailure",
+              code: "thread_not_found",
+            });
+            expect(deletedLaunchWarnings).toEqual([]);
+            if (deletedLaunch === undefined) return yield* Effect.die("Launch was not accepted");
+            expect(yield* launchGrant(deletedLaunch.threadId)).toMatchObject({ targetRunId: null });
+            expect(
+              (yield* invoke("t3_thread_read", { threadId: deletedLaunch.threadId }))
+                .structuredContent,
+            ).toMatchObject({ code: "thread_not_found" });
+
+            const launchCall = yield* invoke("t3_thread_launch", {
+              projectId: otherProjectId,
+              title: "Launched in another project",
+              message: createdThreadPrompt,
+            });
+            const launched = launchCall.structuredContent as {
+              readonly threadId: ThreadId;
+              readonly projectId: ProjectId;
+              readonly runId: string | null;
+            };
+            expect(launched.projectId).toBe(otherProjectId);
+            expect(launched.runId).not.toBeNull();
+            expect((yield* newOtherProjectThreads).map((thread) => thread.id)).toEqual([
+              launched.threadId,
+            ]);
+            expect(yield* launchGrant(launched.threadId)).toMatchObject({
+              targetRunId: launched.runId,
+            });
+            const launchedListing = yield* decodeThreadListResult(
+              (yield* invoke("t3_thread_list", {})).structuredContent,
+            );
+            expect(
+              launchedListing.threads.some((thread) => thread.threadId === launched.threadId),
+            ).toBe(true);
+            const siblingCallerId = ThreadId.make("thread:mcp-launch-sibling-caller");
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make("command:create-launch-sibling-caller"),
+              threadId: siblingCallerId,
+              projectId,
+              title: "Sibling caller",
+              branch: null,
+              worktreePath: null,
+              createdBy: "user",
+              creationSource: "web",
+              modelSelection: codexSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            });
+            const siblingRead = yield* invokeAs(
+              { ...invocation, threadId: siblingCallerId },
+              "t3_thread_read",
+              { threadId: launched.threadId },
+            );
+            expect(siblingRead.structuredContent).toMatchObject({ code: "thread_not_found" });
+            const siblingListing = yield* decodeThreadListResult(
+              (yield* invokeAs({ ...invocation, threadId: siblingCallerId }, "t3_thread_list", {}))
+                .structuredContent,
+            );
+            expect(
+              siblingListing.threads.some((thread) => thread.threadId === launched.threadId),
+            ).toBe(false);
+
+            const launchedRead = yield* decodeThreadReadResult(
+              (yield* invoke("t3_thread_read", { threadId: launched.threadId, view: "messages" }))
+                .structuredContent,
+            ).pipe(Effect.orDie);
+            expect(launchedRead.thread.projectId).toBe(otherProjectId);
+            const launchedWait = yield* invoke("t3_thread_wait", {
+              threadId: launched.threadId,
+              timeoutMs: 5000,
+            });
+            expect(launchedWait.structuredContent).toMatchObject({
+              threadId: launched.threadId,
+              status: "completed",
+            });
+            const launchedSend = yield* invoke("t3_thread_send", {
+              threadId: launched.threadId,
+              message: "Confirm the launched workspace.",
+              mode: "queue",
+              clientRequestId: "send-launched-project-1",
+            });
+            expect(launchedSend.structuredContent).toMatchObject({ threadId: launched.threadId });
+            expect(
+              (yield* orchestrator.getThreadProjection(launched.threadId)).messages.find(
+                (message) => message.text === "Confirm the launched workspace.",
+              )?.senderThreadId,
+            ).toBe(parentThreadId);
+            const launchedInterrupt = yield* invoke("t3_thread_interrupt", {
+              threadId: launched.threadId,
+              clientRequestId: "interrupt-launched-project-1",
+            });
+            expect(launchedInterrupt.structuredContent).toMatchObject({
+              threadId: launched.threadId,
+            });
+            yield* waitForProjection(orchestrator, launched.threadId, (projection) =>
+              projection.runs.every((run) =>
+                ["completed", "failed", "cancelled", "interrupted"].includes(run.status),
+              ),
+            );
+            yield* threadManagement.dispatch({
+              type: "thread.delete",
+              threadId: launched.threadId,
+              commandId: CommandId.make("delete-launched-target"),
+            });
+            for (const tool of [
+              "t3_thread_read",
+              "t3_thread_send",
+              "t3_thread_wait",
+              "t3_thread_interrupt",
+            ] as const) {
+              const denied = yield* invoke(tool, {
+                threadId: launched.threadId,
+                ...(tool === "t3_thread_send" ? { message: "after delete" } : {}),
+              });
+              expect(denied.structuredContent).toMatchObject({ code: "thread_not_found" });
+            }
+
             const cancellableCall = yield* invoke("delegate_task", {
               task: cancellationPrompt,
               target: {
@@ -2158,6 +2855,46 @@ describe("orchestrator MCP toolkit", () => {
                 model: item.targetModel,
               })),
             ).toEqual([
+              {
+                targetThreadId: repairTargetId,
+                targetRunId: repairedTarget.runs[0]!.id,
+                title: repairedTarget.thread.title,
+                providerInstanceId: codexInstanceId,
+                model: codexModel,
+              },
+              {
+                targetThreadId: knownProjectThread.threadId,
+                targetRunId: knownProjectThread.runId,
+                title: knownProjectThread.title,
+                providerInstanceId: codexInstanceId,
+                model: codexModel,
+              },
+              ...(faultStage !== "grant"
+                ? [
+                    {
+                      targetThreadId: faultedTargetId,
+                      targetRunId:
+                        faultStage === "run-link-exhausted" ? null : faultedTarget.runs[0]!.id,
+                      title: "Faulted launch",
+                      providerInstanceId: codexInstanceId,
+                      model: codexModel,
+                    },
+                  ]
+                : []),
+              {
+                targetThreadId: deletedLaunch.threadId,
+                targetRunId: null,
+                title: "Deleted before run link",
+                providerInstanceId: codexInstanceId,
+                model: codexModel,
+              },
+              {
+                targetThreadId: launched.threadId,
+                targetRunId: launched.runId,
+                title: "Launched in another project",
+                providerInstanceId: codexInstanceId,
+                model: codexModel,
+              },
               {
                 targetThreadId: emptyThread.threadId,
                 targetRunId: null,
@@ -2474,6 +3211,21 @@ describe("orchestrator MCP toolkit", () => {
             expect(
               listed.threads.some((thread) => thread.relationshipToParent === "subagent"),
             ).toBe(false);
+
+            for (const archivedThreadId of [promptedThread.threadId, knownProjectThread.threadId]) {
+              expect(listed.threads.map((thread) => thread.threadId)).toContain(archivedThreadId);
+              yield* orchestrator.dispatch({
+                type: "thread.archive",
+                commandId: CommandId.make(`archive-created:${archivedThreadId}`),
+                threadId: archivedThreadId,
+              });
+              const afterArchive = yield* decodeThreadListResult(
+                (yield* invoke("t3_thread_list", { limit: 100 })).structuredContent,
+              );
+              expect(afterArchive.threads.map((thread) => thread.threadId)).not.toContain(
+                archivedThreadId,
+              );
+            }
 
             // A wait-mode delegation whose blocking wait times out no longer
             // owns delivery, so delegate_task upgrades the task to "always".
@@ -3602,6 +4354,23 @@ describe("orchestrator MCP toolkit", () => {
                 thirdFanoutDelivery.messageId,
               ]),
             );
+            yield* threadManagement.dispatch({
+              type: "thread.delete",
+              threadId: parentThreadId,
+              commandId: CommandId.make("delete-creation-grant-owner"),
+            });
+            for (const tool of [
+              "t3_thread_read",
+              "t3_thread_send",
+              "t3_thread_wait",
+              "t3_thread_interrupt",
+            ] as const) {
+              const denied = yield* invoke(tool, {
+                threadId: knownProjectThread.threadId,
+                ...(tool === "t3_thread_send" ? { message: "after caller delete" } : {}),
+              });
+              expect(denied.structuredContent).toMatchObject({ code: "thread_not_found" });
+            }
           }).pipe(Effect.provide(testLayer));
         }),
       ),
@@ -3643,6 +4412,7 @@ describe("orchestrator MCP toolkit", () => {
           ),
           Layer.provide(providerRegistryLayer),
           Layer.provide(unusedScheduledTaskStubLayer),
+          Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
           Layer.provide(NodeServices.layer),
         );
 
