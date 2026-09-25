@@ -211,6 +211,7 @@ export function makeGrokAcpAdapterFlavor(options: GrokAdapterV2Options): AcpAdap
     runtimeHarness: "Grok",
     capabilities: GrokProviderCapabilitiesV2,
     interruptPromptOnCancel: false,
+    suppressUnownedBackgroundCompletions: true,
     // User Stop (requestRuntimeRestart) still hard-kills the process group and
     // respawns so existing background tasks stop too. Older 0.2.x builds could
     // detach a cancelled foreground command (E3 harness 2026-07-18); current

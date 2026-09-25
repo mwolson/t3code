@@ -499,6 +499,7 @@ export function runOrchestratorV2Scenario(
           });
         }
         gate?.release(label);
+        if (gate !== undefined) yield* Effect.promise(() => gate.waitForProcessed(label));
       });
 
       for (const step of scenarioSteps(scenario)) {

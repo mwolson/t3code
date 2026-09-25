@@ -21,6 +21,22 @@ describe("ProviderReplayGate", () => {
     expect(await gate.waitForReached("unknown-frame")).toBe(false);
   });
 
+  it("waits for opted-in frame processing after release", async () => {
+    const gate = makeProviderReplayGate(["held-frame"]);
+    const emission = gate.beforeEmit("held-frame", undefined, true);
+    let processed = false;
+    const receipt = gate.waitForProcessed("held-frame").then(() => {
+      processed = true;
+    });
+    gate.release("held-frame");
+    await emission;
+    expect(processed).toBe(false);
+    gate.afterEmit("held-frame");
+    await receipt;
+    expect(processed).toBe(true);
+    await gate.waitForProcessed("untracked-frame");
+  });
+
   it("stops waiting when the replay consumer is interrupted", async () => {
     const label = "held-frame";
     const gate = makeProviderReplayGate([label]);

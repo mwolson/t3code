@@ -1,3 +1,4 @@
+import * as NodeUtil from "node:util";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { GrokSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -5,6 +6,7 @@ import * as Crypto from "effect/Crypto";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -15,6 +17,8 @@ import { layer as idAllocatorLayer, IdAllocatorV2 } from "../IdAllocator.ts";
 import { makeLayerEffect as makeProviderAdapterRegistryLayerEffect } from "../ProviderAdapterRegistry.ts";
 import type { OrchestratorV2ProviderReplayHarness } from "../testkit/ProviderReplayHarness.ts";
 import { makeReplayServerConfig } from "../testkit/ProviderReplayHarness.ts";
+import { ProviderContinuationRequests } from "../ProviderContinuationRequests.ts";
+import type { ProviderReplayGate } from "../testkit/ProviderReplayGate.testkit.ts";
 import {
   type AcpReplayTranscript,
   AcpReplayTranscriptDecodeError,
@@ -26,7 +30,10 @@ import { GROK_DEFAULT_INSTANCE_ID, GROK_PROVIDER, makeGrokAdapterV2 } from "./Gr
 
 const DEFAULT_GROK_SETTINGS = Schema.decodeUnknownSync(GrokSettings)({});
 
-function makeGrokProviderAdapterRegistryReplayLayer(transcript: AcpReplayTranscript) {
+function makeGrokProviderAdapterRegistryReplayLayer(
+  transcript: AcpReplayTranscript,
+  options?: { readonly replayGate?: ProviderReplayGate },
+) {
   const serverConfigLayer = Layer.effect(
     ServerConfig,
     makeReplayServerConfig(`grok-${transcript.scenario}`).pipe(Effect.orDie),
@@ -61,12 +68,35 @@ function makeGrokProviderAdapterRegistryReplayLayer(transcript: AcpReplayTranscr
         idAllocator,
         serverConfig,
         selfInvocation: yield* resolveSelfInvocation(),
-        makeRuntime: makeAcpReplayRuntime({
-          transcript,
-          statusPath,
-          scriptPath,
-          childProcessSpawner,
-        }),
+        continuationRequests: yield* ProviderContinuationRequests,
+        makeRuntime: (input) =>
+          makeAcpReplayRuntime({
+            transcript,
+            statusPath,
+            scriptPath,
+            childProcessSpawner,
+          })(input).pipe(
+            Effect.map((runtime) => ({
+              ...runtime,
+              handleSessionUpdate: (handler) =>
+                runtime.handleSessionUpdate((notification) => {
+                  const entry = transcript.entries.find(
+                    (entry) =>
+                      entry.type === "emit_inbound" &&
+                      Predicate.isObject(entry.frame) &&
+                      NodeUtil.isDeepStrictEqual(Reflect.get(entry.frame, "params"), notification),
+                  );
+                  const label = entry?.type === "emit_inbound" ? entry.label : undefined;
+                  return Effect.promise(
+                    (signal) =>
+                      options?.replayGate?.beforeEmit(label, signal, true) ?? Promise.resolve(),
+                  ).pipe(
+                    Effect.andThen(handler(notification)),
+                    Effect.ensuring(Effect.sync(() => options?.replayGate?.afterEmit(label))),
+                  );
+                }),
+            })),
+          ),
         assertComplete: makeAcpReplayCompletenessAssertion(fileSystem, statusPath, transcript),
       });
       return [adapter];

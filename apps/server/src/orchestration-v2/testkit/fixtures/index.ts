@@ -91,6 +91,7 @@ import {
   READ_ONLY_NEVER_POLICY,
   READ_ONLY_ON_REQUEST_POLICY,
   RESTRICTED_GRANULAR_POLICY,
+  type OrchestratorFixtureInput,
   type OrchestratorReplayFixture,
   WORKSPACE_NEVER_POLICY,
 } from "./shared.ts";
@@ -153,6 +154,48 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
       },
     ],
   },
+  {
+    name: "grok_cancel_detach",
+    buildInput: () => ({
+      steps: [
+        ...messageSteeringInput().steps,
+        { type: "await_run_status", targetRunIndex: 1, status: "completed" },
+        { type: "release_replay_gate", label: "post-settle.chatter" },
+      ],
+    }),
+    providers: [
+      {
+        driver: ProviderDriverKind.make("grok"),
+        transcriptFile: new URL("./grok_cancel_detach/grok_transcript.ndjson", import.meta.url),
+        modelSelection: GROK_MODEL_SELECTION,
+        assertOutput: assertGrokMessageSteeringOutput,
+      },
+    ],
+  },
+  ...(
+    [
+      "grok_cancel_detach_owned_duplicate",
+      "grok_cancel_detach_owned_normalized",
+      "grok_cancel_detach_owned_reregister",
+    ] as const
+  ).map((name) => ({
+    name,
+    buildInput: (): OrchestratorFixtureInput => ({
+      steps: [
+        ...messageSteeringInput().steps,
+        { type: "await_run_status", targetRunIndex: 1, status: "completed" },
+        { type: "release_replay_gate", label: "post-settle.chatter" },
+      ],
+    }),
+    providers: [
+      {
+        driver: ProviderDriverKind.make("grok"),
+        transcriptFile: new URL(`./${name}/grok_transcript.ndjson`, import.meta.url),
+        modelSelection: GROK_MODEL_SELECTION,
+        assertOutput: assertGrokMessageSteeringOutput,
+      },
+    ],
+  })),
   {
     name: "grok_subagent_lineage",
     buildInput: grokSubagentLineageInput,

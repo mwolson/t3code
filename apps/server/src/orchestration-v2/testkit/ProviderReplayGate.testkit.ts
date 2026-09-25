@@ -1,5 +1,11 @@
 export interface ProviderReplayGate {
-  readonly beforeEmit: (label: string | undefined, signal?: AbortSignal) => Promise<void>;
+  readonly beforeEmit: (
+    label: string | undefined,
+    signal?: AbortSignal,
+    trackProcessing?: boolean,
+  ) => Promise<void>;
+  readonly afterEmit: (label: string | undefined) => void;
+  readonly waitForProcessed: (label: string) => Promise<void>;
   readonly waitForReached: (label: string) => Promise<boolean>;
   readonly hasReached: (label: string) => boolean;
   readonly release: (label: string) => boolean;
@@ -9,6 +15,9 @@ export interface ProviderReplayGate {
 interface GateState {
   reached: boolean;
   released: boolean;
+  trackProcessing: boolean;
+  readonly processedPromise: Promise<void>;
+  readonly resolveProcessed: () => void;
   readonly reachedPromise: Promise<void>;
   readonly resolveReached: () => void;
   readonly promise: Promise<void>;
@@ -29,7 +38,14 @@ export function makeProviderReplayGate(labels: ReadonlyArray<string>): ProviderR
     const reachedPromise = new Promise<void>((resume) => {
       resolveReached = resume;
     });
+    let resolveProcessed = () => {};
+    const processedPromise = new Promise<void>((resume) => {
+      resolveProcessed = resume;
+    });
     states.set(label, {
+      trackProcessing: false,
+      processedPromise,
+      resolveProcessed,
       reached: false,
       released: false,
       reachedPromise,
@@ -40,7 +56,14 @@ export function makeProviderReplayGate(labels: ReadonlyArray<string>): ProviderR
   }
 
   return {
-    beforeEmit: (label, signal) => {
+    afterEmit: (label) => {
+      if (label !== undefined) states.get(label)?.resolveProcessed();
+    },
+    waitForProcessed: (label) => {
+      const state = states.get(label);
+      return state?.trackProcessing ? state.processedPromise : Promise.resolve();
+    },
+    beforeEmit: (label, signal, trackProcessing = false) => {
       if (label === undefined) {
         return Promise.resolve();
       }
@@ -48,6 +71,7 @@ export function makeProviderReplayGate(labels: ReadonlyArray<string>): ProviderR
       if (state === undefined) {
         return Promise.resolve();
       }
+      state.trackProcessing = trackProcessing;
       state.reached = true;
       state.resolveReached();
       if (signal === undefined) {

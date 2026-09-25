@@ -2,6 +2,9 @@ import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { ProviderDriverKind, ProviderReplayTranscript } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -39,6 +42,11 @@ import { layer as orchestratorLayer } from "../Orchestrator.ts";
 import { ProjectionStoreV2, layer as projectionStoreLayer } from "../ProjectionStore.ts";
 import { OrchestratorV2, type OrchestratorV2Error } from "../Orchestrator.ts";
 import { ProviderAdapterRegistryV2 } from "../ProviderAdapterRegistry.ts";
+import {
+  ProviderContinuationRequests,
+  type ProviderContinuationRequest,
+} from "../ProviderContinuationRequests.ts";
+import { workerLive as providerContinuationWorkerLive } from "../ProviderContinuationService.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
 import { layer as providerEventIngestorLayer } from "../ProviderEventIngestor.ts";
 import {
@@ -241,13 +249,17 @@ export function makeOrchestratorV2ProviderReplayLayer<
     scenario.transcript,
     options.replayGate === undefined ? {} : { replayGate: options.replayGate },
   );
-  return makeOrchestratorV2ReplayLayerWithRegistry(scenario, registryLayer, options);
+  return makeOrchestratorV2ReplayLayerWithRegistry(scenario, registryLayer, {
+    ...options,
+    enableProviderContinuations: harness.driver === "grok",
+  });
 }
 
 export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
   scenario: Pick<OrchestratorV2ProviderReplayScenario, "name" | "runtimePolicyOverride">,
-  registryLayer: Layer.Layer<ProviderAdapterRegistryV2, Error>,
+  inputRegistryLayer: Layer.Layer<ProviderAdapterRegistryV2, Error>,
   options: {
+    readonly enableProviderContinuations?: boolean;
     readonly databaseLayer?: Layer.Layer<
       SqlClient.SqlClient,
       MigrationError | PlatformError.PlatformError | SqlError
@@ -262,6 +274,34 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
   | ProviderSessionManagerV2,
   Error | MigrationError | PlatformError.PlatformError | SqlError
 > {
+  // Replay frames await the real continuation worker's dispatch receipt, not a timer.
+  const continuationLayer = Layer.effect(
+    ProviderContinuationRequests,
+    Effect.gen(function* () {
+      const queue = yield* Queue.unbounded<ProviderContinuationRequest>();
+      return {
+        take: Queue.take(queue),
+        offer: Effect.fnUntraced(function* (request: ProviderContinuationRequest) {
+          const processed = yield* Deferred.make<void>();
+          yield* Queue.offer(queue, {
+            ...request,
+            clearIfCurrent: () =>
+              (request.clearIfCurrent?.() ?? Effect.void).pipe(
+                Effect.ensuring(Deferred.succeed(processed, undefined)),
+              ),
+            dispatchIfCurrent: (effect) =>
+              (request.dispatchIfCurrent?.(effect) ?? effect.pipe(Effect.map(Option.some))).pipe(
+                Effect.ensuring(Deferred.succeed(processed, undefined)),
+              ),
+          });
+          yield* Deferred.await(processed);
+        }),
+      };
+    }),
+  );
+  const registryLayer = options.enableProviderContinuations
+    ? inputRegistryLayer.pipe(Layer.provide(continuationLayer))
+    : inputRegistryLayer;
   const serverConfigLayer = Layer.effect(
     ServerConfig,
     makeReplayServerConfig(scenario.name).pipe(Effect.orDie),
@@ -442,6 +482,23 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
   if (options.runEffectWorker === false) {
     return replayRuntime;
   }
+  const continuationWorker = providerContinuationWorkerLive.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        continuationLayer,
+        idAllocatorLayer,
+        Layer.unwrap(
+          Effect.gen(function* () {
+            const orchestrator = yield* OrchestratorV2;
+            return Layer.mock(ThreadManagementService)({
+              dispatch: orchestrator.dispatch,
+              getThreadRecords: orchestrator.getThreadRecords,
+            });
+          }),
+        ).pipe(Layer.provide(replayRuntime)),
+      ),
+    ),
+  );
   return Layer.effect(
     OrchestratorV2,
     Effect.gen(function* () {
@@ -449,5 +506,11 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
       yield* runEffectWorkerDaemon.pipe(Effect.forkScoped);
       return orchestrator;
     }),
-  ).pipe(Layer.provideMerge(replayRuntime));
+  ).pipe(
+    Layer.provideMerge(
+      options.enableProviderContinuations
+        ? Layer.merge(replayRuntime, continuationWorker)
+        : replayRuntime,
+    ),
+  );
 }

@@ -227,6 +227,8 @@ export interface AcpAdapterV2Flavor {
     EffectAcpErrors.AcpError,
     Crypto.Crypto | Scope.Scope
   >;
+  /** Grok cancel may detach foreground commands that must not create background wakes. */
+  readonly suppressUnownedBackgroundCompletions?: boolean;
   readonly resolveModelId?: (selection: ModelSelection) => string | undefined;
   /**
    * Replaces the default model application on session setup. Returns the model
@@ -1816,6 +1818,9 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
         // Direct Stop (requestRuntimeRestart) quarantines residual events from the
         // stopped run so they cannot wake or attach to a later prompt/run.
         const stoppedRunQuarantine = yield* Ref.make(false);
+        const userOwnedBackgroundTaskIds = yield* Ref.make<ReadonlySet<string>>(new Set());
+        const suppressUnownedPostSettleOffers = yield* Ref.make(false);
+        const ownedPostSettleCompletion = yield* Ref.make(false);
         // A steering restart (or any interrupt) can finalize a turn while its
         // spawned subagents are still running natively. Carry the live
         // lineages into the next turn on the same session so their terminal
@@ -1855,10 +1860,25 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
         const endedBackgroundTaskIds = yield* Ref.make<ReadonlySet<string>>(new Set());
         const endedBackgroundTaskIdLimit = 128;
 
+        const recognizeOwnedPostSettleCompletion = Effect.fnUntraced(function* (taskId: string) {
+          if (
+            !flavor.suppressUnownedBackgroundCompletions ||
+            !(yield* Ref.get(userOwnedBackgroundTaskIds)).has(taskId) ||
+            (yield* Ref.get(handledBackgroundTaskIdsInActiveTurn)).has(taskId)
+          )
+            return;
+          const context = yield* Ref.get(activeTurn);
+          if (context !== null && !context.finalized) return;
+          yield* Ref.set(ownedPostSettleCompletion, true);
+          yield* Ref.set(suppressUnownedPostSettleOffers, false);
+        });
+
         const setBackgroundTaskRunning = (taskId: string, running: boolean) =>
           Effect.gen(function* () {
-            if (running && (yield* Ref.get(endedBackgroundTaskIds)).has(taskId)) {
-              return;
+            const ended = (yield* Ref.get(endedBackgroundTaskIds)).has(taskId);
+            if (running && ended) return;
+            if (!running && !ended && (yield* Ref.get(runningBackgroundTaskIds)).has(taskId)) {
+              yield* recognizeOwnedPostSettleCompletion(taskId);
             }
             yield* Ref.update(runningBackgroundTaskIds, (current) => {
               if (current.has(taskId) === running) return current;
@@ -1872,8 +1892,13 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             });
           });
 
-        const markBackgroundTaskEnded = (taskId: string) =>
-          Ref.update(endedBackgroundTaskIds, (current) => {
+        const markBackgroundTaskEnded = Effect.fnUntraced(function* (taskId: string) {
+          // A normalized Bash status may already have removed the running id.
+          // Only the first genuine end is new evidence in that case.
+          if (!(yield* Ref.get(endedBackgroundTaskIds)).has(taskId)) {
+            yield* recognizeOwnedPostSettleCompletion(taskId);
+          }
+          yield* Ref.update(endedBackgroundTaskIds, (current) => {
             if (current.has(taskId)) return current;
             const next = new Set(current).add(taskId);
             for (const oldest of next) {
@@ -1881,7 +1906,9 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               next.delete(oldest);
             }
             return next;
-          }).pipe(Effect.andThen(setBackgroundTaskRunning(taskId, false)));
+          });
+          yield* setBackgroundTaskRunning(taskId, false);
+        });
 
         const applyBackgroundTaskMutationRunning = (mutation: {
           readonly taskId: string;
@@ -2935,6 +2962,11 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
           const backgroundTaskId = flavor.extractBackgroundTaskId?.(toolCall);
           if (backgroundTaskId !== undefined) {
             context.toolCallIdsByBackgroundTaskId.set(backgroundTaskId, toolCall.toolCallId);
+            if (flavor.suppressUnownedBackgroundCompletions && !context.interrupted) {
+              yield* Ref.update(userOwnedBackgroundTaskIds, (current) =>
+                current.has(backgroundTaskId) ? current : new Set(current).add(backgroundTaskId),
+              );
+            }
             if (flavor.isPersistentBackgroundTool?.(toolCall) === true) {
               context.persistentBackgroundTaskIds.add(backgroundTaskId);
             }
@@ -3489,6 +3521,7 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             Effect.gen(function* () {
               if (yield* Ref.get(continuationClosed)) return Option.none();
               if (yield* Ref.get(stoppedRunQuarantine)) return Option.none();
+              if (yield* Ref.get(suppressUnownedPostSettleOffers)) return Option.none();
               if (yield* Ref.get(continuationRequested)) return Option.none();
               const route = yield* Ref.get(lastTurnRoute);
               if (route === null) return Option.none();
@@ -3600,9 +3633,11 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             // post-finalize injected-turn path; arming here would spuriously
             // offer "Background task completed." after the report streams into
             // the held turn. Residual cancel-backgrounded completions from a
-            // prior interrupt must not open a synthetic continuation.
+            // prior interrupt must not open a synthetic continuation. Grok
+            // re-registration of an ended id is not fresh completion evidence.
             if (
               !activeContext.promptSettled &&
+              (!flavor.suppressUnownedBackgroundCompletions || !taskAlreadyEnded) &&
               !handled.has(mutation.taskId) &&
               activeContext.toolCallIdsByBackgroundTaskId.has(mutation.taskId)
             ) {
@@ -3610,8 +3645,27 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
                 new Set(current).add(mutation.taskId),
               );
             }
+          }
+          if (
+            flavor.suppressUnownedBackgroundCompletions &&
+            !(yield* Ref.get(userOwnedBackgroundTaskIds)).has(mutation.taskId) &&
+            !(yield* Ref.get(ownedPostSettleCompletion)) &&
+            (yield* Ref.get(midTurnUnreportedCompletedTaskIds)).size === 0
+          ) {
+            const carryover = yield* Ref.get(carryoverSubagents);
+            // An outstanding offer owns the retained wake output; only Stop may
+            // discard it, so an unowned terminal cannot suppress or clear it.
+            if (
+              (yield* Ref.get(runningBackgroundTaskIds)).size === 0 &&
+              (carryover === null || carryover.subagents.length === 0) &&
+              !(yield* Ref.get(continuationRequested))
+            ) {
+              yield* Ref.set(suppressUnownedPostSettleOffers, true);
+              yield* Ref.set(wakeBuffer, []);
+            }
             return;
           }
+          if (activeContext !== null && !activeContext.finalized) return;
           if (
             postSettleContinuationEnabled &&
             (yield* Ref.get(activeSessionId)) === sessionId &&
@@ -3692,6 +3746,9 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
                 }
               }
             }
+          }
+          if (yield* Ref.get(suppressUnownedPostSettleOffers)) {
+            return { buffered: false, offerContinuation: false, stopProcessing: true };
           }
           const backgroundWorkRunning = (yield* Ref.get(runningBackgroundTaskIds)).size > 0;
           // Residual Grok agent/thought chatter after in-turn-handled background
@@ -6332,6 +6389,9 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
               yield* Ref.set(wakeBuffer, []);
               yield* Ref.set(continuationRequested, false);
               yield* Ref.set(runningBackgroundTaskIds, new Set());
+              // Stopped work is no longer the user's; its late ends cannot wake.
+              yield* Ref.set(userOwnedBackgroundTaskIds, new Set());
+              yield* Ref.set(ownedPostSettleCompletion, false);
               yield* Ref.set(midTurnUnreportedCompletedTaskIds, new Set());
               yield* Ref.set(carryoverSubagents, null);
               yield* Ref.set(lastTurnRoute, null);
@@ -6486,6 +6546,11 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             }
           }
           yield* Ref.set(activeTurn, null);
+          if (settledStatus === "completed" && !directStopQuarantine) {
+            for (const taskId of yield* Ref.get(midTurnUnreportedCompletedTaskIds)) {
+              yield* recognizeOwnedPostSettleCompletion(taskId);
+            }
+          }
           // A mid-turn background completion may have deferred its offer while
           // this root turn was still streaming. Once the turn leaves the active
           // slot, re-check: empty running set + residual wake evidence (or a
@@ -6835,6 +6900,8 @@ export function makeAcpAdapterV2(options: AcpAdapterV2Options): ProviderAdapterV
             // Direct Stop closes and recreates the old runtime before reaching
             // this reset. The quarantine remains session-scoped by design.
             yield* Ref.set(stoppedRunQuarantine, false);
+            yield* Ref.set(suppressUnownedPostSettleOffers, false);
+            yield* Ref.set(ownedPostSettleCompletion, false);
             const runningTurn = providerTurnPayload(context, "running", null);
             yield* Ref.update(providerTurns, (current) => {
               const updated = new Map(current);
