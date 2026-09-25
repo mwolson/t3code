@@ -340,6 +340,7 @@ interface ActivePiTurn {
    */
   readonly toolStartedAt: Map<string, DateTime.Utc>;
   interrupted: boolean;
+  unresolvedAssistantAbort: boolean;
   /**
    * Whether any agent run activity was observed. Command-only prompts (pure
    * extension slash commands) never start an agent run and never emit
@@ -1629,7 +1630,17 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
             const message = event["message"];
             if (recordString(message, "role") !== "assistant") return;
             yield* completeOpenStreamItems(turn);
-            if (recordString(message, "stopReason") === "error" && turn.failure === null) {
+            const stopReason = recordString(message, "stopReason");
+            if (stopReason === "aborted") {
+              turn.unresolvedAssistantAbort = true;
+            } else if (
+              stopReason === "stop" ||
+              stopReason === "toolUse" ||
+              stopReason === "length"
+            ) {
+              turn.unresolvedAssistantAbort = false;
+            }
+            if (stopReason === "error" && turn.failure === null) {
               turn.failure = makeProviderFailure({
                 message: recordString(message, "errorMessage") ?? "Pi reported a model error.",
                 class: "provider_error",
@@ -1940,6 +1951,14 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
               (recordNumber(data, "pendingMessageCount") ?? 0) === 0
             ) {
               turn.settleWhenIdle = false;
+              // An aborted attempt can recover through extension work. Classify it
+              // only after the current turn's idle probe confirms settlement.
+              if (!turn.interrupted && turn.failure === null && turn.unresolvedAssistantAbort) {
+                turn.failure = makeProviderFailure({
+                  message: "Pi aborted the response before completion.",
+                  class: "provider_error",
+                });
+              }
               if (state !== null) yield* finalizeTurn(state);
             }
             return;
@@ -2355,6 +2374,7 @@ export function makePiAdapterV2(options: PiAdapterV2Options): ProviderAdapterV2S
               toolArgs: new Map(),
               toolStartedAt: new Map(),
               interrupted: false,
+              unresolvedAssistantAbort: false,
               sawAgentActivity: false,
               promptMayBeCommandOnly:
                 compactCommand !== null || (payload?.message.trimStart().startsWith("/") ?? false),
