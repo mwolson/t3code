@@ -14,7 +14,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
-  type ProviderSessionId,
+  ProviderSessionId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -3502,3 +3502,40 @@ it.effect(
       assert.isFalse(denied?.capabilities?.has("device"));
     }),
 );
+
+it("keeps an error occurrence through teardown and stamps only new runtime failures", () => {
+  const now = DateTime.makeUnsafe("2026-09-20T01:00:00Z");
+  const later = DateTime.makeUnsafe("2026-09-20T02:00:00Z");
+  const session = (driver: "opencode" | "pi") => ({
+    ...makeProviderSession({
+      providerSessionId: ProviderSessionId.make("session:occurrence"),
+      now,
+    }),
+    driver: ProviderDriverKind.make(driver),
+    status: "error" as const,
+    lastError: "Earlier turn failed",
+    lastErrorAt: now,
+  });
+  const idle = ProviderSessionManager.releasedProviderSession({
+    session: session("opencode"),
+    now: later,
+    reason: "idle_timeout",
+  });
+  assert.equal(idle.lastError, "Earlier turn failed");
+  assert.deepStrictEqual(idle.lastErrorAt, now);
+  for (const driver of ["opencode", "pi"] as const) {
+    const released = ProviderSessionManager.releasedProviderSession({
+      session: session(driver),
+      now: later,
+      reason: "runtime_error",
+      runtimeErrorCause: "stream_end",
+      detail: "Provider event stream ended.",
+    });
+    const preserve = driver === "pi";
+    assert.equal(
+      released.lastError,
+      preserve ? "Earlier turn failed" : "Provider event stream ended.",
+    );
+    assert.deepStrictEqual(released.lastErrorAt, preserve ? now : later);
+  }
+});
