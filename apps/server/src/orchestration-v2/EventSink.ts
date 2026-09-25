@@ -14,6 +14,7 @@ import {
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import type { IdAllocatorV2Error } from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderCommitBatch from "./ProviderCommitBatch.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -135,6 +136,14 @@ export interface EventSinkV2Shape {
       readonly resultId: OrchestrationV2TurnItem["id"];
     };
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+    /**
+     * More events, built in the write transaction once the run check passes, so the rows they
+     * are read from cannot change before the write.
+     */
+    readonly eventsInTransaction?: Effect.Effect<
+      ReadonlyArray<OrchestrationV2DomainEvent>,
+      ProjectionStore.ProjectionStoreV2Error | IdAllocatorV2Error
+    >;
     readonly effects?: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<
     {
@@ -573,10 +582,14 @@ const layerBase: Layer.Layer<
               }
             }
 
+            const events =
+              input.eventsInTransaction === undefined
+                ? input.events
+                : [...input.events, ...(yield* input.eventsInTransaction)];
             const normalized = yield* normalizeEvents(
               input.guardPendingUserInputCancellations === true
-                ? yield* guardUserInputCancellations(input.events)
-                : input.events,
+                ? yield* guardUserInputCancellations(events)
+                : events,
             );
             const storedEvents = yield* eventStore.append({
               ...(input.commandId === undefined ? {} : { commandId: input.commandId }),

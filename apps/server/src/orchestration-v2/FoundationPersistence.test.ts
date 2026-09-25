@@ -1897,16 +1897,34 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           scopeId: CheckpointScopeId.make("scope:foundation-current-capture"),
         },
       };
-      assert.isTrue(
-        (yield* eventSink.writeIfRunCurrent({
-          threadId,
-          runId,
-          activeAttemptId: attemptId,
-          expectedStatus: "starting",
-          events: [],
-          effects: [captureEffect],
-        })).committed,
-      );
+      // Events can be built from rows read inside the transaction that stores them.
+      const current = yield* eventSink.writeIfRunCurrent({
+        threadId,
+        runId,
+        activeAttemptId: attemptId,
+        expectedStatus: "starting",
+        events: [],
+        eventsInTransaction: projectionStore.getRun(threadId, runId).pipe(
+          Effect.map((run) =>
+            run === undefined
+              ? []
+              : [
+                  {
+                    id: EventId.make("event:foundation-stale-provider-start:reread"),
+                    type: "run.updated" as const,
+                    threadId,
+                    runId,
+                    providerInstanceId,
+                    occurredAt: now,
+                    payload: run,
+                  },
+                ],
+          ),
+        ),
+        effects: [captureEffect],
+      });
+      assert.isTrue(current.committed);
+      assert.lengthOf(current.storedEvents, 1);
       assert.isTrue(Option.isSome(yield* outbox.get(captureEffect.id)));
       yield* outbox.awaitAvailable;
       const staleCaptureEffect = { ...captureEffect, id: "effect:foundation-stale-capture" };
@@ -1923,6 +1941,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           activeAttemptId: attemptId,
           expectedStatus: "starting",
           effects: [staleCaptureEffect],
+          eventsInTransaction: Effect.die("a refused write must build no events"),
           events: [
             {
               id: EventId.make("event:foundation-stale-provider-start:running"),
