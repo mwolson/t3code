@@ -488,6 +488,22 @@ function delegatedCompletionWakeDetail(taskIds: ReadonlyArray<string>): string {
     : `Delegated tasks ${taskList} reached terminal states. Use task_status with each taskId to read the results.`;
 }
 
+type NotificationOutcome = NonNullable<
+  OrchestrationV2ConversationMessage["notification"]
+>["outcome"];
+
+// A command batch reports its most severe outcome; agreeing outcomes pass through.
+function backgroundCommandBatchOutcome(
+  previous: NotificationOutcome,
+  incoming: NotificationOutcome,
+): NotificationOutcome {
+  if (previous === "failed" || incoming === "failed") return "failed";
+  if (previous === "cancelled" || incoming === "cancelled") return "cancelled";
+  if (previous === incoming) return previous;
+  if (previous === "unknown" || incoming === "unknown") return "unknown";
+  return "updated";
+}
+
 function isTerminalDelegatedTaskStatus(status: OrchestrationV2Subagent["status"]): boolean {
   return (
     status === "completed" ||
@@ -5093,6 +5109,74 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             capabilities: queuedCapabilities,
           }),
         );
+        // Dispatch and promotion share the thread lock. Merge only a still-queued
+        // Codex command completion wake with the same sender, selection and
+        // provider thread; if promotion won, queue a new delivery normally. User
+        // and delegated-completion runs never absorb a batch, a batch keeps its
+        // run's hold state, and public queued-run.edit keeps rejecting
+        // notifications.
+        if (
+          queuedAdapter.driver === "codex" &&
+          command.createdBy === "agent" &&
+          command.creationSource === "server" &&
+          command.notification?.source.kind === "command" &&
+          delegatedCompletion === undefined &&
+          command.attachments.length === 0 &&
+          command.context === undefined &&
+          command.sourcePlanRef === undefined &&
+          command.scheduledTaskId === undefined
+        ) {
+          const batchRun = queuedRunsInDeliveryOrder(projection).find((candidate) => {
+            const message = projection.messages.find((row) => row.id === candidate.userMessageId);
+            return (
+              candidate.providerThreadId === targetProviderThread?.id &&
+              modelSelectionsEqual(candidate.modelSelection, modelSelection) &&
+              candidate.sourcePlanRef === undefined &&
+              message?.createdBy === command.createdBy &&
+              message.creationSource === command.creationSource &&
+              message.senderThreadId === command.senderThreadId &&
+              message.delegatedCompletion === undefined &&
+              message.attachments.length === 0 &&
+              message.context === undefined &&
+              message.scheduledTaskId === undefined &&
+              message.notification?.source.kind === "command"
+            );
+          });
+          const batchMessage = projection.messages.find(
+            (row) => row.id === batchRun?.userMessageId,
+          );
+          if (batchRun !== undefined && batchMessage?.notification !== undefined) {
+            const previous = batchMessage.notification;
+            const incoming = command.notification;
+            yield* emit(
+              events,
+              command,
+            )({
+              type: "message.updated",
+              threadId: command.threadId,
+              runId: batchRun.id,
+              ...(batchMessage.nodeId === null ? {} : { nodeId: batchMessage.nodeId }),
+              providerInstanceId: batchRun.providerInstanceId,
+              occurredAt: now,
+              payload: {
+                ...batchMessage,
+                text: `${batchMessage.text}\n\n${command.text}`,
+                notification: {
+                  // A batch has no single native command identity.
+                  source: { kind: "command" },
+                  outcome: backgroundCommandBatchOutcome(previous.outcome, incoming.outcome),
+                  summary: "Background commands finished",
+                  detail: [
+                    previous.detail ?? previous.summary,
+                    incoming.detail ?? incoming.summary,
+                  ].join("\n\n"),
+                },
+                updatedAt: now,
+              },
+            });
+            return;
+          }
+        }
         const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
           id: idAllocator.derive.providerThread({
             driver: queuedAdapter.driver,
