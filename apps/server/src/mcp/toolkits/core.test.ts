@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { McpAttachmentInput } from "./attachment/input.ts";
 import { McpSchema, McpServer, Tool } from "effect/ai";
@@ -382,6 +383,7 @@ it.effect("refuses act-as-caller tools to a client caller", () =>
       McpHttpServer.layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
+        Layer.provide(Path.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
         Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
@@ -420,6 +422,7 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
       McpHttpServer.layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
+        Layer.provide(Path.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
         Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
@@ -486,6 +489,7 @@ it.effect("a caller cannot interrupt a thread that runs above its own modes", ()
       McpHttpServer.layerOrchestratorToolkit.pipe(
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provide(NodeCrypto.layer),
+        Layer.provide(Path.layer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
             getThreadShell: () =>

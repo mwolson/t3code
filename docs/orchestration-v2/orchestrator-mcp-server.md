@@ -309,15 +309,18 @@ type CreateThreadsInput = {
     };
     runtimeMode?: "inherit" | "approval-required" | "auto-accept-edits" | "full-access";
     interactionMode?: "inherit" | "plan" | "default";
+    projectDirectory?: string;
   }>;
   clientRequestId?: string;
 };
 ```
 
-Each entry independently resolves provider, model, and modes. The new threads
-inherit the parent's project, branch, and worktree path, but they have no
-sub-agent lineage. Entries with a prompt immediately dispatch a run; entries
-without a prompt remain idle.
+Each entry independently resolves provider, model, and modes. Without
+`projectDirectory`, it inherits the parent's project, branch, and worktree.
+An absolute or `~/` directory must match a registered, available project root;
+that selection starts at the target root with no inherited branch or worktree.
+Unknown and relative paths are rejected. Entries have no subagent lineage;
+a prompt immediately dispatches a run, otherwise the thread remains idle.
 
 ### `t3_thread_launch`
 
