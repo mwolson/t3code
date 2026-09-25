@@ -18,6 +18,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
+import { restartContinuationRun } from "./RestartContinuation.ts";
+
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
@@ -812,6 +814,7 @@ it.effect(
             runRecoveryOnce: Effect.succeed(false),
           }),
           Layer.mock(EffectOutbox.EffectOutboxV2)({
+            getRepairRunIds: () => Effect.succeed([]),
             reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
           }),
         ),
@@ -1483,5 +1486,94 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
         : [],
     );
     assert.deepEqual(noted, [`subagent ${nativeSubagentId}`]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("leaves a repair-owned prepared continuation and its background items to repair", () => {
+  const threadId = ThreadId.make("repair-owned-continuation");
+  const runId = RunId.make("repair-owned-continuation:run");
+  const providerThreadId = ProviderThreadId.make("repair-owned-continuation:provider-thread");
+  const providerSessionId = ProviderSessionId.make("repair-owned-continuation:session");
+  const providerInstanceId = ProviderInstanceId.make("codex");
+  const driver = ProviderDriverKind.make("codex");
+  const projection = {
+    thread: { id: threadId, archivedAt: null, deletedAt: null, providerInstanceId },
+    runs: [
+      {
+        id: runId,
+        ordinal: 2,
+        status: "starting",
+        providerInstanceId,
+        providerThreadId,
+        restartContinuationOfRunId: RunId.make("repair-owned-continuation:previous"),
+      },
+    ],
+    providerThreads: [
+      {
+        id: providerThreadId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        providerInstanceId,
+        driver,
+        providerSessionId,
+        status: "active",
+        nativeThreadRef: { driver, nativeId: "native:repair-owned", strength: "strong" },
+      },
+    ],
+    providerSessions: [{ id: providerSessionId, providerInstanceId, driver, status: "stopped" }],
+    turnItems: [
+      {
+        id: TurnItemId.make("repair-owned-background"),
+        runId,
+        nodeId: null,
+        providerThreadId,
+        providerInstanceId,
+        type: "command_execution",
+        status: "running",
+      },
+    ],
+    attempts: [],
+    nodes: [],
+    subagents: [],
+    messages: [],
+    providerTurns: [],
+    runtimeRequests: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  const committed: Array<Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0]> = [];
+  const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true })),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRecoveryThreadIds: () => Effect.succeed([threadId]),
+          getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          commitCommand: (input) => {
+            committed.push(input);
+            return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+          },
+        }),
+        IdAllocator.layer,
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          getRepairRunIds: () => Effect.succeed([runId]),
+          reconcileAfterProcessLoss: Effect.succeed({ requeued: 1, cancelled: 0 }),
+        }),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    assert.equal(restartContinuationRun(projection)?.id, runId);
+    const summary = yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).recover;
+    assert.equal(summary.terminalizedRuns, 0);
+    assert.deepEqual(
+      committed.flatMap((command) => command.effects ?? []),
+      [],
+    );
+    assert.isFalse(
+      committed
+        .flatMap((command) => command.events)
+        .some((event) => event.type === "run.updated" || event.type === "turn-item.updated"),
+    );
   }).pipe(Effect.provide(layer));
 });

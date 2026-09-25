@@ -41,6 +41,12 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     preserveBufferedOutput: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
+    type: Schema.Literal("provider-turn.repair"),
+    runId: RunId,
+    attemptId: Schema.NullOr(RunAttemptId),
+    error: Schema.String,
+  }),
+  Schema.Struct({
     type: Schema.Literal("provider-turn.start"),
     runId: RunId,
   }),
@@ -119,6 +125,7 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "provider-runtime.continue",
   "provider-session.detach",
   "provider-thread.rollback",
+  "provider-turn.repair",
   "checkpoint.capture",
   "terminal.cleanup",
   "attachment.cleanup",
@@ -228,6 +235,15 @@ export interface EffectOutboxV2Shape {
     readonly excludeRestartContinuations?: boolean;
   }) => Effect.Effect<Option.Option<OrchestrationEffectV2>, EffectOutboxError>;
   readonly nextClaimableAt: Effect.Effect<Option.Option<DateTime.Utc>, EffectOutboxError>;
+  readonly getRepairRunIds: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<RunId>, EffectOutboxError>;
+  readonly beginRepair: (input: {
+    readonly effectId: string;
+    readonly workerId: string;
+    readonly runId: RunId;
+    readonly error: string;
+  }) => Effect.Effect<boolean, EffectOutboxError>;
   readonly succeed: (input: {
     readonly effectId: string;
     readonly workerId: string;
@@ -574,6 +590,46 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             : new EffectOutboxError({ operation: "next-claimable", cause }),
         ),
       ),
+      getRepairRunIds: (threadId) =>
+        sql<{ readonly run_id: string }>`
+        SELECT r.run_id FROM orchestration_v2_projection_runs AS r
+        JOIN orchestration_v2_effect_outbox AS e ON e.thread_id = r.thread_id
+          AND json_extract(e.payload_json, '$.runId') = r.run_id
+          AND json_extract(e.payload_json, '$.attemptId') = json_extract(r.payload_json, '$.activeAttemptId')
+        WHERE r.thread_id = ${threadId} AND r.status = 'starting'
+          AND e.effect_type = 'provider-turn.repair' AND e.status IN ('pending', 'running')
+      `.pipe(
+          Effect.map((rows) => rows.map((row) => RunId.make(row.run_id))),
+          Effect.mapError((cause) => new EffectOutboxError({ operation: "repair-runs", cause })),
+        ),
+      beginRepair: ({ effectId, workerId, runId, error }) =>
+        Effect.gen(function* () {
+          const payload = yield* Schema.encodeEffect(
+            Schema.fromJsonString(OrchestrationEffectRequestV2),
+          )({
+            type: "provider-turn.repair",
+            runId,
+            attemptId: null,
+            error,
+          });
+          const now = DateTime.formatIso(yield* DateTime.now);
+          const rows = yield* sql<{ readonly effect_id: string }>`
+          UPDATE orchestration_v2_effect_outbox
+          SET effect_type = 'provider-turn.repair', payload_json = json_set(${payload}, '$.attemptId', (
+            SELECT json_extract(r.payload_json, '$.activeAttemptId')
+            FROM orchestration_v2_projection_runs AS r
+            WHERE r.run_id = ${runId} AND r.thread_id = orchestration_v2_effect_outbox.thread_id
+          )), updated_at = ${now}
+          WHERE effect_id = ${effectId} AND status = 'running' AND lease_owner = ${workerId}
+            AND effect_type IN ('provider-turn.start', 'provider-turn.restart')
+          RETURNING effect_id
+        `;
+          return rows.length === 1;
+        }).pipe(
+          Effect.mapError(
+            (cause) => new EffectOutboxError({ operation: "begin-repair", effectId, cause }),
+          ),
+        ),
       succeed: ({ effectId, workerId }) =>
         Effect.gen(function* () {
           const now = DateTime.formatIso(yield* DateTime.now);

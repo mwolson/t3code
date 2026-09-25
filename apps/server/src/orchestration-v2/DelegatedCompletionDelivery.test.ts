@@ -12,11 +12,16 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
+  RunAttemptId,
   RunId,
+  TurnItemId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
@@ -34,6 +39,17 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
+import * as ContextHandoffService from "./ContextHandoffService.ts";
+import * as IdAllocator from "./IdAllocator.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProviderContinuationRequests from "./ProviderContinuationRequests.ts";
+import * as ProviderContinuationService from "./ProviderContinuationService.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
+import * as RunExecutionService from "./RunExecutionService.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
@@ -101,7 +117,13 @@ const layerTestProviderInstanceRegistry = Layer.succeed(
   },
 );
 
-const layerTest = Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink).pipe(
+const layerTest = Layer.mergeAll(
+  RuntimeLayer.layer,
+  RuntimeLayer.layerEventSink,
+  ProjectionStore.layer,
+  IdAllocator.layer,
+  ProviderContinuationRequests.layer,
+).pipe(
   Layer.provideMerge(RuntimeLayer.layerProjectService),
   Layer.provide(
     Layer.mock(WorkspacePaths.WorkspacePaths)({
@@ -798,7 +820,7 @@ const seedRestartCancelledChild = (input: {
   readonly completionWake: "always" | "settled_only";
   readonly continuationPending: boolean;
   /** "completed" seeds a settled turn whose background work the restart cancelled. */
-  readonly runStatus?: "cancelled" | "completed";
+  readonly runStatus?: "cancelled" | "completed" | "running";
   readonly now: DateTime.Utc;
 }) =>
   Effect.gen(function* () {
@@ -1270,5 +1292,270 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
         [child.taskId],
       );
     }),
+  );
+});
+
+const layerStartRepair = ProviderTurnStartService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProviderTurnStartServiceTestkit.layer,
+      FileSystem.layerNoop({}),
+      Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
+      Layer.mock(ProviderAuthService.ProviderAuthService)({}),
+      Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
+      Layer.mock(RunExecutionService.RunExecutionServiceV2)({}),
+      Layer.mock(RuntimePolicy.RuntimePolicyV2)({}),
+    ),
+  ),
+);
+
+// Start repair can fail before a provider transcript exists. Gate the projection
+// read while exercising the real event sink and app-owned completion finalizer.
+it.layer(layerTest)("delegated tasks across start repair", (it) => {
+  it.effect.each(["during repair", "after repair"] as const)(
+    "preserves a child result arriving %s",
+    (arrival) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make(`repair-parent:${arrival}`);
+        const projectId = ProjectId.make(`repair-project:${arrival}`);
+        const runId = RunId.make(`repair-run:${arrival}`);
+        const rootNodeId = NodeId.make(`repair-root:${arrival}`);
+        yield* seedParentWithTerminalTask({
+          threadId,
+          projectId,
+          runId,
+          rootNodeId,
+          taskId: NodeId.make(`repair-first-child:${arrival}`),
+          deliveryState: "delivered",
+          now,
+        });
+        const child = yield* seedRestartCancelledChild({
+          parentThreadId: threadId,
+          projectId,
+          parentRunId: runId,
+          rootNodeId,
+          name: `repair-second-child:${arrival}`,
+          completionWake: "always",
+          continuationPending: false,
+          runStatus: "running",
+          now,
+        });
+        const parent = yield* store.getThreadProjection(threadId);
+        const task = parent.subagents.find((row) => row.id === child.taskId)!;
+        const itemId = TurnItemId.make(`repair-child-item:${arrival}`);
+        const attemptId = RunAttemptId.make(`repair-attempt:${arrival}`);
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`repair-starting:${arrival}`),
+              type: "run.updated",
+              threadId,
+              runId,
+              occurredAt: now,
+              payload: { ...parent.runs[0]!, status: "starting", activeAttemptId: attemptId },
+            },
+            {
+              id: EventId.make(`repair-child-node:${arrival}`),
+              type: "node.updated",
+              threadId,
+              runId,
+              nodeId: child.taskId,
+              occurredAt: now,
+              payload: {
+                id: child.taskId,
+                threadId,
+                runId,
+                parentNodeId: rootNodeId,
+                rootNodeId,
+                kind: "subagent",
+                status: "running",
+                countsForRun: false,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                runtimeRequestId: null,
+                checkpointScopeId: null,
+                startedAt: now,
+                completedAt: null,
+              },
+            },
+            {
+              id: EventId.make(`repair-child-item:${arrival}`),
+              type: "turn-item.updated",
+              threadId,
+              runId,
+              nodeId: child.taskId,
+              occurredAt: now,
+              payload: {
+                ...task,
+                id: itemId,
+                nodeId: child.taskId,
+                type: "subagent",
+                subagentId: child.taskId,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 1,
+              },
+            },
+          ],
+        });
+        const snapshotRead = yield* Deferred.make<void>();
+        const resumeRepair = yield* Deferred.make<void>();
+        const repairStore = ProjectionStore.ProjectionStoreV2.of({
+          ...store,
+          getThreadProjection: (id) =>
+            store
+              .getThreadProjection(id)
+              .pipe(
+                Effect.tap(() =>
+                  id === threadId
+                    ? Deferred.succeed(snapshotRead, undefined).pipe(
+                        Effect.andThen(Deferred.await(resumeRepair)),
+                      )
+                    : Effect.void,
+                ),
+              ),
+        });
+        const repair = yield* ProviderTurnStartService.ProviderTurnStartServiceV2.pipe(
+          Effect.flatMap((service) =>
+            service.failFromDeadLetter({
+              threadId,
+              runId,
+              expectedAttemptId: attemptId,
+              error: "exhausted restart",
+            }),
+          ),
+          Effect.provide(Layer.fresh(layerStartRepair)),
+          Effect.provideService(ProjectionStore.ProjectionStoreV2, repairStore),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        yield* Deferred.await(snapshotRead);
+        if (arrival === "after repair") {
+          yield* Deferred.succeed(resumeRepair, undefined);
+          yield* Fiber.join(repair);
+          const repaired = yield* store.getThreadProjection(threadId);
+          assert.equal(repaired.runs[0]?.status, "failed");
+          assert.equal(
+            repaired.subagents.find((row) => row.id === child.taskId)?.status,
+            "running",
+          );
+          assert.equal(repaired.nodes.find((row) => row.id === child.taskId)?.status, "running");
+          assert.equal(repaired.turnItems.find((row) => row.id === itemId)?.status, "running");
+          assert.equal(
+            (yield* store.getThreadProjection(child.childThreadId)).runs[0]?.status,
+            "running",
+          );
+        }
+        // Suppress the asynchronous terminal listener so recovery supplies an
+        // explicit completion barrier under the normal parent dispatch lock.
+        yield* sink.write({
+          commandId: reconcileCommandId(`repair-result:${arrival}`),
+          events: [
+            {
+              id: EventId.make(`repair-child-result:${arrival}`),
+              type: "message.updated",
+              threadId: child.childThreadId,
+              runId: child.childRunId,
+              occurredAt: now,
+              payload: {
+                id: MessageId.make(`repair-child-result:${arrival}`),
+                threadId: child.childThreadId,
+                runId: child.childRunId,
+                nodeId: null,
+                role: "assistant",
+                text: "The independent child finished.",
+                attachments: [],
+                streaming: false,
+                createdBy: "agent",
+                creationSource: "server",
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
+            runEvent({
+              threadId: child.childThreadId,
+              runId: child.childRunId,
+              ordinal: 1,
+              status: "completed",
+              now,
+            }),
+          ],
+        });
+        yield* orchestrator.recoverDelegatedTask(child.childThreadId, child.childRunId);
+        const finalized = yield* store.getThreadProjection(threadId);
+        const cohort = finalized.runs[0]!.delegatedCompletion!;
+        assert.equal(cohort.delivery?.generation, 2);
+        assert.deepEqual(cohort.delivery?.taskIds, [child.taskId]);
+        if (arrival === "during repair") {
+          yield* Deferred.succeed(resumeRepair, undefined);
+          yield* Fiber.join(repair);
+        }
+        const repaired = yield* store.getThreadProjection(threadId);
+        assert.equal(repaired.runs[0]?.status, "failed");
+        assert.deepEqual(repaired.runs[0]?.delegatedCompletion, cohort);
+        const finishedTask = repaired.subagents.find((row) => row.id === child.taskId);
+        assert.equal(finishedTask?.status, "completed");
+        assert.equal(finishedTask?.result, "The independent child finished.");
+        assert.equal(repaired.nodes.find((row) => row.id === child.taskId)?.status, "completed");
+        const item = repaired.turnItems.find((row) => row.id === itemId);
+        assert.equal(item?.status, "completed");
+        assert.equal(item?.type === "subagent" && item.result, "The independent child finished.");
+        assert.equal(
+          repaired.contextTransfers.filter((row) => row.sourceThreadId === child.childThreadId)
+            .length,
+          1,
+        );
+        const delivery = cohort.delivery!;
+        const dispatched = yield* Deferred.make<void>();
+        yield* Layer.build(
+          ProviderContinuationService.layer.pipe(
+            Layer.provide(
+              Layer.mock(ThreadManagementService.ThreadManagementService)({
+                getThreadRecords: orchestrator.getThreadRecords,
+                dispatch: (command) =>
+                  orchestrator
+                    .dispatch(command)
+                    .pipe(
+                      Effect.tap(() =>
+                        command.type === "message.dispatch" &&
+                        command.messageId === delivery.messageId
+                          ? Deferred.succeed(dispatched, undefined)
+                          : Effect.void,
+                      ),
+                    ),
+              }),
+            ),
+          ),
+        );
+        yield* Deferred.await(dispatched);
+        const offered = yield* store.getThreadProjection(threadId);
+        assert.deepEqual(
+          offered.messages.find((row) => row.id === delivery.messageId)?.delegatedCompletion,
+          {
+            parentRunId: runId,
+            generation: delivery.generation,
+            taskIds: [child.taskId],
+          },
+        );
+        yield* orchestrator.dispatch({
+          type: "notification.delivery.accept",
+          commandId: CommandId.make(`repair-accept:${arrival}`),
+          threadId,
+          messageId: delivery.messageId,
+        });
+        const delivered = yield* store.getThreadProjection(threadId);
+        assert.equal(
+          delivered.subagents.find((row) => row.id === child.taskId)?.completionDelivery?.state,
+          "delivered",
+        );
+        assert.isNull(
+          delivered.runs.find((row) => row.id === runId)?.delegatedCompletion?.delivery,
+        );
+      }),
   );
 });
