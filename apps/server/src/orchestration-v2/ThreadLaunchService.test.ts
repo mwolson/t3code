@@ -86,6 +86,8 @@ const otherProject = {
   title: "Other",
 } as const;
 
+class GrantRefused extends Schema.TaggedError<GrantRefused>()("GrantRefused", {}) {}
+
 const adapter = {
   instanceId: modelSelection.instanceId,
   driver: ProviderDriverKind.make("codex"),
@@ -1393,6 +1395,57 @@ it.effect("rejects a server-allocated launch retry after the thread is deleted",
   }).pipe(Effect.provide(harness.layer));
 });
 
+it.effect("runs the creation hook after the thread exists and before its first message", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const observed = yield* Ref.make<
+      ReadonlyArray<{
+        readonly threadId: ThreadId;
+        readonly messages: number;
+        readonly runs: number;
+      }>
+    >([]);
+    const launched = yield* launches.launch({
+      ...launchInput({
+        command: "command:launch:hook",
+        thread: "thread:launch:hook",
+        message: "Go",
+      }),
+      onThreadCreated: (threadId) =>
+        threads
+          .getThreadProjection(threadId)
+          .pipe(
+            Effect.flatMap((projection) =>
+              Ref.update(observed, (entries) => [
+                ...entries,
+                { threadId, messages: projection.messages.length, runs: projection.runs.length },
+              ]),
+            ),
+          ),
+    });
+    assert.deepEqual(yield* Ref.get(observed), [
+      { threadId: launched.threadId, messages: 0, runs: 0 },
+    ]);
+    assert.equal(launched.projection.runs.length, 1);
+
+    const refused = launchInput({
+      command: "command:launch:hook-refused",
+      thread: "thread:launch:hook-refused",
+      message: "Never sent",
+    });
+    const failed = yield* launches
+      .launch({ ...refused, onThreadCreated: () => Effect.fail(new GrantRefused()) })
+      .pipe(Effect.flip);
+    assert.equal(failed.operation, "record-creation");
+    assert.instanceOf(failed.cause, GrantRefused);
+    const idle = yield* threads.getThreadProjection(refused.threadId);
+    assert.equal(idle.messages.length, 0);
+    assert.equal(idle.runs.length, 0);
+  }).pipe(Effect.provide(harness.layer));
+});
+
 it.effect("does not treat an unrelated accepted command receipt as a launch", () => {
   const harness = makeHarness();
   return Effect.gen(function* () {
@@ -1797,6 +1850,15 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
       projectId: ProjectId.make("missing-project"),
     }).pipe(Effect.flip);
     assert.equal(missingProject._tag, "ThreadLaunchError");
+    assert.equal((yield* claimedFiles).length, 1);
+    // A refused creation hook runs before the message, so its claims are unused.
+    const refusedGrant = yield* ThreadMessageIntake.launchThread({
+      ...input,
+      commandId: CommandId.make("intake-refused-grant"),
+      threadId: ThreadId.make("intake-refused-grant-thread"),
+      onThreadCreated: () => Effect.fail(new GrantRefused()),
+    }).pipe(Effect.flip);
+    assert.equal(refusedGrant._tag, "ThreadLaunchError");
     assert.equal((yield* claimedFiles).length, 1);
     const missingThread = yield* ThreadMessageIntake.dispatchCommand({
       type: "message.dispatch",

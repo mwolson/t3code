@@ -27,6 +27,7 @@ import { ProjectService } from "../../../project/ProjectService.ts";
 import { ThreadManagementService } from "../../../orchestration-v2/ThreadManagementService.ts";
 import { SourceControlRepositoryService } from "../../../sourceControl/SourceControlRepositoryService.ts";
 import { McpInvocationContext } from "../../McpInvocationContext.ts";
+import { OrchestratorMcpService } from "../../OrchestratorMcpService.ts";
 
 const shared = {
   success: Project,
@@ -88,7 +89,7 @@ const ProjectCloneTool = Tool.make("t3_project_clone", {
 const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   ...shared,
   description:
-    'Create an ordinary TOP-LEVEL thread with an explicit workspace binding before its agent starts. Use this when the user requests independent work, a new thread, or a PR stack in its own worktree; use delegate_task for child subagents. Set workspaceStrategy to {type:"worktree",baseRef:"parent-branch",branch:"new-branch",startFromOrigin:false} for a new worktree based on local commits, or {type:"existing_worktree",worktreePath:"/absolute/path",branch:"existing-branch"} to use an existing checkout. For upstream commits, set startFromOrigin:true. Omitted workspaceStrategy means the project root, NOT the caller\'s worktree. Omit projectId/modelSelection/modes to inherit those settings. Put the task in message. Do not ask the agent to create its own worktree via shell: that does not update the thread binding. Each call creates a new launch with no retry key; retain threadId and use t3_thread_read/t3_thread_wait to follow preparation. After errors or lost responses, inspect t3_thread_list before retrying. Attachments must be pending uploads. Requires a full-access/default caller.',
+    'Create an ordinary TOP-LEVEL thread with an explicit workspace binding before its agent starts. Use this when the user requests independent work, a new thread, or a PR stack in its own worktree; use delegate_task for child subagents. Set workspaceStrategy to {type:"worktree",baseRef:"parent-branch",branch:"new-branch",startFromOrigin:false} for a new worktree based on local commits, or {type:"existing_worktree",worktreePath:"/absolute/path",branch:"existing-branch"} to use an existing checkout. For upstream commits, set startFromOrigin:true. Omitted workspaceStrategy means the project root, NOT the caller\'s worktree. Omit projectId/modelSelection/modes to inherit those settings. This caller keeps read, wait, send, and interrupt access to the launched thread, even in another project. Put the task in message. Do not ask the agent to create its own worktree via shell: that does not update the thread binding. Each call creates a new launch with no retry key; retain threadId and use t3_thread_read/t3_thread_wait to follow preparation. Once accepted, a failed timeline run link does not hide the successful threadId/runId result. After other errors or lost responses, inspect t3_thread_list before retrying, but a failed pre-dispatch creation grant can leave an idle cross-project thread that this caller cannot list. Attachments must be pending uploads. Requires a full-access/default caller.',
   parameters: Schema.Struct({
     projectId: Schema.optional(ProjectId),
     title: TrimmedNonEmptyString,
@@ -116,7 +117,13 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
   }),
-  dependencies: [...shared.dependencies, ThreadLaunchService, FileSystem.FileSystem, ServerConfig],
+  dependencies: [
+    ...shared.dependencies,
+    ThreadLaunchService,
+    OrchestratorMcpService,
+    FileSystem.FileSystem,
+    ServerConfig,
+  ],
 })
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);

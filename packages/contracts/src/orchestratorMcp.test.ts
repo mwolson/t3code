@@ -26,6 +26,17 @@ const decodeThreadSendInput = Schema.decodeUnknownSync(OrchestratorMcpThreadSend
 const decodeThreadWaitInput = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitInput);
 
 describe("orchestrator MCP contracts", () => {
+  it("allows projectDirectory only for top-level creation", () => {
+    const input = { prompt: "Inspect", projectDirectory: "/known/project" };
+    expect(decodeCreateThreadsInput({ threads: [input] }).threads[0]?.projectDirectory).toBe(
+      input.projectDirectory,
+    );
+    expect(
+      decodeDelegateTaskInput({ task: "Inspect", projectDirectory: "/other" }),
+    ).not.toHaveProperty("projectDirectory");
+    expect(OrchestratorMcpDelegateTaskInput.fields).not.toHaveProperty("projectDirectory");
+  });
+
   it("decodes slim and expanded capability requests", () => {
     expect(decodeCapabilitiesInput({})).toEqual({});
     expect(

@@ -219,11 +219,13 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
         ),
       ),
       Effect.tapError((error) => {
-        // Project/receipt reads precede message dispatch. The create-thread error
-        // also wraps post-message projection reads, so its tag alone is not proof.
+        // Project/receipt reads and the creation hook precede message dispatch. The
+        // create-thread error also wraps post-message projection reads, so its tag
+        // alone is not proof.
         const notAccepted =
           error.operation === "resolve-project" ||
           error.operation === "read-receipt" ||
+          error.operation === "record-creation" ||
           ((error.operation === "create-thread" || error.operation === "dispatch-message") &&
             isOrchestratorError(error.cause) &&
             // Projection errors under create-thread can occur after the message commit.
