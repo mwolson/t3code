@@ -112,6 +112,8 @@ import {
 import * as Metrics from "../observability/Metrics.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
+const DEFAULT_CAPABILITIES_MODEL_LIMIT = 50;
+const MAX_CAPABILITIES_MODEL_LIMIT = 100;
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
 const TASK_WAKE_EVENTS = [
@@ -350,6 +352,52 @@ function listCapabilityModels(input: {
   );
   const listed = visible.filter((model) => input.isPinned(model) || shown.has(model));
   return { listed, omitted: visible.length - listed.length };
+}
+
+function capabilityModelCatalog(
+  provider: ServerProvider,
+  input: {
+    readonly model: string | undefined;
+    readonly modelCursor: number | undefined;
+    readonly modelLimit: number | undefined;
+    readonly includeModelOptions: boolean;
+    readonly searchTerms: ReadonlyArray<string>;
+    readonly preferences:
+      | { readonly hiddenModels: ReadonlyArray<string>; readonly modelOrder: ReadonlyArray<string> }
+      | undefined;
+  },
+) {
+  const rank = new Map(input.preferences?.modelOrder.map((slug, index) => [slug, index]));
+  const visible = provider.models
+    .filter((model) => model.isCustom || !input.preferences?.hiddenModels.includes(model.slug))
+    .toSorted((a, b) => (rank.get(a.slug) ?? rank.size) - (rank.get(b.slug) ?? rank.size));
+  const matchingModels = visible.filter((model) => {
+    if (input.model !== undefined) return model.slug === input.model;
+    const text = `${model.slug} ${model.name} ${model.subProvider ?? ""}`.toLowerCase();
+    return input.searchTerms.every((term) => text.includes(term));
+  });
+  const cursor = input.model === undefined ? (input.modelCursor ?? 0) : 0;
+  const requestedLimit = input.modelLimit ?? DEFAULT_CAPABILITIES_MODEL_LIMIT;
+  const limit =
+    input.model === undefined ? Math.min(requestedLimit, MAX_CAPABILITIES_MODEL_LIMIT) : 1;
+  const page = matchingModels.slice(cursor, cursor + limit);
+  const nextCursor = cursor + page.length < matchingModels.length ? cursor + page.length : null;
+  const models = page.map((model) => {
+    const summary = {
+      id: model.slug,
+      ...(model.name.toLowerCase() === model.slug.toLowerCase() ? {} : { label: model.name }),
+    };
+    const optionDescriptors = model.capabilities?.optionDescriptors;
+    if (!input.includeModelOptions || optionDescriptors === undefined) {
+      return summary;
+    }
+    return { ...summary, options: optionDescriptors };
+  });
+  return {
+    models,
+    modelsNextCursor: nextCursor,
+    modelsTotal: matchingModels.length,
+  };
 }
 
 /** Option ids and allowed values are all a delegating agent needs; labels are UI copy. */
@@ -2080,6 +2128,51 @@ const make = Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings.pipe(
         Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
       );
+      const expandedProviderInstanceId = input.providerInstanceId ?? undefined;
+      const requestedModel = input.model ?? undefined;
+      const modelCursor = input.modelCursor ?? undefined;
+      const modelLimit = input.modelLimit ?? undefined;
+      const includeModelOptions = input.includeModelOptions ?? false;
+      const expandedProvider = providers.find(
+        (provider) => provider.instanceId === expandedProviderInstanceId,
+      );
+      if (
+        expandedProviderInstanceId === undefined &&
+        (requestedModel !== undefined ||
+          modelCursor !== undefined ||
+          modelLimit !== undefined ||
+          includeModelOptions)
+      ) {
+        return yield* failure(
+          "invalid_request",
+          "providerInstanceId is required to expand a model catalog.",
+        );
+      }
+      if (expandedProviderInstanceId !== undefined && expandedProvider === undefined) {
+        return yield* failure(
+          "provider_unavailable",
+          `Provider instance ${expandedProviderInstanceId} is not registered.`,
+        );
+      }
+      if (includeModelOptions && requestedModel === undefined) {
+        return yield* failure("invalid_request", "includeModelOptions requires an exact model id.");
+      }
+      if (
+        requestedModel !== undefined &&
+        !expandedProvider?.models.some(
+          (model) =>
+            model.slug === requestedModel &&
+            (model.isCustom ||
+              !settings.providerModelPreferences?.[
+                expandedProvider.instanceId
+              ]?.hiddenModels.includes(model.slug)),
+        )
+      ) {
+        return yield* failure(
+          "model_unavailable",
+          `Model ${requestedModel} is not advertised by provider ${expandedProviderInstanceId}.`,
+        );
+      }
       const inherited = parent?.thread.modelSelection;
       const searchTerms = input.search?.toLowerCase().split(/\s+/) ?? [];
       return {
@@ -2110,17 +2203,30 @@ const make = Effect.gen(function* () {
             providerInstanceId: provider.instanceId,
             driverKind: provider.driver,
             displayName: provider.displayName ?? null,
-            models: listed.map((model) => {
-              const options = model.capabilities?.optionDescriptors ?? [];
-              return {
-                id: model.slug,
-                ...(model.name.toLowerCase() === model.slug.toLowerCase()
-                  ? {}
-                  : { label: model.name }),
-                ...(options.length === 0 ? {} : { options: options.map(capabilityModelOption) }),
-              };
-            }),
-            ...(omitted === 0 ? {} : { omittedModels: omitted }),
+            ...(provider.instanceId === expandedProviderInstanceId
+              ? capabilityModelCatalog(provider, {
+                  model: requestedModel,
+                  modelCursor,
+                  modelLimit,
+                  includeModelOptions,
+                  searchTerms,
+                  preferences: settings.providerModelPreferences?.[provider.instanceId],
+                })
+              : {
+                  models: listed.map((model) => {
+                    const options = model.capabilities?.optionDescriptors ?? [];
+                    return {
+                      id: model.slug,
+                      ...(model.name.toLowerCase() === model.slug.toLowerCase()
+                        ? {}
+                        : { label: model.name }),
+                      ...(options.length === 0
+                        ? {}
+                        : { options: options.map(capabilityModelOption) }),
+                    };
+                  }),
+                  ...(omitted === 0 ? {} : { omittedModels: omitted }),
+                }),
             ...(provider.supportedRuntimeModes === undefined ||
             provider.supportedRuntimeModes.length === 0
               ? {}
