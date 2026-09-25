@@ -45,8 +45,51 @@ export function getThreadErrorBannerMessage(error: string): string {
     : error;
 }
 
-export function getThreadErrorBannerKey(threadKey: string, error: string | null): string | null {
-  return error === null ? null : `${threadKey}\u0000${error}`;
+export function getThreadErrorBannerKey(
+  threadKey: string,
+  error: string | null,
+  occurrence: string | number | null = null,
+  source: "local" | "runtime" = "runtime",
+): string | null {
+  return error === null
+    ? null
+    : `${threadKey}\u0000${source}\u0000${occurrence ?? ""}\u0000${error}`;
+}
+
+export function resolveThreadErrorBanner(input: {
+  threadKey: string;
+  localError: string | null;
+  localErrorAt: number | null;
+  runtime: { readonly lastError: string | null; readonly lastErrorAt?: string | null } | null;
+}) {
+  const localKey = getThreadErrorBannerKey(
+    input.threadKey,
+    input.localError,
+    input.localErrorAt,
+    "local",
+  );
+  const runtimeKey = getThreadErrorBannerKey(
+    input.threadKey,
+    input.runtime?.lastError ?? null,
+    input.runtime?.lastErrorAt ?? null,
+  );
+  const isLocal =
+    input.localError !== null &&
+    !(
+      localKey !== null &&
+      sessionDismissedThreadErrorBannerKeys.has(localKey) &&
+      sessionDismissedThreadErrorBannerKeys.get(localKey) !== runtimeKey
+    );
+  const error = isLocal ? input.localError : (input.runtime?.lastError ?? null);
+  return {
+    error,
+    key: getThreadErrorBannerKey(
+      input.threadKey,
+      error,
+      isLocal ? input.localErrorAt : (input.runtime?.lastErrorAt ?? null),
+      isLocal ? "local" : "runtime",
+    ),
+  };
 }
 
 export function shouldShowThreadErrorBanner(
@@ -57,11 +100,14 @@ export function shouldShowThreadErrorBanner(
   return getThreadErrorBannerKey(threadKey, error) !== null && !isDismissed;
 }
 
-const sessionDismissedThreadErrorBannerKeys = new Set<string>();
+const sessionDismissedThreadErrorBannerKeys = new Map<string, string | null>();
 
-export function dismissThreadErrorBannerForSession(bannerKey: string | null): void {
+export function dismissThreadErrorBannerForSession(
+  bannerKey: string | null,
+  runtimeKey: string | null = null,
+): void {
   if (bannerKey !== null) {
-    sessionDismissedThreadErrorBannerKeys.add(bannerKey);
+    sessionDismissedThreadErrorBannerKeys.set(bannerKey, runtimeKey);
   }
 }
 

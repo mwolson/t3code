@@ -6,6 +6,7 @@ import {
   getThreadErrorBannerMessage,
   isThreadErrorBannerDismissedForSession,
   shouldShowThreadErrorBanner,
+  resolveThreadErrorBanner,
 } from "./ThreadErrorBanner";
 
 describe("getThreadErrorBannerMessage", () => {
@@ -39,6 +40,38 @@ describe("ThreadErrorBanner", () => {
         "env:thread-b",
         secondError,
         isThreadErrorBannerDismissedForSession(newErrorKey),
+      ),
+    ).toBe(true);
+  });
+
+  it("shows the same message again for a later occurrence", () => {
+    const input = {
+      threadKey: "env:repeated-runtime-failure",
+      localError: null,
+      localErrorAt: null,
+      runtime: { lastError: "Provider failed", lastErrorAt: "2026-10-16T01:00:00Z" },
+    };
+    const first = resolveThreadErrorBanner(input);
+    dismissThreadErrorBannerForSession(first.key);
+    const revisited = resolveThreadErrorBanner(input);
+    expect(
+      shouldShowThreadErrorBanner(
+        input.threadKey,
+        revisited.error,
+        isThreadErrorBannerDismissedForSession(revisited.key),
+      ),
+    ).toBe(false);
+
+    const later = resolveThreadErrorBanner({
+      ...input,
+      runtime: { ...input.runtime, lastErrorAt: "2026-10-16T02:00:00Z" },
+    });
+    expect(later.error).toBe(first.error);
+    expect(
+      shouldShowThreadErrorBanner(
+        input.threadKey,
+        later.error,
+        isThreadErrorBannerDismissedForSession(later.key),
       ),
     ).toBe(true);
   });
