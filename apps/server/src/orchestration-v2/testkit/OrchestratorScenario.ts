@@ -13,6 +13,7 @@ import type {
   CommandId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -41,6 +42,12 @@ export type OrchestratorV2ScenarioStep =
     }
   | {
       readonly type: "await_all";
+    }
+  | {
+      readonly type: "await_command_event";
+      readonly threadId: ThreadId;
+      readonly commandId: CommandId;
+      readonly eventType: OrchestrationV2DomainEvent["type"];
     }
   | {
       readonly type: "await_thread_idle";
@@ -200,6 +207,7 @@ const hasActiveRun = (projection: OrchestrationV2ThreadProjection) =>
     ["preparing", "queued", "starting", "running", "waiting"].includes(run.status),
   );
 
+const SCENARIO_COMMAND_EVENT_WAIT_DEADLINE_MS = 30_000;
 const SCENARIO_WAIT_ATTEMPTS = 10_000;
 // Iterations count event-loop turns, not time: while async work (git
 // subprocesses, fixture IO) is in flight the loop is idle and the counter
@@ -575,6 +583,34 @@ export function runOrchestratorV2Scenario(
               yield* awaitDispatch(key);
             }
             break;
+          case "await_command_event": {
+            const event = yield* orchestrator
+              .streamStoredEventsFrom({ threadId: step.threadId })
+              .pipe(
+                Stream.filter(
+                  (stored) =>
+                    stored.commandId === step.commandId && stored.event.type === step.eventType,
+                ),
+                Stream.take(1),
+                Stream.runCollect,
+                Effect.raceFirst(
+                  Effect.sleep(SCENARIO_COMMAND_EVENT_WAIT_DEADLINE_MS).pipe(
+                    // Only the deadline uses wall time; the stream keeps the scenario's clock.
+                    Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+                    Effect.andThen(
+                      Effect.fail(
+                        new OrchestratorV2ScenarioStepError({
+                          scenario: scenario.name,
+                          step: `await_command_event:${step.threadId}:${step.commandId}:${step.eventType}`,
+                        }),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            storedEventGroups.push(event);
+            break;
+          }
           case "await_thread_idle":
             yield* waitForThreadIdle(step.threadId);
             break;

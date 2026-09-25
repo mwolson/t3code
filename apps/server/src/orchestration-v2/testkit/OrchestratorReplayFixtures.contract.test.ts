@@ -24,6 +24,59 @@ function assertUnique(values: ReadonlyArray<string>, label: string) {
 }
 
 describe("orchestrator replay fixture contract", () => {
+  it.effect("waits for exact reflection commands before dependent replay events", () =>
+    Effect.gen(function* () {
+      for (const name of [
+        "opencode2_mode_reflection",
+        "opencode2_queued_mode_reflection",
+        "opencode2_native_agent_selection",
+      ]) {
+        const fixture = ORCHESTRATOR_REPLAY_FIXTURES.find((entry) => entry.name === name)!;
+        const provider = fixture.providers[0]!;
+        const input = fixture.buildInput();
+        const reflection = input.steps.find((step) => step.type === "await_mode_reflection");
+        assert.ok(reflection);
+        const materialized = yield* materializeFixtureInput({
+          scenario: name,
+          fixtureInput: input,
+          driver: provider.driver,
+          modelSelection: provider.modelSelection,
+        });
+        const index = materialized.steps.findIndex((step) => step.type === "await_command_event");
+        assert.isAtLeast(index, 0);
+        const wait = materialized.steps[index]!;
+        assert.equal(wait.type, "await_command_event");
+        if (wait.type !== "await_command_event")
+          return yield* Effect.die("missing reflection wait");
+        assert.equal(
+          wait.commandId,
+          `command:provider-mode-reflection:${wait.threadId}:${provider.driver}:${reflection.nativeThreadId}:${reflection.nativeSequence}`,
+        );
+        assert.equal(wait.eventType, "thread.interaction-mode-updated");
+        assert.equal(materialized.steps[index + 1]!.type, "release_replay_gate");
+        assert.isFalse(
+          materialized.steps
+            .slice(0, index)
+            .some(
+              (step) =>
+                step.type === "await_thread_idle" ||
+                step.type === "await_all" ||
+                step.type === "await",
+            ),
+        );
+        assert.isFalse(
+          materialized.commands.some((command) => command.commandId === wait.commandId),
+        );
+      }
+      const negative = ORCHESTRATOR_REPLAY_FIXTURES.find(
+        (entry) => entry.name === "opencode2_queued_mode_reflection_user_aba",
+      )!;
+      assert.isFalse(
+        negative.buildInput().steps.some((step) => step.type === "await_mode_reflection"),
+      );
+    }).pipe(Effect.provide(idAllocatorLayer), provideDeterministicTestRuntime),
+  );
+
   it.effect("materializes queued fixture messages as queue-after-active dispatches", () =>
     Effect.gen(function* () {
       const materialized = yield* materializeFixtureInput({
@@ -341,7 +394,8 @@ describe("orchestrator replay fixture contract", () => {
                   step.type !== "await_run_status" &&
                   step.type !== "capture_shell_snapshot" &&
                   step.type !== "release_replay_gate" &&
-                  step.type !== "release_replay_gate_after_waiting",
+                  step.type !== "release_replay_gate_after_waiting" &&
+                  step.type !== "await_mode_reflection",
               );
             assert.equal(materialized.commands.length, commandProducingSteps.length + 1);
             assert.isAtLeast(materialized.steps.length, materialized.commands.length);

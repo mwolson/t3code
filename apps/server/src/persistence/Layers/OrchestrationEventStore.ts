@@ -11,6 +11,7 @@ import {
   ProjectIconOverride,
   ThreadId,
   type OrchestrationV2DomainEvent,
+  type RunAttemptId,
 } from "@t3tools/contracts";
 import {
   OrchestrationActorKind,
@@ -373,6 +374,8 @@ const makeEventStore = Effect.gen(function* () {
     readonly threadId?: ThreadId;
     readonly commandId?: CommandId;
     readonly eventType?: OrchestrationV2DomainEvent["type"];
+    readonly entityId?: string;
+    readonly runStartAttemptId?: RunAttemptId;
     readonly onlyAgentEvents?: boolean;
     readonly limit: number;
   }) =>
@@ -410,6 +413,14 @@ const makeEventStore = Effect.gen(function* () {
           ...(input.threadId === undefined ? [] : [sql`stream_id = ${input.threadId}`]),
           ...(input.commandId === undefined ? [] : [sql`command_id = ${input.commandId}`]),
           ...(input.eventType === undefined ? [] : [sql`event_type = ${input.eventType}`]),
+          ...(input.entityId === undefined
+            ? []
+            : [sql`json_extract(payload_json, '$.id') = ${input.entityId}`]),
+          ...(input.runStartAttemptId === undefined
+            ? []
+            : [
+                sql`event_type IN ('run.created', 'run.updated') AND json_extract(payload_json, '$.status') = 'starting' AND json_extract(payload_json, '$.activeAttemptId') = ${input.runStartAttemptId}`,
+              ]),
         ])}
       ORDER BY sequence ASC
       LIMIT ${input.limit}
@@ -495,6 +506,10 @@ const makeEventStore = Effect.gen(function* () {
           ...(input?.threadId === undefined ? {} : { threadId: input.threadId }),
           ...(input?.commandId === undefined ? {} : { commandId: input.commandId }),
           ...(input?.eventType === undefined ? {} : { eventType: input.eventType }),
+          ...(input?.entityId === undefined ? {} : { entityId: input.entityId }),
+          ...(input?.runStartAttemptId === undefined
+            ? {}
+            : { runStartAttemptId: input.runStartAttemptId }),
           onlyAgentEvents: true,
           limit: pageLimit,
         }).pipe(

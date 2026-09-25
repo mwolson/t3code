@@ -26,6 +26,8 @@ import {
 import { layer as idAllocatorLayer } from "../IdAllocator.ts";
 import { ProviderAdapterDriverCreateError } from "../ProviderAdapterDriver.ts";
 import { makeDriverLayer as makeProviderAdapterRegistryDriverLayer } from "../ProviderAdapterRegistry.ts";
+import { layer as providerInteractionModeReflectionsLayer } from "../ProviderInteractionModeReflections.ts";
+import type { ProviderReplayGate } from "../testkit/ProviderReplayGate.testkit.ts";
 import {
   makeReplayServerConfig,
   type OrchestratorV2ProviderReplayHarness,
@@ -157,8 +159,11 @@ export class OpenCode2ReplayController {
   private readonly transcript: OpenCode2SdkReplayTranscript;
   private readonly abortController = new AbortController();
 
-  constructor(transcript: OpenCode2SdkReplayTranscript) {
+  private readonly replayGate: ProviderReplayGate | undefined;
+
+  constructor(transcript: OpenCode2SdkReplayTranscript, replayGate?: ProviderReplayGate) {
     this.transcript = transcript;
+    this.replayGate = replayGate;
   }
 
   /** Whether every entry before the labelled one has been consumed. */
@@ -349,6 +354,8 @@ export class OpenCode2ReplayController {
               if (!delayCompleted || isSignalAborted(signal)) return;
             }
             this.throwFailure();
+            await this.replayGate?.beforeEmit(entry.label, this.replaySignal(signal));
+            if (isSignalAborted(signal) || this.abortController.signal.aborted) return;
             const event = frame.event as V2Event;
             this.advance();
             this.currentEventEpoch += 1;
@@ -623,11 +630,14 @@ export function makeReplayClient(controller: OpenCode2ReplayController): OpenCod
   } as unknown as OpenCodeClient;
 }
 
-function makeOpenCode2ReplayRuntimeLayer(transcript: OpenCode2SdkReplayTranscript) {
+function makeOpenCode2ReplayRuntimeLayer(
+  transcript: OpenCode2SdkReplayTranscript,
+  replayGate?: ProviderReplayGate,
+) {
   return Layer.effect(
     OpenCode2Runtime,
     Effect.gen(function* () {
-      const controller = new OpenCode2ReplayController(transcript);
+      const controller = new OpenCode2ReplayController(transcript, replayGate);
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           controller.abort();
@@ -651,7 +661,7 @@ function makeOpenCode2ReplayRuntimeLayer(transcript: OpenCode2SdkReplayTranscrip
 
 function makeOpenCode2ProviderAdapterRegistryReplayLayer(
   transcript: OpenCode2SdkReplayTranscript,
-  _options: { readonly replayGate?: unknown } = {},
+  options: { readonly replayGate?: ProviderReplayGate } = {},
 ) {
   const serverConfigLayer = Layer.effect(
     ServerConfig,
@@ -671,7 +681,8 @@ function makeOpenCode2ProviderAdapterRegistryReplayLayer(
   }).pipe(
     Layer.provide(
       Layer.mergeAll(
-        makeOpenCode2ReplayRuntimeLayer(transcript),
+        makeOpenCode2ReplayRuntimeLayer(transcript, options.replayGate),
+        providerInteractionModeReflectionsLayer,
         serverConfigLayer,
         NodeServices.layer,
         idAllocatorLayer,

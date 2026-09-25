@@ -1,4 +1,4 @@
-import { CommandId, EventId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import { CommandId, EventId, ProviderSessionId, RunAttemptId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -9,6 +9,10 @@ import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import {
+  EventStoreV2,
+  layerFromOrchestrationEventStore,
+} from "../../orchestration-v2/EventStore.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { OrchestrationEventStore } from "../Services/OrchestrationEventStore.ts";
 import { OrchestrationEventStoreLive } from "./OrchestrationEventStore.ts";
@@ -71,6 +75,204 @@ const seedEvents = Effect.fn("test.seedSequenceEvents")(function* (
     RETURNING sequence, aggregate_kind, application_event_version, stream_id, command_id
   `;
 });
+
+it.effect("filters a source run in SQL before paging or decoding unrelated creation payloads", () =>
+  Effect.gen(function* () {
+    const store = yield* EventStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = ThreadId.make("reflection-source-lookup");
+    const targetId = "source-run";
+    const creation = (ordinal: number, id: string, payload: Record<string, unknown>) => ({
+      ...eventRow(ordinal, "thread", 2, threadId, "source-command"),
+      event_type: "run.created",
+      payload_json: encodeJson({ id, ...payload }),
+    });
+    // Invalid unrelated payloads prove the exact lookup never decodes the history.
+    yield* seedEvents(Array.from({ length: 1_002 }, (_, i) => creation(i, `other-${i}`, {})));
+    const [source] = yield* seedEvents([
+      creation(1_003, targetId, {
+        threadId,
+        ordinal: 1_004,
+        providerInstanceId: "codex",
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        providerThreadId: null,
+        userMessageId: "source-message",
+        rootNodeId: null,
+        activeAttemptId: null,
+        status: "queued",
+        requestedAt: occurredAt,
+        startedAt: null,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      }),
+    ]);
+    assert.ok(source);
+    const events = yield* store
+      .read({ threadId, eventType: "run.created", entityId: targetId, limit: 1 })
+      .pipe(Stream.runCollect);
+    assert.deepEqual(
+      events.map((event) => [event.sequence, event.commandId]),
+      [[source.sequence, CommandId.make("source-command")]],
+    );
+    assert.deepEqual(
+      yield* store
+        .read({ threadId, eventType: "run.created", entityId: "missing", limit: 1 })
+        .pipe(Stream.runCollect),
+      [],
+    );
+    // This generic entity lookup does not exercise the start-admission predicate below.
+    const plan = yield* sql<{ readonly detail: string }>`
+      EXPLAIN QUERY PLAN SELECT sequence FROM orchestration_events
+      WHERE sequence > 0 AND sequence <= ${Number.MAX_SAFE_INTEGER}
+        AND application_event_version = 2 AND aggregate_kind = 'thread'
+        AND stream_id = ${threadId} AND event_type = 'run.created'
+        AND json_extract(payload_json, '$.id') = ${targetId}
+      ORDER BY sequence ASC LIMIT 1
+    `;
+    assert.isTrue(
+      plan.some((row) => row.detail.includes("SEARCH orchestration_events USING INDEX")),
+      plan.map((row) => row.detail).join("; "),
+    );
+  }).pipe(
+    Effect.provide(
+      Layer.fresh(layerFromOrchestrationEventStore.pipe(Layer.provideMerge(eventStoreLayer))),
+    ),
+  ),
+);
+
+it.effect(
+  "filters immutable start admission by run, status and exact attempt before decoding",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* EventStoreV2;
+      const threadId = ThreadId.make("reflection-start-lookup");
+      const attemptId = RunAttemptId.make("source-attempt");
+      const row = (ordinal: number, eventType: string, payload: Record<string, unknown>) => ({
+        ...eventRow(ordinal, "thread", 2, threadId, "admission-command"),
+        event_type: eventType,
+        payload_json: encodeJson(payload),
+      });
+      yield* seedEvents(
+        Array.from({ length: 1_002 }, (_, i) =>
+          row(i, "run.updated", {
+            id: i % 2 === 0 ? "other" : "source",
+            status: "starting",
+            activeAttemptId: "other-attempt",
+          }),
+        ),
+      );
+      yield* seedEvents([
+        row(1_003, "run.created", { id: "source", status: "queued", activeAttemptId: attemptId }),
+        row(1_004, "run.updated", { id: "source", status: "queued", activeAttemptId: attemptId }),
+        row(1_005, "run.updated", { id: "source", status: "running", activeAttemptId: attemptId }),
+      ]);
+      const payload = {
+        id: "source",
+        threadId,
+        ordinal: 1,
+        providerInstanceId: "codex",
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        providerThreadId: null,
+        userMessageId: "message",
+        rootNodeId: null,
+        activeAttemptId: attemptId,
+        status: "starting",
+        requestedAt: occurredAt,
+        startedAt: null,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      const [promoted] = yield* seedEvents([row(1_006, "run.updated", payload)]);
+      yield* seedEvents([row(1_007, "run.updated", payload)]);
+      const query = { threadId, entityId: "source", runStartAttemptId: attemptId, limit: 1 };
+      const statements: Array<string> = [];
+      const tracer = Tracer.make({
+        span(options) {
+          const span = new Tracer.NativeSpan(options);
+          const end = span.end.bind(span);
+          span.end = (endTime, exit) => {
+            end(endTime, exit);
+            const text = span.attributes.get("db.query.text");
+            if (typeof text === "string" && text.includes("$.activeAttemptId"))
+              statements.push(text);
+          };
+          return span;
+        },
+      });
+      assert.deepEqual(
+        yield* store.read({ ...query, eventType: "run.created" }).pipe(Stream.runCollect),
+        [],
+      );
+      assert.deepEqual(
+        (yield* store
+          .read({ ...query, eventType: "run.updated" })
+          .pipe(Stream.runCollect, Effect.withTracer(tracer))).map((event) => event.sequence),
+        [promoted!.sequence],
+      );
+      assert.lengthOf(statements, 1);
+      const statement = statements[0]!;
+      for (const predicate of [
+        "stream_id = ?",
+        "event_type = ?",
+        "event_type IN ('run.created', 'run.updated')",
+        "json_extract(payload_json, '$.id') = ?",
+        "json_extract(payload_json, '$.status') = 'starting'",
+        "json_extract(payload_json, '$.activeAttemptId') = ?",
+        "LIMIT ?",
+      ]) {
+        assert.include(statement, predicate);
+      }
+      const sql = yield* SqlClient.SqlClient;
+      // Inspect the emitted SQL; bind the same lookup values and a safe high-water bound.
+      const plan = yield* sql.unsafe<{ readonly detail: string }>(
+        `EXPLAIN QUERY PLAN ${statement}`,
+        [0, Number.MAX_SAFE_INTEGER, threadId, "run.updated", "source", attemptId, 1],
+      );
+      assert.isTrue(
+        plan.some((row) => row.detail.includes("SEARCH orchestration_events USING INDEX")),
+        plan.map((row) => row.detail).join("; "),
+      );
+      assert.isFalse(plan.some((row) => row.detail.includes("TEMP B-TREE")));
+      assert.deepEqual(
+        yield* store
+          .read({
+            ...query,
+            eventType: "run.updated",
+            runStartAttemptId: RunAttemptId.make("missing"),
+          })
+          .pipe(Stream.runCollect),
+        [],
+      );
+      const [immediate] = yield* seedEvents([
+        row(1_008, "run.created", { ...payload, id: "immediate" }),
+      ]);
+      assert.deepEqual(
+        (yield* store
+          .read({ ...query, entityId: "immediate", eventType: "run.created" })
+          .pipe(Stream.runCollect)).map((event) => event.sequence),
+        [immediate!.sequence],
+      );
+      const [restarted] = yield* seedEvents([
+        row(1_009, "run.updated", { ...payload, activeAttemptId: "restart-attempt" }),
+      ]);
+      assert.deepEqual(
+        (yield* store
+          .read({
+            ...query,
+            eventType: "run.updated",
+            runStartAttemptId: RunAttemptId.make("restart-attempt"),
+          })
+          .pipe(Stream.runCollect)).map((event) => event.sequence),
+        [restarted!.sequence],
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.fresh(layerFromOrchestrationEventStore.pipe(Layer.provideMerge(eventStoreLayer))),
+      ),
+    ),
+);
 
 it.effect("keeps application and scoped agent high-water marks separate from legacy history", () =>
   Effect.gen(function* () {

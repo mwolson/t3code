@@ -45,6 +45,7 @@ import {
   layer as continuationRequestsLayer,
 } from "./ProviderContinuationRequests.ts";
 import { workerLive } from "./ProviderContinuationService.ts";
+import { make as makeInteractionModeReflections } from "./ProviderInteractionModeReflections.ts";
 import { ThreadManagementService } from "./ThreadManagementService.ts";
 import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "./testkit/ReplayFixtureWorkspace.ts";
@@ -186,6 +187,7 @@ const makeAdapter = (
 ) =>
   Effect.gen(function* () {
     return makeOpenCodeAdapterV2({
+      interactionModeReflections: yield* makeInteractionModeReflections,
       instanceId,
       settings: SETTINGS,
       environment: {},

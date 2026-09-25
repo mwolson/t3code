@@ -2,6 +2,7 @@ import {
   CommandId,
   OrchestrationV2DomainEvent,
   OrchestrationV2StoredEvent,
+  RunAttemptId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -57,6 +58,8 @@ export interface EventStoreV2Shape {
     readonly throughSequence?: number;
     readonly threadId?: ThreadId;
     readonly eventType?: OrchestrationV2DomainEvent["type"];
+    readonly entityId?: string;
+    readonly runStartAttemptId?: RunAttemptId;
     readonly limit?: number;
   }) => Stream.Stream<OrchestrationV2StoredEvent, EventStoreV2Error>;
   readonly readByCommandId: (input: {
@@ -88,6 +91,10 @@ const baseLayer: Layer.Layer<EventStoreV2, never, OrchestrationEventStore> = Lay
             : { throughSequence: input.throughSequence }),
           ...(input?.threadId === undefined ? {} : { threadId: input.threadId }),
           ...(input?.eventType === undefined ? {} : { eventType: input.eventType }),
+          ...(input?.entityId === undefined ? {} : { entityId: input.entityId }),
+          ...(input?.runStartAttemptId === undefined
+            ? {}
+            : { runStartAttemptId: input.runStartAttemptId }),
           ...(input?.limit === undefined ? {} : { limit: input.limit }),
         })
         .pipe(

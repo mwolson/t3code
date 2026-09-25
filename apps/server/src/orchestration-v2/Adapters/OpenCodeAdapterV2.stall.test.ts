@@ -78,6 +78,7 @@ const openStallSession = Effect.fnUntraced(function* (
     cwd: process.cwd(),
   });
   const adapter = makeOpenCodeAdapterV2({
+    interactionModeReflections: { offer: () => Effect.void },
     instanceId,
     settings: yield* decodeSettings({ serverUrl: "replay://opencode2" }),
     environment: {},

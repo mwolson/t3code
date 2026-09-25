@@ -226,6 +226,11 @@ import {
   terminalToolStatus,
 } from "./openCodeProjection.ts";
 
+import {
+  ProviderInteractionModeReflections,
+  type ProviderInteractionModeReflection,
+} from "../ProviderInteractionModeReflections.ts";
+
 export const OPENCODE_SDK_PROTOCOL = "opencode2-sdk.sse" as const;
 export const OPENCODE2_RETIRED_SUPPRESS_WAKE_LIMIT = 16;
 export const OPENCODE2_PROMOTED_INPUT_ID_LIMIT = 64;
@@ -557,6 +562,12 @@ interface OpenCode2ThreadState {
   providerThread: OrchestrationV2ProviderThread;
   appThread: OrchestrationV2AppThread | null;
   activeTurn: ActiveOpenCode2Turn | null;
+  reflectionSource?:
+    | (Omit<ProviderInteractionModeReflection, "interactionMode" | "dedupeKey"> & {
+        readonly admissionSequence: number;
+      })
+    | undefined;
+  highestDurableSequence: number;
   boundModel: string | null;
   boundVariant: string | null;
   boundAgent: string | null;
@@ -741,6 +752,7 @@ export interface OpenCodeAdapterV2Options {
   readonly idAllocator: IdAllocatorV2Shape;
   readonly serverConfig: ServerConfig["Service"];
   readonly nativeEventLogger?: EventNdjsonLogger;
+  readonly interactionModeReflections: Pick<ProviderInteractionModeReflections["Service"], "offer">;
   readonly continuationRequests?: {
     readonly offer: (request: ProviderContinuationRequest) => Effect.Effect<void>;
   };
@@ -3136,6 +3148,7 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
             providerThread: childProviderThread,
             appThread: childThread,
             activeTurn: null,
+            highestDurableSequence: -1,
             boundModel: model,
             boundVariant: normalizeOpenCodeVariant(nativeSession.model?.variant) ?? null,
             boundAgent: nativeSession.agent ?? null,
@@ -4397,6 +4410,9 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
             readonly threadDisposition?: "reusable" | "broken";
           },
         ) {
+          if (status !== "completed" && state.reflectionSource?.sourceRunId === turn.runId) {
+            state.reflectionSource = undefined;
+          }
           if (turn.finalized) {
             if (
               turn.terminalStatus === "completed" &&
@@ -5430,6 +5446,14 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
               (!activeInputIsPromoted && promotedOwners.length > 0),
           };
           state.activeExecution = ownership;
+          // A session selection has no execution identity. Once background work
+          // owns execution, the preceding ordinary run cannot authorize it.
+          if (
+            state.activeTurn === null ||
+            state.activeTurn.providerBufferedContinuation ||
+            Array.from(ownership.inputIds).some((inputId) => inputId !== activeInputId)
+          )
+            state.reflectionSource = undefined;
           for (const inputId of ownership.inputIds) {
             state.promotedInputIds.delete(inputId);
           }
@@ -5631,6 +5655,22 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
               sessionState.quietProbeStrikes = 0;
             }
           }
+          const sequenceState =
+            eventSessionId === undefined ? undefined : threads.get(eventSessionId);
+          const durable = recordValue(event, "durable");
+          const sequence = recordNumber(durable, "seq");
+          if (
+            sequenceState !== undefined &&
+            recordString(durable, "aggregateID") === sequenceState.nativeSessionId &&
+            sequence !== undefined &&
+            Number.isSafeInteger(sequence) &&
+            sequence >= 0
+          ) {
+            sequenceState.highestDurableSequence = Math.max(
+              sequenceState.highestDurableSequence,
+              sequence,
+            );
+          }
           if (!isDeferredChildReplay) {
             yield* logProtocolEvent({
               direction: "incoming",
@@ -5825,6 +5865,33 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
               }
               state.lastAgentSelectedSequence = selected.durable.seq;
               state.boundAgent = selected.data.agent;
+              const source = state.reflectionSource;
+              const interactionMode = selected.data.agent === "plan" ? "plan" : "default";
+              if (
+                source === undefined ||
+                selected.durable.seq <= source.admissionSequence ||
+                isReplay ||
+                isDeferredChildReplay ||
+                (selected.data.agent !== "plan" && selected.data.agent !== "build") ||
+                state.quarantined ||
+                state.parentSubagent !== null ||
+                state.providerThread.id !== source.providerThreadId ||
+                (state.activeTurn !== null &&
+                  (state.activeTurn.runId !== source.sourceRunId ||
+                    state.activeTurn.interrupted ||
+                    state.activeTurn.providerBufferedContinuation ||
+                    !activeTurnOwnsOpenCode2Execution(state, state.activeTurn))) ||
+                (state.activeTurn === null &&
+                  state.postSettleWakes.some((wake) => wake.phase !== "ready"))
+              )
+                return;
+              // Matching native echoes still supersede earlier queued observations.
+              const { admissionSequence: _, ...reflection } = source;
+              yield* options.interactionModeReflections.offer({
+                ...reflection,
+                interactionMode,
+                dedupeKey: `${driver}:${state.nativeSessionId}:${selected.durable.seq}`,
+              });
               return;
             }
             case "session.model.selected": {
@@ -7120,6 +7187,7 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
             providerThread,
             appThread: null,
             activeTurn: null,
+            highestDurableSequence: -1,
             boundModel:
               nativeSession.model === undefined
                 ? null
@@ -7254,6 +7322,7 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
         ) {
           if (turn.interrupted) return;
           turn.interrupted = true;
+          state.reflectionSource = undefined;
           const sessionID = state.nativeSessionId;
           const interrupted = yield* sdkCallWithTimeout(
             "session.interrupt",
@@ -7848,6 +7917,23 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
               state.appThread = turnInput.appThread;
               state.activeTurn = turn;
               resetQuietTracking(state, DateTime.toEpochMillis(startedAt));
+              state.reflectionSource =
+                !providerBufferedContinuation &&
+                turn.runId !== null &&
+                turn.runtimePolicy.interactionMode === turn.appThread.interactionMode &&
+                turn.runtimePolicy.runtimeMode === turn.appThread.runtimeMode
+                  ? Object.freeze({
+                      admissionSequence: state.highestDurableSequence,
+                      threadId: turn.threadId,
+                      driver,
+                      sourceRunId: turn.runId,
+                      sourceAttemptId: turnInput.attemptId,
+                      providerThreadId: state.providerThread.id,
+                      nativeThreadId: state.nativeSessionId,
+                      expectedInteractionMode: turn.appThread.interactionMode,
+                      expectedRuntimeMode: turn.appThread.runtimeMode,
+                    })
+                  : undefined;
               lastEmptyPendingWorkProbeAtMs.delete(sessionID);
               state.providerTurns.set(String(providerTurnId), providerTurn);
               yield* emitProviderTurn(state, turn, "running", null);
@@ -8000,6 +8086,7 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
                     "OpenCode background Stop target is no longer current.",
                   );
                 }
+                state.reflectionSource = undefined;
                 const interrupted = yield* sdkCallWithTimeout(
                   "session.interrupt",
                   { sessionID },
@@ -8035,6 +8122,7 @@ export function makeOpenCodeAdapterV2(options: OpenCodeAdapterV2Options): Provid
                 );
               }
               turn.interrupted = true;
+              state.reflectionSource = undefined;
               // Let an in-flight admission settle first so the native interrupt
               // targets the admitted input instead of racing ahead of it.
               if (turn.admissionSettled !== null) {
@@ -8436,6 +8524,7 @@ export type OpenCodeAdapterV2DriverEnv =
   | OpenCode2Runtime
   | IdAllocatorV2
   | ProviderEventLoggers
+  | ProviderInteractionModeReflections
   | ServerConfig;
 
 export const OPENCODE_PROVIDER = ProviderDriverKind.make("opencode");
@@ -8453,6 +8542,7 @@ function createOpenCodeAdapterV2Driver(
         const openCode2Runtime = yield* OpenCode2Runtime;
         const idAllocator = yield* IdAllocatorV2;
         const continuationRequests = yield* ProviderContinuationRequests;
+        const interactionModeReflections = yield* ProviderInteractionModeReflections;
         const providerEventLoggers = yield* ProviderEventLoggers;
         const serverConfig = yield* ServerConfig;
         const environment = yield* Effect.try({
@@ -8480,6 +8570,7 @@ function createOpenCodeAdapterV2Driver(
           idAllocator,
           serverConfig,
           continuationRequests,
+          interactionModeReflections,
           ...(providerEventLoggers.native === undefined
             ? {}
             : { nativeEventLogger: providerEventLoggers.native }),

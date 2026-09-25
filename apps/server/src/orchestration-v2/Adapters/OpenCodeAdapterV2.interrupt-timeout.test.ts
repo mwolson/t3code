@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import type { V2Event } from "@opencode/client";
 import {
   MessageId,
   NodeId,
@@ -7,6 +8,7 @@ import {
   OrchestrationV2AppThread,
   ProjectId,
   ProviderInstanceId,
+  ProviderReplayEntry,
   ProviderSessionId,
   RunAttemptId,
   RunId,
@@ -33,6 +35,7 @@ import {
   OPENCODE2_INTERRUPT_REQUEST_TIMEOUT_MS,
   OPENCODE_PROVIDER,
 } from "./OpenCodeAdapterV2.ts";
+import type { ProviderInteractionModeReflection } from "../ProviderInteractionModeReflections.ts";
 import { makeReplayClient, OpenCode2ReplayController } from "./OpenCodeAdapterV2.testkit.ts";
 
 const decodeSettings = Schema.decodeUnknownEffect(OpenCode2Settings);
@@ -46,7 +49,7 @@ const TestLayer = Layer.mergeAll(
 it.layer(TestLayer)("OpenCode settled Stop timeout", (it) => {
   for (const failEnumeration of [false, true]) {
     it.effect(
-      `keeps unconfirmed root Stop failed and quarantined; known cleanup survives enumeration failure=${failEnumeration}`,
+      `keeps unconfirmed root Stop failed, quarantined and without reflection authority; known cleanup survives enumeration failure=${failEnumeration}`,
       () =>
         Effect.gen(function* () {
           const raw = yield* readProviderReplayTranscript(
@@ -60,6 +63,8 @@ it.layer(TestLayer)("OpenCode settled Stop timeout", (it) => {
               entry.type === "emit_inbound" && entry.label === "child.children.list.response",
           );
           assert.isAtLeast(end, 0);
+          const rootId = "ses_opencode2_settled_background_stop";
+          const childId = "ses_opencode2_settled_background_stop_child";
           // Reuse the real adapter transcript up to cleanup; the root request has
           // no response. Its abort is driven by TestClock, not a delayed fixture.
           const entries = raw.entries
@@ -67,6 +72,33 @@ it.layer(TestLayer)("OpenCode settled Stop timeout", (it) => {
             .filter(
               (entry) =>
                 entry.type !== "emit_inbound" || entry.label !== "root.session.interrupt.response",
+            )
+            .flatMap((entry): ProviderReplayEntry[] => {
+              if (entry.type !== "emit_inbound") return [entry];
+              // A native child's selection never has root reflection authority.
+              if (entry.label === "child.execution.started")
+                return [entry, selected(childId, "plan", 7)];
+              // The settled ordinary root turn still owns a later session selection.
+              if (entry.label === "root.execution.succeeded")
+                return [entry, selected(rootId, "plan", 50)];
+              return [entry];
+            })
+            .concat(
+              // After an unconfirmed Stop the quarantined session cannot reflect.
+              selected(rootId, "build", 51),
+              {
+                type: "emit_inbound",
+                frame: {
+                  type: "sdk.event",
+                  event: {
+                    id: "evt_opencode2_stop_window_drained",
+                    created: 1785297600052,
+                    type: "session.renamed",
+                    durable: { aggregateID: rootId, seq: 52, version: 1 },
+                    data: { sessionID: rootId, title: "reflection window drained" },
+                  } satisfies V2Event,
+                },
+              },
             )
             .map((entry) =>
               failEnumeration &&
@@ -91,7 +123,24 @@ it.layer(TestLayer)("OpenCode settled Stop timeout", (it) => {
           });
           yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()));
           const client = makeReplayClient(controller);
-          const rootId = "ses_opencode2_settled_background_stop";
+          const windowDrained = Promise.withResolvers<void>();
+          const subscribe = client.event.subscribe.bind(client.event);
+          client.event.subscribe = (options) => {
+            const events = subscribe(options);
+            return {
+              async *[Symbol.asyncIterator]() {
+                for await (const event of events) {
+                  yield event;
+                  // Iterator resume proves the adapter finished handling the marker.
+                  if (
+                    event.type === "session.renamed" &&
+                    event.data.title === "reflection window drained"
+                  )
+                    windowDrained.resolve();
+                }
+              },
+            };
+          };
           const rootInterruptStarted = Promise.withResolvers<void>();
           let aborted = false;
           const interrupt = client.session.interrupt.bind(client.session);
@@ -117,7 +166,14 @@ it.layer(TestLayer)("OpenCode settled Stop timeout", (it) => {
             interactionMode: "default",
             cwd: process.cwd(),
           });
+          const offers: ProviderInteractionModeReflection[] = [];
           const adapter = makeOpenCodeAdapterV2({
+            interactionModeReflections: {
+              offer: (request) =>
+                Effect.sync(() => {
+                  offers.push(request);
+                }),
+            },
             instanceId,
             settings: yield* decodeSettings({
               serverUrl: "replay://opencode2",
@@ -214,7 +270,16 @@ it.layer(TestLayer)("OpenCode settled Stop timeout", (it) => {
           const error = yield* Fiber.join(stop);
           assert.equal(error._tag, "ProviderAdapterInterruptError");
           assert.isTrue(aborted);
+          yield* Effect.promise(() => windowDrained.promise);
           controller.assertComplete(); // Includes root shell, known child interrupt and child shell removal.
+          assert.deepEqual(
+            offers.map((request) => [
+              request.sourceRunId,
+              request.interactionMode,
+              request.dedupeKey,
+            ]),
+            [["timeout-run", "plan", `opencode:${rootId}:50`]],
+          );
           const reuseError = yield* session
             .resumeThread({ providerThread, threadId, modelSelection, runtimePolicy })
             .pipe(Effect.flip);
@@ -227,3 +292,19 @@ it.layer(TestLayer)("OpenCode settled Stop timeout", (it) => {
     );
   }
 });
+
+function selected(sessionID: string, agent: string, seq: number): ProviderReplayEntry {
+  return {
+    type: "emit_inbound",
+    frame: {
+      type: "sdk.event",
+      event: {
+        id: `evt_opencode2_stop_selection_${seq}`,
+        created: 1785297600000 + seq,
+        type: "session.agent.selected",
+        durable: { aggregateID: sessionID, seq, version: 1 },
+        data: { sessionID, agent },
+      } satisfies V2Event,
+    },
+  };
+}

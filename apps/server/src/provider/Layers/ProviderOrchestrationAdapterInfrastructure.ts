@@ -15,10 +15,16 @@ import {
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../../orchestration-v2/IdAllocator.ts";
 import { layer as providerContinuationRequestsLayer } from "../../orchestration-v2/ProviderContinuationRequests.ts";
 
+import {
+  ProviderInteractionModeReflections,
+  layer as providerInteractionModeReflectionsLayer,
+} from "../../orchestration-v2/ProviderInteractionModeReflections.ts";
+
 export type ProviderOrchestrationAdapterInfrastructure =
   | ClaudeAgentSdkQueryRunner
   | CodexAppServerClientFactory
   | CursorAgentSdkRunner
+  | ProviderInteractionModeReflections
   | IdAllocatorV2;
 
 /**
@@ -33,4 +39,6 @@ export const ProviderOrchestrationAdapterInfrastructureLive = Layer.mergeAll(
   cursorAgentSdkRunnerLiveLayer,
   idAllocatorLayer,
   providerContinuationRequestsLayer,
+  // Share this exact layer reference with runtimeLayer's command consumer.
+  providerInteractionModeReflectionsLayer,
 );

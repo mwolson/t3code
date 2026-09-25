@@ -23,10 +23,24 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { ServerConfig } from "../../config.ts";
+import {
+  NoOpProviderEventLoggers,
+  ProviderEventLoggers,
+} from "../../provider/Layers/ProviderEventLoggers.ts";
+import { OpenCode2Runtime } from "../../provider/opencode2Runtime.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../IdAllocator.ts";
 import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
+import {
+  make as makeInteractionModeReflections,
+  ProviderInteractionModeReflections,
+  type ProviderInteractionModeReflection,
+} from "../ProviderInteractionModeReflections.ts";
 import { readProviderReplayTranscript } from "../testkit/ReplayTranscriptNdjson.ts";
-import { makeOpenCodeAdapterV2, OPENCODE_PROVIDER } from "./OpenCodeAdapterV2.ts";
+import {
+  makeOpenCodeAdapterV2,
+  OPENCODE_PROVIDER,
+  OpenCodeAdapterV2Driver,
+} from "./OpenCodeAdapterV2.ts";
 import { makeReplayClient, OpenCode2ReplayController } from "./OpenCodeAdapterV2.testkit.ts";
 
 const decodeSettings = Schema.decodeEffect(OpenCode2Settings);
@@ -40,6 +54,46 @@ const TestLayer = Layer.mergeAll(
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
 it.layer(TestLayer)("OpenCode pinned native selection", (it) => {
+  for (const sequence of [39, 40, 41]) {
+    it.effect(`reflection requires a sequence above the admission watermark (${sequence})`, () =>
+      Effect.gen(function* () {
+        const raw = yield* readProviderReplayTranscript(
+          new URL("../testkit/fixtures/multi_turn/opencode2_transcript.ndjson", import.meta.url),
+        );
+        const entries: ProviderReplayEntry[] = [];
+        for (const entry of raw.entries) {
+          entries.push(entry);
+          if (
+            entry.type === "emit_inbound" &&
+            entry.label === "session.execution.succeeded.first"
+          ) {
+            entries.push(
+              sdkEvent({
+                ...agentSelected("build", 100),
+                durable: { aggregateID: "ses_other", seq: 100, version: 1 },
+              }),
+              nativeEvent("session.renamed", 40, { sessionID, title: "high sequence" }),
+              nativeEvent("session.renamed", 30, { sessionID, title: "selection window drained" }),
+            );
+          }
+          if (entry.type === "emit_inbound" && entry.label === "session.execution.started.second") {
+            entries.push(
+              nativeEvent("session.renamed", 80, { sessionID, title: "after admission" }),
+              sdkEvent(agentSelected("plan", sequence)),
+            );
+          }
+        }
+        const reflected = yield* runTurns(entries, undefined, "default", ["first", "second"], true);
+        assert.deepStrictEqual(
+          reflected.map((item) => [item.sourceRunId, item.interactionMode]),
+          sequence > 40 ? [["selection-run-1", "plan"]] : [],
+        );
+        for (const reflection of reflected) {
+          assert.equal("admissionSequence" in reflection, false);
+        }
+      }),
+    );
+  }
   for (const test of [
     {
       name: "variant-only external change reasserts explicit high",
@@ -381,6 +435,322 @@ it.layer(TestLayer)("OpenCode pinned native selection", (it) => {
     }
   }
 
+  for (const position of [
+    "active",
+    "settled",
+    "pending",
+    "suppressed",
+    "after-suppressed",
+    "replayable",
+  ] as const) {
+    it.effect(
+      `reflection authority is separate from cache freshness during ${position} selection`,
+      () =>
+        Effect.gen(function* () {
+          const raw = yield* readProviderReplayTranscript(
+            new URL("../testkit/fixtures/multi_turn/opencode2_transcript.ndjson", import.meta.url),
+          );
+          const entries: ProviderReplayEntry[] = [];
+          const selected = sdkEvent(agentSelected("plan", 20));
+          // A pending wake is admitted but not executing, so background
+          // ownership has not yet withdrawn the settled turn's source.
+          const background =
+            position === "pending" ||
+            position === "suppressed" ||
+            position === "after-suppressed" ||
+            position === "replayable";
+          const wake = [
+            nativeEvent("session.inbox.enqueued", 10, {
+              sessionID,
+              inboxID: "reflection-wake",
+              item: {
+                type: "synthetic",
+                payload: {
+                  text:
+                    position === "replayable"
+                      ? '<subagent state="completed">DONE</subagent>'
+                      : '<subagent state="cancelled">CANCELLED</subagent>',
+                  description: "result",
+                },
+                delivery: "queue",
+              },
+            }),
+            ...(position === "pending" ? [selected] : []),
+            nativeEvent("session.inbox.delivered", 11, { sessionID, inboxID: "reflection-wake" }),
+            nativeEvent("session.execution.started", 12, { sessionID }),
+            ...(position === "after-suppressed" || position === "pending" ? [] : [selected]),
+            nativeEvent("session.execution.succeeded", 30, { sessionID }),
+            ...(position === "after-suppressed" ? [selected] : []),
+          ];
+          for (const entry of raw.entries) {
+            if (
+              entry.type === "emit_inbound" &&
+              entry.label === "session.execution.succeeded.first" &&
+              position === "active"
+            )
+              entries.push(selected);
+            if (entry.type === "expect_outbound" && entry.label === "session.prompt.second")
+              entries.push(...rpc("session.switchAgent", { sessionID, agent: "build" }, null));
+            entries.push(entry);
+            if (
+              entry.type === "emit_inbound" &&
+              entry.label === "session.execution.succeeded.first"
+            ) {
+              if (background) entries.push(...wake);
+              if (position === "settled") entries.push(selected);
+              entries.push(
+                nativeEvent("session.renamed", 40, {
+                  sessionID,
+                  title: "selection window drained",
+                }),
+              );
+            }
+          }
+          const observed = yield* runTurns(
+            entries,
+            undefined,
+            "default",
+            ["first", "second"],
+            true,
+          );
+          assert.equal(observed.length, background ? 0 : 1);
+          if (!background) {
+            assert.equal(observed[0]!.sourceRunId, "selection-run-0");
+            assert.equal(observed[0]!.nativeThreadId, sessionID);
+            assert.equal(observed[0]!.expectedRuntimeMode, "full-access");
+            assert.equal(observed[0]!.interactionMode, "plan");
+          }
+        }),
+    );
+  }
+
+  it.effect("a live selection during a provider-buffered continuation turn is not offered", () =>
+    Effect.gen(function* () {
+      const raw = yield* readProviderReplayTranscript(
+        new URL("../testkit/fixtures/multi_turn/opencode2_transcript.ndjson", import.meta.url),
+      );
+      // The wake starts while the app is idle, so background ownership withdraws the
+      // settled source first. The selection is held until the continuation turn has
+      // taken over the still-running wake execution.
+      const selected = agentSelected("plan", 20);
+      const entries: ProviderReplayEntry[] = [];
+      for (const entry of raw.entries) {
+        if (entry.type === "expect_outbound" && entry.label === "session.prompt.second")
+          entries.push(...rpc("session.switchAgent", { sessionID, agent: "build" }, null));
+        entries.push(entry);
+        if (entry.type === "emit_inbound" && entry.label === "session.execution.succeeded.first") {
+          entries.push(
+            nativeEvent("session.inbox.enqueued", 10, {
+              sessionID,
+              inboxID: "continuation-wake",
+              item: {
+                type: "synthetic",
+                payload: {
+                  text: '<subagent state="completed">DONE</subagent>',
+                  description: "result",
+                },
+                delivery: "queue",
+              },
+            }),
+            nativeEvent("session.inbox.delivered", 11, { sessionID, inboxID: "continuation-wake" }),
+            nativeEvent("session.execution.started", 12, { sessionID }),
+            nativeEvent("session.renamed", 13, { sessionID, title: "selection window drained" }),
+            sdkEvent(selected),
+            nativeEvent("session.execution.succeeded", 30, { sessionID }),
+          );
+        }
+      }
+      const observed = yield* runTurns(
+        entries,
+        undefined,
+        "default",
+        ["first", "continuation", "second"],
+        true,
+        "default",
+        "completed",
+        false,
+        { eventId: selected.id, releaseAfterTurn: "continuation" },
+      );
+      assert.deepEqual(
+        observed.map((request) => [request.sourceRunId, request.interactionMode]),
+        [],
+      );
+    }),
+  );
+
+  it.effect(
+    "an interrupted source cannot authorize a later selection while its cache still updates",
+    () =>
+      Effect.gen(function* () {
+        const raw = yield* readProviderReplayTranscript(
+          new URL("../testkit/fixtures/multi_turn/opencode2_transcript.ndjson", import.meta.url),
+        );
+        const entries: ProviderReplayEntry[] = [];
+        for (const entry of raw.entries) {
+          if (
+            entry.type === "emit_inbound" &&
+            entry.label === "session.execution.succeeded.first"
+          ) {
+            entries.push(
+              nativeEvent("session.execution.interrupted", 19, { sessionID, reason: "user" }),
+              sdkEvent(agentSelected("plan", 20)),
+              nativeEvent("session.renamed", 40, { sessionID, title: "selection window drained" }),
+            );
+            continue;
+          }
+          if (entry.type === "expect_outbound" && entry.label === "session.prompt.second")
+            entries.push(...rpc("session.switchAgent", { sessionID, agent: "build" }, null));
+          entries.push(entry);
+        }
+        assert.deepEqual(
+          yield* runTurns(
+            entries,
+            undefined,
+            "default",
+            ["first", "second"],
+            true,
+            "default",
+            "interrupted",
+          ),
+          [],
+        );
+      }),
+  );
+
+  it.effect("a restrictive effective Plan policy cannot confer reflection authority", () =>
+    Effect.gen(function* () {
+      const raw = yield* readProviderReplayTranscript(
+        new URL("../testkit/fixtures/multi_turn/opencode2_transcript.ndjson", import.meta.url),
+      );
+      const entries: ProviderReplayEntry[] = [];
+      for (const entry of raw.entries) {
+        if (entry.type === "expect_outbound" && entry.label === "session.create") {
+          entries.push({
+            ...entry,
+            frame: {
+              type: "session.create",
+              input: { model, agent: "plan", location: { directory: "<workspace>" } },
+            },
+          });
+          continue;
+        }
+        if (entry.type === "emit_inbound" && entry.label === "session.execution.succeeded.first")
+          entries.push(sdkEvent(agentSelected("build", 20)));
+        if (entry.type === "expect_outbound" && entry.label === "session.prompt.second")
+          entries.push(...rpc("session.switchAgent", { sessionID, agent: "plan" }, null));
+        entries.push(entry);
+      }
+      assert.deepEqual(
+        yield* runTurns(entries, undefined, "plan", ["first", "second"], false, "default"),
+        [],
+      );
+    }),
+  );
+
+  it.effect(
+    "matching echoes and later actual starts retain distinct source ownership without model reflection",
+    () =>
+      Effect.gen(function* () {
+        const raw = yield* readProviderReplayTranscript(
+          new URL("../testkit/fixtures/multi_turn/opencode2_transcript.ndjson", import.meta.url),
+        );
+        const entries: ProviderReplayEntry[] = [];
+        for (const entry of raw.entries) {
+          if (
+            entry.type === "emit_inbound" &&
+            entry.label === "session.execution.succeeded.first"
+          ) {
+            entries.push(
+              sdkEvent(agentSelected("plan", 20)),
+              sdkEvent(agentSelected("build", 21)),
+              sdkEvent(agentSelected("build", 21)),
+            );
+            entries.push(sdkEvent({ ...modelSelected(22), data: { sessionID, model } }));
+          }
+          if (entry.type === "emit_inbound" && entry.label === "session.execution.succeeded.second")
+            entries.push(sdkEvent(agentSelected("build", 23)));
+          entries.push(entry);
+        }
+        const observed = yield* runTurns(entries);
+        assert.deepEqual(
+          observed.map((request) => [
+            request.sourceRunId,
+            request.sourceAttemptId,
+            request.interactionMode,
+            request.dedupeKey,
+          ]),
+          [
+            ["selection-run-0", "selection-attempt-0", "plan", `opencode:${sessionID}:20`],
+            ["selection-run-0", "selection-attempt-0", "default", `opencode:${sessionID}:21`],
+            ["selection-run-1", "selection-attempt-1", "default", `opencode:${sessionID}:23`],
+          ],
+        );
+      }),
+  );
+
+  it.effect("stale, duplicate and foreign durable selections never reach reflection", () =>
+    Effect.gen(function* () {
+      const raw = yield* readProviderReplayTranscript(
+        new URL("../testkit/fixtures/multi_turn/opencode2_transcript.ndjson", import.meta.url),
+      );
+      const entries: ProviderReplayEntry[] = [];
+      for (const entry of raw.entries) {
+        if (entry.type === "emit_inbound" && entry.label === "session.execution.succeeded.first") {
+          entries.push(
+            sdkEvent(agentSelected("plan", 20)),
+            // Later wall clock and a greater event id cannot outrank the durable sequence.
+            sdkEvent(agentSelected("build", 19, "evt_zzzzzzzzzzzzzzzzzzzzzzzzzz", 1785297609999)),
+            sdkEvent(agentSelected("plan", 20)),
+            sdkEvent({
+              ...agentSelected("build", 40),
+              durable: { aggregateID: "ses_unrelated", seq: 40, version: 1 },
+            }),
+            sdkEvent(agentSelected("build", 21)),
+          );
+        }
+        entries.push(entry);
+      }
+      const observed = yield* runTurns(entries);
+      assert.deepEqual(
+        observed.map((request) => [request.interactionMode, request.dedupeKey]),
+        [
+          ["plan", `opencode:${sessionID}:20`],
+          ["default", `opencode:${sessionID}:21`],
+        ],
+      );
+    }),
+  );
+
+  it.effect("the registered driver passes its required reflection channel to the adapter", () =>
+    Effect.gen(function* () {
+      const raw = yield* readProviderReplayTranscript(
+        new URL("../testkit/fixtures/multi_turn/opencode2_transcript.ndjson", import.meta.url),
+      );
+      const entries: ProviderReplayEntry[] = [];
+      for (const entry of raw.entries) {
+        if (entry.type === "emit_inbound" && entry.label === "session.execution.succeeded.first")
+          entries.push(sdkEvent(agentSelected("plan", 20)));
+        if (entry.type === "expect_outbound" && entry.label === "session.prompt.second")
+          entries.push(...rpc("session.switchAgent", { sessionID, agent: "build" }, null));
+        entries.push(entry);
+      }
+      const observed = yield* runTurns(
+        entries,
+        undefined,
+        "default",
+        ["first", "second"],
+        false,
+        "default",
+        "completed",
+        true,
+      );
+      assert.deepEqual(
+        observed.map((request) => [request.sourceRunId, request.interactionMode]),
+        [["selection-run-0", "plan"]],
+      );
+    }),
+  );
+
   it.effect("native Build cannot override the next app Plan turn", () =>
     Effect.gen(function* () {
       const raw = yield* readProviderReplayTranscript(
@@ -424,6 +794,10 @@ const runTurns = Effect.fnUntraced(function* (
   interactionMode: "default" | "plan" = "default",
   turns: readonly string[] = ["first", "second"],
   awaitWindow = false,
+  appInteractionMode = interactionMode,
+  firstStatus: "completed" | "interrupted" = "completed",
+  viaDriver = false,
+  gate?: { readonly eventId: string; readonly releaseAfterTurn: string },
 ) {
   const controller = new OpenCode2ReplayController({
     provider: OPENCODE_PROVIDER,
@@ -441,6 +815,21 @@ const runTurns = Effect.fnUntraced(function* (
   yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()));
   const client = makeReplayClient(controller);
   const windowDrained = Promise.withResolvers<void>();
+  const gateReleased = Promise.withResolvers<void>();
+  if (gate !== undefined) {
+    const subscribe = client.event.subscribe.bind(client.event);
+    client.event.subscribe = (options) => {
+      const events = subscribe(options);
+      return {
+        async *[Symbol.asyncIterator]() {
+          for await (const event of events) {
+            if ("id" in event && event.id === gate.eventId) await gateReleased.promise;
+            yield event;
+          }
+        },
+      };
+    };
+  }
   if (awaitWindow) {
     const subscribe = client.event.subscribe.bind(client.event);
     client.event.subscribe = (options) => {
@@ -471,25 +860,53 @@ const runTurns = Effect.fnUntraced(function* (
     interactionMode,
     cwd: process.cwd(),
   });
-  const adapter = makeOpenCodeAdapterV2({
-    instanceId,
-    settings: yield* decodeSettings({
-      serverUrl: "replay://opencode2",
-    }),
-    environment: {},
-    runtime: {
-      connectToOpenCodeServer: () =>
-        Effect.succeed({
-          url: "replay://opencode2",
-          password: "replay",
-          external: true,
-          exitCode: null,
-        }),
-      createOpenCodeSdkClient: () => client,
-    },
-    idAllocator: yield* IdAllocatorV2,
-    serverConfig: yield* ServerConfig,
+  const channel = yield* makeInteractionModeReflections;
+  const observed: ProviderInteractionModeReflection[] = [];
+  const interactionModeReflections = ProviderInteractionModeReflections.of({
+    offer: (request) =>
+      channel.offer(request).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            observed.push(request);
+          }),
+        ),
+      ),
+    take: channel.take,
   });
+  const settings = yield* decodeSettings({
+    serverUrl: "replay://opencode2",
+  });
+  const runtime = OpenCode2Runtime.of({
+    connectToOpenCodeServer: () =>
+      Effect.succeed({
+        url: "replay://opencode2",
+        password: "replay",
+        external: true,
+        exitCode: null,
+      }),
+    createOpenCodeSdkClient: () => client,
+  });
+  const adapter = viaDriver
+    ? yield* OpenCodeAdapterV2Driver.create({
+        instanceId,
+        displayName: undefined,
+        environment: [],
+        enabled: true,
+        config: settings,
+      }).pipe(
+        Effect.provideService(OpenCode2Runtime, runtime),
+        Effect.provideService(ProviderEventLoggers, NoOpProviderEventLoggers),
+        Effect.provideService(ProviderInteractionModeReflections, interactionModeReflections),
+      )
+    : makeOpenCodeAdapterV2({
+        interactionModeReflections,
+        instanceId,
+        settings,
+        environment: {},
+        runtime,
+        idAllocator: yield* IdAllocatorV2,
+        serverConfig: yield* ServerConfig,
+      });
   const threadId = ThreadId.make("selection-thread");
   const session = yield* adapter.openSession({
     threadId,
@@ -506,7 +923,7 @@ const runTurns = Effect.fnUntraced(function* (
     providerInstanceId: instanceId,
     modelSelection,
     runtimeMode: "full-access",
-    interactionMode,
+    interactionMode: appInteractionMode,
     createdBy: "user",
     creationSource: "web",
     branch: null,
@@ -548,11 +965,14 @@ const runTurns = Effect.fnUntraced(function* (
       modelSelection,
       runtimePolicy,
     });
+    if (word === gate?.releaseAfterTurn) gateReleased.resolve();
     const result = Option.getOrThrow(yield* Fiber.join(terminal));
     assert.strictEqual(result.type, "turn.terminal");
-    if (result.type === "turn.terminal") assert.strictEqual(result.status, "completed");
+    if (result.type === "turn.terminal")
+      assert.strictEqual(result.status, index === 0 ? firstStatus : "completed");
   }
   controller.assertComplete();
+  return observed;
 });
 
 function agentSelected(

@@ -43,6 +43,7 @@ import {
   deriveInterruptibleRun,
   derivePendingBackgroundWork,
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -50,6 +51,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -65,6 +67,7 @@ import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
 import { notificationTurnItem } from "./Notification.ts";
 import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
 import { EventSinkV2 } from "./EventSink.ts";
+import { EventStoreV2 } from "./EventStore.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import { IdAllocatorV2 } from "./IdAllocator.ts";
 import {
@@ -91,6 +94,7 @@ import {
 import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
 import { ProviderContinuationRequests } from "./ProviderContinuationRequests.ts";
 import { makeProviderFailure } from "./ProviderFailure.ts";
+import { ProviderInteractionModeReflections } from "./ProviderInteractionModeReflections.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { ProviderSwitchPlanError, ProviderSwitchServiceV2 } from "./ProviderSwitchService.ts";
 import { isAutomaticCompletionRun, queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
@@ -664,6 +668,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const fileSystem = yield* FileSystem.FileSystem;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
   const continuationRequests = yield* ProviderContinuationRequests;
+  const modeReflections = yield* ProviderInteractionModeReflections;
+  const eventStore = yield* EventStoreV2;
   const providerSessions = yield* ProviderSessionManagerV2;
   const providerSwitchService = yield* ProviderSwitchServiceV2;
   const runtimePolicy = yield* RuntimePolicyV2;
@@ -9825,6 +9831,119 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const dispatchWithReceipt = (command: OrchestrationV2Command) =>
     threadDispatch.withLock(commandThreadId(command), dispatchWithReceiptEffect(command));
 
+  yield* modeReflections.take.pipe(
+    Effect.flatMap((request) =>
+      Effect.gen(function* () {
+        // Immediate starts are created as starting; queued/prepared runs transition later.
+        // Keep this immutable admission lookup outside the lock. Taking the first start
+        // for the exact attempt also protects edits during provider startup and retries.
+        const sourceQuery = {
+          threadId: request.threadId,
+          entityId: request.sourceRunId,
+          runStartAttemptId: request.sourceAttemptId,
+          limit: 1,
+        };
+        let source = yield* eventStore
+          .read({ ...sourceQuery, eventType: "run.created" })
+          .pipe(Stream.runHead);
+        if (Option.isNone(source)) {
+          source = yield* eventStore
+            .read({ ...sourceQuery, eventType: "run.updated" })
+            .pipe(Stream.runHead);
+        }
+        if (Option.isNone(source)) return;
+        yield* threadDispatch.withLock(
+          request.threadId,
+          Effect.gen(function* () {
+            const projection = yield* projectionStore.getThreadRecords(request.threadId, [
+              "runs",
+              "providerThreads",
+            ]);
+            const thread = projection.thread;
+            const sourceRun = projection.runs.find((run) => run.id === request.sourceRunId);
+            if (
+              thread.deletedAt !== null ||
+              thread.archivedAt !== null ||
+              thread.lineage.relationshipToParent === "subagent" ||
+              (thread.createdBy === "agent" &&
+                request.expectedInteractionMode === "plan" &&
+                request.interactionMode === "default") ||
+              thread.activeProviderThreadId !== request.providerThreadId ||
+              thread.runtimeMode !== request.expectedRuntimeMode ||
+              sourceRun === undefined ||
+              sourceRun.activeAttemptId !== request.sourceAttemptId ||
+              sourceRun.status === "rolled_back" ||
+              sourceRun.status === "cancelled" ||
+              sourceRun.status === "interrupted" ||
+              sourceRun.status === "failed" ||
+              sourceRun.providerThreadId !== request.providerThreadId ||
+              projection.runs.some(
+                (run) => run.ordinal > sourceRun.ordinal && run.status === "rolled_back",
+              ) ||
+              projection.runs.some((run) => run.id !== sourceRun.id && isBlockingRun(run)) ||
+              thread.interactionMode === request.interactionMode
+            )
+              return;
+            const binding = projection.providerThreads.find(
+              (entry) => entry.id === request.providerThreadId,
+            );
+            if (
+              binding?.driver !== request.driver ||
+              binding.ownerNodeId !== null ||
+              binding.lastRunOrdinal !== sourceRun.ordinal ||
+              (binding.nativeThreadRef?.nativeId ?? null) !== request.nativeThreadId
+            )
+              return;
+            // Sequence, rather than wall time or current value, detects user ABA changes.
+            for (const eventType of [
+              "thread.interaction-mode-updated",
+              "thread.runtime-mode-updated",
+              "thread.model-selection-updated",
+              "thread.provider-switched",
+              "thread.archived",
+            ] as const) {
+              const changed = yield* eventStore
+                .read({
+                  threadId: request.threadId,
+                  afterSequence: source.value.sequence,
+                  eventType,
+                })
+                .pipe(
+                  Stream.filter(
+                    (stored) =>
+                      stored.commandId !== source.value.commandId &&
+                      !String(stored.commandId).startsWith("command:provider-mode-reflection:"),
+                  ),
+                  Stream.runHead,
+                );
+              if (Option.isSome(changed)) return;
+            }
+            yield* dispatchWithReceiptEffect({
+              type: "thread.interaction-mode.set",
+              commandId: CommandId.make(
+                `command:provider-mode-reflection:${request.threadId}:${request.dedupeKey}`,
+              ),
+              threadId: request.threadId,
+              interactionMode: request.interactionMode,
+            });
+          }),
+        );
+      }).pipe(
+        Effect.retry({ schedule: Schedule.exponential("100 millis"), times: 2 }),
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("Failed to reflect provider interaction mode", {
+                threadId: request.threadId,
+                cause,
+              }),
+        ),
+      ),
+    ),
+    Effect.forever,
+    Effect.forkScoped,
+  );
+
   // A dispatched provider continuation holds its adapter's buffered-output
   // offer until its turn starts. Settle, archive and queue cancellation end a
   // queued continuation before that, so its offer is released here instead.
@@ -10089,6 +10208,8 @@ export const layer: Layer.Layer<
   | CommandReceiptStoreV2
   | ContextHandoffServiceV2
   | EventSinkV2
+  | EventStoreV2
+  | ProviderInteractionModeReflections
   | IdAllocatorV2
   | ProjectionProjectRepository
   | ProviderAdapterRegistryV2

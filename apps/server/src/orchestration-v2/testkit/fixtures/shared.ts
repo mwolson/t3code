@@ -195,6 +195,15 @@ export const WEB_SEARCH_PROMPT =
 
 export type OrchestratorFixtureInputStep =
   | {
+      readonly type: "await_mode_reflection";
+      readonly nativeThreadId: string;
+      readonly nativeSequence: number;
+    }
+  | {
+      readonly type: "interaction_mode";
+      readonly interactionMode: ProviderInteractionMode;
+    }
+  | {
       readonly type: "message";
       readonly text: string;
       readonly attachments?: ReadonlyArray<ChatAttachment>;
@@ -538,6 +547,7 @@ export function materializeFixtureInput(input: {
                 ((nextStep.type === "interrupt" && nextStep.targetRunIndex === runIndex) ||
                   nextStep.type === "interrupt_provider_native" ||
                   nextStep.type === "queue_message" ||
+                  nextStep.type === "await_mode_reflection" ||
                   (nextStep.type === "restart" && nextStep.targetRunIndex === runIndex) ||
                   (nextStep.type === "release_replay_gate_after_waiting" &&
                     nextStep.targetRunIndex === runIndex))) ||
@@ -629,6 +639,9 @@ export function materializeFixtureInput(input: {
             }),
           );
           const shouldSkipQueueBarrier =
+            nextStep?.type === "await_run_status" ||
+            nextStep?.type === "interaction_mode" ||
+            nextStep?.type === "await_mode_reflection" ||
             nextStep?.type === "queue_message" ||
             (nextStep?.type === "cancel_queued_run" && nextStep.targetRunIndex === runIndex);
           if (!shouldSkipQueueBarrier) {
@@ -640,6 +653,30 @@ export function materializeFixtureInput(input: {
           }
           break;
         }
+        case "await_mode_reflection":
+          steps.push({
+            type: "await_command_event",
+            threadId: ids.threadId,
+            commandId: CommandId.make(
+              `command:provider-mode-reflection:${ids.threadId}:${input.driver}:${step.nativeThreadId}:${step.nativeSequence}`,
+            ),
+            eventType: "thread.interaction-mode-updated",
+          });
+          break;
+        case "interaction_mode":
+          pushDispatch(
+            {
+              type: "thread.interaction-mode.set",
+              commandId: yield* idAllocator.allocate.command({
+                fixtureName: input.scenario,
+                commandName: `interaction-mode-${stepIndex}`,
+              }),
+              threadId: ids.threadId,
+              interactionMode: step.interactionMode,
+            },
+            { advanceClockAfter: false },
+          );
+          break;
         case "cancel_queued_run":
           pushDispatch({
             type: "queued-run.cancel",

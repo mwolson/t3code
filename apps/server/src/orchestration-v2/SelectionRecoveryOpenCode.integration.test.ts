@@ -29,6 +29,7 @@ import { layer as idAllocatorLayer, IdAllocatorV2 } from "./IdAllocator.ts";
 import { OrchestratorV2 } from "./Orchestrator.ts";
 import { ProviderAdapterV2RuntimePolicy } from "./ProviderAdapter.ts";
 import { makeSingleLayer } from "./ProviderAdapterRegistry.ts";
+import { make as makeInteractionModeReflections } from "./ProviderInteractionModeReflections.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "./testkit/ReplayFixtureWorkspace.ts";
@@ -138,6 +139,7 @@ const makeAdapter = (input: {
 }) =>
   Effect.gen(function* () {
     return makeOpenCodeAdapterV2({
+      interactionModeReflections: yield* makeInteractionModeReflections,
       instanceId,
       settings,
       environment: {},

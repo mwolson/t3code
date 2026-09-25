@@ -39,6 +39,7 @@ import { EventSinkV2, layerFromStores as eventSinkLayer } from "../EventSink.ts"
 import { layer as eventStoreLayer } from "../EventStore.ts";
 import { layer as idAllocatorLayer } from "../IdAllocator.ts";
 import { layer as orchestratorLayer } from "../Orchestrator.ts";
+import { layer as providerInteractionModeReflectionsLayer } from "../ProviderInteractionModeReflections.ts";
 import { ProjectionStoreV2, layer as projectionStoreLayer } from "../ProjectionStore.ts";
 import { OrchestratorV2, type OrchestratorV2Error } from "../Orchestrator.ts";
 import { ProviderAdapterRegistryV2 } from "../ProviderAdapterRegistry.ts";
@@ -429,6 +430,7 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
       Layer.mergeAll(
         checkpointServiceProvided,
         commandPolicyLayer,
+        providerInteractionModeReflectionsLayer,
         contextHandoffServiceProvided,
         persistenceLayer,
         ProjectionProjectRepositoryLive.pipe(Layer.provide(databaseLayer)),

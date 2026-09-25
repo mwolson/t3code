@@ -23,6 +23,10 @@ import * as OpenCode2Runtime from "../../provider/opencode2Runtime.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../IdAllocator.ts";
 import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
 import {
+  ProviderInteractionModeReflections,
+  layer as providerInteractionModeReflectionsLayer,
+} from "../ProviderInteractionModeReflections.ts";
+import {
   makeOpenCodeAdapterV2,
   OpenCode2ProviderCapabilitiesV2,
   unwrapOpenCode2Data,
@@ -36,6 +40,7 @@ const decodeOpenCode2Settings = Schema.decodeUnknownEffect(OpenCode2Settings);
 const layer = Layer.mergeAll(
   OpenCode2Runtime.layer.pipe(Layer.provide(NodeServices.layer)),
   idAllocatorLayer,
+  providerInteractionModeReflectionsLayer,
   serverConfigLayer,
 );
 
@@ -148,6 +153,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
               runtime,
               idAllocator,
               serverConfig,
+              interactionModeReflections: yield* ProviderInteractionModeReflections,
             });
             const session = yield* adapter.openSession({
               threadId: ThreadId.make("thread-opencode2-live-test"),
@@ -333,6 +339,7 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
               runtime,
               idAllocator,
               serverConfig,
+              interactionModeReflections: yield* ProviderInteractionModeReflections,
             });
             const deleteDetachedThread = adapter.deleteDetachedThread;
             assert.isDefined(deleteDetachedThread);
@@ -391,8 +398,8 @@ describe.runIf(process.env.T3_OPENCODE2_LIVE === "1")(
 
             const missing = yield* OpenCode2Runtime.runOpenCodeSdk("session.get", () =>
               client.session.get({ sessionID: nativeSession.id }),
-            ).pipe(Effect.either);
-            assert.equal(missing._tag, "Left");
+            ).pipe(Effect.result);
+            assert.equal(missing._tag, "Failure");
           }),
         ).pipe(Effect.provide(layer)),
       { timeout: 60_000 },

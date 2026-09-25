@@ -1,10 +1,19 @@
 import { ProviderDriverKind } from "@t3tools/contracts";
-import { assertOpenCode2ExecutingSuppressedSelectionOutput } from "./opencode2_native_selection_executing_suppressed_wake/output.ts";
-import { openCode2NativeSelectionSuppressedWakeInput } from "./opencode2_native_selection_suppressed_wake/input.ts";
-import { openCode2NativeModelSelectionInput } from "./opencode2_native_model_selection/input.ts";
-import { assertOpenCode2NativeModelSelectionOutput } from "./opencode2_native_model_selection/output.ts";
 import { openCode2CommandUsageInput } from "./opencode2_command_usage/input.ts";
 import { assertOpenCode2CommandUsageOutput } from "./opencode2_command_usage/output.ts";
+import { modeReflectionInput } from "./opencode2_mode_reflection/input.ts";
+import { assertOpenCode2ModeReflectionOutput } from "./opencode2_mode_reflection/output.ts";
+import { nativeAgentSelectionInput } from "./opencode2_native_agent_selection/input.ts";
+import { assertOpenCode2NativeAgentSelectionOutput } from "./opencode2_native_agent_selection/output.ts";
+import { openCode2NativeModelSelectionInput } from "./opencode2_native_model_selection/input.ts";
+import { assertOpenCode2NativeModelSelectionOutput } from "./opencode2_native_model_selection/output.ts";
+import { assertOpenCode2ExecutingSuppressedSelectionOutput } from "./opencode2_native_selection_executing_suppressed_wake/output.ts";
+import { openCode2NativeSelectionSuppressedWakeInput } from "./opencode2_native_selection_suppressed_wake/input.ts";
+import {
+  queuedModeReflectionInput,
+  queuedModeReflectionUserAbaInput,
+} from "./opencode2_queued_mode_reflection/input.ts";
+import { assertQueuedModeReflectionOutput } from "./opencode2_queued_mode_reflection/output.ts";
 
 import { claudeBackgroundTaskAfterRootInput } from "./claude_background_task_after_root/input.ts";
 import { assertClaudeBackgroundTaskAfterRootOutput } from "./claude_background_task_after_root/output.ts";
@@ -603,6 +612,51 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
     ],
   },
   {
+    name: "opencode2_mode_reflection",
+    buildInput: modeReflectionInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode"),
+        transcriptFile: new URL(
+          "./opencode2_mode_reflection/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertOpenCode2ModeReflectionOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_queued_mode_reflection",
+    buildInput: queuedModeReflectionInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode"),
+        transcriptFile: new URL(
+          "./opencode2_queued_mode_reflection/opencode2_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertQueuedModeReflectionOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_queued_mode_reflection_user_aba",
+    buildInput: queuedModeReflectionUserAbaInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode"),
+        transcriptFile: new URL(
+          "./opencode2_queued_mode_reflection/user_aba_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: OPENCODE2_MODEL_SELECTION,
+        assertOutput: assertQueuedModeReflectionOutput,
+      },
+    ],
+  },
+  {
     name: "opencode2_native_selection_executing_suppressed_wake",
     buildInput: multiTurnInput,
     providers: [
@@ -634,7 +688,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
   },
   {
     name: "opencode2_native_agent_selection",
-    buildInput: multiTurnInput,
+    buildInput: nativeAgentSelectionInput,
     providers: [
       {
         driver: ProviderDriverKind.make("opencode"),
@@ -643,7 +697,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
           import.meta.url,
         ),
         modelSelection: OPENCODE2_MODEL_SELECTION,
-        assertOutput: assertMultiTurnOutput,
+        assertOutput: assertOpenCode2NativeAgentSelectionOutput,
       },
     ],
   },

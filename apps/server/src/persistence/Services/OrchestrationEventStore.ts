@@ -15,6 +15,7 @@ import type {
   CommandId,
   OrchestrationV2DomainEvent,
   OrchestrationV2StoredEvent,
+  RunAttemptId,
   ThreadId,
 } from "@t3tools/contracts";
 import type { OrchestrationEvent } from "@t3tools/contracts/legacy-orchestration";
@@ -79,6 +80,8 @@ export interface OrchestrationEventStoreShape {
     readonly threadId?: ThreadId;
     readonly commandId?: CommandId;
     readonly eventType?: OrchestrationV2DomainEvent["type"];
+    readonly entityId?: string;
+    readonly runStartAttemptId?: RunAttemptId;
     readonly limit?: number;
   }) => Stream.Stream<OrchestrationV2StoredEvent, OrchestrationEventStoreError>;
 

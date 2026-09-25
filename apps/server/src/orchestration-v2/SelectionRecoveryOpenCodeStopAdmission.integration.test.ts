@@ -39,6 +39,7 @@ import {
   type ProviderAdapterV2Shape,
 } from "./ProviderAdapter.ts";
 import { makeSingleLayer } from "./ProviderAdapterRegistry.ts";
+import { make as makeInteractionModeReflections } from "./ProviderInteractionModeReflections.ts";
 import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "./testkit/ReplayFixtureWorkspace.ts";
 
@@ -150,6 +151,7 @@ function makeParkedAdmission(cwd: string, reply: "success" | "failure") {
   };
   const adapter = Effect.gen(function* () {
     return makeOpenCodeAdapterV2({
+      interactionModeReflections: yield* makeInteractionModeReflections,
       instanceId,
       settings: SETTINGS,
       environment: {},
