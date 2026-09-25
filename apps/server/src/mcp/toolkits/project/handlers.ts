@@ -1,11 +1,15 @@
 import { MessageId, ThreadId, OrchestratorMcpFailure, ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
+import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import { newCommandId, readCaller, readMutationCaller, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -18,6 +22,16 @@ function projectFailure(error: Project.ProjectServiceError) {
         ? "The workspace is already registered to a project."
         : "The project is not empty; force=true is required to delete it.";
   return new OrchestratorMcpFailure({ code: "invalid_request", message });
+}
+
+const isOrchestratorMcpFailure = Schema.is(OrchestratorMcpFailure);
+
+function launchFailure(error: Claims.AttachmentClaimError | ThreadLaunch.ThreadLaunchError) {
+  if (error._tag === "AttachmentClaimError")
+    return new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message });
+  if (error.operation === "record-creation" && isOrchestratorMcpFailure(error.cause))
+    return error.cause;
+  return unavailable();
 }
 
 const access = Effect.gen(function* () {
@@ -46,6 +60,9 @@ export const ProjectHandlersLive = ProjectToolkit.toLayer({
           code: "capability_denied",
           message: "Project launches require a full-access/default calling thread.",
         });
+      // The caller's grant lets it reach the launched thread in any project.
+      const recordCreation =
+        yield* (yield* OrchestratorMcpService.OrchestratorMcpService).launchedThreadGrant(scope);
       const commandId = yield* newCommandId();
       const threadId = ThreadId.make(commandId);
       const messageId = MessageId.make(commandId);
@@ -98,15 +115,27 @@ export const ProjectHandlersLive = ProjectToolkit.toLayer({
             }),
         createdBy: "agent",
         creationSource: "mcp",
-      }).pipe(
-        Effect.mapError((error) =>
-          error._tag === "AttachmentClaimError"
-            ? new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message })
-            : unavailable(),
-        ),
-      );
+        onThreadCreated: (createdThreadId) => recordCreation(createdThreadId, null),
+      }).pipe(Effect.mapError(launchFailure));
       const thread = result.projection.thread;
       const run = result.projection.runs.find((run) => run.userMessageId === messageId);
+      if (run !== undefined) {
+        yield* recordCreation(thread.id, run.id).pipe(
+          Effect.retry({
+            times: 3,
+            schedule: Schedule.exponential("25 millis"),
+            while: (error) => error.code === "orchestration_error",
+          }),
+          Effect.catch((error) => {
+            if (error.code !== "orchestration_error") return Effect.fail(error);
+            return Effect.logWarning("orchestrator-mcp.thread-launch.run-link-failed", {
+              threadId: thread.id,
+              runId: run.id,
+              code: error.code,
+            });
+          }),
+        );
+      }
       return {
         threadId: thread.id,
         projectId: thread.projectId,

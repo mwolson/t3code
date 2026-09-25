@@ -58,6 +58,22 @@ describe("orchestrator MCP tool guidance", () => {
     assert.include(timeoutText, "does not cancel the child");
   });
 
+  it("exposes known-project targeting only for ordinary thread creation", () => {
+    assert.include(CreateThreadsTool.description ?? "", "projectDirectory");
+    assert.include(DelegateTaskTool.description ?? "", "always inherit this thread's project");
+    for (const name of [
+      "t3_thread_read",
+      "t3_thread_send",
+      "t3_thread_wait",
+      "t3_thread_interrupt",
+    ] as const) {
+      assert.include(
+        OrchestratorToolkit.tools[name].description ?? "",
+        "created through create_threads or t3_thread_launch",
+      );
+    }
+  });
+
   it("documents slim and paginated capability discovery", () => {
     const schema = Tool.getJsonSchema(OrchestratorCapabilitiesTool) as {
       readonly properties?: Readonly<Record<string, { readonly description?: unknown }>>;

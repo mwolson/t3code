@@ -683,8 +683,9 @@ const EnvironmentRegistrationLive = McpServer.toolkit(EnvironmentToolkit).pipe(
   Layer.provide(EnvironmentHandlersLive),
 );
 
-const ProjectRegistrationLive = McpServer.toolkit(ProjectToolkit).pipe(
+export const ProjectRegistrationLive = McpServer.toolkit(ProjectToolkit).pipe(
   Layer.provide(ProjectHandlersLive),
+  Layer.provide(OrchestratorMcpService.layer),
 );
 
 const AttachmentRegistrationLive = McpServer.toolkit(AttachmentToolkit).pipe(

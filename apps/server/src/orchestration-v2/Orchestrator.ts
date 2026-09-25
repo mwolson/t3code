@@ -7208,7 +7208,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .getThreadRecords(
           command.parentThreadId,
           ["runs", "nodes", "turnItems", "attempts", "providerTurns"],
-          { turnItemTypes: [], messageRoles: ["user"] },
+          { turnItemTypes: ["thread_created"], messageRoles: ["user"] },
         )
         .pipe(
           Effect.mapError(
@@ -7234,6 +7234,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               }),
           ),
         );
+      if (
+        parentProjection.thread.deletedAt !== null ||
+        targetProjection.thread.deletedAt !== null
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Cannot record creation for a deleted parent or target thread.",
+        });
+      }
       const parentRun = parentProjection.runs.find(
         (candidate) => candidate.id === command.parentRunId,
       );
@@ -7252,13 +7262,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Parent node ${command.parentNodeId} is not the root of run ${command.parentRunId}.`,
         });
       }
-      if (parentProjection.thread.projectId !== targetProjection.thread.projectId) {
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: `Target thread ${command.targetThreadId} belongs to another project.`,
-        });
-      }
       if (
         command.targetRunId !== null &&
         !targetProjection.runs.some((candidate) => candidate.id === command.targetRunId)
@@ -7272,7 +7275,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
       const now = yield* DateTime.now;
       const parentProviderTurn = providerTurnForRun(parentProjection, parentRun);
-      const turnItem: OrchestrationV2TurnItem = {
+      const existing = parentProjection.turnItems.find(
+        (item) => item.type === "thread_created" && item.targetThreadId === command.targetThreadId,
+      );
+      // Concurrent grant attempts converge on the original row and its metadata.
+      const turnItem: OrchestrationV2TurnItem = existing ?? {
         id: idAllocator.derive.createdThreadTurnItem({ commandId: command.commandId }),
         threadId: command.parentThreadId,
         runId: command.parentRunId,
@@ -7300,11 +7307,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       )({
         type: "turn-item.updated",
         threadId: command.parentThreadId,
-        runId: command.parentRunId,
-        nodeId: command.parentNodeId,
+        runId: turnItem.runId ?? command.parentRunId,
+        nodeId: turnItem.nodeId ?? command.parentNodeId,
         providerInstanceId: parentRun.providerInstanceId,
         occurredAt: now,
-        payload: turnItem,
+        payload:
+          turnItem.type === "thread_created" &&
+          turnItem.targetRunId === null &&
+          command.targetRunId !== null
+            ? { ...turnItem, targetRunId: command.targetRunId, updatedAt: now }
+            : turnItem,
       });
     },
   );
