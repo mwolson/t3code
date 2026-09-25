@@ -219,6 +219,11 @@ export type OrchestratorFixtureInputStep =
       readonly key: string;
     }
   | {
+      readonly type: "await_command_notice_updates";
+      readonly count: number;
+      readonly distinctMessages: number;
+    }
+  | {
       readonly type: "release_replay_gate";
       readonly label: string;
     }
@@ -571,6 +576,7 @@ export function materializeFixtureInput(input: {
               (nextStep !== undefined &&
                 ((nextStep.type === "interrupt" && nextStep.targetRunIndex === runIndex) ||
                   nextStep.type === "queue_message" ||
+                  nextStep.type === "await_command_notice_updates" ||
                   (nextStep.type === "restart" && nextStep.targetRunIndex === runIndex) ||
                   (nextStep.type === "release_replay_gate_after_waiting" &&
                     nextStep.targetRunIndex === runIndex) ||
@@ -683,6 +689,9 @@ export function materializeFixtureInput(input: {
           break;
         case "capture_shell_snapshot":
           steps.push({ type: "capture_shell_snapshot", key: step.key });
+          break;
+        case "await_command_notice_updates":
+          steps.push({ ...step, threadId: ids.threadId });
           break;
         case "release_replay_gate":
           steps.push({ type: "release_replay_gate", label: step.label });
