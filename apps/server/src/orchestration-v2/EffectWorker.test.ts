@@ -129,6 +129,7 @@ function layerExecutorFor(input: {
               });
             }
           }),
+        failFromDeadLetter: (request) => record(`failFromDeadLetter:${request.runId}`),
       }),
     ),
     Layer.succeed(
@@ -352,6 +353,7 @@ it.effect("requeues a claim when a pre-execution worker check fails", () =>
     const layerExecutor = Layer.succeed(
       EffectWorker.OrchestrationEffectExecutorV2,
       EffectWorker.OrchestrationEffectExecutorV2.of({
+        compensateDeadLetter: () => Effect.void,
         execute: () => Ref.update(executionCount, (count) => count + 1),
       }),
     );
@@ -421,6 +423,7 @@ it.effect("arms cancellation before the durable pre-execution check", () =>
     const layerExecutor = Layer.succeed(
       EffectWorker.OrchestrationEffectExecutorV2,
       EffectWorker.OrchestrationEffectExecutorV2.of({
+        compensateDeadLetter: () => Effect.void,
         execute: () =>
           Effect.yieldNow.pipe(Effect.andThen(Ref.update(executionCount, (count) => count + 1))),
       }),
@@ -488,6 +491,7 @@ it.effect("terminalizes a process-bound claim when success settlement fails", ()
     const layerExecutor = Layer.succeed(
       EffectWorker.OrchestrationEffectExecutorV2,
       EffectWorker.OrchestrationEffectExecutorV2.of({
+        compensateDeadLetter: () => Effect.void,
         execute: () => Ref.update(executionCount, (count) => count + 1),
       }),
     );
