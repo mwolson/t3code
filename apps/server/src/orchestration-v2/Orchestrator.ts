@@ -8336,7 +8336,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (deliveryRun !== undefined) {
         // The terminal-run listener owns reconciliation of a completed wake.
         // A sibling that wins the parent lock first remains pending for its
-        // one successor rather than creating a competing delivery.
+        // next delivery rather than creating a competing delivery.
         return {
           task: {
             ...input.updatedTask,
@@ -8376,23 +8376,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
 
     const settledDeliveryCount = cohort?.settledDeliveryCount ?? 0;
-    if (settledDeliveryCount >= 2) {
-      // A cohort permits one initial delivery and one successor. Keep the
-      // result pending and inspectable instead of recursively re-arming the
-      // parent for every child that finishes after that bounded handoff.
-      return {
-        task: {
-          ...input.updatedTask,
-          completionDelivery: {
-            state: "pending" as const,
-            observedByRunId: null,
-          },
-        },
-        parentRun: undefined,
-        message: undefined,
-        offer: false,
-      };
-    }
     const generation = cohort?.nextGeneration ?? 1;
     const messageId = yield* mapDelegatedCompletionError(
       idAllocator.allocate.message({
@@ -8786,10 +8769,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .map((task) => task.id);
       const settledDeliveryCount = (cohort.settledDeliveryCount ?? 0) + 1;
       const canReserveFollowUp =
+        deliveryRun.status !== "cancelled" &&
         cohort.disposition === "open" &&
         projection.thread.archivedAt === null &&
         projection.thread.deletedAt === null &&
-        settledDeliveryCount < 2 &&
         pendingTaskIds.length > 0;
       const nextDelivery = canReserveFollowUp
         ? {
@@ -8892,9 +8875,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const parentIsLive = hasLiveRun(projection);
     const pendingTaskIds =
-      projection.thread.archivedAt === null &&
-      projection.thread.deletedAt === null &&
-      (cohort.settledDeliveryCount ?? 0) < 2
+      projection.thread.archivedAt === null && projection.thread.deletedAt === null
         ? projection.subagents
             .filter(
               (task) =>
@@ -8943,7 +8924,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     // Provider acceptance drains this batch but does not acknowledge its results
-    // or spend an idle-wake allowance. task_status owns acknowledgment.
+    // or count as a settled wake run. task_status owns acknowledgment.
     yield* emitEvent({
       type: "run.updated",
       threadId: command.threadId,
