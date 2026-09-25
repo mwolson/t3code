@@ -338,12 +338,15 @@ Creates between one and twenty ordinary top-level T3 threads:
 import type { OrchestratorMcpCreateThreadsInput as CreateThreadsInput } from "@t3tools/contracts";
 ```
 
-Each entry independently resolves provider, model, and modes. The new threads
-inherit the parent's project, branch, and worktree path, but they have no
-sub-agent lineage. Entries with a prompt immediately dispatch a run; entries
-without a prompt remain idle. `create_threads` is local-only: `target.environmentId` and
-`target.projectId` are ignored even though the shared target contract accepts them. Use
-`t3_thread_launch` with `environmentId` and `projectId` to select another environment or project.
+Each entry independently resolves provider, model, and modes. Without
+`projectDirectory`, it inherits the parent's project, branch, and worktree.
+An absolute or `~/` directory must match a registered, available project root;
+that selection starts at the target root with no inherited branch or worktree.
+Unknown and relative paths are rejected. Entries have no subagent lineage;
+a prompt immediately dispatches a run, otherwise the thread remains idle.
+`create_threads` is local-only: `target.environmentId` and `target.projectId` are
+ignored. Use `t3_thread_launch` with `environmentId` and `projectId` for explicit
+project or environment selection.
 
 ### `t3_thread_launch`
 
