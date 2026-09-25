@@ -59,6 +59,12 @@ export const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(Schema
   )
   .annotate({ description: "Reuse it to retry the same call. A new call gets a new key." });
 
+const OrchestratorMcpProjectDirectory = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(4096),
+).annotate({
+  description: "Absolute or ~/ root of a known T3 project. Omit to inherit this thread's checkout.",
+});
+
 // OpenCode 1.15 serializes nested MCP union objects as JSON strings; decode that form at the boundary.
 const OrchestratorMcpScheduleFromJsonString = Schema.fromJsonString(
   ScheduledTaskUpsertSchedule,
@@ -268,6 +274,7 @@ export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
   target: Schema.optional(OrchestratorMcpTarget),
   runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),
   interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
+  projectDirectory: Schema.optional(OrchestratorMcpProjectDirectory),
 });
 export type OrchestratorMcpCreateThreadRequest = typeof OrchestratorMcpCreateThreadRequest.Type;
 
