@@ -178,7 +178,7 @@ const PendingRequestRespondTool = Tool.make("t3_pending_request_respond", {
 const ThreadConfigurationTool = Tool.make("t3_thread_configuration", {
   ...commandTool,
   description:
-    "Read a thread's provider/model selection and modes. Omit threadId for this thread. orchestrator_capabilities lists available providers and models.",
+    "Read a thread's provider/model selection and modes. Omit threadId for this thread. orchestrator_capabilities lists providers and pages their models when given providerInstanceId.",
   parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
   success: Schema.Struct({
     threadId: ThreadId,
