@@ -926,6 +926,7 @@ export const OrchestrationV2ProviderSession = Schema.Struct({
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   lastError: Schema.NullOr(Schema.String),
+  lastErrorAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
 });
 export type OrchestrationV2ProviderSession = typeof OrchestrationV2ProviderSession.Type;
 
@@ -2061,6 +2062,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   blockedOnThreadWait: Schema.optional(Schema.Boolean),
   status: OrchestrationV2ShellThreadStatus,
   lastError: Schema.optional(Schema.NullOr(Schema.String)),
+  lastErrorAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   lastErrorClass: Schema.optional(Schema.NullOr(OrchestrationV2ProviderFailureClass)),
   lastErrorCode: Schema.optional(Schema.NullOr(Schema.String)),
   usageLimitResetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
@@ -2300,6 +2302,7 @@ export const OrchestrationV2ProviderSessionJson = OrchestrationV2ProviderSession
     ...fields,
     createdAt: Schema.DateTimeUtcFromString,
     updatedAt: Schema.DateTimeUtcFromString,
+    lastErrorAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   }),
 );
 export type OrchestrationV2ProviderSessionJson = typeof OrchestrationV2ProviderSessionJson.Type;

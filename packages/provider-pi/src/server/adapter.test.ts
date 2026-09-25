@@ -22,6 +22,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -444,8 +445,10 @@ const openRuntime = Effect.fnUntraced(function* (
     runtimePolicy,
   });
   const emitted = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+  const eventsEnded = yield* Deferred.make<void>();
   yield* runtime.events.pipe(
     Stream.runForEach((event) => Queue.offer(emitted, event)),
+    Effect.ensuring(Deferred.succeed(eventsEnded, undefined)),
     Effect.forkScoped,
   );
   const takeEvent = (predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean) =>
@@ -455,7 +458,7 @@ const openRuntime = Effect.fnUntraced(function* (
         if (predicate(event)) return event;
       }
     });
-  return { runtime, takeEvent };
+  return { runtime, takeEvent, eventsEnded: Deferred.await(eventsEnded) };
 });
 
 const makeAppThread = Effect.fnUntraced(function* (model: string, threadId = THREAD_ID) {
@@ -520,6 +523,84 @@ const startTurn = Effect.fnUntraced(function* (
 });
 
 describe("PiAdapterV2", () => {
+  it.effect("emits a new occurrence for the same failure after the next turn clears it", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      const occurrences: Array<number> = [];
+      for (const runOrdinal of [1, 2]) {
+        yield* startTurn(runtime, providerThread, "default", [], "Hello pi", undefined, runOrdinal);
+        yield* fake.takeRequest("prompt");
+        const running = yield* takeEvent(
+          (event) =>
+            event.type === "provider_session.updated" && event.providerSession.status === "running",
+        );
+        assert.equal(running.type, "provider_session.updated");
+        if (running.type !== "provider_session.updated") return;
+        assert.isNull(running.providerSession.lastError);
+        assert.isNull(running.providerSession.lastErrorAt);
+
+        yield* TestClock.adjust("1 second");
+        const failedAt = yield* DateTime.now;
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: "capacity exhausted",
+          },
+        });
+        yield* fake.emit({ type: "agent_settled" });
+        const failed = yield* takeEvent(
+          (event) =>
+            event.type === "provider_session.updated" && event.providerSession.status === "error",
+        );
+        assert.equal(failed.type, "provider_session.updated");
+        if (failed.type !== "provider_session.updated") return;
+        assert.equal(failed.providerSession.lastError, "capacity exhausted");
+        assert.isNotNull(failed.providerSession.lastErrorAt);
+        assert.isDefined(failed.providerSession.lastErrorAt);
+        const occurrence = DateTime.toEpochMillis(failed.providerSession.lastErrorAt!);
+        assert.equal(occurrence, DateTime.toEpochMillis(failedAt));
+        occurrences.push(occurrence);
+        yield* takeEvent((event) => event.type === "turn.terminal");
+      }
+      assert.isAbove(occurrences[1]!, occurrences[0]!);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("retains the occurrence when transport cleanup repeats an unsolicited-work error", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, eventsEnded } = yield* openRuntime(fake);
+      yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* fake.emit({ type: "agent_start" });
+      const first = yield* takeEvent((event) => event.type === "provider_session.updated");
+      assert.equal(first.type, "provider_session.updated");
+      if (first.type !== "provider_session.updated") return;
+      assert.equal(first.providerSession.status, "error");
+      assert.isNotNull(first.providerSession.lastErrorAt);
+      assert.isDefined(first.providerSession.lastErrorAt);
+      yield* eventsEnded;
+      const refreshed = yield* takeEvent((event) => event.type === "provider_session.updated");
+      assert.equal(refreshed.type, "provider_session.updated");
+      if (refreshed.type !== "provider_session.updated") return;
+      assert.equal(refreshed.providerSession.lastError, first.providerSession.lastError);
+      assert.deepEqual(refreshed.providerSession.lastErrorAt, first.providerSession.lastErrorAt);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("keeps native image bytes and the saved path in the prompt", () =>
     Effect.gen(function* () {
       const host = yield* ProviderHost.ProviderHost;
