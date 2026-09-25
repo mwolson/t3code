@@ -1405,13 +1405,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
 
   const reservePendingDelegatedCompletionDelivery = Effect.fnUntraced(function* (
-    projection: Pick<
-      OrchestrationV2ThreadProjection,
-      "thread" | "runs" | "subagents" | "providerTurns"
-    >,
+    projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "subagents">,
     parentRun: OrchestrationV2Run,
-    emitEvent: ReturnType<typeof emit>,
-    command: OrchestrationV2Command,
+    emitEvent: (
+      event: Omit<OrchestrationV2DomainEvent, "id">,
+    ) => Effect.Effect<unknown, OrchestratorDispatchError>,
+    command?: OrchestrationV2Command,
   ) {
     const threadId = projection.thread.id;
     const cohort = parentRun.delegatedCompletion;
@@ -1495,6 +1494,74 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       }
     });
+
+  // Steering retries can all fail before the terminal event lands. Once the run settles,
+  // reoffer reservations it still carries as unaccepted steers. A steer whose results were
+  // all read can no longer deliver: release it and reserve waiting siblings, unless its
+  // owner was rolled back.
+  const recoverSettledMailboxSteers = Effect.fn("Orchestrator.recoverSettledMailboxSteers")(
+    function* (threadId: ThreadId, settledRun: OrchestrationV2Run) {
+      const { messages } = yield* projectionStore.getThreadRecords(threadId, ["messages"], {
+        messageRunIds: [settledRun.id],
+        messageRoles: ["user"],
+      });
+      const steers = messages.filter(
+        (message) =>
+          message.delegatedCompletion !== undefined && message.id !== settledRun.userMessageId,
+      );
+      if (steers.length === 0) return;
+      const { runs } = yield* projectionStore.getThreadRecords(threadId, ["runs"]);
+      for (const steer of steers) {
+        const parentRunId = steer.delegatedCompletion!.parentRunId;
+        const parentRun = runs.find((run) => run.id === parentRunId);
+        const delivery = parentRun?.delegatedCompletion?.delivery;
+        if (parentRun === undefined || delivery?.messageId !== steer.id) continue;
+        if (delivery.taskIds.length > 0) {
+          yield* offerDelegatedCompletionDelivery(threadId, parentRunId);
+        } else if (parentRun.status !== "rolled_back") {
+          yield* releaseSettledMailboxSteer(threadId, runs, parentRun);
+        }
+      }
+    },
+  );
+
+  const releaseSettledMailboxSteer = Effect.fn("Orchestrator.releaseSettledMailboxSteer")(
+    function* (
+      threadId: ThreadId,
+      runs: ReadonlyArray<OrchestrationV2Run>,
+      parentRun: OrchestrationV2Run,
+    ) {
+      const cohort = parentRun.delegatedCompletion;
+      if (cohort === undefined) return;
+      const { thread, subagents } = yield* projectionStore.getThreadRecords(threadId, [
+        "subagents",
+      ]);
+      const released: OrchestrationV2Run = {
+        ...parentRun,
+        delegatedCompletion: { ...cohort, delivery: null },
+      };
+      const events: Array<Omit<OrchestrationV2DomainEvent, "id">> = [
+        {
+          type: "run.updated",
+          threadId,
+          runId: released.id,
+          ...(released.rootNodeId === null ? {} : { nodeId: released.rootNodeId }),
+          providerInstanceId: released.providerInstanceId,
+          occurredAt: yield* DateTime.now,
+          payload: released,
+        },
+      ];
+      yield* reservePendingDelegatedCompletionDelivery(
+        { thread, runs, subagents },
+        released,
+        (event) => Effect.sync(() => events.push(event)),
+      );
+      yield* writeSystemEvents(events);
+      if (events.length > 1) {
+        yield* offerDelegatedCompletionDelivery(threadId, released.id);
+      }
+    },
+  );
 
   const emitQueuedRunCancellation = Effect.fn("Orchestrator.emitQueuedRunCancellation")(
     function* (input: {
@@ -2551,9 +2618,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
     const remainingTaskIds = delivery.taskIds.filter((taskId) => taskId !== task.id);
     const deliveryRun = completionDeliveryRun(projection, delivery);
+    // A steer left on a settled run is never accepted, and recovery will not
+    // offer an empty reservation, so keeping it would strand later siblings.
+    const releaseSettledSteer =
+      deliveryRun !== undefined &&
+      deliveryRun.userMessageId !== delivery.messageId &&
+      !isBlockingRun(deliveryRun) &&
+      parentRun.status !== "rolled_back";
     const clearDelivery =
       remainingTaskIds.length === 0 &&
-      (deliveryRun === undefined || deliveryRun.status === "queued");
+      (deliveryRun === undefined || deliveryRun.status === "queued" || releaseSettledSteer);
     const updatedCohort: OrchestrationV2DelegatedCompletionCohort = {
       ...cohort,
       delivery: clearDelivery
@@ -2575,6 +2649,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         delegatedCompletion: updatedCohort,
       },
     });
+    if (clearDelivery && releaseSettledSteer) {
+      yield* reservePendingDelegatedCompletionDelivery(
+        projection,
+        { ...parentRun, delegatedCompletion: updatedCohort },
+        emitEvent,
+        command,
+      );
+      return parentRun.id;
+    }
 
     if (deliveryRun?.status === "queued") {
       if (remainingTaskIds.length === 0) {
@@ -5574,8 +5657,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const delivery = parentRun?.delegatedCompletion?.delivery;
       if (
         parentRun?.delegatedCompletion?.disposition !== "open" ||
+        parentRun.status === "rolled_back" ||
         delivery === null ||
         delivery === undefined ||
+        delivery.taskIds.length === 0 ||
         delivery.generation !== requestedCompletion.generation ||
         delivery.messageId !== command.messageId ||
         (projection.messages.some((candidate) => candidate.id === command.messageId) &&
@@ -13343,6 +13428,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ) {
       yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.parentThreadId));
     }
+    if (
+      (command.type === "delegated_task.completion-delivery.acknowledge" ||
+        command.type === "delegated_task.completion-delivery.dispose") &&
+      committed.storedEvents.some(
+        (stored) =>
+          stored.event.type === "subagent.updated" &&
+          stored.event.payload.completionDelivery?.state === "claimed",
+      )
+    ) {
+      yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.parentThreadId));
+    }
 
     return {
       sequence: committed.receipt.resultSequence,
@@ -13406,6 +13502,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* threadDispatch.withLock(
           parentThreadId,
           finalizeAppOwnedSubagent(threadId, { syncRunId: run.id }),
+        );
+      }
+      // Recover after queue promotion and child finalization.
+      if (stored.event.type === "run.updated" && stored.event.payload.status !== "rolled_back") {
+        yield* threadDispatch.withLock(
+          threadId,
+          recoverSettledMailboxSteers(threadId, stored.event.payload),
         );
       }
     },
