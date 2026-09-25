@@ -174,6 +174,7 @@ export interface EventSinkV2Shape {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
       readonly reason: string;
     };
+    readonly updateDelegatedCompletionOnly?: boolean;
     /** Like writeWithEffects' updateDelegatedCompletionOnly, for this run's run.updated only. */
     readonly updateDelegatedCompletionOnlyRunId?: RunId;
   }) => Effect.Effect<
@@ -682,11 +683,14 @@ const layerBase: Layer.Layer<
           }
 
           const runId = input.updateDelegatedCompletionOnlyRunId;
-          const normalized = yield* normalizeEvents(
-            runId === undefined
-              ? input.events
-              : yield* updateDelegatedCompletionOnly(input.events, (id) => id === runId),
-          );
+          let events = input.events;
+          if (input.updateDelegatedCompletionOnly === true || runId !== undefined) {
+            events = yield* updateDelegatedCompletionOnly(
+              events,
+              (id) => input.updateDelegatedCompletionOnly === true || id === runId,
+            );
+          }
+          const normalized = yield* normalizeEvents(events);
           const storedEvents = yield* eventStore.append({
             commandId: input.commandId,
             events: normalized,
