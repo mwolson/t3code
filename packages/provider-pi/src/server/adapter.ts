@@ -425,6 +425,7 @@ interface ActivePiTurn {
   interrupted: boolean;
   /** Cancellation of the latest native run; new work can recover before settlement. */
   nativeAborted: boolean;
+  unresolvedAssistantAbort: boolean;
   /**
    * Whether any agent run activity was observed. Command-only prompts (pure
    * extension slash commands) never start an agent run and never emit
@@ -1895,7 +1896,17 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             const message = event["message"];
             if (recordString(message, "role") !== "assistant") return;
             yield* completeOpenStreamItems(turn);
-            if (recordString(message, "stopReason") === "error" && turn.failure === null) {
+            const stopReason = recordString(message, "stopReason");
+            if (stopReason === "aborted") {
+              turn.unresolvedAssistantAbort = true;
+            } else if (
+              stopReason === "stop" ||
+              stopReason === "toolUse" ||
+              stopReason === "length"
+            ) {
+              turn.unresolvedAssistantAbort = false;
+            }
+            if (stopReason === "error" && turn.failure === null) {
               turn.failure = makeProviderFailure({
                 message: recordString(message, "errorMessage") ?? "Pi reported a model error.",
                 class: "provider_error",
@@ -2240,6 +2251,17 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               (recordNumber(data, "pendingMessageCount") ?? 0) === 0
             ) {
               turn.settleWhenIdle = false;
+              if (
+                !turn.interrupted &&
+                !turn.nativeAborted &&
+                turn.failure === null &&
+                turn.unresolvedAssistantAbort
+              ) {
+                turn.failure = makeProviderFailure({
+                  message: "Pi aborted the response before completion.",
+                  class: "provider_error",
+                });
+              }
               if (state !== null) yield* finalizeTurn(state);
             }
             return;
@@ -2669,6 +2691,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               toolStartedAt: new Map(),
               interrupted: false,
               nativeAborted: false,
+              unresolvedAssistantAbort: false,
               sawAgentActivity: false,
               adoptedWake: false,
               promptMayBeCommandOnly:
