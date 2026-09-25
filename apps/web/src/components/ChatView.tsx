@@ -420,13 +420,8 @@ import {
   ProviderStatusBanner,
   shouldShowProviderStatusBanner,
 } from "./chat/ProviderStatusBanner";
-import {
-  dismissThreadErrorBannerForSession,
-  getThreadErrorBannerKey,
-  isThreadErrorBannerDismissedForSession,
-  shouldShowThreadErrorBanner,
-  ThreadErrorBanner,
-} from "./chat/ThreadErrorBanner";
+import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
+import { useThreadErrorState } from "./chat/useThreadErrorState";
 import {
   QueuedRunsControl,
   type QueuedRunsControlHandle,
@@ -506,7 +501,6 @@ import {
   releaseDraftAttachments,
   startAttachmentUpload,
 } from "../lib/attachmentUploadQueue";
-import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { previewEnvironment } from "../state/preview";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
@@ -1442,14 +1436,6 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
   );
 });
 
-// Errors surface through two maps (draft-keyed and thread-keyed) whose entries
-// can race around promotion, so each write carries its time to let the latest
-// one win when they collide.
-type LocalThreadErrorEntry = {
-  readonly message: string | null;
-  readonly at: number;
-};
-
 function chatActionErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "An error occurred.";
 }
@@ -1786,12 +1772,6 @@ export default function ChatView(props: ChatViewProps) {
   );
   const optimisticUserMessagesRef = useRef(optimisticUserMessages);
   optimisticUserMessagesRef.current = optimisticUserMessages;
-  const [localDraftErrorsByDraftId, setLocalDraftErrorsByDraftId] = useState<
-    Record<string, LocalThreadErrorEntry>
-  >({});
-  const [localServerErrorsByThreadKey, setLocalServerErrorsByThreadKey] = useState<
-    Record<string, LocalThreadErrorEntry>
-  >({});
   const [isConnecting, _setIsConnecting] = useState(false);
   const isRevertingCheckpoint = useComposerDraftStore((store) =>
     store.rewindingThreadKeys.has(routeThreadKey),
@@ -1933,45 +1913,6 @@ export default function ChatView(props: ChatViewProps) {
     ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
     : null;
   const fallbackDraftProject = useProject(fallbackDraftProjectRef);
-  const localDraftError = serverThread
-    ? null
-    : ((draftId ? localDraftErrorsByDraftId[draftId]?.message : null) ?? null);
-  const localServerError = localServerErrorsByThreadKey[routeThreadKey]?.message ?? null;
-  // Draft errors are keyed by draftId while server errors are keyed by thread
-  // key, so a pending draft entry must migrate when the server thread loads or
-  // a failed send would silently disappear on promotion. When both keys hold
-  // an entry, the most recent write wins.
-  useEffect(() => {
-    if (!serverThread || !draftId) {
-      return;
-    }
-    const pendingDraftEntry = localDraftErrorsByDraftId[draftId];
-    if (pendingDraftEntry === undefined) {
-      return;
-    }
-    setLocalDraftErrorsByDraftId((existing) => {
-      if (existing[draftId] === undefined) {
-        return existing;
-      }
-      const next = { ...existing };
-      delete next[draftId];
-      return next;
-    });
-    setLocalServerErrorsByThreadKey((existing) => {
-      const currentEntry = existing[routeThreadKey];
-      if (
-        currentEntry !== undefined &&
-        (currentEntry.at > pendingDraftEntry.at ||
-          currentEntry.message === pendingDraftEntry.message)
-      ) {
-        return existing;
-      }
-      return {
-        ...existing,
-        [routeThreadKey]: pendingDraftEntry,
-      };
-    });
-  }, [draftId, localDraftErrorsByDraftId, routeThreadKey, serverThread]);
   const localDraftThread = useMemo(
     () =>
       draftThread
@@ -2030,27 +1971,18 @@ export default function ChatView(props: ChatViewProps) {
           },
     [parentSubagentThread?.title, parentSubagentThreadRef],
   );
-  const threadError = isServerThread
-    ? (localServerError ?? serverRuntime?.lastError ?? null)
-    : localDraftError;
-  // Dismissals can only mask the shown error, never clear it: a server thread
-  // keeps its error in session.lastError, so clearing the local shadow would
-  // just fall through to the persisted one. Mask the current error until a
-  // different error arrives, mirroring the provider status banner.
-  const threadErrorBannerKey = getThreadErrorBannerKey(routeThreadKey, threadError);
-  const visibleThreadError = shouldShowThreadErrorBanner(
-    routeThreadKey,
-    threadError,
-    isThreadErrorBannerDismissedForSession(threadErrorBannerKey),
-  )
-    ? threadError
-    : null;
-  // Dismissing only mutates the session-scoped mask set, which does not
-  // trigger a render on its own; setThreadError(null) can also bail when the
-  // local shadow is already empty and the banner is driven purely by
-  // session.lastError. Bump a tick so the banner hides immediately. Mirrors
-  // the branch mismatch banner.
-  const [, setThreadErrorBannerDismissTick] = useState(0);
+  const {
+    error: visibleThreadError,
+    currentError: threadError,
+    errorClass: threadErrorClass,
+    dismiss: dismissThreadError,
+    setError: setLocalThreadError,
+  } = useThreadErrorState({
+    threadKey: routeThreadKey,
+    draftId,
+    isServerThread,
+    runtime: isServerThread ? (serverRuntime ?? null) : null,
+  });
   const defaultRuntimeMode = resolveProjectSettings(settings, activeThread?.projectId ?? null)
     .settings.defaultRuntimeMode;
   // Implicit drafts follow their current project/environment, including retargets.
@@ -4194,37 +4126,19 @@ export default function ChatView(props: ChatViewProps) {
   const setThreadError = useCallback(
     (targetThreadId: ThreadId | null, error: string | null) => {
       if (!targetThreadId) return;
-      const nextError = sanitizeThreadErrorMessage(error);
-      const nextEntry: LocalThreadErrorEntry = { message: nextError, at: Date.now() };
       if (
         serverThread &&
         targetThreadId === routeThreadRef.threadId &&
         serverThread.environmentId === routeThreadRef.environmentId &&
         serverThread.id === targetThreadId
       ) {
-        setLocalServerErrorsByThreadKey((existing) => {
-          if ((existing[routeThreadKey]?.message ?? null) === nextError) {
-            return existing;
-          }
-          return {
-            ...existing,
-            [routeThreadKey]: nextEntry,
-          };
-        });
+        setLocalThreadError(routeThreadKey, true, error);
         return;
       }
       const localDraftErrorKey = draftId ?? targetThreadId;
-      setLocalDraftErrorsByDraftId((existing) => {
-        if ((existing[localDraftErrorKey]?.message ?? null) === nextError) {
-          return existing;
-        }
-        return {
-          ...existing,
-          [localDraftErrorKey]: nextEntry,
-        };
-      });
+      setLocalThreadError(localDraftErrorKey, false, error);
     },
-    [draftId, routeThreadKey, routeThreadRef, serverThread],
+    [draftId, routeThreadKey, routeThreadRef, serverThread, setLocalThreadError],
   );
 
   const focusComposer = useCallback(() => {
@@ -10401,16 +10315,8 @@ export default function ChatView(props: ChatViewProps) {
               />
               <ThreadErrorBanner
                 error={timelineThreadError}
-                errorClass={
-                  localServerError === null && visibleThreadError === serverRuntime?.lastError
-                    ? (serverRuntime?.lastErrorClass ?? null)
-                    : null
-                }
-                onDismiss={() => {
-                  setThreadError(activeThread.id, null);
-                  dismissThreadErrorBannerForSession(threadErrorBannerKey);
-                  setThreadErrorBannerDismissTick((tick) => tick + 1);
-                }}
+                errorClass={threadErrorClass}
+                onDismiss={dismissThreadError}
               />
             </div>
             {/* Messages Wrapper */}

@@ -256,6 +256,33 @@ function releaseStatusFor(
   return reason === "runtime_error" ? "error" : "stopped";
 }
 
+export function releasedProviderSession(input: {
+  readonly reason: ProviderSessionReleaseReason;
+  readonly session: OrchestrationV2ProviderSession;
+  readonly now: DateTime.Utc;
+  readonly detail?: string | undefined;
+  readonly runtimeErrorCause?: "stream_end" | undefined;
+}): OrchestrationV2ProviderSession {
+  if (input.reason === "runtime_error") {
+    if (
+      input.runtimeErrorCause === "stream_end" &&
+      input.session.driver === "pi" &&
+      input.session.status === "error" &&
+      input.session.lastError !== null
+    ) {
+      return { ...input.session, updatedAt: input.now };
+    }
+    return {
+      ...input.session,
+      status: "error",
+      updatedAt: input.now,
+      lastError: input.detail ?? "Provider runtime failed.",
+      lastErrorAt: input.now,
+    };
+  }
+  return { ...input.session, status: releaseStatusFor(input.reason), updatedAt: input.now };
+}
+
 function releasedRuntimeRequestStatusFor(
   reason: ProviderSessionReleaseReason,
 ): OrchestrationV2RuntimeRequest["status"] {
@@ -603,18 +630,39 @@ export const layerWithOptions = (
         readonly entry: LiveSessionEntry;
         readonly reason: ProviderSessionReleaseReason;
         readonly detail?: string;
+        readonly runtimeErrorCause?: "stream_end";
       }) =>
         Effect.gen(function* () {
           const now = yield* DateTime.now;
-          const payload: OrchestrationV2ProviderSession = {
-            ...input.entry.runtime.providerSession,
-            status: releaseStatusFor(input.reason),
-            updatedAt: now,
-            lastError:
-              input.reason === "runtime_error"
-                ? (input.detail ?? "Provider runtime failed.")
-                : null,
-          };
+          let session = input.entry.runtime.providerSession;
+          for (const threadId of input.entry.attachedThreadIds) {
+            const context = yield* projectionStore.getThreadProviderContext(threadId).pipe(
+              Effect.catch(() =>
+                Effect.logWarning(
+                  "orchestration-v2.driver-session.release-projection-read-failed",
+                  {
+                    threadId,
+                    providerSessionId: session.id,
+                    reason: input.reason,
+                  },
+                ).pipe(Effect.as(null)),
+              ),
+            );
+            const projected = context?.providerSessions.findLast(
+              (candidate) => candidate.id === session.id,
+            );
+            if (projected !== undefined) {
+              session = projected;
+              break;
+            }
+          }
+          const payload = releasedProviderSession({
+            session,
+            reason: input.reason,
+            now,
+            detail: input.detail,
+            runtimeErrorCause: input.runtimeErrorCause,
+          });
           yield* writeProviderSessionEvents({
             runtime: input.entry.runtime,
             threadIds: input.entry.attachedThreadIds,
@@ -730,6 +778,7 @@ export const layerWithOptions = (
         readonly providerSessionId: ProviderSessionId;
         readonly reason: ProviderSessionReleaseReason;
         readonly detail?: string;
+        readonly runtimeErrorCause?: "stream_end";
         readonly cancelIdleFiber?: boolean;
         readonly onlyIfIdleGeneration?: number;
         readonly gracefulSubscribers?: boolean;
@@ -815,6 +864,9 @@ export const layerWithOptions = (
                   yield* writeReleasedSessionEvents({
                     entry,
                     reason: input.reason,
+                    ...(input.runtimeErrorCause === undefined
+                      ? {}
+                      : { runtimeErrorCause: input.runtimeErrorCause }),
                     ...(input.detail === undefined ? {} : { detail: input.detail }),
                   });
                   yield* writeReleasedRuntimeRequestEvents({
@@ -1925,6 +1977,7 @@ export const layerWithOptions = (
               yield* releaseEntry({
                 providerSessionId: entry.runtime.providerSessionId,
                 reason: "runtime_error",
+                ...(Exit.isSuccess(exit) ? { runtimeErrorCause: "stream_end" as const } : {}),
                 detail: Cause.pretty(cause),
               }).pipe(Effect.ignore);
             }),

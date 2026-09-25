@@ -1,5 +1,6 @@
 import {
-  latestRootProviderFailure,
+  latestRootProviderFailureItem,
+  providerFailureOccurredAt,
   threadErrorSummary,
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
@@ -87,6 +88,7 @@ export function deriveThreadRuntime(
       activeProviderThreadId: projection.thread.activeProviderThreadId,
       runs: projection.runs,
     }).length > 0;
+  const failureItem = latestRootProviderFailureItem(latestRunProjection, projection.turnItems);
   return {
     status: hasPendingBackgroundTasks ? "idle" : (activityRun?.status ?? "idle"),
     activeRunId,
@@ -96,10 +98,13 @@ export function deriveThreadRuntime(
         : null,
     providerInstanceId: projection.thread.providerInstanceId,
     providerName: providerSession?.driver ?? null,
-    ...threadErrorSummary(
-      latestRootProviderFailure(latestRunProjection, projection.turnItems),
-      providerSession?.lastError ?? null,
-    ),
+    ...threadErrorSummary(failureItem?.failure ?? null, providerSession?.lastError ?? null, {
+      sessionErrorAt:
+        providerSession?.lastErrorAt == null
+          ? null
+          : DateTime.formatIso(providerSession.lastErrorAt),
+      failureAt: providerFailureOccurredAt(failureItem),
+    }),
     updatedAt: DateTime.formatIso(projection.updatedAt),
   };
 }

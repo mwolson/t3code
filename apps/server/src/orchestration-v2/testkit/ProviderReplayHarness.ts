@@ -36,7 +36,7 @@ import { EventSinkV2, layerFromStores as eventSinkLayer } from "../EventSink.ts"
 import { layer as eventStoreLayer } from "../EventStore.ts";
 import { layer as idAllocatorLayer } from "../IdAllocator.ts";
 import { layer as orchestratorLayer } from "../Orchestrator.ts";
-import { layer as projectionStoreLayer } from "../ProjectionStore.ts";
+import { ProjectionStoreV2, layer as projectionStoreLayer } from "../ProjectionStore.ts";
 import { OrchestratorV2, type OrchestratorV2Error } from "../Orchestrator.ts";
 import { ProviderAdapterRegistryV2 } from "../ProviderAdapterRegistry.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
@@ -230,7 +230,11 @@ export function makeOrchestratorV2ProviderReplayLayer<
     readonly replayGate?: ProviderReplayGate;
   } = {},
 ): Layer.Layer<
-  OrchestratorV2 | OrchestrationEffectWorkerV2 | EventSinkV2,
+  | OrchestratorV2
+  | OrchestrationEffectWorkerV2
+  | EventSinkV2
+  | ProjectionStoreV2
+  | ProviderSessionManagerV2,
   Error | MigrationError | PlatformError.PlatformError | SqlError
 > {
   const registryLayer = harness.makeProviderAdapterRegistryLayer(
@@ -251,7 +255,11 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
     readonly runEffectWorker?: boolean;
   } = {},
 ): Layer.Layer<
-  OrchestratorV2 | OrchestrationEffectWorkerV2 | EventSinkV2 | ProviderSessionManagerV2,
+  | OrchestratorV2
+  | OrchestrationEffectWorkerV2
+  | EventSinkV2
+  | ProjectionStoreV2
+  | ProviderSessionManagerV2,
   Error | MigrationError | PlatformError.PlatformError | SqlError
 > {
   const serverConfigLayer = Layer.effect(
@@ -425,6 +433,7 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
     effectWorkerProvided,
     eventSinkProvided,
     providerSessionManagerProvided,
+    storesLayer,
   ).pipe(Layer.provide(worktreeRepairDependenciesTestLayer), Layer.provide(NodeServices.layer));
 
   // Build the daemon from the exact worker instance exposed alongside the
