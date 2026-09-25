@@ -5,6 +5,7 @@ import {
   getThreadErrorBannerKey,
   getThreadErrorBannerMessage,
   isThreadErrorBannerDismissedForSession,
+  resolveThreadErrorBanner,
   shouldShowThreadErrorBanner,
 } from "./ThreadErrorBanner";
 
@@ -43,20 +44,31 @@ describe("ThreadErrorBanner", () => {
     ).toBe(true);
   });
 
-  it("reappears when a later run fails with the same error on the same thread", () => {
-    const error = "Turn failed";
-    const dismissedKey = getThreadErrorBannerKey("env:thread-c", error, "run-a");
-    dismissThreadErrorBannerForSession(dismissedKey);
-    const laterRunKey = getThreadErrorBannerKey("env:thread-c", error, "run-b");
+  it.each([
+    { label: "the same text in a later occurrence", localError: null },
+    { label: "a local copy of the runtime error", localError: "Turn failed" },
+  ])("uses the new runtime key for $label", ({ label, localError }) => {
+    const threadKey = `env:thread-c:${label}`;
+    const lastError = "Turn failed";
+    const runtime = { lastError, lastErrorAt: "2026-09-25T00:00:00Z" };
+    const first = resolveThreadErrorBanner({
+      threadKey,
+      localError: null,
+      localErrorAt: null,
+      runtime,
+    });
+    dismissThreadErrorBannerForSession(first.key);
+    const lastErrorAt = "2026-09-25T00:01:00Z";
+    const later = resolveThreadErrorBanner({
+      threadKey,
+      localError,
+      localErrorAt: localError === null ? null : 1,
+      runtime: { ...runtime, lastErrorAt },
+    });
+    const expectedKey = getThreadErrorBannerKey(threadKey, lastError, lastErrorAt);
 
-    expect(isThreadErrorBannerDismissedForSession(dismissedKey)).toBe(true);
-    expect(isThreadErrorBannerDismissedForSession(laterRunKey)).toBe(false);
-    expect(
-      shouldShowThreadErrorBanner(
-        "env:thread-c",
-        error,
-        isThreadErrorBannerDismissedForSession(laterRunKey),
-      ),
-    ).toBe(true);
+    expect(later).toEqual({ error: lastError, key: expectedKey, runtimeKey: expectedKey });
+    expect(isThreadErrorBannerDismissedForSession(first.key)).toBe(true);
+    expect(isThreadErrorBannerDismissedForSession(later.key)).toBe(false);
   });
 });

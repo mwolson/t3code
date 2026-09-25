@@ -182,6 +182,7 @@ describe("thread execution presentation", () => {
       lastError: "Plan limit reached",
       lastErrorClass: "usage_limit",
       lastErrorSource: "limit-error@2026-07-28T10:00:00.000Z",
+      lastErrorAt: DateTime.formatIso(now),
     });
     // A retried run fails again through the same item, so only its failure time tells it apart.
     const later = DateTime.makeUnsafe("2026-07-28T10:05:00.000Z");
@@ -215,6 +216,13 @@ describe("thread execution presentation", () => {
     expect(source({ runs: [ended], providerSessions: [session("Session failed")] })).toBe(
       "limited@2026-07-28T10:00:00.000Z",
     );
+    expect(
+      deriveThreadRuntime({
+        ...projection,
+        runs: [ended],
+        providerSessions: [{ ...session("Session failed"), lastErrorAt: later }],
+      }),
+    ).toMatchObject({ lastError: "Session failed", lastErrorAt: DateTime.formatIso(later) });
     expect(source({ runs: starting, providerSessions: [session("Session failed")] })).toBe(
       "limited@2026-07-28T10:00:00.000Z",
     );
