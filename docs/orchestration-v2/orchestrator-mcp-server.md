@@ -215,6 +215,14 @@ user's model order for other providers. `omittedModels` counts the rest, and the
 `search` input finds them, legacy models included. `delegate_task` still accepts
 any catalog model.
 
+Pass `providerInstanceId` to page that provider's full visible catalog in the
+user's model order, including legacy and custom models. `modelCursor` defaults
+to 0 and `modelLimit` defaults to 50 (maximum 100). `modelsNextCursor` is null on
+the last page; `modelsTotal` counts visible matches before paging. `search` can
+filter the paged catalog. An exact `model` selects one visible model regardless
+of the cursor or search; `includeModelOptions: true` returns its full option
+descriptors. Expanded catalogs omit options unless explicitly requested.
+
 ### `delegate_task`
 
 Creates a T3-owned child thread and immediately dispatches the supplied task
