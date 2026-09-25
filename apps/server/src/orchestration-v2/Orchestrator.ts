@@ -693,13 +693,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
 
-  const mapDelegatedCompletionError = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  const mapDelegatedCompletionError = <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+    command?: Pick<OrchestrationV2Command, "commandId" | "type">,
+  ) =>
     effect.pipe(
       Effect.mapError(
         (cause) =>
           new OrchestratorDispatchError({
-            commandId: CommandId.make("command:system:delegated-completion-delivery"),
-            commandType: "delegated_task.completion-delivery",
+            commandId:
+              command?.commandId ?? CommandId.make("command:system:delegated-completion-delivery"),
+            commandType: command?.type ?? "delegated_task.completion-delivery",
             cause,
           }),
       ),
@@ -1044,6 +1048,84 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       });
     });
+
+  const reservePendingDelegatedCompletionDelivery = Effect.fnUntraced(function* (
+    projection: Pick<
+      OrchestrationV2ThreadProjection,
+      "thread" | "runs" | "subagents" | "providerTurns"
+    >,
+    parentRun: OrchestrationV2Run,
+    emitEvent: ReturnType<typeof emit>,
+    command: OrchestrationV2Command,
+  ) {
+    const threadId = projection.thread.id;
+    const cohort = parentRun.delegatedCompletion;
+    if (
+      cohort === undefined ||
+      cohort.disposition !== "open" ||
+      cohort.delivery !== null ||
+      projection.thread.archivedAt !== null ||
+      projection.thread.deletedAt !== null
+    )
+      return;
+    const parentIsLive = hasLiveRun(projection);
+    const pendingTasks = projection.subagents.filter(
+      (task) =>
+        task.origin === "app_owned" &&
+        task.runId === parentRun.id &&
+        isTerminalDelegatedTaskStatus(task.status) &&
+        task.completionDelivery?.state === "pending" &&
+        (!parentIsLive || task.completionWake === "always"),
+    );
+    if (pendingTasks.length === 0) return;
+    const now = yield* DateTime.now;
+    const messageId = yield* mapDelegatedCompletionError(
+      idAllocator.allocate.message({
+        threadId,
+        ordinal:
+          (yield* mapDelegatedCompletionError(projectionStore.getMessageCount(threadId), command)) +
+          1,
+      }),
+      command,
+    );
+    for (const event of [
+      ...pendingTasks.map((task) => ({
+        type: "subagent.updated" as const,
+        threadId,
+        ...(task.runId === null ? {} : { runId: task.runId }),
+        nodeId: task.id,
+        driver: task.driver,
+        providerInstanceId: task.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          ...task,
+          completionDelivery: { state: "claimed" as const, observedByRunId: null },
+          updatedAt: now,
+        },
+      })),
+      {
+        type: "run.updated" as const,
+        threadId,
+        runId: parentRun.id,
+        ...(parentRun.rootNodeId === null ? {} : { nodeId: parentRun.rootNodeId }),
+        providerInstanceId: parentRun.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          ...parentRun,
+          delegatedCompletion: {
+            ...cohort,
+            nextGeneration: cohort.nextGeneration + 1,
+            delivery: {
+              generation: cohort.nextGeneration,
+              messageId,
+              taskIds: pendingTasks.map((task) => task.id),
+            },
+          },
+        },
+      },
+    ])
+      yield* emitEvent(event);
+  });
 
   const offerDelegatedCompletionDeliveries = (threadId: ThreadId) =>
     Effect.gen(function* () {
@@ -6677,18 +6759,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       completionWake: command.completionWake,
       updatedAt: now,
     };
-    // A non-terminal task needs no offer here: finalize reads the upgraded
-    // policy when the child terminalizes. Both writers hold this parent lock,
-    // so a terminal task means finalize already committed the terminal row and
-    // already made its offer decision under the pre-upgrade policy: under
-    // settled_only it offered iff the parent had no live run. Plan a delivery
-    // only when the parent has a live run now, which is precisely the case
-    // where finalize skipped. The mailbox steers a capable active session or
-    // queues behind that run. When the parent is not live, finalize already
-    // offered and a second
-    // offer would wake the parent twice. (If the parent settled in between,
-    // this skips a wake that finalize also skipped; a missed wake is cheaper
-    // than a duplicate one, and the result is already in the projection.)
+    // Preserve live-parent batching, then reserve other pending cohorts from
+    // the resulting plan. Non-terminal tasks use the policy when they finish.
+    // A settled_only result finalized while the parent ran still gets no wake if the parent finished before this upgrade.
     const parentRun =
       task.runId === null
         ? undefined
@@ -6703,6 +6776,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             task: updatedTask,
             updatedTask,
             now,
+            command,
           })
         : undefined;
     yield* emitEvent({
@@ -6715,10 +6789,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       occurredAt: now,
       payload: completionPlan?.task ?? updatedTask,
     });
-    if (completionPlan === undefined) {
-      return;
-    }
-    if (completionPlan.parentRun !== undefined) {
+    if (completionPlan?.parentRun !== undefined) {
       yield* emitEvent({
         type: "run.updated",
         threadId: command.parentThreadId,
@@ -6731,7 +6802,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: completionPlan.parentRun,
       });
     }
-    if (completionPlan.message !== undefined) {
+    if (completionPlan?.message !== undefined) {
       yield* emitEvent({
         type: "message.updated",
         threadId: command.parentThreadId,
@@ -6746,6 +6817,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: completionPlan.message,
       });
     }
+    // Reserve from the planned policy state so policy, claims and generation commit together.
+    const pending = {
+      ...parentProjection,
+      subagents: parentProjection.subagents.map((candidate) =>
+        candidate.id === task.id ? (completionPlan?.task ?? updatedTask) : candidate,
+      ),
+      runs: parentProjection.runs.map((candidate) =>
+        candidate.id === completionPlan?.parentRun?.id ? completionPlan.parentRun : candidate,
+      ),
+    };
+    for (const run of pending.runs)
+      yield* reservePendingDelegatedCompletionDelivery(pending, run, emitEvent, command);
   });
 
   const dispatchCreatedThreadRecord = Effect.fn("orchestrationV2.dispatch.createdThreadRecord")(
@@ -8407,6 +8490,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly task: OrchestrationV2Subagent;
     readonly updatedTask: OrchestrationV2Subagent;
     readonly now: DateTime.Utc;
+    readonly command?: Pick<OrchestrationV2Command, "commandId" | "type">;
   }) {
     const taskDelivery = input.updatedTask.completionDelivery;
     // delivered ownership has already settled through a completed wake run.
@@ -8560,8 +8644,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ordinal:
           (yield* mapDelegatedCompletionError(
             projectionStore.getMessageCount(input.parentRun.threadId),
+            input.command,
           )) + 1,
       }),
+      input.command,
     );
     const nextCohort = {
       disposition: "open" as const,
@@ -8950,6 +9036,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cohort.disposition === "open" &&
         projection.thread.archivedAt === null &&
         projection.thread.deletedAt === null &&
+        deliveryRun.status !== "cancelled" &&
         pendingTaskIds.length > 0;
       const nextDelivery = canReserveFollowUp
         ? {
@@ -9027,6 +9114,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) {
     const projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     const message = projection.messages.find((row) => row.id === command.messageId);
+    const deliveryRun = projection.runs.find((run) => run.id === message?.runId);
     const ownership = message?.delegatedCompletion;
     const parentRun = projection.runs.find((run) => run.id === ownership?.parentRunId);
     const cohort = parentRun?.delegatedCompletion;
@@ -9039,7 +9127,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       cohort.disposition !== "open" ||
       delivery == null ||
       delivery.messageId !== command.messageId ||
-      delivery.generation !== ownership?.generation
+      delivery.generation !== ownership?.generation ||
+      deliveryRun === undefined ||
+      deliveryRun.status === "cancelled" ||
+      deliveryRun.status === "interrupted"
     ) {
       yield* emitEvent({
         type: "thread.metadata-updated",
@@ -9672,20 +9763,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 for (const runId of terminalDeliveryRunIds) {
                   yield* finalizeDelegatedCompletionDelivery(threadId, runId);
                 }
-                const refreshed =
-                  terminalDeliveryRunIds.length === 0
-                    ? projection
-                    : yield* projectionStore.getThreadRecords(threadId, ["runs", "messages"], {
-                        messageRoles: ["user"],
-                      });
-                for (const run of refreshed.runs) {
-                  if (
-                    run.delegatedCompletion?.delivery !== null &&
-                    run.delegatedCompletion !== undefined
-                  ) {
-                    yield* offerDelegatedCompletionDelivery(threadId, run.id);
-                  }
-                }
+                yield* offerDelegatedCompletionDeliveries(threadId);
               }),
             )
             .pipe(
