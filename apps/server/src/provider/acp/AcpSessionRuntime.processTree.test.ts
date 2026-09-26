@@ -309,7 +309,8 @@ describe("terminatePosixOwnedProcessTree", () => {
           encoding: "utf8",
         },
       );
-      expect(missingTargetResult.status, missingTargetResult.stderr).toBe(125);
+      // dash runs the EXIT trap after a failed exec (125); bash as sh exits 127 without it.
+      expect([125, 127], missingTargetResult.stderr).toContain(missingTargetResult.status);
     } finally {
       packagedExecPath.mockRestore();
       NodeFS.rmSync(scratch, { recursive: true, force: true });
