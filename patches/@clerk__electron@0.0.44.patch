@@ -1,0 +1,43 @@
+diff --git a/dist/cjs/storage/index.js b/dist/cjs/storage/index.js
+index 7adc3a0df931931393e2336631f3b3f4c60fdbab..f628e546e5514e039b2bf91e87385d28a4e9c9e2 100644
+--- a/dist/cjs/storage/index.js
++++ b/dist/cjs/storage/index.js
+@@ -98,8 +98,12 @@ async function resolveCipher() {
+ function storage(options = {}) {
+ 	const store = new electron_store.default({
+ 		name: options.name ?? "clerk-tokens",
+-		...options.path ? { cwd: options.path } : {}
++		...options.path ? { cwd: options.path } : {},
++		configFileMode: 0o600
+ 	});
++	try {
++		require("node:fs").chmodSync(store.path, 0o600);
++	} catch {}
+ 	const memoryFallback = /* @__PURE__ */ new Map();
+ 	const mutationVersions = /* @__PURE__ */ new Map();
+ 	const beginMutation = (key) => {
+diff --git a/dist/esm/storage/index.js b/dist/esm/storage/index.js
+index d289bd84ca4dc6a5e2fc4c6b8f9de5bef1d7a175..195996714ecc36d818ecd480fcdeaf8e5a830d4d 100644
+--- a/dist/esm/storage/index.js
++++ b/dist/esm/storage/index.js
+@@ -1,5 +1,6 @@
+ import { safeStorage } from "electron";
+ import Store from "electron-store";
++import { chmodSync } from "node:fs";
+ 
+ //#region src/storage/index.ts
+ /**
+@@ -69,8 +70,12 @@ async function resolveCipher() {
+ function storage(options = {}) {
+ 	const store = new Store({
+ 		name: options.name ?? "clerk-tokens",
+-		...options.path ? { cwd: options.path } : {}
++		...options.path ? { cwd: options.path } : {},
++		configFileMode: 0o600
+ 	});
++	try {
++		chmodSync(store.path, 0o600);
++	} catch {}
+ 	const memoryFallback = /* @__PURE__ */ new Map();
+ 	const mutationVersions = /* @__PURE__ */ new Map();
+ 	const beginMutation = (key) => {
