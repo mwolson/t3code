@@ -5,6 +5,7 @@
  * Native and canonical views share batching, rotation, and retention state so
  * they cannot race while appending to the same thread-scoped file.
  */
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
@@ -36,6 +37,8 @@ const MAX_RECORD_CHARACTERS = 64 * 1024;
 const MAX_RECORD_FIELDS = 1_024;
 const MAX_RECORD_DEPTH = 16;
 const GLOBAL_THREAD_SEGMENT = "_global";
+const THREAD_SEGMENT_PREFIX_MAX_CHARS = 64;
+const THREAD_SEGMENT_HASH_HEX_CHARS = 32;
 const LOG_SCOPE = "provider-observability";
 const encodeUnknownJsonString = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
@@ -173,9 +176,22 @@ function logWarning(message: string, context: Record<string, unknown>): Effect.E
   return Effect.logWarning(message, context).pipe(Effect.annotateLogs({ scope: LOG_SCOPE }));
 }
 
-function resolveThreadSegment(raw: string | null | undefined): string {
-  const normalized = typeof raw === "string" ? toSafeThreadAttachmentSegment(raw) : null;
-  return normalized ?? GLOBAL_THREAD_SEGMENT;
+/**
+ * File-name segment for one thread's provider log. The readable prefix is
+ * lossy (case, punctuation and length), so a hash of the complete raw id keeps
+ * threads that normalize alike, such as retries of one delegated task, in
+ * separate files. Records without a thread share the global file.
+ */
+export function providerEventLogThreadSegment(threadId: string | null | undefined): string {
+  if (typeof threadId !== "string" || threadId.length === 0) return GLOBAL_THREAD_SEGMENT;
+  const readable = (toSafeThreadAttachmentSegment(threadId) ?? "thread")
+    .slice(0, THREAD_SEGMENT_PREFIX_MAX_CHARS)
+    .replace(/[-_]+$/g, "");
+  const hash = NodeCrypto.createHash("sha256")
+    .update(threadId, "utf8")
+    .digest("hex")
+    .slice(0, THREAD_SEGMENT_HASH_HEX_CHARS);
+  return `${readable.length > 0 ? readable : "thread"}-${hash}`;
 }
 
 function resolveStreamLabel(stream: EventNdjsonStream): string {
@@ -758,7 +774,12 @@ export const makeEventNdjsonLogStore = Effect.fnUntraced(function* (
           return Effect.succeed([{ flush: false }, state] as const);
         }
         const pending = state.pending;
-        pending.push({ stream, threadSegment: resolveThreadSegment(threadId), line, bytes });
+        pending.push({
+          stream,
+          threadSegment: providerEventLogThreadSegment(threadId),
+          line,
+          bytes,
+        });
         const pendingBytes = state.pendingBytes + bytes;
         const flush =
           resolved.batchWindowMs === 0 ||
