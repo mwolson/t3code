@@ -87,6 +87,7 @@ index 4d33b3fe426070cf312fc493ce902b2c24d853ea..e619708b95865afd8b43dd8f0a6523fc
  };
  exports.computeIOSContentOffset = computeIOSContentOffset;
  //# sourceMappingURL=helpers.js.map
+\ No newline at end of file
 diff --git a/lib/commonjs/components/KeyboardChatScrollView/useChatKeyboard/index.ios.js b/lib/commonjs/components/KeyboardChatScrollView/useChatKeyboard/index.ios.js
 index 2073da84b8b2be291aa3181700c2b18a75d0fc56..7ae9bb220ce3cc23c788a79677afdc7d9547a27c 100644
 --- a/lib/commonjs/components/KeyboardChatScrollView/useChatKeyboard/index.ios.js
@@ -221,6 +222,7 @@ index 0d50bdfeb7bbc5c14a31ed344f8a690e4fd340b3..e0b73653fd1dd23f0f2e2c85835a3d10
 +  }, [inverted, keyboardLiftBehavior, adjustedInsetCompensation, adjustedStartInsetCompensation]);
  }
  //# sourceMappingURL=index.js.map
+\ No newline at end of file
 diff --git a/lib/module/components/KeyboardChatScrollView/index.js b/lib/module/components/KeyboardChatScrollView/index.js
 index 612dd8bd9bd6cc3e30a5acac937ea3383eb1b630..76b858a6590ad0592cc663864ea822db55eaeceb 100644
 --- a/lib/module/components/KeyboardChatScrollView/index.js
@@ -319,6 +321,7 @@ index 295e2219b560519b8d033968b5105d1da3e77315..ff7ee3fe0d880c2287a7b70d5ecf952e
 +  return Math.min(Math.max(keyboardHeight + relativeScroll, minScroll), maxScroll);
  };
  //# sourceMappingURL=helpers.js.map
+\ No newline at end of file
 diff --git a/lib/module/components/KeyboardChatScrollView/useChatKeyboard/index.ios.js b/lib/module/components/KeyboardChatScrollView/useChatKeyboard/index.ios.js
 index 52943c3a7d6a68fe2094dc1d112c07e6b9d890e4..cc4bfae859191aeb848179028b7217098cba2340 100644
 --- a/lib/module/components/KeyboardChatScrollView/useChatKeyboard/index.ios.js
@@ -454,6 +457,7 @@ index 1afa50987a8d2a5fe3f36b20945efe804d48a873..7b05d0721c50e118cf78c07913b580a3
  }
  export { useExtraContentPadding };
  //# sourceMappingURL=index.js.map
+\ No newline at end of file
 diff --git a/lib/typescript/components/KeyboardChatScrollView/types.d.ts b/lib/typescript/components/KeyboardChatScrollView/types.d.ts
 index a036b431f03efb9d5379527c17db6fce62bfee09..5e56bf7edec9161698a745e8e6292bfccd68d3db 100644
 --- a/lib/typescript/components/KeyboardChatScrollView/types.d.ts
