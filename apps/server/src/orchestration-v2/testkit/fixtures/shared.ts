@@ -73,6 +73,15 @@ export const OPENCODE2_INTERRUPT_PROMPT =
   "Run the shell command `sleep 60 && echo LATE` with the bash tool, then reply DONE.";
 export const OPENCODE2_PERMISSION_PROMPT =
   "Run the shell command `echo FIRST` with the bash tool. After it completes, run `echo SECOND` with the bash tool. Then reply with what happened.";
+export const OPENCODE2_STEER_PROMPT =
+  "Run the shell command `sleep 12 && echo A` with the bash tool, then reply DONE_A.";
+export const OPENCODE2_STEER_TEXT = "Also mention the word STEERED in your final reply.";
+export const OPENCODE2_QUEUED_PROMPT = "Reply exactly QUEUED_B.";
+export const OPENCODE2_CANCELLED_PROMPT = "Reply exactly QUEUED_C.";
+export const OPENCODE2_REVERT_FIRST_PROMPT =
+  "Create a file named reverted.txt containing the word ALPHA using the write tool, then reply DONE.";
+export const OPENCODE2_REVERT_SECOND_PROMPT =
+  "Overwrite reverted.txt so it contains the word BETA using the write tool, then reply DONE.";
 export const OPENCODE2_QUESTION_PROMPT =
   "Before doing anything, use the question tool to ask me which color I prefer, offering the options red and blue. After I answer, reply with only the chosen color.";
 export const OPENCODE2_SUBAGENT_PROMPT =

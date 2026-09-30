@@ -16,7 +16,9 @@ import {
   type RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 
 import {
   OPENCODE2_HTTP_PROTOCOL,
@@ -27,8 +29,12 @@ import { provideDeterministicTestRuntime } from "./testkit/DeterministicRuntime.
 import type { OrchestratorV2ScenarioStep } from "./testkit/OrchestratorScenario.ts";
 import { runOrchestratorV2ProviderReplayScenario } from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "./testkit/ReplayFixtureWorkspace.ts";
+import { readProviderReplayTranscript } from "./testkit/ReplayTranscriptNdjson.ts";
+import * as IdAllocator from "./IdAllocator.ts";
 
 const SESSION = "ses_f148ca2deffeJcwCnRQtb0YFNX";
+/** Held until the scenario releases it, so the turn is still running meanwhile. */
+const FIRST_TURN_END = "first-turn-end";
 const instanceId = ProviderInstanceId.make("opencode");
 const bigPickle: ModelSelection = { instanceId, model: "opencode/big-pickle" };
 const mimo: ModelSelection = { instanceId, model: "opencode/mimo-v2.6-flash-free" };
@@ -48,6 +54,8 @@ const event = (type: string, data: Record<string, unknown>): ProviderReplayEntry
     event: { id: `evt_${type.replaceAll(".", "")}`, created: 1, type, data },
   },
 });
+const labelled = (entry: ProviderReplayEntry, label: string): ProviderReplayEntry =>
+  entry.type === "runtime_exit" ? entry : { ...entry, label };
 const T3_RULES = [{ action: "*", resource: "*", effect: "allow" }];
 /** Paths the build and plan agents allow for themselves, as 2.0.18 lists them. */
 const BUILD_PATHS = [
@@ -510,5 +518,155 @@ describe("OpenCode 2 through the orchestrator", () => {
         ["completed", "completed"],
       );
     }).pipe(Effect.scoped),
+  );
+
+  it.effect("forks from an earlier turn before the next turn's user message", () =>
+    Effect.gen(function* () {
+      const name = "opencode2-fork";
+      const cwd = yield* checkpointWorkspace(name);
+      const recorded = yield* readProviderReplayTranscript(
+        new URL("./testkit/fixtures/opencode2_fork/opencode_transcript.ndjson", import.meta.url),
+      );
+      const transcript = yield* OpenCode2OrchestratorReplayHarness.decodeTranscript(recorded);
+      const source = threadCommands({ name, worktreePath: cwd });
+      const target = ThreadId.make(`thread:${name}:target`);
+      const [one, two] = [source.message("one"), source.message("two")];
+      const commands: ReadonlyArray<OrchestrationV2Command> = [
+        source.create,
+        one,
+        two,
+        {
+          type: "thread.fork",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: source.command("fork"),
+          sourceThreadId: source.threadId,
+          targetThreadId: target,
+          sourcePoint: {
+            type: "run",
+            runId: (yield* IdAllocator.IdAllocatorV2).derive.run({
+              threadId: source.threadId,
+              ordinal: 1,
+            }),
+          },
+        },
+        {
+          ...source.message("repeat"),
+          threadId: target,
+          messageId: MessageId.make(`message:${name}:repeat`),
+        },
+      ];
+      const steps: Array<OrchestratorV2ScenarioStep> = commands.flatMap((command) => [
+        { type: "dispatch" as const, command },
+        { type: "advance_clock" as const, duration: "1 millis" as const },
+        ...(command.type === "message.dispatch"
+          ? [{ type: "await_thread_idle" as const, threadId: command.threadId }]
+          : []),
+      ]);
+      const result = yield* runOrchestratorV2ProviderReplayScenario(
+        { name, transcript, commands, steps, projectionThreadIds: [source.threadId, target] },
+        OpenCode2OrchestratorReplayHarness,
+      ).pipe(provideDeterministicTestRuntime);
+      const forked = result.projections.get(target);
+      assert.isDefined(forked);
+      assert.equal(forked.contextTransfers[0]?.resolution?.strategy, "native_fork");
+      assert.equal(
+        forked.providerThreads[0]?.nativeThreadRef?.nativeId,
+        recorded.metadata?.["forkedNativeSessionId"],
+      );
+      // The fork keeps the first turn and drops the second: the model answers
+      // from the first alone, and T3 shows the inherited turn but not the other.
+      assert.deepEqual(
+        forked.runs.map((run) => run.status),
+        ["completed"],
+      );
+      const visible = forked.visibleTurnItems.flatMap((row) =>
+        row.item.type === "assistant_message" ? [row.item.text] : [],
+      );
+      assert.deepEqual(visible, ["ONE", "ONE"]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, IdAllocator.layer))),
+  );
+
+  it.effect("never sends OpenCode a queued message that was cancelled", () =>
+    Effect.gen(function* () {
+      const name = "opencode2-queued-cancel";
+      const cwd = yield* checkpointWorkspace(name);
+      const thread = threadCommands({ name, worktreePath: cwd });
+      const queued = (key: string): OrchestrationV2Command => ({
+        ...thread.message(key),
+        dispatchMode: { type: "queue_after_active" },
+      });
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const run = (ordinal: number) => ids.derive.run({ threadId: thread.threadId, ordinal });
+      // The first turn is held open until the queue has been changed: its end
+      // is the last event, after the cancel.
+      const [first, second, third] = [thread.message("first"), queued("second"), queued("third")];
+      const cancel: OrchestrationV2Command = {
+        type: "queued-run.cancel",
+        commandId: thread.command("cancel"),
+        threadId: thread.threadId,
+        runId: run(2),
+      };
+      const transcript = yield* OpenCode2OrchestratorReplayHarness.decodeTranscript({
+        provider: OPENCODE_PROVIDER,
+        protocol: OPENCODE2_HTTP_PROTOCOL,
+        version: "2.0.18",
+        scenario: name,
+        entries: [
+          ...createdSession(cwd),
+          out("session.prompt", { sessionID: SESSION, id: "<any>", text: "<any>" }),
+          reply("session.prompt", {
+            data: {
+              id: "msg_user_FIRST",
+              sessionID: SESSION,
+              time: { created: 1 },
+              type: "user",
+              payload: { text: "<prompt>" },
+              delivery: "steer",
+            },
+          }),
+          // Only the third message reaches OpenCode, as the next turn.
+          ...answeredPrompt("THIRD"),
+        ],
+      });
+      const steps: Array<OrchestratorV2ScenarioStep> = [
+        { type: "dispatch", command: thread.create },
+        { type: "advance_clock", duration: "1 millis" },
+        { type: "dispatch", command: first, await: false, key: "first" },
+        { type: "await_run_steerable", threadId: thread.threadId, runId: run(1) },
+        { type: "dispatch", command: second },
+        { type: "dispatch", command: third },
+        { type: "dispatch", command: cancel },
+        { type: "await_run_status", threadId: thread.threadId, runId: run(2), status: "cancelled" },
+        { type: "release_replay_gate", label: FIRST_TURN_END },
+        { type: "await", key: "first" },
+        { type: "await_thread_idle", threadId: thread.threadId },
+      ];
+      const result = yield* runOrchestratorV2ProviderReplayScenario(
+        {
+          name,
+          transcript: {
+            ...transcript,
+            entries: [
+              ...transcript.entries.slice(0, -4),
+              labelled(
+                event("session.execution.succeeded", { sessionID: SESSION }),
+                FIRST_TURN_END,
+              ),
+              ...transcript.entries.slice(-4),
+            ],
+          },
+          commands: [thread.create, first, second, third, cancel],
+          steps,
+        },
+        OpenCode2OrchestratorReplayHarness,
+      ).pipe(provideDeterministicTestRuntime);
+      const projection = result.projections.get(thread.threadId);
+      assert.isDefined(projection);
+      assert.deepEqual(
+        projection.runs.map((candidate) => candidate.status),
+        ["completed", "cancelled", "completed"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, IdAllocator.layer))),
   );
 });

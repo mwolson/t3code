@@ -5,11 +5,13 @@
  */
 import { assert, it } from "@effect/vitest";
 import {
+  CheckpointId,
   MessageId,
   NodeId,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
   RunAttemptId,
   RunId,
   ThreadId,
@@ -34,6 +36,7 @@ import type {
   ProviderAdapterV2SessionRuntime,
 } from "../ProviderAdapter.ts";
 import * as IdAllocator from "../IdAllocator.ts";
+import type { ProviderContinuationRequest } from "../ProviderContinuationRequests.ts";
 import * as ProviderContinuationRequests from "../ProviderContinuationRequests.ts";
 import { OPENCODE_PROVIDER } from "./OpenCodeAdapterV2.ts";
 import { OPENCODE_2_STILL_STOPPING } from "./OpenCode2AdapterV2.ts";
@@ -1663,6 +1666,261 @@ describe("OpenCode2 adapter", () => {
       const runtime = yield* openCode2ReplayRuntime([...opening]);
       assert.equal(runtime.getModelContextWindow?.(bigPickle), 160000);
     }).pipe(Effect.scoped),
+  );
+
+  it.effect("clears a staged revert whose commit failed, before the next prompt too", () =>
+    Effect.gen(function* () {
+      const kept = "msg_t3_turn_run-attempt:kept:1";
+      const dropped = "msg_t3_turn_run-attempt:dropped:1";
+      const { runtime, thread } = yield* resumed([
+        out("message.list", "<any>"),
+        reply("message.list", {
+          data: [
+            { id: dropped, time: { created: 2 }, text: "second", type: "user" },
+            { id: kept, time: { created: 1 }, text: "first", type: "user" },
+          ],
+          cursor: {},
+        }),
+        out("session.revert.stage", { sessionID: SESSION, messageID: dropped, files: false }),
+        replyData("session.revert.stage", { messageID: dropped, files: [] }),
+        out("session.revert.commit", { sessionID: SESSION }),
+        reply("session.revert.commit", {
+          status: 500,
+          body: { _tag: "UnknownError", message: "disk I/O error" },
+        }),
+        // Uncleared, OpenCode would commit the stage on the next prompt.
+        out("session.revert.clear", { sessionID: SESSION }),
+        reply("session.revert.clear", {
+          status: 500,
+          body: { _tag: "UnknownError", message: "busy" },
+        }),
+        // The next turn clears it first, then waits out the empty execution `clear` runs.
+        out("session.revert.clear", { sessionID: SESSION }),
+        reply("session.revert.clear", null),
+        event("session.execution.started", { sessionID: SESSION }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+        out("session.prompt", { sessionID: SESSION, id: "<any>", text: "<any>" }),
+        promptAccepted,
+        event("session.execution.started", { sessionID: SESSION }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const now = yield* DateTime.now;
+      const turn = (attempt: string, ordinal: number) => ({
+        id: ProviderTurnId.make(`provider-turn:${attempt}`),
+        providerThreadId: thread.id,
+        nodeId: NodeId.make(`node:${attempt}`),
+        runAttemptId: RunAttemptId.make(`run-attempt:${attempt}:1`),
+        nativeTurnRef: {
+          driver: OPENCODE_PROVIDER,
+          nativeId: `msg_t3_turn_run-attempt:${attempt}:1`,
+          strength: "weak" as const,
+        },
+        ordinal,
+        status: "completed" as const,
+        startedAt: now,
+        completedAt: now,
+      });
+      const rollback = yield* runtime
+        .rollbackThread({
+          providerThread: thread,
+          target: {
+            type: "provider_turn",
+            checkpointId: CheckpointId.make("checkpoint:kept"),
+            appRunOrdinal: 1,
+            providerTurn: turn("kept", 1),
+          },
+          providerThreadTurns: [turn("kept", 1), turn("dropped", 2)],
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(rollback));
+      yield* runtime.startTurn(turnInput(thread));
+      assert.equal((yield* terminalOf(runtime))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("offers no follow-up for the execution a cleared revert starts", () =>
+    Effect.gen(function* () {
+      const kept = "msg_t3_turn_run-attempt:kept:1";
+      const dropped = "msg_t3_turn_run-attempt:dropped:1";
+      const offers: Array<ProviderContinuationRequest> = [];
+      const { runtime, thread } = yield* resumed([
+        out("message.list", "<any>"),
+        reply("message.list", {
+          data: [
+            { id: dropped, time: { created: 2 }, text: "second", type: "user" },
+            { id: kept, time: { created: 1 }, text: "first", type: "user" },
+          ],
+          cursor: {},
+        }),
+        out("session.revert.stage", { sessionID: SESSION, messageID: dropped, files: false }),
+        replyData("session.revert.stage", { messageID: dropped, files: [] }),
+        out("session.revert.commit", { sessionID: SESSION }),
+        reply("session.revert.commit", {
+          status: 500,
+          body: { _tag: "UnknownError", message: "disk I/O error" },
+        }),
+        // Uncleared, OpenCode would commit the stage on the next prompt. The
+        // clear wakes the session into an empty execution of its own, with no
+        // turn of T3's running: it is no subagent's follow-up.
+        out("session.revert.clear", { sessionID: SESSION }),
+        reply("session.revert.clear", null),
+        event("session.revert.cleared", { sessionID: SESSION }),
+        event("session.execution.started", { sessionID: SESSION }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]).pipe(
+        Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+          offer: (request) => Effect.sync(() => void offers.push(request)),
+          take: Effect.never,
+        }),
+      );
+      const now = yield* DateTime.now;
+      const turn = (attempt: string, ordinal: number) => ({
+        id: ProviderTurnId.make(`provider-turn:${attempt}`),
+        providerThreadId: thread.id,
+        nodeId: NodeId.make(`node:${attempt}`),
+        runAttemptId: RunAttemptId.make(`run-attempt:${attempt}:1`),
+        nativeTurnRef: {
+          driver: OPENCODE_PROVIDER,
+          nativeId: `msg_t3_turn_run-attempt:${attempt}:1`,
+          strength: "weak" as const,
+        },
+        ordinal,
+        status: "completed" as const,
+        startedAt: now,
+        completedAt: now,
+      });
+      const rollback = yield* runtime
+        .rollbackThread({
+          providerThread: thread,
+          target: {
+            type: "provider_turn",
+            checkpointId: CheckpointId.make("checkpoint:kept"),
+            appRunOrdinal: 1,
+            providerTurn: turn("kept", 1),
+          },
+          providerThreadTurns: [turn("kept", 1), turn("dropped", 2)],
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(rollback));
+      assert.lengthOf(offers, 0);
+      assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("ends a follow-up turn a steer joined exactly once", () =>
+    Effect.gen(function* () {
+      const reportText = `<subagent sessionID="${CHILD}" state="completed" description="Sleep">\nCHILD_OK\n</subagent>`;
+      const steerId = "msg_t3_steer_message:opencode2-adapter:steer";
+      const offers: Array<ProviderContinuationRequest> = [];
+      const { runtime, thread } = yield* resumed([
+        ...backgroundLaunch(CHILD),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+        event("session.execution.succeeded", { sessionID: CHILD }),
+        event("session.inbox.enqueued", {
+          inboxID: "msg_report",
+          sessionID: SESSION,
+          item: {
+            type: "synthetic",
+            payload: {
+              text: reportText,
+              description: "Sleep",
+              metadata: {
+                source: "subagent",
+                childID: CHILD,
+                agent: "General",
+                state: "completed",
+              },
+            },
+            delivery: "steer",
+          },
+        }),
+        // OpenCode starts the follow-up on its own; T3 holds it for its turn.
+        event("session.execution.started", { sessionID: SESSION }),
+        event("session.inbox.delivered", { sessionID: SESSION, inboxID: "msg_report" }),
+        // The user steers into the follow-up turn; its execution reads the steer.
+        out("session.prompt", {
+          sessionID: SESSION,
+          id: steerId,
+          text: "<any>",
+          delivery: "steer",
+        }),
+        replyData("session.prompt", {
+          id: steerId,
+          sessionID: SESSION,
+          time: { created: 1790656601500 },
+          type: "user",
+          payload: { text: "Also say STEERED." },
+          delivery: "steer",
+        }),
+        event("session.inbox.delivered", { sessionID: SESSION, inboxID: steerId }),
+        event("session.text.ended", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_followup",
+          ordinal: 0,
+          text: "CHILD_OK STEERED",
+        }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]).pipe(
+        Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+          offer: (request) => Effect.sync(() => void offers.push(request)),
+          take: Effect.never,
+        }),
+      );
+      const terminals: Array<string> = [];
+      const followUpEnded = yield* Deferred.make<void>();
+      yield* runtime.events.pipe(
+        Stream.tap((event) =>
+          Effect.gen(function* () {
+            if (event.type !== "turn.terminal") return;
+            terminals.push(event.status);
+            if (terminals.length === 2) yield* Deferred.succeed(followUpEnded, undefined);
+          }),
+        ),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(withLineage(thread));
+      // The launching turn ends; then the held follow-up is offered and taken.
+      yield* Effect.gen(function* () {
+        while (offers.length === 0) yield* Effect.yieldNow;
+      }).pipe(Effect.timeout("2 seconds"), Effect.orDie);
+      const followUp = {
+        ...withLineage(thread),
+        runId: RunId.make("run:opencode2-adapter:wake"),
+        runOrdinal: 2,
+        providerTurnOrdinal: 2,
+        attemptId: RunAttemptId.make("attempt:opencode2-adapter:wake"),
+        message: {
+          ...turnInput(thread).message,
+          messageId: MessageId.make("message:opencode2-adapter:wake"),
+          createdBy: "agent" as const,
+          creationSource: "provider" as const,
+        },
+      };
+      yield* runtime.startTurn(followUp);
+      const followUpTurnId = (yield* IdAllocator.IdAllocatorV2).derive.providerTurn({
+        driver: OPENCODE_PROVIDER,
+        nativeTurnId: `${SESSION}:attempt:attempt:opencode2-adapter:wake`,
+      });
+      yield* runtime.steerTurn({
+        threadId,
+        runId: followUp.runId,
+        providerThread: thread,
+        providerTurnId: followUpTurnId,
+        message: {
+          ...turnInput(thread).message,
+          messageId: MessageId.make("message:opencode2-adapter:steer"),
+          text: "Also say STEERED.",
+        },
+      });
+      yield* Deferred.await(followUpEnded);
+      // The launching turn and the steered follow-up end once each. The
+      // replay has no frame after the follow-up's end, so a second end of the
+      // follow-up (or another continuation) would show here or fail the replay.
+      yield* Effect.yieldNow;
+      assert.deepEqual(terminals, ["completed", "completed"]);
+      assert.lengthOf(offers, 1);
+    }).pipe(Effect.scoped, Effect.provide(IdAllocator.layer)),
   );
 });
 

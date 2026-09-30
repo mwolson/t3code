@@ -119,7 +119,12 @@ function materializeMessageIds(value: unknown, messageIds: ReadonlyMap<string, s
   return Object.fromEntries(
     Object.entries(record).map(([key, entry]) => [
       key,
-      typeof entry === "string" && (key === "id" || key === "messageID" || key === "parentID")
+      typeof entry === "string" &&
+      (key === "id" ||
+        key === "messageID" ||
+        key === "parentID" ||
+        key === "inboxID" ||
+        key === "before")
         ? (messageIds.get(entry) ?? entry)
         : materializeMessageIds(entry, messageIds),
     ]),
@@ -149,12 +154,16 @@ export class OpenCodeReplayController {
       const actualFrame = frameRecord(actual);
       const messageIds = new Map(this.messageIds);
       let conflictingMessageId = false;
+      // A message id the client picks (1.x prompts, 2.x steers) replaces the
+      // recorded one everywhere after it, so replies and events carry the live id.
+      const idKey = expectedFrame?.type === "session.promptAsync" ? "messageID" : "id";
       if (
-        expectedFrame?.type === "session.promptAsync" &&
+        (expectedFrame?.type === "session.promptAsync" ||
+          expectedFrame?.type === "session.prompt") &&
         actualFrame?.type === expectedFrame.type
       ) {
-        const recordedId = frameRecord(expectedFrame.input)?.messageID;
-        const actualId = frameRecord(actualFrame.input)?.messageID;
+        const recordedId = frameRecord(expectedFrame.input)?.[idKey];
+        const actualId = frameRecord(actualFrame.input)?.[idKey];
         if (
           typeof recordedId === "string" &&
           typeof actualId === "string" &&
@@ -233,7 +242,23 @@ export class OpenCodeReplayController {
     }
   }
 
-  async *events(signal?: AbortSignal): AsyncIterable<unknown> {
+  /**
+   * Like {@link untilEventsDelivered}, but also waits for recorded responses to
+   * be taken: over HTTP a request can start while an earlier one's answer is
+   * still in flight, and must not be matched against that answer.
+   */
+  async untilInboundDelivered(): Promise<void> {
+    while (true) {
+      this.throwFailure();
+      if (this.transcript.entries[this.cursor]?.type !== "emit_inbound") return;
+      await this.changed();
+    }
+  }
+
+  async *events(
+    signal?: AbortSignal,
+    beforeEmit?: (label: string | undefined) => Promise<void>,
+  ): AsyncIterable<unknown> {
     while (true) {
       if (signal?.aborted === true) return;
       this.throwFailure();
@@ -241,6 +266,8 @@ export class OpenCodeReplayController {
       if (entry?.type === "emit_inbound") {
         const frame = frameRecord(entry.frame);
         if (frame?.type === "sdk.event") {
+          // A scenario can hold an event until it has done what happened meanwhile.
+          if (beforeEmit !== undefined) await beforeEmit(entry.label);
           if (entry.afterMs !== undefined && entry.afterMs > 0) {
             await Effect.runPromise(Effect.sleep(Duration.millis(entry.afterMs)));
           }
