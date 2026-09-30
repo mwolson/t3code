@@ -85,8 +85,34 @@ const answeredPrompt = (text: string): ReadonlyArray<ProviderReplayEntry> => [
   }),
   event("session.execution.succeeded", { sessionID: SESSION }),
 ];
+/** A `/api/model` entry as 2.0.18 lists it; a known window means no re-read after a turn. */
+const catalogModel = (id: string, name: string) => ({
+  id,
+  modelID: id,
+  providerID: "opencode",
+  family: id,
+  name,
+  compatibility: { reasoningField: "reasoning_content" },
+  package: "@opencode/ai/providers/openai-compatible",
+  settings: { apiKey: "public", baseURL: "https://opencode.ai/zen/v1", provider: "opencode" },
+  capabilities: { tools: true, input: ["text"], output: ["text"] },
+  variants: [],
+  time: { released: 1760659200000 },
+  cost: [{ input: 0, output: 0, cache: { read: 0, write: 0 } }],
+  status: "active",
+  enabled: true,
+  limit: { context: 200000, input: 160000, output: 32000 },
+});
 const createdSession = (directory: string): ReadonlyArray<ProviderReplayEntry> => [
   out("event.subscribe"),
+  out("model.list", "<any>"),
+  reply("model.list", {
+    location: { directory },
+    data: [
+      catalogModel("big-pickle", "Big Pickle"),
+      catalogModel("mimo-v2.6-flash-free", "MiMo V2.6 Flash Free"),
+    ],
+  }),
   out("session.create", "<any>"),
   reply("session.create", sessionInfo(directory)),
 ];

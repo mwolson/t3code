@@ -77,6 +77,30 @@ const sessionInfo = (overrides: Record<string, unknown> = {}) => ({
   location: { directory: WORK },
   ...overrides,
 });
+// `/api/model` as 2.0.18 lists big-pickle: its 160k input limit is the usable window.
+const modelCatalog = {
+  location: { directory: WORK },
+  data: [
+    {
+      id: "big-pickle",
+      modelID: "big-pickle",
+      providerID: "opencode",
+      family: "big-pickle",
+      name: "Big Pickle",
+      compatibility: { reasoningField: "reasoning_content" },
+      package: "@opencode/ai/providers/openai-compatible",
+      settings: { apiKey: "public", baseURL: "https://opencode.ai/zen/v1", provider: "opencode" },
+      capabilities: { tools: true, input: ["text"], output: ["text"] },
+      variants: [],
+      time: { released: 1760659200000 },
+      cost: [{ input: 0, output: 0, cache: { read: 0, write: 0 } }],
+      status: "active",
+      enabled: true,
+      limit: { context: 200000, input: 160000, output: 32000 },
+    },
+  ],
+};
+
 const promptAccepted = replyData("session.prompt", {
   id: "msg_0eb735d41001NJee1EvVePJAK5",
   sessionID: SESSION,
@@ -85,6 +109,13 @@ const promptAccepted = replyData("session.prompt", {
   payload: { text: "hi" },
   delivery: "steer",
 });
+
+/** What every session sends when it opens: the event stream, then the model list. */
+const opening: ReadonlyArray<ProviderReplayEntry> = [
+  out("event.subscribe"),
+  out("model.list", "<any>"),
+  reply("model.list", modelCatalog),
+];
 
 const bigPickle: ModelSelection = { instanceId, model: "opencode/big-pickle" };
 const policy = (runtimeMode: "full-access" | "approval-required" = "full-access") => ({
@@ -142,7 +173,7 @@ const resumed = (entries: ReadonlyArray<ProviderReplayEntry>, options?: { extern
   Effect.gen(function* () {
     const runtime = yield* openCode2ReplayRuntime(
       [
-        out("event.subscribe"),
+        ...opening,
         out("session.get", { sessionID: SESSION }),
         replyData("session.get", sessionInfo()),
         ...entries,
@@ -167,6 +198,39 @@ const terminalOf = (runtime: ProviderAdapterV2SessionRuntime) =>
     Stream.runHead,
     Effect.map(Option.getOrUndefined),
   );
+
+// The history the spike read back after its `simple` turn (recordings/simple.ndjson).
+const history = {
+  data: [
+    {
+      id: "msg_0eb732081001RntUJfRtTXOAjd",
+      time: { created: 1790656585885 },
+      text: "Think carefully step by step about whether 391 is prime, showing your reasoning, then answer in one short sentence.",
+      type: "user",
+    },
+    {
+      id: "msg_0eb7320a9001vve3OV5uNi2HRT",
+      time: { created: 1790656585925, streamed: 1790656590719, completed: 1790656590736 },
+      type: "assistant",
+      agent: "build",
+      model: { id: "space-bunny-free", providerID: "opencode", variant: "high" },
+      content: [
+        { type: "reasoning", text: "Check divisibility up to sqrt(391)." },
+        { type: "text", text: "391 is not prime: it's the product 17 × 23." },
+      ],
+      finish: "stop",
+      cost: 0,
+      tokens: { input: 8701, output: 113, reasoning: 147, cache: { read: 489, write: 0 } },
+    },
+    {
+      id: "msg_0eb733399001NhwTrB32UU6d6H",
+      time: { created: 1790656590745 },
+      type: "idle",
+      outcome: "succeeded",
+    },
+  ],
+  cursor: {},
+};
 
 describe("OpenCode2 adapter", () => {
   it.effect("switches the session's model and variant before a turn that changed them", () =>
@@ -281,7 +345,7 @@ describe("OpenCode2 adapter", () => {
   it.effect("denies the subagent tool on the sessions it creates", () =>
     Effect.gen(function* () {
       const runtime = yield* openCode2ReplayRuntime([
-        out("event.subscribe"),
+        ...opening,
         out("session.create", {
           location: { directory: WORK },
           model: { providerID: "opencode", id: "big-pickle" },
@@ -567,7 +631,7 @@ describe("OpenCode2 adapter", () => {
 
   it.effect("refuses to resume a thread without an OpenCode session as a protocol error", () =>
     Effect.gen(function* () {
-      const runtime = yield* openCode2ReplayRuntime([out("event.subscribe")]);
+      const runtime = yield* openCode2ReplayRuntime(opening);
       const failed = yield* runtime
         .resumeThread({
           providerThread: { ...providerThread(yield* DateTime.now), nativeThreadRef: null },
@@ -580,7 +644,7 @@ describe("OpenCode2 adapter", () => {
   it.effect("gives a resumed session T3's rules when it was made with others", () =>
     Effect.gen(function* () {
       const runtime = yield* openCode2ReplayRuntime([
-        out("event.subscribe"),
+        ...opening,
         out("session.get", { sessionID: SESSION }),
         // Made before the subagent rule: it still allows everything.
         replyData(
@@ -602,7 +666,7 @@ describe("OpenCode2 adapter", () => {
   it.effect("moves the session when the thread's worktree changed", () =>
     Effect.gen(function* () {
       const runtime = yield* openCode2ReplayRuntime([
-        out("event.subscribe"),
+        ...opening,
         out("session.get", { sessionID: SESSION }),
         replyData("session.get", sessionInfo()),
         out("session.move", { sessionID: SESSION, directory: "/work/opencode2-feature" }),
@@ -622,7 +686,7 @@ describe("OpenCode2 adapter", () => {
     () =>
       Effect.gen(function* () {
         const runtime = yield* openCode2ReplayRuntime([
-          out("event.subscribe"),
+          ...opening,
           out("session.get", { sessionID: SESSION }),
           replyData("session.get", sessionInfo()),
           out("session.move", { sessionID: SESSION, directory: "/work/opencode2-feature" }),
@@ -665,7 +729,7 @@ describe("OpenCode2 adapter", () => {
   it.effect("refuses a model slug that is not provider/model before creating a session", () =>
     Effect.gen(function* () {
       // Nothing but the session's opening is expected: no create, no prompt.
-      const runtime = yield* openCode2ReplayRuntime([out("event.subscribe")]);
+      const runtime = yield* openCode2ReplayRuntime([...opening]);
       const created = yield* runtime
         .ensureThread({
           threadId,
@@ -818,6 +882,102 @@ describe("OpenCode2 adapter", () => {
         last?.type === "provider_session.updated" ? last.providerSession.status : undefined,
         "error",
       );
+    }).pipe(Effect.scoped),
+  );
+  it.effect("reads user and assistant text from the session's message list", () =>
+    Effect.gen(function* () {
+      const runtime = yield* openCode2ReplayRuntime([
+        ...opening,
+        out("message.list", { sessionID: SESSION, order: "asc", limit: "100" }),
+        reply("message.list", history),
+      ]);
+      const snapshot = yield* runtime.readThreadSnapshot({
+        providerThread: providerThread(yield* DateTime.now),
+      });
+      assert.deepEqual(
+        snapshot.messages.map((message) => [message.role, message.text]),
+        [
+          ["user", history.data[0]!.text],
+          ["assistant", "391 is not prime: it's the product 17 × 23."],
+        ],
+      );
+      assert.equal(
+        snapshot.providerThread.nativeConversationHeadRef?.nativeId,
+        history.data[0]!.id,
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("ends a turn before re-reading a model list that never answers", () =>
+    Effect.gen(function* () {
+      // The session opened before the catalog loaded, so the turn's model has no window.
+      const runtime = yield* openCode2ReplayRuntime([
+        out("event.subscribe"),
+        out("model.list", "<any>"),
+        reply("model.list", { location: { directory: WORK }, data: [] }),
+        out("session.get", { sessionID: SESSION }),
+        replyData("session.get", sessionInfo()),
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.execution.succeeded", { sessionID: SESSION }),
+        out("model.list", "<any>"),
+        reply("model.list", "<hang>"),
+      ]);
+      const thread = yield* runtime.resumeThread({
+        providerThread: providerThread(yield* DateTime.now),
+        threadId,
+        modelSelection: bigPickle,
+        runtimePolicy: policy(),
+      });
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn(turnInput(thread));
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+      // The terminal did not wait on the re-read, which is still in flight.
+      for (let i = 0; i < 20; i++) yield* Effect.yieldNow;
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("reports cache writes as cache creation, not only as input", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        // A step from a provider that reports prompt-cache writes.
+        event("session.step.ended", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_0eb735d5b001oAFVeY5jz3WD4Z",
+          finish: "stop",
+          cost: 0,
+          tokens: { input: 1200, output: 40, reasoning: 0, cache: { read: 300, write: 2500 } },
+        }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const turn = yield* runtime.events.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.completedAt !== null,
+        ),
+        Stream.runHead,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const settled = Option.getOrUndefined(yield* Fiber.join(turn));
+      assert.deepInclude(
+        settled?.type === "provider_turn.updated" ? settled.providerTurn.turnTokenUsage : undefined,
+        {
+          inputTokens: 1200 + 300 + 2500,
+          cachedInputTokens: 300,
+          cacheCreationTokens: 2500,
+          outputTokens: 40,
+        },
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("reports a model's input limit as its context window", () =>
+    Effect.gen(function* () {
+      const runtime = yield* openCode2ReplayRuntime([...opening]);
+      assert.equal(runtime.getModelContextWindow?.(bigPickle), 160000);
     }).pipe(Effect.scoped),
   );
 });

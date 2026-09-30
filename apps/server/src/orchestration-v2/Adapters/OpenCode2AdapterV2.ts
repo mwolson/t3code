@@ -40,7 +40,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../../config.ts";
-import type { OpenCode2StreamEvent } from "../../provider/opencode2/OpenCode2Client.ts";
+import { paginate, type OpenCode2StreamEvent } from "../../provider/opencode2/OpenCode2Client.ts";
 import * as OpenCode2Server from "../../provider/opencode2/OpenCode2Server.ts";
 import {
   parseOpenCodeModelSlug,
@@ -68,7 +68,7 @@ const OpenCode2ProviderCapabilities = {
   },
   threads: {
     canCreateEmptyThread: true,
-    canReadThreadSnapshot: false,
+    canReadThreadSnapshot: true,
     canRollbackThread: false,
     canForkThread: false,
     canForkFromTurn: false,
@@ -139,7 +139,7 @@ const OpenCode2ProviderCapabilities = {
     supportsNestedCheckpointScopes: true,
     providerCanRollbackConversation: false,
     providerRollbackReturnsSnapshot: false,
-    providerCanReadConversationSnapshot: false,
+    providerCanReadConversationSnapshot: true,
   },
   identity: {
     nativeThreadIds: "strong",
@@ -152,6 +152,7 @@ const OpenCode2ProviderCapabilities = {
 } satisfies OrchestrationV2ProviderCapabilities;
 
 type EventOf<T extends OpenCodeEvent["type"]> = Extract<OpenCodeEvent, { readonly type: T }>;
+type Tokens = EventOf<"session.step.ended">["data"]["tokens"];
 
 interface ActiveTurn {
   readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
@@ -162,6 +163,16 @@ interface ActiveTurn {
   readonly startedAt: Map<string, DateTime.Utc>;
   readonly ordinals: Map<string, number>;
   nextOrdinal: number;
+  /** Input includes cache reads and writes, as 1.x reports it; the parts are also kept apart. */
+  readonly usage: {
+    input: number;
+    cached: number;
+    cacheWrite: number;
+    output: number;
+    reasoning: number;
+  };
+  steps: number;
+  lastStep: Tokens | undefined;
   interrupted: boolean;
   /**
    * Set on a turn started after a timed-out Stop's run left the server: that
@@ -299,6 +310,25 @@ const sameModel = (left: ModelRef, right: ModelRef | undefined) =>
   left.id === right?.id &&
   (left.variant ?? "default") === (right?.variant ?? "default");
 
+/** The turn's own tokens: steps add up, and the last step's input is the live context size. */
+const turnTokenUsage = (turn: ActiveTurn, status: OrchestrationV2ProviderTurn["status"]) =>
+  turn.steps === 0
+    ? {
+        usageScope: "main_agent" as const,
+        usageStatus: "unavailable" as const,
+        hasSubagents: false,
+      }
+    : {
+        usageScope: "main_agent" as const,
+        usageStatus: status === "completed" ? ("complete" as const) : ("partial" as const),
+        inputTokens: turn.usage.input,
+        cachedInputTokens: turn.usage.cached,
+        cacheCreationTokens: turn.usage.cacheWrite,
+        outputTokens: turn.usage.output,
+        reasoningTokens: turn.usage.reasoning,
+        hasSubagents: false,
+      };
+
 /**
  * The adapter for one provider instance. It talks to the instance's
  * {@link OpenCode2Server.OpenCode2Server}, which the driver builds from the instance's settings.
@@ -308,12 +338,15 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const driver = OPENCODE_PROVIDER;
+  // Context windows by `provider/model`, from the latest `/api/model` read.
+  const contextWindows = new Map<string, number>();
 
   const openSession = Effect.fn("OpenCode2Adapter.openSession")(function* (
     input: Parameters<ProviderAdapter.ProviderAdapterV2Shape["openSession"]>[0],
     connection: OpenCode2Server.OpenCode2Connection,
   ) {
     const { client } = connection;
+    const sessionScope = yield* Effect.scope;
     const now = yield* DateTime.now;
     let session: OrchestrationV2ProviderSession = {
       id: input.providerSessionId,
@@ -540,10 +573,27 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           terminal.status === "completed" ? "completed" : "interrupted",
         );
       }
+      const window = contextWindows.get(turn.input.modelSelection.model);
+      const lastStep = turn.lastStep;
       yield* emitProviderTurn(state, turn, {
         ...turn.providerTurn,
         status: terminal.status,
         completedAt,
+        turnTokenUsage: turnTokenUsage(turn, terminal.status),
+        ...(lastStep === undefined
+          ? {}
+          : {
+              tokenUsage: {
+                usedTokens:
+                  lastStep.input + lastStep.cache.read + lastStep.cache.write + lastStep.output,
+                maxTokens: window ?? null,
+                inputTokens: lastStep.input + lastStep.cache.read + lastStep.cache.write,
+                cachedInputTokens: lastStep.cache.read,
+                outputTokens: lastStep.output,
+                reasoningOutputTokens: lastStep.reasoning,
+                updatedAt: DateTime.formatIso(completedAt),
+              },
+            }),
       });
       state.providerThread = {
         ...state.providerThread,
@@ -575,6 +625,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             }
           : { ...base, status: terminal.status, failure: null },
       );
+      // A spawned server lists its models lazily, so a window still unknown is
+      // read again for the next turn, off this stream so it never delays one.
+      if (window === undefined) yield* Effect.forkIn(readModels, sessionScope);
     });
 
     /**
@@ -722,6 +775,19 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           turn.tools.delete(event.data.id);
           return;
         }
+        case "session.step.ended":
+        case "session.step.failed": {
+          const tokens = event.data.tokens;
+          if (tokens === undefined) return;
+          turn.steps += 1;
+          turn.lastStep = tokens;
+          turn.usage.input += tokens.input + tokens.cache.read + tokens.cache.write;
+          turn.usage.cached += tokens.cache.read;
+          turn.usage.cacheWrite += tokens.cache.write;
+          turn.usage.output += tokens.output + tokens.reasoning;
+          turn.usage.reasoning += tokens.reasoning;
+          return;
+        }
         case "session.execution.succeeded":
           return yield* finishTurn(state, {
             status: turn.interrupted ? "interrupted" : "completed",
@@ -781,6 +847,27 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       );
     }
 
+    // Context windows come from the server's model list, read when the session
+    // opens and again after a turn whose model had none yet.
+    const readModels = client.model
+      .list({ location: { directory: session.cwd ?? serverConfig.cwd } })
+      .pipe(
+        Effect.timeout("5 seconds"),
+        Effect.tap((models) =>
+          Effect.sync(() => {
+            for (const model of models.data) {
+              // A model's input limit, when it has one, is its real headroom.
+              contextWindows.set(
+                `${model.providerID}/${model.id}`,
+                model.limit.input ?? model.limit.context,
+              );
+            }
+          }),
+        ),
+        Effect.ignore({ log: true }),
+      );
+    yield* readModels;
+
     const register = (
       providerThread: OrchestrationV2ProviderThread,
       sessionId: string,
@@ -823,6 +910,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         return session;
       },
       events: Stream.fromQueue(events),
+      getModelContextWindow: (selection) =>
+        selection.instanceId === instanceId ? contextWindows.get(selection.model) : undefined,
       ensureThread: (threadInput) =>
         Effect.gen(function* () {
           if (threadInput.existingProviderThread?.nativeThreadRef != null) {
@@ -981,6 +1070,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               startedAt: new Map(),
               ordinals: new Map(),
               nextOrdinal: turnInput.providerTurnOrdinal * 100 + 1,
+              usage: { input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0 },
+              steps: 0,
+              lastStep: undefined,
               interrupted: false,
               awaitingStart: afterUnsettled,
             };
@@ -1169,12 +1261,68 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           }),
         ),
       readThreadSnapshot: ({ providerThread }) =>
-        Effect.fail(
-          new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({
-            driver,
-            providerThreadId: providerThread.id,
-            cause: notYet("history snapshots"),
-          }),
+        Effect.gen(function* () {
+          const sessionId = yield* sessionIdOf(providerThread);
+          const history = yield* paginate(
+            { sessionID: Session.ID.make(sessionId), order: "asc" as const, limit: 100 },
+            client.message.list,
+          ).pipe(Stream.runCollect);
+          const snapshotAt = yield* DateTime.now;
+          const messages = history.flatMap((message): Array<OrchestrationV2ConversationMessage> => {
+            const text =
+              message.type === "user"
+                ? message.text
+                : message.type === "assistant"
+                  ? textOf(message.content)
+                  : "";
+            if (text.length === 0 || (message.type !== "user" && message.type !== "assistant")) {
+              return [];
+            }
+            const createdAt = message.time.created;
+            return [
+              {
+                createdBy: message.type === "user" ? "user" : "agent",
+                creationSource: "provider",
+                id: idAllocator.derive.messageFromProviderItem({
+                  driver,
+                  nativeItemId: message.id,
+                }),
+                threadId: providerThread.appThreadId ?? input.threadId,
+                runId: null,
+                nodeId: null,
+                role: message.type,
+                text,
+                attachments: [],
+                streaming: false,
+                createdAt,
+                updatedAt: createdAt,
+              },
+            ];
+          });
+          const lastUser = history.findLast((message) => message.type === "user")?.id;
+          const state = threads.get(sessionId);
+          return {
+            providerThread: {
+              ...providerThread,
+              providerSessionId: input.providerSessionId,
+              nativeConversationHeadRef: lastUser === undefined ? null : ref(lastUser, "weak"),
+              status: "idle" as const,
+              updatedAt: snapshotAt,
+            },
+            providerTurns: state === undefined ? [] : [...state.providerTurns.values()],
+            messages,
+            runtimeRequests: [],
+          };
+        }).pipe(
+          Effect.mapError((cause) =>
+            isProviderAdapterError(cause)
+              ? cause
+              : new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({
+                  driver,
+                  providerThreadId: providerThread.id,
+                  cause,
+                }),
+          ),
         ),
       rollbackThread: (rollbackInput) =>
         Effect.fail(

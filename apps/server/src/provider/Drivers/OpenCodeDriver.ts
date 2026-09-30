@@ -34,6 +34,7 @@ import { ProviderDriverError } from "../Errors.ts";
 import { readOpenCodeGoUsageLimits } from "../Layers/openCodeUsageLimits.ts";
 import {
   checkOpenCodeProviderStatus,
+  makeOpenCode2ModelLoader,
   makePendingOpenCodeProvider,
   openCodeSkillsToServerProviderSkills,
   openCodeCommandsToServerProviderSlashCommands,
@@ -263,6 +264,21 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
           Effect.provideService(OpenCode2Server.OpenCode2Server, openCode2Server),
         ),
       });
+      const loadOpenCode2Models = yield* makeOpenCode2ModelLoader(
+        openCode2Server.withConnection((connection) =>
+          connection.client.model.list({ location: { directory: serverConfig.cwd } }).pipe(
+            Effect.map((models) => models.data),
+            Effect.mapError(
+              (cause) =>
+                new OpenCodeRuntime.OpenCodeRuntimeError({
+                  operation: "model.list",
+                  detail: "The OpenCode server could not list its models.",
+                  cause,
+                }),
+            ),
+          ),
+        ),
+      );
       const serverOwner = yield* OpenCodeServerOwner.make({
         binaryPath: effectiveConfig.binaryPath,
         directory: serverConfig.cwd,
@@ -284,6 +300,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
             effectiveConfig,
             serverConfig.cwd,
             runtimeProbe.refresh,
+            loadOpenCode2Models,
           ),
           usageLimits: readOpenCodeGoUsageLimits({
             enabled: effectiveConfig.enabled,

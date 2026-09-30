@@ -52,6 +52,7 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstanceRegistry.ts";
 import { worktreeRepairDependenciesTestLayer } from "./ProviderTurnStartService.testkit.ts";
 import { OrchestrationV2LayerLive } from "./runtimeLayer.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
@@ -143,7 +144,8 @@ const liveLayer = OrchestrationV2LayerLive.pipe(
   Layer.provide(CheckpointStore.layer.pipe(Layer.provide(vcsDriverRegistryLayer))),
   Layer.provide(serverConfigLayer),
   Layer.provide(serverSettingsLayer),
-  Layer.provide(providerInstanceRegistryLayer),
+  // Merged, not only provided: the test reads the same instance the orchestrator uses.
+  Layer.provideMerge(providerInstanceRegistryLayer),
   Layer.provide(ResetCreditCoordinator.layer),
   Layer.provide(backgroundPolicyLayer),
   Layer.provide(PlatformTestLayer),
@@ -231,6 +233,18 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         const path = yield* Path.Path;
         yield* fs.writeFileString(path.join(ROOT, "work", "hello.txt"), "hello from t3 live\n");
         yield* EffectWorker.runDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
+
+        // A status check starts a fresh server, which lists no models for its
+        // first few hundred milliseconds; the picker must still get them.
+        const instance =
+          yield* (yield* ProviderInstanceRegistry.ProviderInstanceRegistry).getInstance(INSTANCE);
+        assert.isDefined(instance);
+        const status = yield* instance!.snapshot.refresh;
+        assert.equal(status.status, "ready");
+        assert.include(
+          status.models.map((model) => model.slug),
+          "opencode/big-pickle",
+        );
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const threadId = ThreadId.make("thread:opencode2-live");
         yield* orchestrator.dispatch({
@@ -265,6 +279,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         assert.isDefined(
           first.turnItems.find((item) => item.type === "dynamic_tool" && item.toolName === "read"),
         );
+        assert.isAbove(first.providerTurns[0]?.tokenUsage?.maxTokens ?? 0, 0);
 
         yield* send(
           threadId,

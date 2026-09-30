@@ -9,6 +9,7 @@ import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
 
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { compareSemverVersions } from "@t3tools/shared/semver";
@@ -377,15 +378,125 @@ export const makePendingOpenCodeProvider = (
     });
   });
 
+/** One model an OpenCode 2 server lists, as the status check reads it. */
+export interface OpenCode2Model {
+  readonly providerID: string;
+  readonly id: string;
+  readonly name: string;
+  readonly variants: ReadonlyArray<{ readonly id: string }>;
+}
+
+/**
+ * A server loads its catalog lazily and lists nothing for its first few
+ * hundred milliseconds, and a local instance starts a fresh server for each
+ * status check. So an empty list is read again for a while, and the last
+ * non-empty list stands in if the catalog still has not loaded.
+ */
+export const makeOpenCode2ModelLoader = <E>(
+  list: Effect.Effect<ReadonlyArray<OpenCode2Model>, E>,
+) =>
+  Effect.sync(() => {
+    let lastLoaded: ReadonlyArray<OpenCode2Model> = [];
+    return list.pipe(
+      Effect.repeat({
+        until: (models) => models.length > 0,
+        schedule: Schedule.spaced("250 millis"),
+      }),
+      Effect.timeoutOption("5 seconds"),
+      Effect.map((loaded) => {
+        if (loaded._tag === "Some" && loaded.value.length > 0) lastLoaded = loaded.value;
+        return lastLoaded;
+      }),
+    );
+  });
+
 /**
  * OpenCode 2 only runs in Full access until approvals map onto its permission
- * rules, so the snapshot offers that mode alone. Its models come from the
- * user's custom models until the 2.x model list lands.
+ * rules, so the snapshot offers that mode alone.
  */
 const OPENCODE_2_PRESENTATION = {
   ...OPENCODE_PRESENTATION,
   supportedRuntimeModes: ["full-access"],
 } as const;
+
+function openCode2ModelCapabilities(model: OpenCode2Model): ModelCapabilities {
+  const variants = model.variants.map((variant) => variant.id);
+  const defaultVariant = inferDefaultVariant(model.providerID, variants);
+  return createModelCapabilities({
+    optionDescriptors:
+      variants.length === 0
+        ? []
+        : [
+            {
+              id: "variant",
+              label: "Reasoning",
+              type: "select",
+              options: variants.map((id) => ({
+                id,
+                label: titleCaseSlug(id),
+                ...(id === defaultVariant ? { isDefault: true } : {}),
+              })),
+              ...(defaultVariant === undefined ? {} : { currentValue: defaultVariant }),
+            },
+          ],
+  });
+}
+
+const checkOpenCode2 = Effect.fn("checkOpenCode2")(function* (
+  settings: OpenCodeSettings,
+  version: string,
+  checkedAt: string,
+  loadModels: Effect.Effect<ReadonlyArray<OpenCode2Model>, OpenCodeRuntime.OpenCodeRuntimeError>,
+) {
+  const result = yield* Effect.exit(loadModels);
+  const probe = (status: "ready" | "warning" | "error", message: string) => ({
+    installed: true,
+    version,
+    status,
+    auth: { status: status === "ready" ? ("authenticated" as const) : ("unknown" as const) },
+    message,
+  });
+  if (result._tag === "Failure") {
+    // The detail can carry a response body; it stays in the log, not the status.
+    yield* Effect.logWarning("OpenCode 2 model list failed", result.cause);
+    return buildServerProvider({
+      presentation: OPENCODE_2_PRESENTATION,
+      enabled: true,
+      checkedAt,
+      models: providerModelsFromSettings(
+        [],
+        settings.customModels,
+        DEFAULT_OPENCODE_MODEL_CAPABILITIES,
+      ),
+      probe: probe("error", "OpenCode could not load its model list."),
+    });
+  }
+  const models = providerModelsFromSettings(
+    result.value
+      .map((model) => ({
+        slug: `${model.providerID}/${model.id}`,
+        name: model.name,
+        isCustom: false,
+        capabilities: openCode2ModelCapabilities(model),
+      }))
+      .toSorted((left, right) => left.name.localeCompare(right.name)),
+    settings.customModels,
+    DEFAULT_OPENCODE_MODEL_CAPABILITIES,
+  );
+  return buildServerProvider({
+    presentation: OPENCODE_2_PRESENTATION,
+    enabled: true,
+    checkedAt,
+    models,
+    probe:
+      result.value.length > 0
+        ? probe(
+            "ready",
+            `OpenCode ${version} lists ${result.value.length} model${result.value.length === 1 ? "" : "s"}.`,
+          )
+        : probe("warning", "OpenCode 2 is running, but it did not list any models yet."),
+  });
+});
 
 /**
  * `probeRuntime` is the driver's memoized version probe: `opencode --version` for a local binary,
@@ -396,6 +507,10 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
   openCodeSettings: OpenCodeSettings,
   cwd: string,
   probeRuntime: Effect.Effect<ProbedOpenCode, OpenCodeRuntime.OpenCodeRuntimeError>,
+  loadOpenCode2Models: Effect.Effect<
+    ReadonlyArray<OpenCode2Model>,
+    OpenCodeRuntime.OpenCodeRuntimeError
+  >,
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
@@ -465,19 +580,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
   if (probedExit._tag === "Failure") return fallback(Cause.squash(probedExit.cause));
   const probed = probedExit.value;
   if (probed.generation === "v2") {
-    return buildServerProvider({
-      presentation: OPENCODE_2_PRESENTATION,
-      enabled: true,
-      checkedAt,
-      models: providerModelsFromSettings([], customModels, DEFAULT_OPENCODE_MODEL_CAPABILITIES),
-      probe: {
-        installed: true,
-        version: probed.version,
-        status: "ready",
-        auth: { status: "unknown" },
-        message: `OpenCode ${probed.version} is available.`,
-      },
-    });
+    return yield* checkOpenCode2(openCodeSettings, probed.version, checkedAt, loadOpenCode2Models);
   }
   let version: string | null = probed.version;
   if (compareSemverVersions(probed.version, OpenCodeRuntime.MINIMUM_OPENCODE_VERSION) < 0) {
