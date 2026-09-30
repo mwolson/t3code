@@ -556,7 +556,12 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
 
       NodeAssert.equal(snapshot.status, "ready");
       NodeAssert.equal(snapshot.version, "2.0.18");
-      NodeAssert.deepEqual(snapshot.supportedRuntimeModes, ["full-access"]);
+      NodeAssert.deepEqual(snapshot.supportedRuntimeModes, [
+        "approval-required",
+        "auto-accept-edits",
+        "auto",
+        "full-access",
+      ]);
       NodeAssert.deepEqual(
         snapshot.models.map((model) => model.slug),
         ["opencode/big-pickle", "opencode/space-bunny-free"],
@@ -670,7 +675,12 @@ it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (i
 
       NodeAssert.equal(snapshot.status, "warning");
       NodeAssert.equal(snapshot.version, "2.0.18");
-      NodeAssert.deepEqual(snapshot.supportedRuntimeModes, ["full-access"]);
+      NodeAssert.deepEqual(snapshot.supportedRuntimeModes, [
+        "approval-required",
+        "auto-accept-edits",
+        "auto",
+        "full-access",
+      ]);
       NodeAssert.equal(runtimeMock.state.sdkClientInputs.length, 0);
     }),
   );

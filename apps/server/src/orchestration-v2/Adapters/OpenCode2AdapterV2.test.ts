@@ -34,7 +34,7 @@ import type {
 } from "../ProviderAdapter.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import { OPENCODE_PROVIDER } from "./OpenCodeAdapterV2.ts";
-import { OPENCODE_2_FULL_ACCESS_ONLY, OPENCODE_2_STILL_STOPPING } from "./OpenCode2AdapterV2.ts";
+import { OPENCODE_2_STILL_STOPPING } from "./OpenCode2AdapterV2.ts";
 import { openCode2ReplayRuntime } from "./OpenCode2AdapterV2.testkit.ts";
 
 const SESSION = "ses_f148ca2deffeJcwCnRQtb0YFNX";
@@ -110,6 +110,14 @@ const promptAccepted = replyData("session.prompt", {
   delivery: "steer",
 });
 
+/** A resumed session that waits on nothing. */
+const noOpenRequests: ReadonlyArray<ProviderReplayEntry> = [
+  out("permission.list", { sessionID: SESSION }),
+  replyData("permission.list", []),
+  out("session.form.list", { sessionID: SESSION }),
+  replyData("session.form.list", []),
+];
+
 /** What every session sends when it opens: the event stream, then the model list. */
 const opening: ReadonlyArray<ProviderReplayEntry> = [
   out("event.subscribe"),
@@ -168,26 +176,112 @@ const turnInput = (
   runtimePolicy: policy(runtimeMode),
 });
 
-/** Resumes the recorded session and returns the runtime, the thread, and its event stream. */
-const resumed = (entries: ReadonlyArray<ProviderReplayEntry>, options?: { external?: boolean }) =>
+/** The agents' own path rules, as `/api/agent` lists them for build. */
+const buildPaths = [
+  {
+    action: "external_directory",
+    resource: "/home/.local/share/opencode/tool-output/*",
+    effect: "allow",
+  },
+];
+const agentList = {
+  location: { directory: WORK },
+  data: [
+    {
+      id: "build",
+      name: "Build",
+      request: { settings: {}, headers: {}, body: {} },
+      description: "The default agent.",
+      mode: "primary",
+      hidden: false,
+      permissions: [{ action: "*", resource: "*", effect: "allow" }, ...buildPaths],
+    },
+  ],
+};
+/** Supervised: shell, edits and other directories ask. */
+const supervisedRules = [
+  { action: "shell", resource: "*", effect: "ask" },
+  { action: "edit", resource: "*", effect: "ask" },
+  { action: "external_directory", resource: "*", effect: "ask" },
+  ...buildPaths,
+  { action: "subagent", resource: "*", effect: "deny" },
+];
+
+// The first ask and question form the spike recorded (recordings/permission, question).
+const shellAsk = {
+  data: {
+    id: "per_0eb7c4d7e001Pyt8o50Vi4KrOO",
+    sessionID: SESSION,
+    action: "shell",
+    resources: ["echo FIRST"],
+    save: ["echo *"],
+    source: { type: "tool", messageID: "msg_0eb7c4330001dYFQKuTpfD780v", id: "call_1" },
+  },
+};
+const shellAskEvent = event("permission.asked", shellAsk.data);
+const colorForm = {
+  id: "frm_0eb79ab35001fkvFECSh3wYNVD",
+  sessionID: SESSION,
+  title: "Questions",
+  metadata: { kind: "question" },
+  fields: [
+    {
+      key: "q0",
+      title: "Color preference",
+      description: "Which color do you prefer?",
+      type: "string",
+      options: [{ value: "Red", label: "Red" }],
+      custom: true,
+    },
+  ],
+};
+
+/**
+ * Resumes the recorded session and returns the runtime and the thread. A
+ * supervised resume gives the session Supervised rules first.
+ */
+const resumed = (
+  entries: ReadonlyArray<ProviderReplayEntry>,
+  options?: { readonly external?: boolean; readonly supervised?: boolean },
+) =>
   Effect.gen(function* () {
     const runtime = yield* openCode2ReplayRuntime(
       [
         ...opening,
         out("session.get", { sessionID: SESSION }),
         replyData("session.get", sessionInfo()),
+        ...noOpenRequests,
+        ...(options?.supervised === true
+          ? [
+              out("agent.list", "<any>"),
+              reply("agent.list", agentList),
+              out("session.update", { sessionID: SESSION, permissions: supervisedRules }),
+              reply("session.update", null),
+            ]
+          : []),
         ...entries,
       ],
-      options,
+      options?.external === undefined ? undefined : { external: options.external },
     );
     const thread = yield* runtime.resumeThread({
       providerThread: providerThread(yield* DateTime.now),
       threadId,
       modelSelection: bigPickle,
-      runtimePolicy: policy(),
+      runtimePolicy: policy(options?.supervised === true ? "approval-required" : "full-access"),
     });
     return { runtime, thread };
   });
+
+const requestOf = (runtime: ProviderAdapterV2SessionRuntime) =>
+  runtime.events.pipe(
+    Stream.filter(
+      (event): event is Extract<ProviderAdapterV2Event, { type: "runtime_request.updated" }> =>
+        event.type === "runtime_request.updated",
+    ),
+    Stream.map((event) => event.runtimeRequest),
+    Stream.runHead,
+    Effect.map(Option.getOrUndefined),
+  );
 
 const terminalOf = (runtime: ProviderAdapterV2SessionRuntime) =>
   runtime.events.pipe(
@@ -255,22 +349,6 @@ describe("OpenCode2 adapter", () => {
       );
       assert.equal((yield* Fiber.join(terminal))?.status, "completed");
     }).pipe(Effect.scoped),
-  );
-
-  it.effect(
-    "refuses a turn outside Full access instead of running it with every tool allowed",
-    () =>
-      Effect.gen(function* () {
-        // No prompt is expected: the turn fails without reaching the server.
-        const { runtime, thread } = yield* resumed([]);
-        const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
-        yield* runtime.startTurn(turnInput(thread, bigPickle, "approval-required"));
-        const refused = yield* Fiber.join(terminal);
-        assert.deepInclude(refused?.failure, {
-          class: "validation_error",
-          message: OPENCODE_2_FULL_ACCESS_ONLY,
-        });
-      }).pipe(Effect.scoped),
   );
 
   it.effect("ends the turn when its terminal event is one this build cannot decode", () =>
@@ -651,6 +729,7 @@ describe("OpenCode2 adapter", () => {
           "session.get",
           sessionInfo({ permissions: [{ action: "*", resource: "*", effect: "allow" }] }),
         ),
+        ...noOpenRequests,
         out("session.update", { sessionID: SESSION, permissions: t3Rules }),
         reply("session.update", null),
       ]);
@@ -669,6 +748,7 @@ describe("OpenCode2 adapter", () => {
         ...opening,
         out("session.get", { sessionID: SESSION }),
         replyData("session.get", sessionInfo()),
+        ...noOpenRequests,
         out("session.move", { sessionID: SESSION, directory: "/work/opencode2-feature" }),
         reply("session.move", null),
       ]);
@@ -689,6 +769,7 @@ describe("OpenCode2 adapter", () => {
           ...opening,
           out("session.get", { sessionID: SESSION }),
           replyData("session.get", sessionInfo()),
+          ...noOpenRequests,
           out("session.move", { sessionID: SESSION, directory: "/work/opencode2-feature" }),
           reply("session.move", null),
         ]);
@@ -753,7 +834,51 @@ describe("OpenCode2 adapter", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("ends the turn when a permission it refuses cannot be answered", () =>
+  it.effect("stops the requests a session still waits on when a restarted T3 loads it", () =>
+    Effect.gen(function* () {
+      // T3 restarted while the server kept waiting on an ask T3 no longer shows.
+      const runtime = yield* openCode2ReplayRuntime(
+        [
+          ...opening,
+          out("session.get", { sessionID: SESSION }),
+          replyData("session.get", sessionInfo()),
+          out("permission.list", { sessionID: SESSION }),
+          replyData("permission.list", [shellAsk.data]),
+          out("session.form.list", { sessionID: SESSION }),
+          replyData("session.form.list", [colorForm]),
+          out("permission.reply", {
+            sessionID: SESSION,
+            requestID: shellAsk.data.id,
+            decision: "reject",
+          }),
+          reply("permission.reply", null),
+          out("session.form.cancel", { sessionID: SESSION, formID: colorForm.id }),
+          reply("session.form.cancel", null),
+          // The next turn checks that the stopped run is gone. Its end arrives
+          // late and is its own; the turn ends on its own execution's end.
+          out("session.active"),
+          reply("session.active", { data: {} }),
+          event("session.execution.interrupted", { sessionID: SESSION, reason: "user" }),
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          event("session.execution.started", { sessionID: SESSION }),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ],
+        { external: true },
+      );
+      const thread = yield* runtime.resumeThread({
+        providerThread: providerThread(yield* DateTime.now),
+        threadId,
+        modelSelection: bigPickle,
+        runtimePolicy: policy(),
+      });
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn(turnInput(thread));
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("ends the turn when an answer to its request cannot be delivered", () =>
     Effect.gen(function* () {
       const failedReply = reply("permission.reply", {
         status: 500,
@@ -761,95 +886,223 @@ describe("OpenCode2 adapter", () => {
       });
       const replyOut = out("permission.reply", {
         sessionID: SESSION,
-        requestID: "per_0eb7c4d7e001Pyt8o50Vi4KrOO",
-        decision: "reject",
-        message: "<any>",
+        requestID: shellAsk.data.id,
+        decision: "once",
       });
-      const { runtime, thread } = yield* resumed([
-        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
-        promptAccepted,
-        {
-          type: "emit_inbound",
-          frame: {
-            type: "sdk.event",
-            event: {
-              id: "evt_permissionasked0",
-              created: 1,
-              type: "permission.asked",
-              data: {
-                id: "per_0eb7c4d7e001Pyt8o50Vi4KrOO",
-                sessionID: SESSION,
-                action: "shell",
-                resources: ["echo FIRST"],
-              },
-            },
-          },
-        },
-        // One try and one retry, then the turn ends and the session is stopped.
-        replyOut,
-        failedReply,
-        replyOut,
-        failedReply,
-        out("session.interrupt", { sessionID: SESSION }),
-        reply("session.interrupt", { interrupted: true }),
-      ]);
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          shellAskEvent,
+          // One try and one retry, then the turn ends and the session is stopped.
+          replyOut,
+          failedReply,
+          replyOut,
+          failedReply,
+          out("session.interrupt", { sessionID: SESSION }),
+          reply("session.interrupt", { interrupted: true }),
+        ],
+        { supervised: true },
+      );
+      const requested = yield* requestOf(runtime).pipe(Effect.forkScoped);
       const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
-      yield* runtime.startTurn(turnInput(thread));
+      yield* runtime.startTurn(turnInput(thread, bigPickle, "approval-required"));
+      const request = yield* Fiber.join(requested);
+      yield* runtime.respondToRuntimeRequest({ requestId: request!.id, decision: "accept" });
       const ended = yield* Fiber.join(terminal);
       assert.equal(ended?.status, "failed");
       assert.equal(
         ended?.status === "failed" ? ended.failure.message : undefined,
         "OpenCode is waiting on a request T3 Code couldn't answer.",
       );
-      // Let the best-effort interrupt reach the server before the scope closes.
-      for (let i = 0; i < 20; i++) yield* Effect.yieldNow;
     }).pipe(Effect.scoped),
   );
 
-  it.effect("answers a question form instead of cancelling it", () =>
+  it.effect("counts an answer to a request OpenCode already dropped as delivered", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          shellAskEvent,
+          // The execution ended first, so OpenCode no longer knows the request.
+          out("permission.reply", {
+            sessionID: SESSION,
+            requestID: shellAsk.data.id,
+            decision: "once",
+          }),
+          reply("permission.reply", {
+            status: 404,
+            body: {
+              _tag: "PermissionNotFoundError",
+              requestID: shellAsk.data.id,
+              message: "Permission request not found",
+            },
+          }),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ],
+        { supervised: true },
+      );
+      const requested = yield* requestOf(runtime).pipe(Effect.forkScoped);
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn(turnInput(thread, bigPickle, "approval-required"));
+      const request = yield* Fiber.join(requested);
+      yield* runtime.respondToRuntimeRequest({ requestId: request!.id, decision: "accept" });
+      // Not "waiting on a request T3 Code couldn't answer": nothing waits on it.
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("declines a form T3 cannot show with the reason, instead of leaving it open", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([
         out("session.prompt", { sessionID: SESSION, text: "<any>" }),
         promptAccepted,
-        {
-          type: "emit_inbound",
-          frame: {
-            type: "sdk.event",
-            event: {
-              id: "evt_formcreated0000",
-              created: 1,
-              type: "form.created",
-              data: {
-                form: {
-                  id: "frm_0eb79ab35001fkvFECSh3wYNVD",
-                  sessionID: SESSION,
-                  title: "Questions",
-                  metadata: { kind: "question" },
-                  fields: [
-                    {
-                      key: "q0",
-                      title: "Color preference",
-                      type: "string",
-                      options: [{ value: "Red", label: "Red" }],
-                      custom: true,
-                    },
-                  ],
-                },
+        event("form.created", {
+          form: {
+            id: "frm_0eb79ab35001fkvFECSh3wYNVD",
+            sessionID: SESSION,
+            title: "MCP authorization",
+            metadata: { kind: "mcp" },
+            fields: [
+              {
+                key: "authorization",
+                type: "external",
+                url: "https://example.com/authorize",
+                title: "Authorize",
               },
-            },
+            ],
           },
-        },
-        out("session.form.reply", {
+        }),
+        out("session.form.cancel", {
           sessionID: SESSION,
           formID: "frm_0eb79ab35001fkvFECSh3wYNVD",
-          answer: { q0: "Questions aren't supported by this OpenCode integration yet." },
         }),
-        reply("session.form.reply", null),
-        event("session.execution.succeeded", { sessionID: SESSION }),
+        reply("session.form.cancel", null),
       ]);
       const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
       yield* runtime.startTurn(turnInput(thread));
+      const ended = yield* Fiber.join(terminal);
+      assert.equal(ended?.status, "failed");
+      assert.include(
+        ended?.status === "failed" ? ended.failure.message : "",
+        "asked for a link to open",
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("asks a subagent's permission request on the parent thread's turn", () =>
+    Effect.gen(function* () {
+      const child = "ses_f0e5aa64cffelFnoQRL0DAA9BH";
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          // As 2.0.18 announced the child the live probe's parent started.
+          event("session.created", {
+            sessionID: child,
+            slug: "stellar-garden",
+            version: "2.0.18",
+            projectID: "global",
+            parentID: SESSION,
+            location: { directory: WORK },
+            subpath: "",
+            title: "Echo test command",
+            agent: "general",
+            permissions: supervisedRules,
+            model: { id: "big-pickle", providerID: "opencode", variant: "default" },
+          }),
+          event("permission.asked", { ...shellAsk.data, sessionID: child }),
+          out("permission.reply", {
+            sessionID: child,
+            requestID: shellAsk.data.id,
+            decision: "once",
+          }),
+          reply("permission.reply", null),
+          event("permission.replied", {
+            sessionID: child,
+            requestID: shellAsk.data.id,
+            reply: "once",
+          }),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ],
+        { supervised: true },
+      );
+      const requested = yield* requestOf(runtime).pipe(Effect.forkScoped);
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn(turnInput(thread, bigPickle, "approval-required"));
+      const request = yield* Fiber.join(requested);
+      assert.equal(request?.nativeRequestRef?.nativeId, shellAsk.data.id);
+      yield* runtime.respondToRuntimeRequest({ requestId: request!.id, decision: "accept" });
       assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps 'allow this session' in the session's rules, not OpenCode's saved grants", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          shellAskEvent,
+          // The grant goes into this session's rules; the reply is only `once`.
+          out("session.update", {
+            sessionID: SESSION,
+            permissions: [
+              ...supervisedRules.slice(0, 3),
+              { action: "shell", resource: "echo *", effect: "allow" },
+              ...supervisedRules.slice(3),
+            ],
+          }),
+          reply("session.update", null),
+          out("permission.reply", {
+            sessionID: SESSION,
+            requestID: shellAsk.data.id,
+            decision: "once",
+          }),
+          reply("permission.reply", null),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ],
+        { supervised: true },
+      );
+      const requested = yield* requestOf(runtime).pipe(Effect.forkScoped);
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn(turnInput(thread, bigPickle, "approval-required"));
+      const request = yield* Fiber.join(requested);
+      yield* runtime.respondToRuntimeRequest({
+        requestId: request!.id,
+        decision: "acceptForSession",
+      });
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("reads the agents again while a fresh server still lists none", () =>
+    Effect.gen(function* () {
+      // 2.0.18 answers `/api/agent` with `[]` for a moment after it starts;
+      // rules written from that would drop the agents' own paths.
+      const runtime = yield* openCode2ReplayRuntime([
+        ...opening,
+        out("agent.list", "<any>"),
+        reply("agent.list", { location: { directory: WORK }, data: [] }),
+        out("agent.list", "<any>"),
+        reply("agent.list", agentList),
+        out("session.create", {
+          location: { directory: WORK },
+          model: { providerID: "opencode", id: "big-pickle" },
+          permissions: supervisedRules,
+        }),
+        replyData("session.create", sessionInfo({ permissions: supervisedRules })),
+      ]);
+      const created = yield* runtime
+        .ensureThread({
+          threadId,
+          modelSelection: bigPickle,
+          runtimePolicy: policy("approval-required"),
+        })
+        .pipe(Effect.forkScoped);
+      yield* TestClock.adjust("250 millis");
+      assert.equal((yield* Fiber.join(created)).nativeThreadRef?.nativeId, SESSION);
     }).pipe(Effect.scoped),
   );
 
@@ -917,6 +1170,7 @@ describe("OpenCode2 adapter", () => {
         reply("model.list", { location: { directory: WORK }, data: [] }),
         out("session.get", { sessionID: SESSION }),
         replyData("session.get", sessionInfo()),
+        ...noOpenRequests,
         out("session.prompt", { sessionID: SESSION, text: "<any>" }),
         promptAccepted,
         event("session.execution.succeeded", { sessionID: SESSION }),

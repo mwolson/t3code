@@ -10,6 +10,7 @@ import {
   type ModelSelection,
   type OrchestrationV2Command,
   ProjectId,
+  type ProviderInteractionMode,
   ProviderInstanceId,
   type ProviderReplayEntry,
   type RuntimeMode,
@@ -17,7 +18,6 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
-import { OPENCODE_2_FULL_ACCESS_ONLY } from "./Adapters/OpenCode2AdapterV2.ts";
 import {
   OPENCODE2_HTTP_PROTOCOL,
   OpenCode2OrchestratorReplayHarness,
@@ -52,6 +52,75 @@ const T3_RULES = [
   { action: "*", resource: "*", effect: "allow" },
   { action: "subagent", resource: "*", effect: "deny" },
 ];
+/** Paths the build and plan agents allow for themselves, as 2.0.18 lists them. */
+const BUILD_PATHS = [
+  {
+    action: "external_directory",
+    resource: "/home/.local/share/opencode/tool-output/*",
+    effect: "allow",
+  },
+];
+const PLAN_PATHS = [
+  ...BUILD_PATHS,
+  { action: "edit", resource: "/home/.opencode/plan/*", effect: "allow" },
+  { action: "external_directory", resource: "/home/.opencode/plan/*", effect: "allow" },
+];
+const agentInfo = (id: string, description: string, permissions: ReadonlyArray<unknown>) => ({
+  id,
+  name: id === "plan" ? "Plan" : "Build",
+  request: { settings: {}, headers: {}, body: {} },
+  description,
+  mode: "primary",
+  hidden: false,
+  permissions,
+});
+/** `/api/agent` trimmed to the two agents a T3 session runs. */
+const agentList = (directory: string) => ({
+  location: { directory },
+  data: [
+    agentInfo("build", "The default agent.", [
+      { action: "*", resource: "*", effect: "allow" },
+      { action: "external_directory", resource: "*", effect: "ask" },
+      ...BUILD_PATHS,
+    ]),
+    agentInfo("plan", "Read-only agent for planning.", [
+      { action: "*", resource: "*", effect: "allow" },
+      { action: "external_directory", resource: "*", effect: "ask" },
+      ...BUILD_PATHS,
+      { action: "edit", resource: "*", effect: "deny" },
+      ...PLAN_PATHS.slice(BUILD_PATHS.length),
+    ]),
+  ],
+});
+/** A session this runtime loads again (after a detach) waits on nothing. */
+const noOpenRequests: ReadonlyArray<ProviderReplayEntry> = [
+  out("permission.list", { sessionID: SESSION }),
+  reply("permission.list", { data: [] }),
+  out("session.form.list", { sessionID: SESSION }),
+  reply("session.form.list", { data: [] }),
+];
+const SUPERVISED_RULES = [
+  { action: "shell", resource: "*", effect: "ask" },
+  { action: "edit", resource: "*", effect: "ask" },
+  { action: "external_directory", resource: "*", effect: "ask" },
+  ...BUILD_PATHS,
+  { action: "subagent", resource: "*", effect: "deny" },
+];
+const AUTO_EDIT_RULES = [
+  { action: "shell", resource: "*", effect: "ask" },
+  { action: "edit", resource: "*", effect: "allow" },
+  { action: "external_directory", resource: "*", effect: "ask" },
+  ...BUILD_PATHS,
+  { action: "subagent", resource: "*", effect: "deny" },
+];
+/** Plan mode on Full access: edits are denied except the plan agent's own plan files. */
+const PLAN_RULES = [
+  { action: "*", resource: "*", effect: "allow" },
+  { action: "edit", resource: "*", effect: "deny" },
+  ...PLAN_PATHS,
+  { action: "subagent", resource: "*", effect: "deny" },
+];
+
 const sessionInfo = (directory: string, permissions: ReadonlyArray<unknown> = T3_RULES) => ({
   data: {
     id: SESSION,
@@ -103,7 +172,10 @@ const catalogModel = (id: string, name: string) => ({
   enabled: true,
   limit: { context: 200000, input: 160000, output: 32000 },
 });
-const createdSession = (directory: string): ReadonlyArray<ProviderReplayEntry> => [
+const createdSession = (
+  directory: string,
+  permissions: ReadonlyArray<unknown> = T3_RULES,
+): ReadonlyArray<ProviderReplayEntry> => [
   out("event.subscribe"),
   out("model.list", "<any>"),
   reply("model.list", {
@@ -113,14 +185,19 @@ const createdSession = (directory: string): ReadonlyArray<ProviderReplayEntry> =
       catalogModel("mimo-v2.6-flash-free", "MiMo V2.6 Flash Free"),
     ],
   }),
-  out("session.create", "<any>"),
-  reply("session.create", sessionInfo(directory)),
+  // Only a mode that narrows Full access reads the agents' own path rules.
+  ...(permissions === T3_RULES
+    ? []
+    : [out("agent.list", "<any>"), reply("agent.list", agentList(directory))]),
+  out("session.create", { location: { directory }, model: "<any>", permissions }),
+  reply("session.create", sessionInfo(directory, permissions)),
 ];
 
 const threadCommands = (input: {
   readonly name: string;
   readonly worktreePath: string;
   readonly runtimeMode?: RuntimeMode;
+  readonly interactionMode?: ProviderInteractionMode;
 }) => {
   const threadId = ThreadId.make(`thread:${input.name}`);
   const command = (key: string) => CommandId.make(`command:${input.name}:${key}`);
@@ -136,7 +213,7 @@ const threadCommands = (input: {
       title: input.name,
       modelSelection: bigPickle,
       runtimeMode: input.runtimeMode ?? "full-access",
-      interactionMode: "default",
+      interactionMode: input.interactionMode ?? "default",
       branch: null,
       worktreePath: input.worktreePath,
     } satisfies OrchestrationV2Command,
@@ -256,6 +333,8 @@ describe("OpenCode 2 through the orchestrator", () => {
           ...answeredPrompt("FIRST"),
           out("session.get", { sessionID: SESSION }),
           reply("session.get", sessionInfo(before)),
+          // The worktree change detached the thread, so its session is loaded afresh.
+          ...noOpenRequests,
           out("session.move", { sessionID: SESSION, directory: after }),
           reply("session.move", null),
           ...answeredPrompt("SECOND"),
@@ -299,6 +378,7 @@ describe("OpenCode 2 through the orchestrator", () => {
             "session.get",
             sessionInfo(before, [{ action: "*", resource: "*", effect: "allow" }]),
           ),
+          ...noOpenRequests,
           out("session.update", { sessionID: SESSION, permissions: T3_RULES }),
           reply("session.update", null),
           out("session.move", { sessionID: SESSION, directory: after }),
@@ -324,26 +404,112 @@ describe("OpenCode 2 through the orchestrator", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("fails a turn outside Full access with the refusal, never prompting", () =>
+  it.effect(
+    "creates a Supervised thread's session with rules that ask before shell and edits",
+    () =>
+      Effect.gen(function* () {
+        const name = "opencode2-supervised-rules";
+        const cwd = yield* checkpointWorkspace(name);
+        const thread = threadCommands({
+          name,
+          worktreePath: cwd,
+          runtimeMode: "approval-required",
+        });
+        const projection = yield* runScenario({
+          name,
+          threadId: thread.threadId,
+          entries: [...createdSession(cwd, SUPERVISED_RULES), ...answeredPrompt("FIRST")],
+          commands: [thread.create, thread.message("first")],
+        });
+        assert.deepEqual(
+          projection.runs.map((run) => run.status),
+          ["completed"],
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("rewrites the session's rules when the thread's mode changes between turns", () =>
     Effect.gen(function* () {
-      const name = "opencode2-supervised-refusal";
+      const name = "opencode2-mode-change";
       const cwd = yield* checkpointWorkspace(name);
-      const thread = threadCommands({ name, worktreePath: cwd, runtimeMode: "approval-required" });
+      const thread = threadCommands({ name, worktreePath: cwd });
+      const setMode = (key: string, runtimeMode: RuntimeMode) =>
+        ({
+          type: "thread.runtime-mode.set",
+          commandId: thread.command(key),
+          threadId: thread.threadId,
+          runtimeMode,
+        }) satisfies OrchestrationV2Command;
       const projection = yield* runScenario({
         name,
         threadId: thread.threadId,
-        // The session is created, then the turn is refused: no prompt is expected.
-        entries: createdSession(cwd),
-        commands: [thread.create, thread.message("refused")],
+        entries: [
+          ...createdSession(cwd),
+          ...answeredPrompt("FIRST"),
+          // A mode change detaches nothing: the same session is resumed with the new rules.
+          out("session.get", { sessionID: SESSION }),
+          reply("session.get", sessionInfo(cwd)),
+          out("agent.list", "<any>"),
+          reply("agent.list", agentList(cwd)),
+          out("session.update", { sessionID: SESSION, permissions: AUTO_EDIT_RULES }),
+          reply("session.update", null),
+          ...answeredPrompt("SECOND"),
+          // Back to Full access: the narrowing rules go.
+          out("session.get", { sessionID: SESSION }),
+          reply("session.get", sessionInfo(cwd, AUTO_EDIT_RULES)),
+          out("session.update", { sessionID: SESSION, permissions: T3_RULES }),
+          reply("session.update", null),
+          ...answeredPrompt("THIRD"),
+        ],
+        commands: [
+          thread.create,
+          thread.message("first"),
+          setMode("auto-edit", "auto-accept-edits"),
+          thread.message("second"),
+          setMode("full", "full-access"),
+          thread.message("third"),
+        ],
       });
       assert.deepEqual(
         projection.runs.map((run) => run.status),
-        ["failed"],
+        ["completed", "completed", "completed"],
       );
-      const failure = projection.turnItems.find((item) => item.type === "error");
-      assert.equal(
-        failure?.type === "error" ? failure.failure.message : undefined,
-        OPENCODE_2_FULL_ACCESS_ONLY,
+      assert.lengthOf(projection.providerThreads, 1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("denies edits outside the plan directory in plan mode and lifts it after", () =>
+    Effect.gen(function* () {
+      const name = "opencode2-plan-rules";
+      const cwd = yield* checkpointWorkspace(name);
+      const thread = threadCommands({ name, worktreePath: cwd, interactionMode: "plan" });
+      const projection = yield* runScenario({
+        name,
+        threadId: thread.threadId,
+        entries: [
+          ...createdSession(cwd, PLAN_RULES),
+          ...answeredPrompt("PLANNED"),
+          out("session.get", { sessionID: SESSION }),
+          reply("session.get", sessionInfo(cwd, PLAN_RULES)),
+          out("session.update", { sessionID: SESSION, permissions: T3_RULES }),
+          reply("session.update", null),
+          ...answeredPrompt("BUILT"),
+        ],
+        commands: [
+          thread.create,
+          thread.message("plan"),
+          {
+            type: "thread.interaction-mode.set",
+            commandId: thread.command("default"),
+            threadId: thread.threadId,
+            interactionMode: "default",
+          },
+          thread.message("build"),
+        ],
+      });
+      assert.deepEqual(
+        projection.runs.map((run) => run.status),
+        ["completed", "completed"],
       );
     }).pipe(Effect.scoped),
   );

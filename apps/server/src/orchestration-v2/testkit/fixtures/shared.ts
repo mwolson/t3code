@@ -71,6 +71,10 @@ export const OPENCODE2_TOOL_CALL_PROMPT =
   "Use the read tool to read hello.txt, then run the shell command `echo TOOL_OK` with the bash tool, then reply DONE.";
 export const OPENCODE2_INTERRUPT_PROMPT =
   "Run the shell command `sleep 60 && echo LATE` with the bash tool, then reply DONE.";
+export const OPENCODE2_PERMISSION_PROMPT =
+  "Run the shell command `echo FIRST` with the bash tool. After it completes, run `echo SECOND` with the bash tool. Then reply with what happened.";
+export const OPENCODE2_QUESTION_PROMPT =
+  "Before doing anything, use the question tool to ask me which color I prefer, offering the options red and blue. After I answer, reply with only the chosen color.";
 export const TURN_INTERRUPT_PROMPT =
   "Do not answer immediately. First run the local shell command `sleep 30`, then respond with exactly: interrupt fixture should not finish naturally.";
 export const TURN_INTERRUPT_MID_TOOL_PROMPT =
@@ -534,6 +538,12 @@ export function materializeFixtureInput(input: {
       }),
     );
 
+    // A run that asks several times stays busy between answers, so the next
+    // answer waits for its request instead of for the thread to go idle.
+    const answersNext = (stepIndex: number) => {
+      const next = input.fixtureInput.steps[stepIndex + 1]?.type;
+      return next === "approve_next_runtime_request" || next === "answer_next_user_input_request";
+    };
     for (const [stepIndex, step] of input.fixtureInput.steps.entries()) {
       switch (step.type) {
         case "message":
@@ -686,7 +696,9 @@ export function materializeFixtureInput(input: {
             answers: step.answers,
           };
           steps.push({ type: "advance_clock", duration: "1 millis" });
-          steps.push({ type: "await_thread_idle", threadId: ids.threadId });
+          if (!answersNext(stepIndex)) {
+            steps.push({ type: "await_thread_idle", threadId: ids.threadId });
+          }
           break;
         case "approve_next_runtime_request":
           pushDispatch(
@@ -715,7 +727,9 @@ export function materializeFixtureInput(input: {
               : { shellSnapshotKeyWhilePending: step.shellSnapshotKeyWhilePending }),
           };
           steps.push({ type: "advance_clock", duration: "1 millis" });
-          steps.push({ type: "await_thread_idle", threadId: ids.threadId });
+          if (!answersNext(stepIndex)) {
+            steps.push({ type: "await_thread_idle", threadId: ids.threadId });
+          }
           break;
         case "steer":
           messageIndex += 1;

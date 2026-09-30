@@ -411,12 +411,12 @@ export const makeOpenCode2ModelLoader = <E>(
   });
 
 /**
- * OpenCode 2 only runs in Full access until approvals map onto its permission
- * rules, so the snapshot offers that mode alone.
+ * Every mode maps onto OpenCode 2 session rules. Auto asks like Supervised:
+ * OpenCode has no reviewer that approves routine actions.
  */
 const OPENCODE_2_PRESENTATION = {
   ...OPENCODE_PRESENTATION,
-  supportedRuntimeModes: ["full-access"],
+  supportedRuntimeModes: ["approval-required", "auto-accept-edits", "auto", "full-access"],
 } as const;
 
 function openCode2ModelCapabilities(model: OpenCode2Model): ModelCapabilities {

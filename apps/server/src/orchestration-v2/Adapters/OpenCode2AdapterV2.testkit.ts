@@ -62,6 +62,7 @@ const operationOf = (
   const session = /^\/api\/session\/([^/]+)(\/.*)?$/.exec(path);
   if (method === "GET" && path === "/api/event") return { type: "event.subscribe" };
   if (method === "GET" && path === "/api/model") return { type: "model.list", input: query };
+  if (method === "GET" && path === "/api/agent") return { type: "agent.list", input: query };
   if (method === "POST" && path === "/api/session") return { type: "session.create", input: body };
   if (method === "GET" && path === "/api/session/active") return { type: "session.active" };
   if (session !== null) {
@@ -73,7 +74,10 @@ const operationOf = (
     if (method === "POST" && rest === "/interrupt") return { type: "session.interrupt", input };
     if (method === "POST" && rest === "/model") return { type: "session.switchModel", input };
     if (method === "POST" && rest === "/move") return { type: "session.move", input };
+    if (method === "POST" && rest === "/synthetic") return { type: "session.synthetic", input };
     if (method === "GET" && rest === "/message") return { type: "message.list", input };
+    if (method === "GET" && rest === "/permission") return { type: "permission.list", input };
+    if (method === "GET" && rest === "/form") return { type: "session.form.list", input };
     const form = /^\/form\/([^/]+)(\/reply)?$/.exec(rest);
     if (form !== null) {
       const formInput = { ...input, formID: form[1] };

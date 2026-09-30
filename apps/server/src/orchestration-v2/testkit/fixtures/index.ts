@@ -57,6 +57,10 @@ import { assertOpenCodeRunningChildApprovalOutput } from "./opencode_running_chi
 import { openCodeSubagentInput } from "./opencode_subagent/input.ts";
 import { openCode2InterruptInput } from "./opencode2_interrupt/input.ts";
 import { assertOpenCode2InterruptOutput } from "./opencode2_interrupt/output.ts";
+import { openCode2PermissionInput } from "./opencode2_permission/input.ts";
+import { assertOpenCode2PermissionOutput } from "./opencode2_permission/output.ts";
+import { openCode2QuestionInput } from "./opencode2_question/input.ts";
+import { assertOpenCode2QuestionOutput } from "./opencode2_question/output.ts";
 import { openCode2SimpleInput } from "./opencode2_simple/input.ts";
 import { assertOpenCode2SimpleOutput } from "./opencode2_simple/output.ts";
 import { openCode2ToolCallInput } from "./opencode2_tool_call/input.ts";
@@ -813,6 +817,39 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
           model: "opencode/big-pickle",
         },
         assertOutput: assertOpenCode2InterruptOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_permission",
+    buildInput: openCode2PermissionInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode"),
+        transcriptFile: new URL(
+          "./opencode2_permission/opencode_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: {
+          instanceId: OPENCODE2_MODEL_SELECTION.instanceId,
+          model: "opencode/big-pickle",
+        },
+        assertOutput: assertOpenCode2PermissionOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_question",
+    buildInput: openCode2QuestionInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode"),
+        transcriptFile: new URL("./opencode2_question/opencode_transcript.ndjson", import.meta.url),
+        modelSelection: {
+          instanceId: OPENCODE2_MODEL_SELECTION.instanceId,
+          model: "opencode/big-pickle",
+        },
+        assertOutput: assertOpenCode2QuestionOutput,
       },
     ],
   },

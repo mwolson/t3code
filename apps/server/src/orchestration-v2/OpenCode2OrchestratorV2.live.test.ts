@@ -1,13 +1,16 @@
 /**
  * Runs OpenCode 2 through the whole orchestrator with the real driver: the
  * driver probes the binary, spawns `opencode serve`, and routes to the 2.x
- * adapter. One turn reads a file and runs a shell command; a second is
- * stopped while its shell command runs.
+ * adapter. One thread reads a file, runs a shell command, and stops another;
+ * a Supervised thread approves one command, declines another, and answers a
+ * question; a plan-mode thread may write only its plan.
  *
- *   OPENCODE2_BIN=/path/to/opencode vp test run src/orchestration-v2/OpenCode2OrchestratorV2.live.test.ts
+ *   OPENCODE2_BIN=/path/to/opencode OPENCODE2_LIVE_ROOT=/scratch/dir \
+ *     vp test run src/orchestration-v2/OpenCode2OrchestratorV2.live.test.ts
  *
  * The server runs with isolated HOME and XDG directories on the free
- * `opencode/big-pickle` model; `OPENCODE2_MODEL` picks another.
+ * `opencode/big-pickle` model; `OPENCODE2_MODEL` picks another (its provider's
+ * key comes from the test's environment, which the spawned server inherits).
  */
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -324,21 +327,156 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         const models = yield* assistantModels(sessionId!);
         assert.equal(models.at(-1), SWITCHED_MODEL);
         assert.notEqual(models[0], SWITCHED_MODEL);
+      }).pipe(Effect.provide(Layer.merge(liveLayer, NodeServices.layer)), Effect.scoped),
+    360_000,
+  );
 
-        // Supervised threads are refused, not run with every tool allowed.
+  it.live(
+    "asks before each shell command in Supervised, runs the approved one, skips the declined one, and answers a question",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* EffectWorker.runDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const threadId = ThreadId.make("thread:opencode2-live-supervised");
         yield* orchestrator.dispatch({
-          type: "thread.runtime-mode.set",
-          commandId: CommandId.make("command:opencode2-live:runtime-mode"),
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:opencode2-live:supervised-create"),
           threadId,
+          projectId: ProjectId.make("project:opencode2-live"),
+          title: "OpenCode 2 live supervised",
+          modelSelection: MODEL,
           runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: `${ROOT}/work`,
         });
-        yield* send(threadId, "supervised", "Create a file named supervised.txt containing NO.");
-        const refused = yield* waitFor(
+        const pendingAsk = (projection: OrchestrationV2ThreadProjection) =>
+          projection.runtimeRequests.find((request) => request.status === "pending");
+        const answer = (
+          key: string,
+          request: OrchestrationV2ThreadProjection["runtimeRequests"][number],
+          response: { decision: "accept" | "decline" } | { answers: Record<string, string> },
+        ) =>
+          orchestrator.dispatch({
+            type: "runtime-request.respond",
+            commandId: CommandId.make(`command:opencode2-live:${key}`),
+            threadId,
+            requestId: request.id,
+            ...response,
+          });
+
+        yield* send(
           threadId,
-          (projection) => projection.runs.length === 4 && settled(projection),
+          "approve",
+          "Run the shell command `touch approved.txt` with the shell tool, then reply DONE.",
         );
-        assert.equal(refused.runs.at(-1)?.status, "failed");
-        assert.isFalse(yield* fs.exists(path.join(ROOT, "work", "supervised.txt")));
+        const asked = yield* waitFor(
+          threadId,
+          (projection) => pendingAsk(projection) !== undefined,
+        );
+        assert.equal(pendingAsk(asked)?.kind, "command");
+        yield* answer("approve-answer", pendingAsk(asked)!, { decision: "accept" });
+        const approved = yield* waitFor(threadId, settled);
+        assert.equal(approved.runs.at(-1)?.status, "completed");
+        assert.isTrue(yield* fs.exists(path.join(ROOT, "work", "approved.txt")));
+
+        yield* send(
+          threadId,
+          "decline",
+          "Run the shell command `touch declined.txt` with the shell tool, then reply DONE.",
+        );
+        const second = yield* waitFor(
+          threadId,
+          (projection) => projection.runs.length === 2 && pendingAsk(projection) !== undefined,
+        );
+        yield* answer("decline-answer", pendingAsk(second)!, { decision: "decline" });
+        // The model may try again; every retry is declined too.
+        let declined = yield* waitFor(
+          threadId,
+          (projection) =>
+            (projection.runs.length === 2 && settled(projection)) ||
+            pendingAsk(projection) !== undefined,
+        );
+        for (let retry = 0; pendingAsk(declined) !== undefined && retry < 3; retry += 1) {
+          yield* answer(`decline-retry-${retry}`, pendingAsk(declined)!, { decision: "decline" });
+          declined = yield* waitFor(
+            threadId,
+            (projection) =>
+              (projection.runs.length === 2 && settled(projection)) ||
+              pendingAsk(projection) !== undefined,
+          );
+        }
+        assert.equal(declined.runs.at(-1)?.status, "completed");
+        assert.isFalse(yield* fs.exists(path.join(ROOT, "work", "declined.txt")));
+
+        yield* send(
+          threadId,
+          "question",
+          "Before doing anything, use the question tool to ask me which color I prefer, offering the options red and blue. After I answer, reply with only the chosen color.",
+        );
+        const questioned = yield* waitFor(
+          threadId,
+          (projection) => projection.runs.length === 3 && pendingAsk(projection) !== undefined,
+        );
+        const question = pendingAsk(questioned)!;
+        assert.equal(question.kind, "user_input");
+        const form = questioned.turnItems.find(
+          (item) => item.type === "user_input_request" && item.requestId === question.id,
+        );
+        const firstQuestion = form?.type === "user_input_request" ? form.questions[0] : undefined;
+        assert.isDefined(firstQuestion);
+        yield* answer("question-answer", question, { answers: { [firstQuestion!.id]: "Blue" } });
+        const answered = yield* waitFor(
+          threadId,
+          (projection) => projection.runs.length === 3 && settled(projection),
+        );
+        assert.equal(answered.runs.at(-1)?.status, "completed");
+        const reply = answered.messages.findLast((message) => message.role === "assistant");
+        assert.match(reply?.text ?? "", /blue/i);
+      }).pipe(Effect.provide(Layer.merge(liveLayer, NodeServices.layer)), Effect.scoped),
+    600_000,
+  );
+
+  it.live(
+    "lets plan mode write only the plan agent's plan directory under Full access",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* EffectWorker.runDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const threadId = ThreadId.make("thread:opencode2-live-plan");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:opencode2-live:plan-create"),
+          threadId,
+          projectId: ProjectId.make("project:opencode2-live"),
+          title: "OpenCode 2 live plan",
+          modelSelection: MODEL,
+          runtimeMode: "full-access",
+          interactionMode: "plan",
+          branch: null,
+          worktreePath: `${ROOT}/work`,
+        });
+        // The plan agent's directory: `$HOME/.opencode/plan` under the isolated HOME.
+        const planDir = path.join(ROOT, ".opencode", "plan");
+        // No agent switch yet (a later layer adds it), so the build agent runs
+        // under the session's plan rules: the edit deny holds on its own.
+        yield* send(
+          threadId,
+          "plan",
+          `This is a permission test. Do exactly these two tool calls and nothing else: 1) use the write tool to create ${planDir}/probe-plan.md containing PLAN_OK; 2) use the write tool to create plan_write_probe.txt in the current directory containing NO. Then reply with which calls succeeded.`,
+        );
+        const planned = yield* waitFor(threadId, settled);
+        assert.equal(planned.runs.at(-1)?.status, "completed");
+        assert.isFalse(yield* fs.exists(path.join(ROOT, "work", "plan_write_probe.txt")));
+        assert.isTrue(yield* fs.exists(path.join(planDir, "probe-plan.md")));
       }).pipe(Effect.provide(Layer.merge(liveLayer, NodeServices.layer)), Effect.scoped),
     360_000,
   );
