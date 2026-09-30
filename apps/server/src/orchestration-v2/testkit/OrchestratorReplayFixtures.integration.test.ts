@@ -1,6 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import type { OrchestrationV2DomainEvent, ProviderReplayTranscript } from "@t3tools/contracts";
+import type {
+  OrchestrationV2DomainEvent,
+  ProviderReplayEntry,
+  ProviderReplayTranscript,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -85,8 +89,10 @@ const runFixtureProvider = Effect.fn("runOrchestratorReplayFixture")(function* <
   readonly buildInput: () => OrchestratorFixtureInput;
   readonly driver: ProviderOrchestratorReplayVariant;
   readonly harness: OrchestratorV2ProviderReplayHarness<Transcript, Error>;
+  readonly transformTranscript?: (transcript: ProviderReplayTranscript) => ProviderReplayTranscript;
 }) {
-  const rawTranscript = yield* readTranscript(input.driver.transcriptFile);
+  const recordedTranscript = yield* readTranscript(input.driver.transcriptFile);
+  const rawTranscript = input.transformTranscript?.(recordedTranscript) ?? recordedTranscript;
   const replayTranscript = materializeReplayTranscriptRuntimeInstructions(
     transcriptEntriesThroughLabel(rawTranscript, input.driver.transcriptEntriesThroughLabel),
     { driver: input.driver.driver, model: input.driver.modelSelection.model },
@@ -163,6 +169,7 @@ function runFixtureProviderWithRegisteredHarness(input: {
   readonly fixtureName: string;
   readonly buildInput: () => OrchestratorFixtureInput;
   readonly driver: ProviderOrchestratorReplayVariant;
+  readonly transformTranscript?: (transcript: ProviderReplayTranscript) => ProviderReplayTranscript;
 }) {
   switch (input.driver.driver) {
     case "codex":
@@ -243,4 +250,42 @@ describe("orchestrator replay fixtures", () => {
       }),
     );
   }
+
+  // A later OpenCode may change an execution start's shape; the client then
+  // reads it as `unreadable.execution.started`. A subagent's turn and a
+  // background follow-up must still start from it.
+  for (const [fixtureName, label] of [
+    ["opencode2_subagent", "session.execution.started.2"],
+    ["opencode2_background", "session.execution.started.3"],
+  ] as const) {
+    const fixture = ORCHESTRATOR_REPLAY_FIXTURES.find(
+      (candidate) => candidate.name === fixtureName,
+    );
+    const provider = fixture?.providers[0];
+    if (fixture === undefined || provider === undefined) continue;
+    it.effect(
+      `runs ${fixtureName} when ${label} is an execution start this build cannot decode`,
+      () =>
+        runFixtureProviderWithRegisteredHarness({
+          fixtureName,
+          buildInput: fixture.buildInput,
+          driver: provider,
+          transformTranscript: (transcript) => ({
+            ...transcript,
+            entries: transcript.entries.map((entry) =>
+              entry.type === "emit_inbound" && entry.label === label
+                ? undecodableEvent(entry)
+                : entry,
+            ),
+          }),
+        }),
+    );
+  }
 });
+
+/** The same event with an envelope this build cannot decode, as a newer OpenCode may send. */
+function undecodableEvent(entry: ProviderReplayEntry): ProviderReplayEntry {
+  if (entry.type !== "emit_inbound") return entry;
+  const frame = entry.frame as { readonly event: Record<string, unknown> };
+  return { ...entry, frame: { ...frame, event: { ...frame.event, durable: "not-an-envelope" } } };
+}

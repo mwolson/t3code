@@ -48,10 +48,7 @@ const event = (type: string, data: Record<string, unknown>): ProviderReplayEntry
     event: { id: `evt_${type.replaceAll(".", "")}`, created: 1, type, data },
   },
 });
-const T3_RULES = [
-  { action: "*", resource: "*", effect: "allow" },
-  { action: "subagent", resource: "*", effect: "deny" },
-];
+const T3_RULES = [{ action: "*", resource: "*", effect: "allow" }];
 /** Paths the build and plan agents allow for themselves, as 2.0.18 lists them. */
 const BUILD_PATHS = [
   {
@@ -104,21 +101,18 @@ const SUPERVISED_RULES = [
   { action: "edit", resource: "*", effect: "ask" },
   { action: "external_directory", resource: "*", effect: "ask" },
   ...BUILD_PATHS,
-  { action: "subagent", resource: "*", effect: "deny" },
 ];
 const AUTO_EDIT_RULES = [
   { action: "shell", resource: "*", effect: "ask" },
   { action: "edit", resource: "*", effect: "allow" },
   { action: "external_directory", resource: "*", effect: "ask" },
   ...BUILD_PATHS,
-  { action: "subagent", resource: "*", effect: "deny" },
 ];
 /** Plan mode on Full access: edits are denied except the plan agent's own plan files. */
 const PLAN_RULES = [
   { action: "*", resource: "*", effect: "allow" },
   { action: "edit", resource: "*", effect: "deny" },
   ...PLAN_PATHS,
-  { action: "subagent", resource: "*", effect: "deny" },
 ];
 
 const sessionInfo = (directory: string, permissions: ReadonlyArray<unknown> = T3_RULES) => ({
@@ -372,11 +366,15 @@ describe("OpenCode 2 through the orchestrator", () => {
           ...createdSession(before),
           ...answeredPrompt("FIRST"),
           // Reopened after a worktree change, the session reports the rules an
-          // older build gave it; they are replaced before anything runs.
+          // older build gave it, which denied subagents; they are replaced
+          // before anything runs.
           out("session.get", { sessionID: SESSION }),
           reply(
             "session.get",
-            sessionInfo(before, [{ action: "*", resource: "*", effect: "allow" }]),
+            sessionInfo(before, [
+              { action: "*", resource: "*", effect: "allow" },
+              { action: "subagent", resource: "*", effect: "deny" },
+            ]),
           ),
           ...noOpenRequests,
           out("session.update", { sessionID: SESSION, permissions: T3_RULES }),

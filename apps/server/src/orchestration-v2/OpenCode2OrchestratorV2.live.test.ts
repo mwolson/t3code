@@ -58,6 +58,10 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstanceRegistry.ts";
 import { worktreeRepairDependenciesTestLayer } from "./ProviderTurnStartService.testkit.ts";
 import { OrchestrationV2LayerLive } from "./runtimeLayer.ts";
+import * as IdAllocator from "./IdAllocator.ts";
+import * as ProviderContinuationRequests from "./ProviderContinuationRequests.ts";
+import * as ProviderContinuationService from "./ProviderContinuationService.ts";
+import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
 
 const binaryPath = process.env.OPENCODE2_BIN;
@@ -140,7 +144,7 @@ const providerInstanceRegistryLayer = ProviderInstanceRegistryHydrationLive.pipe
     ),
   ),
 );
-const liveLayer = OrchestrationV2LayerLive.pipe(
+const orchestrationLayer = OrchestrationV2LayerLive.pipe(
   Layer.provide(worktreeRepairDependenciesTestLayer),
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(SqlitePersistenceMemory),
@@ -153,6 +157,25 @@ const liveLayer = OrchestrationV2LayerLive.pipe(
   Layer.provide(backgroundPolicyLayer),
   Layer.provide(PlatformTestLayer),
 );
+
+// Starts the continuation run a provider wake asks for, as the production layer does.
+const continuationWorkerLayer = ProviderContinuationService.workerLive.pipe(
+  Layer.provide(
+    Layer.unwrap(
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        return Layer.mock(ThreadManagementService.ThreadManagementService)({
+          dispatch: orchestrator.dispatch,
+          getThreadRecords: orchestrator.getThreadRecords,
+          getThreadProjection: orchestrator.getThreadProjection,
+        });
+      }),
+    ),
+  ),
+  Layer.provide(IdAllocator.layer),
+  Layer.provide(ProviderContinuationRequests.layer),
+);
+const liveLayer = continuationWorkerLayer.pipe(Layer.provideMerge(orchestrationLayer));
 
 const settled = (projection: OrchestrationV2ThreadProjection) =>
   projection.runs.length > 0 &&
@@ -479,5 +502,129 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         assert.isTrue(yield* fs.exists(path.join(planDir, "probe-plan.md")));
       }).pipe(Effect.provide(Layer.merge(liveLayer, NodeServices.layer)), Effect.scoped),
     360_000,
+  );
+
+  it.live(
+    "runs subagents, wakes the thread for a background one, and stops one still running",
+    () =>
+      Effect.gen(function* () {
+        yield* EffectWorker.runDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        // One thread per case: a model that just answered one prompt may repeat it.
+        const thread = Effect.fn("OpenCode2Live.subagentThread")(function* (key: string) {
+          const threadId = ThreadId.make(`thread:opencode2-live-subagents-${key}`);
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make(`command:opencode2-live:subagents-${key}-create`),
+            threadId,
+            projectId: ProjectId.make("project:opencode2-live"),
+            title: `OpenCode 2 live subagents ${key}`,
+            modelSelection: MODEL,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: `${ROOT}/work`,
+          });
+          return threadId;
+        });
+        const childOf = (projection: OrchestrationV2ThreadProjection) =>
+          Effect.gen(function* () {
+            const childThreadId = projection.subagents[0]?.childThreadId;
+            assert.isDefined(childThreadId ?? undefined);
+            return yield* orchestrator.getThreadProjection(childThreadId!);
+          });
+
+        // Foreground: the turn waits for the child thread's answer.
+        const fgThread = yield* thread("fg");
+        yield* send(
+          fgThread,
+          "subagents-fg",
+          "Use the subagent tool (foreground, not background) to delegate to the general subagent with the prompt: 'Reply exactly FG_CHILD_OK.' Wait for it, then reply exactly FG_PARENT_OK.",
+        );
+        const foreground = yield* waitFor(fgThread, settled);
+        assert.deepEqual(
+          foreground.runs.map((run) => run.status),
+          ["completed"],
+        );
+        assert.equal(foreground.subagents[0]?.status, "completed");
+        const fgChild = yield* childOf(foreground);
+        assert.isTrue(
+          fgChild.turnItems.some(
+            (item) => item.type === "assistant_message" && item.text.includes("FG_CHILD_OK"),
+          ),
+        );
+
+        // Background: run 1 ends first, then OpenCode wakes the parent when the
+        // child ends, and T3 opens run 2 for that execution.
+        const bgThread = yield* thread("bg");
+        yield* send(
+          bgThread,
+          "subagents-bg",
+          "Use the subagent tool with background set to true to delegate to the general subagent with the prompt: 'Run the shell command `sleep 8` with the shell tool, then reply exactly BG_CHILD_OK.' As soon as it is launched, reply exactly BG_LAUNCHED and end your turn without waiting.",
+        );
+        const woke = yield* waitFor(
+          bgThread,
+          (projection) => projection.runs.length === 2 && settled(projection),
+        );
+        assert.deepEqual(
+          woke.runs.map((run) => run.status),
+          ["completed", "completed"],
+        );
+        assert.equal(woke.subagents[0]?.status, "completed");
+        const wakeMessage = woke.messages.find(
+          (message) => message.id === woke.runs[1]?.userMessageId,
+        );
+        assert.equal(`${wakeMessage?.createdBy}:${wakeMessage?.creationSource}`, "agent:provider");
+        assert.isTrue(
+          woke.turnItems.some(
+            (item) => item.runId === woke.runs[1]?.id && item.type === "assistant_message",
+          ),
+          "the parent's answer to the report lands in the continuation run",
+        );
+
+        // Stop while a background child runs: OpenCode keeps a background
+        // child running past a parent Stop, so T3 stops it, and nothing wakes.
+        const stopThread = yield* thread("stop");
+        yield* send(
+          stopThread,
+          "subagents-stop",
+          "Use the subagent tool with background set to true to delegate to the general subagent with the prompt: 'Run the shell command `sleep 60` with the shell tool, then reply exactly LATE.' As soon as it is launched, reply exactly STOP_LAUNCHED and end your turn without waiting.",
+        );
+        const launched = yield* waitFor(
+          stopThread,
+          (projection) =>
+            projection.runs[0]?.status !== "running" &&
+            projection.subagents[0]?.status === "running",
+        );
+        yield* orchestrator.dispatch({
+          type: "run.interrupt",
+          commandId: CommandId.make("command:opencode2-live:subagents-stop-interrupt"),
+          threadId: stopThread,
+          runId: launched.runs[0]!.id,
+        });
+        yield* waitFor(
+          stopThread,
+          (projection) =>
+            settled(projection) &&
+            projection.subagents[0] !== undefined &&
+            projection.subagents[0].status !== "running",
+        );
+        // Still settled once OpenCode has reported the stopped child to its parent.
+        yield* Effect.sleep("5 seconds");
+        const final = yield* orchestrator.getThreadProjection(stopThread);
+        assert.lengthOf(final.runs, 1);
+        assert.equal(final.subagents[0]?.status, "interrupted");
+        assert.isFalse(
+          final.turnItems.some((item) => item.status === "running" || item.status === "waiting"),
+        );
+        const stoppedChild = yield* childOf(final);
+        assert.isFalse(
+          stoppedChild.turnItems.some((item) => item.status === "running"),
+          "the stopped child shows nothing running",
+        );
+      }).pipe(Effect.provide(Layer.merge(liveLayer, NodeServices.layer)), Effect.scoped),
+    480_000,
   );
 });

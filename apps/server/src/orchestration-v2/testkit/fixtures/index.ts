@@ -61,6 +61,10 @@ import { openCode2PermissionInput } from "./opencode2_permission/input.ts";
 import { assertOpenCode2PermissionOutput } from "./opencode2_permission/output.ts";
 import { openCode2QuestionInput } from "./opencode2_question/input.ts";
 import { assertOpenCode2QuestionOutput } from "./opencode2_question/output.ts";
+import { openCode2BackgroundInput } from "./opencode2_background/input.ts";
+import { assertOpenCode2BackgroundOutput } from "./opencode2_background/output.ts";
+import { openCode2SubagentInput } from "./opencode2_subagent/input.ts";
+import { assertOpenCode2SubagentOutput } from "./opencode2_subagent/output.ts";
 import { openCode2SimpleInput } from "./opencode2_simple/input.ts";
 import { assertOpenCode2SimpleOutput } from "./opencode2_simple/output.ts";
 import { openCode2ToolCallInput } from "./opencode2_tool_call/input.ts";
@@ -850,6 +854,40 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
           model: "opencode/big-pickle",
         },
         assertOutput: assertOpenCode2QuestionOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_subagent",
+    buildInput: openCode2SubagentInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode"),
+        transcriptFile: new URL("./opencode2_subagent/opencode_transcript.ndjson", import.meta.url),
+        modelSelection: {
+          instanceId: OPENCODE2_MODEL_SELECTION.instanceId,
+          model: "opencode/big-pickle",
+        },
+        assertOutput: assertOpenCode2SubagentOutput,
+      },
+    ],
+  },
+  {
+    name: "opencode2_background",
+    buildInput: openCode2BackgroundInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("opencode"),
+        transcriptFile: new URL(
+          "./opencode2_background/opencode_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: {
+          instanceId: OPENCODE2_MODEL_SELECTION.instanceId,
+          model: "opencode/big-pickle",
+        },
+        runContinuationWorker: true,
+        assertOutput: assertOpenCode2BackgroundOutput,
       },
     ],
   },
