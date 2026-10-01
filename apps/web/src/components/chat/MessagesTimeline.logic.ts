@@ -3,6 +3,7 @@ export { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setu
 import * as Equal from "effect/Equal";
 import { shallow } from "zustand/vanilla/shallow";
 import { renderCodexDirectivesForCopy } from "@t3tools/client-runtime/codex-markdown-directives";
+import { unwrapSoleMarkdownFence } from "../../markdown-clipboard";
 import {
   commandDisplayText,
   commandProgramName,
@@ -644,8 +645,9 @@ export function resolveAssistantMessageCopyState({
 }) {
   const hasText = text !== null && text.trim().length > 0;
   const visible = showCopyButton && hasText && !streaming;
+  const copyText = visible ? unwrapSoleMarkdownFence(renderCodexDirectivesForCopy(text)) : text;
   return {
-    text: hasText ? (visible ? renderCodexDirectivesForCopy(text) : text) : null,
+    text: hasText ? copyText : null,
     visible,
   };
 }

@@ -1,3 +1,5 @@
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -6,8 +8,12 @@ const fixture = vi.hoisted(() => ({
   uploads: {} as Record<string, unknown>,
   preparations: {} as Record<string, number>,
   preparationAtom: Symbol("preparation"),
+  requestIds: ["request-1"],
+  selectedThread: { environmentId: "environment-1", id: "thread-1" },
+  set: vi.fn(),
 }));
 vi.mock("react-native", () => ({ Alert: { alert: vi.fn() } }));
+vi.mock("./atom-registry", () => ({ appAtomRegistry: { get: () => ({}), set: fixture.set } }));
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: (atom: unknown) =>
     atom === "drafts"
@@ -51,32 +57,30 @@ vi.mock("./threads", () => ({ threadEnvironment: {} }));
 vi.mock("./use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("./use-thread-selection", () => ({
   useThreadSelection: () => ({
-    selectedThread: { environmentId: "environment-1", id: "thread-1" },
+    selectedThread: fixture.selectedThread,
   }),
 }));
 vi.mock("./use-thread-detail", () => ({
   useSelectedThreadPendingRequests: () => ({
     approvals: [],
-    userInputs: [
-      {
-        requestId: "request-1",
-        createdAt: "2026-09-08T00:00:00Z",
-        responseCapability: "live",
-        dismissible: false,
-        questions: ["first", "second"].map((id) => ({
-          id,
-          header: id,
-          question: `Attach ${id} file`,
-          options: [],
-          allowCustomAnswer: true,
-          multiSelect: false,
-        })),
-      },
-    ],
+    userInputs: fixture.requestIds.map((requestId) => ({
+      requestId,
+      createdAt: "2026-09-08T00:00:00Z",
+      responseCapability: "live",
+      dismissible: false,
+      questions: ["first", "second"].map((id) => ({
+        id,
+        header: id,
+        question: `Attach ${id} file`,
+        options: [],
+        allowCustomAnswer: true,
+        multiSelect: false,
+      })),
+    })),
   }),
 }));
 
-import { ApprovalRequestId, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { ApprovalRequestId, EnvironmentId, RuntimeRequestId, ThreadId } from "@t3tools/contracts";
 import { questionAttachmentDraftKey } from "./question-attachments";
 import { useSelectedThreadRequests } from "./use-selected-thread-requests";
 
@@ -96,6 +100,9 @@ function submitButtonMarkup() {
   return renderToStaticMarkup(<Probe />);
 }
 beforeEach(() => {
+  fixture.requestIds = ["request-1"];
+  fixture.selectedThread = { environmentId: "environment-1", id: "thread-1" };
+  fixture.set.mockClear();
   fixture.preparations = {};
   fixture.drafts = Object.fromEntries(
     ["first", "second"].map((id) => [
@@ -116,6 +123,74 @@ beforeEach(() => {
   );
   fixture.uploads = { "environment-1:first": { status: "ready" } };
 });
+describe("question draft ownership", () => {
+  it.each(["id", "environmentId"] as const)(
+    "rejects stale request, %s and unmounted callbacks",
+    async (scope) => {
+      fixture.drafts = {};
+      fixture.requestIds = ["request-1", "request-2"];
+      let update!: ReturnType<typeof useSelectedThreadRequests>["onChangeUserInputCustomAnswer"];
+      function Probe() {
+        update = useSelectedThreadRequests().onChangeUserInputCustomAnswer;
+        return null;
+      }
+      const document = { nodeType: 9, addEventListener() {}, removeEventListener() {} };
+      const container = {
+        nodeType: 1,
+        tagName: "DIV",
+        namespaceURI: "http://www.w3.org/1999/xhtml",
+        ownerDocument: document,
+        addEventListener() {},
+        removeEventListener() {},
+      };
+      vi.stubGlobal("document", document);
+      vi.stubGlobal("window", { document, HTMLIFrameElement: EventTarget });
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const root = createRoot(container as unknown as HTMLElement);
+      try {
+        await act(() => root.render(<Probe />));
+        update(RuntimeRequestId.make("request-2"), "first", "hidden");
+        update(RuntimeRequestId.make("missing"), "first", "missing");
+        update(RuntimeRequestId.make("request-1"), "missing", "unknown question");
+        expect(fixture.set).not.toHaveBeenCalled();
+        update(RuntimeRequestId.make("request-1"), "first", "current");
+        expect(fixture.set).toHaveBeenCalledOnce();
+        const retained = update;
+        fixture.set.mockClear();
+        fixture.requestIds = ["request-2", "request-1"];
+        await act(() => root.render(<Probe />));
+        retained(RuntimeRequestId.make("request-1"), "first", "delayed");
+        update(RuntimeRequestId.make("request-1"), "first", "hidden");
+        expect(fixture.set).not.toHaveBeenCalled();
+        update(RuntimeRequestId.make("request-2"), "first", "new current");
+        expect(fixture.set).toHaveBeenCalledOnce();
+        fixture.set.mockClear();
+        fixture.requestIds = [];
+        await act(() => root.render(<Probe />));
+        retained(RuntimeRequestId.make("request-1"), "first", "removed");
+        expect(fixture.set).not.toHaveBeenCalled();
+        fixture.requestIds = ["request-1"];
+        await act(() => root.render(<Probe />));
+        const beforeSwitch = update;
+        fixture.selectedThread = { ...fixture.selectedThread, [scope]: "other-scope" };
+        await act(() => root.render(<Probe />));
+        beforeSwitch(RuntimeRequestId.make("request-1"), "first", "old scope");
+        expect(fixture.set).not.toHaveBeenCalled();
+        update(RuntimeRequestId.make("request-1"), "first", "current scope");
+        expect(fixture.set).toHaveBeenCalledOnce();
+        fixture.set.mockClear();
+        const beforeUnmount = update;
+        await act(() => root.render(null));
+        beforeUnmount(RuntimeRequestId.make("request-1"), "first", "unmounted");
+        expect(fixture.set).not.toHaveBeenCalled();
+      } finally {
+        await act(() => root.unmount());
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+});
+
 describe("question attachment submission readiness", () => {
   it.each([
     undefined,
