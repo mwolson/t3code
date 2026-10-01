@@ -3397,6 +3397,17 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           const state = nativeId == null ? undefined : threads.get(nativeId);
           return state !== undefined && hasBackground(state);
         }),
+      // A held wake is output OpenCode already ran that only a continuation
+      // turn delivers; a Stop, a reconnect or its delivery takes it away.
+      hasBufferedOutputForThread: (providerThread) =>
+        Effect.sync(() => {
+          const nativeId = providerThread.nativeThreadRef?.nativeId;
+          const state = nativeId == null ? undefined : threads.get(nativeId);
+          return state !== undefined && state.wakes.length > 0;
+        }),
+      // A continuation replays output that already ran and sends no model
+      // selection, so its start cannot acknowledge one.
+      continuationDrainsOutput: true,
       // A caller that names no directory gets the one this session opened in.
       getModelContextWindow: (selection, cwd) =>
         selection.instanceId === instanceId
