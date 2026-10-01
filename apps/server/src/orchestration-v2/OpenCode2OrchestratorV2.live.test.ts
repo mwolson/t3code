@@ -3,7 +3,8 @@
  * driver probes the binary, spawns `opencode serve`, and routes to the 2.x
  * adapter. One thread reads a file, runs a shell command, and stops another;
  * a Supervised thread approves one command, declines another, and answers a
- * question; a plan-mode thread may write only its plan.
+ * question; a plan-mode thread may write only its plan; and a thread steers,
+ * queues, forks and rolls back.
  *
  *   OPENCODE2_BIN=/path/to/opencode OPENCODE2_LIVE_ROOT=/scratch/dir \
  *     vp test run src/orchestration-v2/OpenCode2OrchestratorV2.live.test.ts
@@ -22,6 +23,7 @@ import {
   EnvironmentId,
   MessageId,
   type ModelSelection,
+  type OrchestrationV2Command,
   type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderDriverKind,
@@ -34,6 +36,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { FetchHttpClient } from "effect/unstable/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { describe } from "vite-plus/test";
 
 import * as ResetCreditCoordinator from "../provider/Layers/resetCreditCoordinator.ts";
@@ -626,5 +629,214 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         );
       }).pipe(Effect.provide(Layer.merge(liveLayer, NodeServices.layer)), Effect.scoped),
     480_000,
+  );
+
+  it.live(
+    "steers a running turn, queues two messages, forks an earlier turn and rolls back a write",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* EffectWorker.runDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        // A worktree of its own, so rolling back restores files for this thread only.
+        const work = path.join(ROOT, "inbox-work");
+        yield* fs.makeDirectory(work, { recursive: true });
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const git = (...args: ReadonlyArray<string>) =>
+          spawner.exitCode(ChildProcess.make("git", ["-C", work, ...args]));
+        yield* git("init", "-q");
+        yield* git(
+          "-c",
+          "user.name=t3",
+          "-c",
+          "user.email=t3@example.com",
+          "commit",
+          "-q",
+          "--allow-empty",
+          "-m",
+          "init",
+        );
+        const threadId = ThreadId.make("thread:opencode2-live-inbox");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:opencode2-live-inbox:create"),
+          threadId,
+          projectId: ProjectId.make("project:opencode2-live-inbox"),
+          title: "OpenCode 2 live inbox",
+          modelSelection: MODEL,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: work,
+        });
+        const dispatch = (
+          key: string,
+          text: string,
+          dispatchMode: Extract<
+            OrchestrationV2Command,
+            { type: "message.dispatch" }
+          >["dispatchMode"],
+        ) =>
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make(`command:opencode2-live-inbox:${key}`),
+            threadId,
+            messageId: MessageId.make(`message:opencode2-live-inbox:${key}`),
+            text,
+            attachments: [],
+            modelSelection: MODEL,
+            dispatchMode,
+          });
+        const assistantText = (projection: OrchestrationV2ThreadProjection, runId: string) =>
+          projection.turnItems
+            .flatMap((item) =>
+              item.type === "assistant_message" && item.runId === runId ? [item.text] : [],
+            )
+            .join("\n");
+
+        // 1. A turn that writes ALPHA, which the rollback keeps.
+        yield* dispatch(
+          "alpha",
+          "Use the write tool to create reverted.txt containing exactly ALPHA, then reply DONE.",
+          { type: "start_immediately" },
+        );
+        const first = yield* waitFor(threadId, settled);
+        assert.equal(first.runs[0]?.status, "completed");
+        assert.equal((yield* fs.readFileString(path.join(work, "reverted.txt"))).trim(), "ALPHA");
+
+        // 2. A long shell turn: steered while it runs, with two messages queued behind it.
+        yield* dispatch(
+          "shell",
+          "Run the shell command `sleep 15 && echo A` with the shell tool in the foreground (not in the background) and wait for it, then use the write tool to overwrite reverted.txt with exactly BETA, then reply DONE_A.",
+          { type: "start_immediately" },
+        );
+        const running = yield* waitFor(threadId, (projection) =>
+          projection.turnItems.some(
+            (item) => item.type === "command_execution" && item.status === "running",
+          ),
+        );
+        const shellRun = running.runs.at(-1)!;
+        yield* dispatch("steer", "Also include the word STEERED in your final reply.", {
+          type: "steer_active",
+          targetRunId: shellRun.id,
+        });
+        yield* dispatch("queued-b", "Reply with exactly QUEUED_B.", { type: "queue_after_active" });
+        yield* dispatch("queued-c", "Reply with exactly QUEUED_C.", { type: "queue_after_active" });
+        const drained = yield* waitFor(
+          threadId,
+          (projection) => projection.runs.length === 4 && settled(projection),
+        );
+        const [, shell, queuedB, queuedC] = drained.runs;
+        assert.deepEqual(
+          drained.runs.map((run) => run.status),
+          ["completed", "completed", "completed", "completed"],
+        );
+        // The steer joined the running turn: its answer is in that run, one provider turn each.
+        assert.include(assistantText(drained, shell!.id), "STEERED");
+        assert.include(assistantText(drained, queuedB!.id), "QUEUED_B");
+        assert.include(assistantText(drained, queuedC!.id), "QUEUED_C");
+        assert.lengthOf(drained.providerTurns, 4);
+        // Steered natively: a steer user item in the shell run, no restart attempt.
+        assert.deepEqual(
+          drained.turnItems.flatMap((item) =>
+            item.type === "user_message" && item.runId === shell!.id ? [item.inputIntent] : [],
+          ),
+          ["turn_start", "steer"],
+        );
+        assert.lengthOf(
+          drained.attempts.filter((attempt) => attempt.runId === shell!.id),
+          1,
+        );
+        assert.equal((yield* fs.readFileString(path.join(work, "reverted.txt"))).trim(), "BETA");
+
+        // 3. Fork from the first turn: the fork only knows what came before the shell turn.
+        const forkId = ThreadId.make("thread:opencode2-live-inbox-fork");
+        yield* orchestrator.dispatch({
+          type: "thread.fork",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:opencode2-live-inbox:fork"),
+          sourceThreadId: threadId,
+          targetThreadId: forkId,
+          sourcePoint: { type: "run", runId: first.runs[0]!.id },
+        });
+        // In its own worktree, so the source's rollback below restores files for
+        // the source alone. The fork's session moves there with it.
+        const forkWork = path.join(ROOT, "inbox-fork-work");
+        yield* fs.makeDirectory(forkWork, { recursive: true });
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("command:opencode2-live-inbox:fork-worktree"),
+          threadId: forkId,
+          worktreePath: forkWork,
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:opencode2-live-inbox:fork-ask"),
+          threadId: forkId,
+          messageId: MessageId.make("message:opencode2-live-inbox:fork-ask"),
+          text: "Did I ask you to reply with QUEUED_B in this conversation? Answer only YES or NO.",
+          attachments: [],
+          modelSelection: MODEL,
+          dispatchMode: { type: "start_immediately" },
+        });
+        const forked = yield* waitFor(forkId, settled);
+        assert.equal(forked.contextTransfers[0]?.resolution?.strategy, "native_fork");
+        assert.equal(forked.runs[0]?.status, "completed");
+        assert.include(assistantText(forked, forked.runs[0]!.id).toUpperCase(), "NO");
+
+        // 4. Roll the source back to the first turn: OpenCode's history drops the
+        // later turns and T3's checkpoint puts ALPHA back.
+        const checkpoint = drained.checkpoints.find(
+          (candidate) => candidate.appRunOrdinal === 1 && candidate.status === "ready",
+        );
+        assert.isDefined(checkpoint);
+        yield* orchestrator.dispatch({
+          type: "checkpoint.rollback",
+          commandId: CommandId.make("command:opencode2-live-inbox:rollback"),
+          threadId,
+          scopeId: checkpoint!.scopeId,
+          checkpointId: checkpoint!.id,
+        });
+        const rolledBack = yield* waitFor(threadId, (projection) =>
+          projection.runs.slice(1).every((run) => run.status === "rolled_back"),
+        );
+        assert.deepEqual(
+          rolledBack.runs.map((run) => run.status),
+          ["completed", "rolled_back", "rolled_back", "rolled_back"],
+        );
+        assert.equal((yield* fs.readFileString(path.join(work, "reverted.txt"))).trim(), "ALPHA");
+        yield* dispatch(
+          "after",
+          "Did I ask you to reply with QUEUED_B in this conversation? Answer only YES or NO.",
+          { type: "start_immediately" },
+        );
+        const after = yield* waitFor(
+          threadId,
+          (projection) => projection.runs.length === 5 && settled(projection),
+        );
+        assert.include(assistantText(after, after.runs[4]!.id).toUpperCase(), "NO");
+        // OpenCode's own history kept only the first turn before the new one.
+        const sessionId = after.providerThreads[0]?.nativeThreadRef?.nativeId;
+        const db = new NodeSqlite.DatabaseSync(`${ROOT}/data/opencode/opencode.db`, {
+          readOnly: true,
+        });
+        const userMessages = db
+          .prepare(
+            "SELECT id FROM session_message WHERE session_id = ? AND type = 'user' ORDER BY seq",
+          )
+          .all(sessionId!)
+          .map((row) => String(row.id));
+        db.close();
+        assert.lengthOf(userMessages, 2);
+      }).pipe(Effect.provide(Layer.merge(liveLayer, NodeServices.layer)), Effect.scoped),
+    600_000,
   );
 });

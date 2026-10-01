@@ -25,6 +25,7 @@ import * as OpenCode2Client from "../../provider/opencode2/OpenCode2Client.ts";
 import * as OpenCode2Server from "../../provider/opencode2/OpenCode2Server.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
+import type { ProviderReplayGate } from "../testkit/ProviderReplayGate.testkit.ts";
 import {
   makeReplayServerConfig,
   type OrchestratorV2ProviderReplayHarness,
@@ -75,6 +76,20 @@ const operationOf = (
     if (method === "POST" && rest === "/model") return { type: "session.switchModel", input };
     if (method === "POST" && rest === "/move") return { type: "session.move", input };
     if (method === "POST" && rest === "/synthetic") return { type: "session.synthetic", input };
+    if (method === "POST" && rest === "/fork") return { type: "session.fork", input };
+    if (method === "POST" && rest === "/revert/stage") {
+      return { type: "session.revert.stage", input };
+    }
+    if (method === "POST" && rest === "/revert/commit") {
+      return { type: "session.revert.commit", input };
+    }
+    if (method === "DELETE" && rest === "/revert") return { type: "session.revert.clear", input };
+    const inbox = /^\/inbox\/([^/]+)$/.exec(rest);
+    if (method === "DELETE" && inbox !== null) {
+      // T3's steer ids carry `:`, which the path encodes.
+      const inboxID = decodeURIComponent(inbox[1] ?? "");
+      return { type: "session.inbox.cancel", input: { ...input, inboxID } };
+    }
     if (method === "GET" && rest === "/message") return { type: "message.list", input };
     if (method === "GET" && rest === "/permission") return { type: "permission.list", input };
     if (method === "GET" && rest === "/form") return { type: "session.form.list", input };
@@ -95,7 +110,10 @@ const operationOf = (
 };
 
 /** An `HttpClient` that answers every request from the transcript. */
-const replayHttpClient = (controller: OpenCodeReplayController) =>
+const replayHttpClient = (
+  controller: OpenCodeReplayController,
+  replayGate: ProviderReplayGate | undefined,
+) =>
   HttpClient.make((request, url) =>
     Effect.tryPromise({
       try: async () => {
@@ -111,12 +129,13 @@ const replayHttpClient = (controller: OpenCodeReplayController) =>
           raw === undefined ? undefined : decodeJson(raw),
         );
         // The event stream and requests are separate connections: a request
-        // is matched only once the events recorded before it were delivered.
-        if (operation.type !== "event.subscribe") await controller.untilEventsDelivered();
+        // is matched only once what was recorded before it was delivered.
+        if (operation.type !== "event.subscribe") await controller.untilInboundDelivered();
         await controller.expectOutbound(operation);
         if (operation.type === "event.subscribe") {
           const encoder = new TextEncoder();
-          const frames = controller.events()[Symbol.asyncIterator]();
+          const events = controller.events(undefined, replayGate?.beforeEmit);
+          const frames = events[Symbol.asyncIterator]();
           const body = new ReadableStream<Uint8Array>({
             async pull(stream) {
               const next = await frames.next();
@@ -150,13 +169,21 @@ const replayHttpClient = (controller: OpenCodeReplayController) =>
 /** The 2.x adapter over a replayed server, checking at scope close that the transcript ran out. */
 const makeReplayAdapter = (
   transcript: ProviderReplayTranscript,
-  options?: { external?: boolean },
+  options?: { readonly external?: boolean; readonly replayGate?: ProviderReplayGate },
 ) =>
   Effect.gen(function* () {
     const controller = new OpenCodeReplayController(transcript);
-    yield* Effect.addFinalizer(() => Effect.sync(() => controller.assertComplete()));
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        options?.replayGate?.releaseAll();
+        controller.assertComplete();
+      }),
+    );
     const opencode = yield* OpenCode2Client.make.pipe(
-      Effect.provideService(HttpClient.HttpClient, replayHttpClient(controller)),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        replayHttpClient(controller, options?.replayGate),
+      ),
     );
     const connection = {
       ...(yield* opencode.connect({ baseUrl: BASE_URL, password: "replay" })),
@@ -177,9 +204,12 @@ const replayServerConfig = (scenario: string) =>
     Layer.provide(NodeServices.layer),
   );
 
-function makeRegistryLayer(transcript: OpenCode2ReplayTranscript) {
+function makeRegistryLayer(
+  transcript: OpenCode2ReplayTranscript,
+  options?: { readonly replayGate?: ProviderReplayGate },
+) {
   return Layer.unwrap(
-    makeReplayAdapter(transcript, { external: true }).pipe(
+    makeReplayAdapter(transcript, { external: true, ...options }).pipe(
       Effect.map((adapter) => ProviderAdapterRegistry.makeLayer([adapter])),
     ),
   ).pipe(Layer.provide(Layer.mergeAll(replayServerConfig(transcript.scenario), IdAllocator.layer)));
