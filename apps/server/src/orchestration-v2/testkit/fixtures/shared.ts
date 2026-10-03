@@ -242,7 +242,7 @@ export type OrchestratorFixtureInputStep =
       readonly key: string;
     }
   | {
-      readonly type: "release_replay_gate";
+      readonly type: "release_replay_gate" | "await_replay_gate";
       readonly label: string;
     }
   | {
@@ -589,6 +589,7 @@ export function materializeFixtureInput(input: {
               (nextStep !== undefined &&
                 ((nextStep.type === "interrupt" && nextStep.targetRunIndex === runIndex) ||
                   nextStep.type === "queue_message" ||
+                  nextStep.type === "await_replay_gate" ||
                   (nextStep.type === "restart" && nextStep.targetRunIndex === runIndex) ||
                   (nextStep.type === "release_replay_gate_after_waiting" &&
                     nextStep.targetRunIndex === runIndex) ||
@@ -703,8 +704,9 @@ export function materializeFixtureInput(input: {
         case "capture_shell_snapshot":
           steps.push({ type: "capture_shell_snapshot", key: step.key });
           break;
+        case "await_replay_gate":
         case "release_replay_gate":
-          steps.push({ type: "release_replay_gate", label: step.label });
+          steps.push({ type: step.type, label: step.label });
           break;
         case "answer_next_user_input_request":
           pushDispatch(
