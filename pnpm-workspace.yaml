@@ -219,6 +219,8 @@ packageExtensions:
       vite-plus: "catalog:"
 
 patchedDependencies:
+  # Android prefab rejects '=' in aube store paths; retarget on Expo upgrades (aube skips stale patch keys silently).
+  expo-modules-autolinking@58.0.17: patches/expo-modules-autolinking@58.0.17.patch
   react-native-image-viewing@0.2.2: patches/react-native-image-viewing@0.2.2.patch
   mdast-util-math@3.0.0: patches/mdast-util-math@3.0.0.patch
   micromark-extension-llm-math@3.1.0: patches/micromark-extension-llm-math@3.1.0.patch
