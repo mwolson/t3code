@@ -86,6 +86,7 @@ export function assertClaudeBackgroundTaskWakeOutput(
     taskId: BACKGROUND_TASK_ID,
     description: "Background sleep test",
     kind: "command",
+    wakesAgent: true,
   });
   assert.deepEqual(backgroundNotifications(projection), [
     {
