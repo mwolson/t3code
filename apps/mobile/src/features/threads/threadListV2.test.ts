@@ -199,6 +199,19 @@ describe("resolveThreadListV2Status", () => {
     },
   );
 
+  it("shows Waiting for a completed command that wakes the agent", () => {
+    const thread = presentThreadShell(
+      environmentId,
+      makeRawThreadShell({
+        latestRunId: RunId.make("run-background-bash"),
+        status: "completed",
+        pendingBackgroundTasks: [{ taskId: "bash", kind: "command", wakesAgent: true }],
+      }),
+    );
+    expect(thread.runtime?.status).toBe("idle");
+    expect(resolveThreadListV2Status(thread)).toBe("waiting");
+  });
+
   it("resolves ready for quiescent threads", () => {
     expect(resolveThreadListV2Status(makeThread({ id: ThreadId.make("t"), title: "t" }))).toBe(
       "ready",

@@ -16,10 +16,38 @@ export function claudeBackgroundTaskAfterRootInput(): OrchestratorFixtureInput {
   return {
     steps: [
       { type: "message", text: CLAUDE_BACKGROUND_TASK_AFTER_ROOT_PROMPT },
+      { type: "await_replay_gate", label: "background_tasks_changed:empty" },
+      { type: "await_run_status", targetRunIndex: 1, status: "completed" },
+      { type: "capture_shell_snapshot", key: "background-bash-waiting" },
       {
         type: "release_replay_gate_after_waiting",
         label: "background_tasks_changed:empty",
         targetRunIndex: 1,
+      },
+    ],
+  };
+}
+
+export const CLAUDE_BACKGROUND_TASK_USER_FOLLOW_UP_PROMPT = "Reply with exactly: USER_REPLY";
+
+export function claudeBackgroundTaskWithUserRunInput(): OrchestratorFixtureInput {
+  return {
+    steps: [
+      { type: "message", text: CLAUDE_BACKGROUND_TASK_AFTER_ROOT_PROMPT },
+      { type: "await_run_status", targetRunIndex: 1, status: "completed" },
+      { type: "capture_shell_snapshot", key: "before-user-run" },
+      { type: "message", text: CLAUDE_BACKGROUND_TASK_USER_FOLLOW_UP_PROMPT },
+      { type: "await_replay_gate", label: "assistant:follow-up-final" },
+      { type: "await_run_status", targetRunIndex: 2, status: "running" },
+      { type: "capture_shell_snapshot", key: "during-user-run" },
+      { type: "release_replay_gate", label: "assistant:follow-up-final" },
+      { type: "await_replay_gate", label: "background_tasks_changed:empty" },
+      { type: "await_run_status", targetRunIndex: 2, status: "completed" },
+      { type: "capture_shell_snapshot", key: "after-user-run" },
+      {
+        type: "release_replay_gate_after_waiting",
+        label: "background_tasks_changed:empty",
+        targetRunIndex: 2,
       },
     ],
   };
