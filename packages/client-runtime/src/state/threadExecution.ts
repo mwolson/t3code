@@ -1,6 +1,7 @@
 import {
-  latestRootProviderFailure,
+  latestRootProviderFailureItem,
   latestUnheldRun,
+  providerFailureOccurredAt,
   threadErrorSummary,
   usageLimitRunPresentedAsLatest,
 } from "@t3tools/shared/orchestrationV2ThreadError";
@@ -247,6 +248,7 @@ export function deriveThreadRuntime(
       runs: projection.runs,
     }),
   );
+  const failureItem = latestRootProviderFailureItem(latestRunProjection, projection.turnItems);
   return {
     status: usageLimitedRun
       ? "failed"
@@ -260,10 +262,13 @@ export function deriveThreadRuntime(
         : DateTime.formatIso(orchestrationV2RunWorkStartedAt(liveActivityRun)),
     providerInstanceId: projection.thread.providerInstanceId,
     providerName: providerSession?.driver ?? null,
-    ...threadErrorSummary(
-      latestRootProviderFailure(latestRunProjection, projection.turnItems),
-      providerSession?.lastError ?? null,
-    ),
+    ...threadErrorSummary(failureItem?.failure ?? null, providerSession?.lastError ?? null, {
+      sessionErrorAt:
+        providerSession?.lastErrorAt == null
+          ? null
+          : DateTime.formatIso(providerSession.lastErrorAt),
+      failureAt: providerFailureOccurredAt(failureItem),
+    }),
     updatedAt: DateTime.formatIso(projection.updatedAt),
   };
 }
