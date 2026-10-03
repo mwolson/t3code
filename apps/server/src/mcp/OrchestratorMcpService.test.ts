@@ -518,13 +518,25 @@ describe("OrchestratorMcpService provider resolution", () => {
 
         yield* Effect.gen(function* () {
           const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-          const capabilities = yield* service.capabilities(scope);
+          const capabilities = yield* service.capabilities(scope, {});
           const byId = new Map(
             capabilities.providers.map((provider) => [provider.providerInstanceId, provider]),
           );
+          // Models are paged per provider; the no-argument response omits them.
+          const expandedModelIds = (instanceId: ProviderInstanceId) =>
+            service
+              .capabilities(scope, { providerInstanceId: instanceId })
+              .pipe(
+                Effect.map((result) =>
+                  result.providers
+                    .find((entry) => entry.providerInstanceId === instanceId)
+                    ?.models?.map((model) => model.id),
+                ),
+              );
           for (const provider of providers) {
+            assert.isUndefined(byId.get(provider.instanceId)?.models);
             assert.deepEqual(
-              byId.get(provider.instanceId)?.models.map((model) => model.id),
+              yield* expandedModelIds(provider.instanceId),
               provider.models.map((model) => model.slug),
             );
           }
@@ -541,12 +553,9 @@ describe("OrchestratorMcpService provider resolution", () => {
               },
             ],
           }));
-          const refreshed = yield* service.capabilities(scope);
           for (const provider of providers) {
             assert.deepEqual(
-              refreshed.providers
-                .find((entry) => entry.providerInstanceId === provider.instanceId)
-                ?.models.map((model) => model.id),
+              yield* expandedModelIds(provider.instanceId),
               provider.models.map((model) => model.slug),
             );
           }
@@ -585,6 +594,89 @@ describe("OrchestratorMcpService provider resolution", () => {
           );
         }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
       }),
+  );
+
+  it.effect("expands an empty catalog without dropping provider setup constraints", () =>
+    Effect.gen(function* () {
+      const forkOnlyInstanceId = ProviderInstanceId.make("forkOnly");
+      const forkShadow = yield* buildUnavailableProviderSnapshot({
+        driverKind: "forkOnly",
+        instanceId: forkOnlyInstanceId,
+        reason: "Driver 'forkOnly' is not registered in this build.",
+        checkedAt: "2026-09-13T00:00:00.000Z",
+      });
+      const unauthenticatedInstanceId = ProviderInstanceId.make("claudeAgent");
+      const codexProvider = providerSnapshot({
+        instanceId: codexInstanceId,
+        driver: ProviderDriverKind.make("codex"),
+        model: "gpt-5.4",
+      });
+      const providers: ReadonlyArray<ServerProvider> = [
+        {
+          ...codexProvider,
+          models: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.5"].map((slug) => ({
+            ...codexProvider.models[0]!,
+            slug,
+            name: slug,
+          })),
+        },
+        {
+          ...providerSnapshot({
+            instanceId: unauthenticatedInstanceId,
+            driver: ProviderDriverKind.make("claudeAgent"),
+          }),
+          auth: { status: "unauthenticated" },
+        },
+        forkShadow,
+      ];
+      const dependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: () => Effect.succeed(parentProjection([])),
+        }),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed(providers) }),
+        adapterRegistryLayer([codexInstanceId, unauthenticatedInstanceId]),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const unauthenticated = yield* service.capabilities(scope, {
+          providerInstanceId: unauthenticatedInstanceId,
+        });
+        const expanded = unauthenticated.providers.find(
+          (provider) => provider.providerInstanceId === unauthenticatedInstanceId,
+        );
+        assert.deepInclude(expanded, { models: [], modelsNextCursor: null, modelsTotal: 0 });
+        assert.isFalse(expanded!.canRunChildTask);
+        assert.deepEqual(expanded!.constraints, ["Provider is not authenticated."]);
+        for (const provider of unauthenticated.providers) {
+          if (provider.providerInstanceId !== unauthenticatedInstanceId) {
+            assert.notProperty(provider, "models");
+          }
+        }
+
+        const fork = (yield* service.capabilities(scope, {
+          providerInstanceId: forkOnlyInstanceId,
+          modelCursor: 3,
+        })).providers.find((provider) => provider.providerInstanceId === forkOnlyInstanceId);
+        assert.deepInclude(fork, { models: [], modelsNextCursor: null, modelsTotal: 0 });
+        assert.include(fork!.constraints, "No V2 provider adapter is registered.");
+        assert.include(fork!.constraints, "Driver 'forkOnly' is not registered in this build.");
+
+        const exact = (yield* service.capabilities(scope, {
+          providerInstanceId: codexInstanceId,
+          model: "gpt-5.4-mini",
+          modelCursor: 2,
+          modelLimit: 1,
+        })).providers.find((provider) => provider.providerInstanceId === codexInstanceId);
+        assert.deepInclude(exact, {
+          models: [{ id: "gpt-5.4-mini", label: "gpt-5.4-mini" }],
+          modelsNextCursor: null,
+          modelsTotal: 1,
+        });
+      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+    }),
   );
 
   it.effect(

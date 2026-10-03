@@ -20,6 +20,12 @@ describe("T3 orchestration provider instructions", () => {
     );
   });
 
+  it("documents bounded catalog discovery", () => {
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "provider summaries");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "modelCursor");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "includeModelOptions: true");
+  });
+
   it("documents structured schedules instead of JSON strings", () => {
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "structured object, never as JSON text");
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, '"everyMs":3600000');
