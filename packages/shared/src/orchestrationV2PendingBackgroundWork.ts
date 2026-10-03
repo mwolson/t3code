@@ -93,15 +93,17 @@ export function deriveBlockedOnThreadWait(input: {
 }
 
 export function backgroundWorkHoldsCompletion(
-  tasks: ReadonlyArray<Pick<PendingBackgroundWorkTask, "kind">>,
+  tasks: ReadonlyArray<Pick<PendingBackgroundWorkTask, "kind" | "wakesAgent">>,
 ): boolean {
-  return tasks.some((task) => backgroundWorkKindHoldsCompletion(task.kind));
+  return tasks.some(backgroundTaskHoldsCompletion);
 }
 
-function backgroundWorkKindHoldsCompletion(kind: PendingBackgroundWorkTask["kind"]): boolean {
-  switch (kind) {
+function backgroundTaskHoldsCompletion(
+  task: Pick<PendingBackgroundWorkTask, "kind" | "wakesAgent">,
+): boolean {
+  switch (task.kind) {
     case "command":
-      return false;
+      return task.wakesAgent === true;
     case "subagent":
     case "monitor":
     case "background_task":
