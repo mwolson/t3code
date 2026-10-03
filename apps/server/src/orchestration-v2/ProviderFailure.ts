@@ -14,6 +14,10 @@ import * as DateTime from "effect/DateTime";
 import * as Cause from "effect/Cause";
 
 import type { IdAllocatorV2Shape } from "./IdAllocator.ts";
+import {
+  PROVIDER_BUFFERED_OUTPUT_MESSAGE,
+  PROVIDER_RUNNING_WORK_MESSAGE,
+} from "./ProviderAdapter.ts";
 import { ContextHandoffBudgetError } from "./ContextHandoffDelivery.ts";
 
 export const MAX_PROVIDER_FAILURE_MESSAGE_LENGTH = 4_096;
@@ -34,6 +38,10 @@ function causeMessage(cause: unknown): string | undefined {
       }
       if (typeof cause !== "object") break;
       switch ((cause as Record<string, unknown>)._tag) {
+        case "ProviderAdapterRunningWorkError":
+          return PROVIDER_RUNNING_WORK_MESSAGE;
+        case "ProviderAdapterBufferedOutputError":
+          return PROVIDER_BUFFERED_OUTPUT_MESSAGE;
         case "ContextHandoffBudgetError":
           return new ContextHandoffBudgetError().message;
         case "ClaudeBackgroundWorkBlocksQueryReplacementError":
