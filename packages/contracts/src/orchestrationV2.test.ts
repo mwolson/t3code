@@ -30,6 +30,7 @@ import {
   OrchestrationV2LimitRecoveryUpdate,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProviderCapabilities,
+  OrchestrationV2PendingBackgroundTask,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2RpcSchemas,
@@ -1329,6 +1330,19 @@ describe("background work kinds from older or newer servers", () => {
       storedNotification({ kind: "workflow", workflowId: "wf-1" }),
     );
     expect(item).toMatchObject({ type: "notification", source: { kind: "background_task" } });
+  });
+
+  it("round-trips wake lifecycle and decodes historical commands without it", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2PendingBackgroundTask);
+    const encode = Schema.encodeSync(OrchestrationV2PendingBackgroundTask);
+    const waking = { taskId: "bash", kind: "command", wakesAgent: true };
+    expect(encode(decode(waking))).toEqual(waking);
+    expect(decode({ taskId: "old", kind: "command" })).toEqual({ taskId: "old", kind: "command" });
+    expect(decode({ taskId: "new", kind: "workflow", wakesAgent: true })).toEqual({
+      taskId: "new",
+      kind: "background_task",
+      wakesAgent: true,
+    });
   });
 
   it("decodes rosters stored before kinds existed, and kinds from a newer server, as generic tasks", () => {

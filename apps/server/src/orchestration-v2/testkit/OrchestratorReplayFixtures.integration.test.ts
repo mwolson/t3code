@@ -23,6 +23,8 @@ import { PiOrchestratorReplayHarness } from "../Adapters/PiAdapterV2.testkit.ts"
 import * as IdAllocator from "../IdAllocator.ts";
 import { provideDeterministicTestRuntime } from "./DeterministicRuntime.ts";
 import { ORCHESTRATOR_REPLAY_FIXTURES } from "./fixtures/index.ts";
+import { claudeBackgroundTaskWithUserRunInput } from "./fixtures/claude_background_task_after_root/input.ts";
+import { assertClaudeBackgroundTaskWithUserRunOutput } from "./fixtures/claude_background_task_after_root/output.ts";
 import { messageRestartInput } from "./fixtures/message_steering/input.ts";
 import {
   assertProviderNativeSubagentRootTurns,
@@ -221,6 +223,26 @@ function runFixtureProviderWithRegisteredHarness(input: {
 }
 
 describe("orchestrator replay fixtures", () => {
+  it.effect("holds Waiting across an intervening user run during Claude background Bash", () => {
+    const fixture = ORCHESTRATOR_REPLAY_FIXTURES.find(
+      (candidate) => candidate.name === "claude_background_task_after_root",
+    );
+    const provider = fixture?.providers[0];
+    assert.isDefined(provider);
+    return runFixtureProviderWithRegisteredHarness({
+      fixtureName: "claude_background_task_after_root",
+      buildInput: claudeBackgroundTaskWithUserRunInput,
+      driver: {
+        ...provider,
+        transcriptFile: new URL(
+          "./fixtures/claude_background_task_after_root/claude_user_run_transcript.ndjson",
+          import.meta.url,
+        ),
+        assertOutput: assertClaudeBackgroundTaskWithUserRunOutput,
+      },
+    });
+  });
+
   it.effect.each(
     ORCHESTRATOR_REPLAY_FIXTURES.flatMap((fixture) =>
       fixture.providers.map(

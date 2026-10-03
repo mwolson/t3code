@@ -1,5 +1,7 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import { EnvironmentId, type ProviderReplayTranscript } from "@t3tools/contracts";
+
+import { presentThreadShell } from "../../../../../../../packages/client-runtime/src/state/models.ts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -24,6 +26,21 @@ export function assertClaudeLocalBashTaskOutput(
   );
 
   const projection = projectionFor(result, transcript.scenario);
+  assert.isFalse(
+    result.domainEvents.some(
+      (event) =>
+        event.type === "provider-thread.updated" &&
+        (event.payload.pendingBackgroundTasks?.length ?? 0) > 0,
+    ),
+    "foreground local_bash must never join the background roster",
+  );
+  const shell = result.shellSnapshot.threads.find((thread) => thread.id === projection.thread.id);
+  assert.isDefined(shell);
+  assert.deepEqual(shell.pendingBackgroundTasks ?? [], []);
+  assert.equal(
+    presentThreadShell(EnvironmentId.make("replay"), shell).runtime?.status,
+    "completed",
+  );
   assertSemanticProjectionIntegrity(projection);
   assertVisibleTurnItemsMirrorLocalTurnItems(projection);
   assertUserMessagesInclude(projection, [CLAUDE_LOCAL_BASH_TASK_PROMPT]);
