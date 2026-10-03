@@ -308,13 +308,13 @@ export interface PendingBackgroundWorkItem {
 export interface PendingBackgroundWorkPresentation {
   /**
    * "Waiting on subagent Review src/math.ts", "Waiting on 2 subagents and 1 command",
-   * or "Running: Start the dev server" when only commands remain.
+   * or "Running: Start the dev server" when only commands that cannot wake the agent remain.
    */
   readonly title: string;
   readonly items: ReadonlyArray<PendingBackgroundWorkItem>;
   /**
-   * True when the work will wake the agent (subagents, monitors). False when
-   * only commands remain, such as a dev server: the agent is done.
+   * True when the work will wake the agent, including waking commands, subagents, and monitors.
+   * False when only commands that cannot wake the agent remain: the agent is done.
    */
   readonly waiting: boolean;
 }

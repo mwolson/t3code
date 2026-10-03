@@ -766,6 +766,8 @@ const PendingBackgroundTaskFields = {
   taskId: TrimmedNonEmptyString,
   /** The work's name: a subagent's title, a command's description, a monitor's. */
   description: Schema.optional(TrimmedNonEmptyString),
+  /** Completion wakes the agent for follow-up work, rather than leaving a detached command. */
+  wakesAgent: Schema.optional(Schema.Boolean),
 };
 
 /**
@@ -788,9 +790,10 @@ export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
     Schema.Struct({ ...PendingBackgroundTaskFields, kind: Schema.Literal("background_task") }),
   ],
   (kind) => Schema.Struct({ ...PendingBackgroundTaskFields, kind }),
-  ({ taskId, description }) => ({
+  ({ taskId, description, wakesAgent }) => ({
     taskId,
     ...(description === undefined ? {} : { description }),
+    ...(wakesAgent === undefined ? {} : { wakesAgent }),
     kind: "background_task",
   }),
 );

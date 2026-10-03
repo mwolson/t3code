@@ -2056,6 +2056,19 @@ describe("navigation after parking a thread", () => {
 });
 
 describe("unseen completion with background work", () => {
+  it("shows Waiting in the sidebar and status pill for a command that wakes the agent", () => {
+    const thread = presentThreadShell(localEnvironmentId, {
+      ...makeThreadFixture().source,
+      latestRunId: RunId.make("run-background-bash"),
+      status: "completed",
+      pendingBackgroundTasks: [{ taskId: "bash", kind: "command", wakesAgent: true }],
+    });
+    expect(thread.runtime?.status).toBe("idle");
+    expect(resolveSidebarThreadStatus(thread)).toBe("waiting");
+    expect(isSidebarThreadWorking(thread)).toBe(true);
+    expect(resolveThreadStatusPill({ thread })).toMatchObject({ label: "Waiting" });
+  });
+
   it.each([
     { kind: "command", status: "ready", topStatus: "done", receded: false, pill: "Completed" },
     { kind: "monitor", status: "waiting", topStatus: "waiting", receded: true, pill: "Waiting" },

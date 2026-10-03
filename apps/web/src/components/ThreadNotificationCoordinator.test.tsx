@@ -20,7 +20,7 @@ const state = vi.hoisted(() => ({
   turnError: false,
   limited: false,
   subagent: false,
-  background: [] as Array<{ taskId: string; kind: "command" | "monitor" }>,
+  background: [] as Array<{ taskId: string; kind: "command" | "monitor"; wakesAgent?: boolean }>,
   add: vi.fn(
     (_toast: { title: string; description: string; actionProps: { onClick: () => void } }) =>
       "toast-1",
@@ -262,6 +262,51 @@ describe("thread notifications", () => {
     expect(state.add).toHaveBeenLastCalledWith(
       expect.objectContaining({ title: "Thread completed" }),
     );
+  });
+
+  it("defers completion toast and sound until a waking command's continuation finishes", async () => {
+    state.mode = "notifications-and-sound";
+    await render();
+    state.background = [{ taskId: "bash", kind: "command", wakesAgent: true }];
+    await complete();
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
+    expect(state.sound).not.toHaveBeenCalled();
+    expect(state.notification).not.toHaveBeenCalled();
+
+    state.completedAt = null;
+    state.background = [];
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
+    expect(state.sound).not.toHaveBeenCalled();
+    state.completedAt = "2026-09-13T10:01:00.000Z";
+    await render();
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(1);
+    expect(state.add).toHaveBeenLastCalledWith(
+      expect.objectContaining({ title: "Thread completed" }),
+    );
+    expect(state.sound).toHaveBeenCalledTimes(1);
+    expect(state.sound).toHaveBeenCalledWith("completion", expect.any(Function));
+    expect(state.notification).not.toHaveBeenCalled();
+  });
+
+  it("defers a desktop completion alert while a waking command is pending", async () => {
+    state.mode = "notifications";
+    state.focused = false;
+    await render();
+    state.background = [{ taskId: "bash", kind: "command", wakesAgent: true }];
+    await complete();
+    expect(state.notification).not.toHaveBeenCalled();
+    state.background = [];
+    await render();
+    await render();
+    expect(state.notification).toHaveBeenCalledTimes(1);
+    expect(state.notification).toHaveBeenCalledWith("Thread completed", {
+      body: "Fix the login form",
+      tag: "env-1:thread-1",
+      silent: true,
+    });
   });
 
   it("keeps background desktop alerts when in-app notifications are disabled", async () => {

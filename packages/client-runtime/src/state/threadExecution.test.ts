@@ -54,6 +54,45 @@ function run(id: string, ordinal: number, status: OrchestrationV2RunStatus) {
 }
 
 describe("thread execution presentation", () => {
+  it("parks detail runtime idle and presents Waiting on a command that wakes the agent", () => {
+    const pendingBackgroundTasks = [
+      { taskId: "bash", description: "npm test", kind: "command" as const, wakesAgent: true },
+    ];
+    const providerThread = {
+      id: ProviderThreadId.make("background-bash"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: v2Projection.thread.providerInstanceId,
+      providerSessionId: null,
+      appThreadId: v2Projection.thread.id,
+      ownerNodeId: null,
+      nativeThreadRef: null,
+      nativeConversationHeadRef: null,
+      status: "idle" as const,
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const completedRun = {
+      ...run("background-bash", 1, "completed"),
+      providerThreadId: providerThread.id,
+    };
+    const projection = {
+      ...v2Projection,
+      thread: { ...v2Projection.thread, activeProviderThreadId: providerThread.id },
+      runs: [completedRun],
+      turnItems: [],
+      providerThreads: [{ ...providerThread, pendingBackgroundTasks }],
+    };
+    expect(deriveThreadRuntime(projection)).toMatchObject({ status: "idle", activeRunId: null });
+    expect(presentPendingBackgroundWork(pendingBackgroundTasks)).toMatchObject({
+      title: "Waiting on command npm test",
+      waiting: true,
+    });
+  });
+
   it("derives the current root failure without inheriting errors from children or previous runs", () => {
     const failed = { ...run("limited", 1, "failed"), rootNodeId: NodeId.make("root") };
     const item = {
@@ -601,8 +640,26 @@ describe("presentPendingBackgroundWork", () => {
     expect(presentPendingBackgroundWork([])).toBeNull();
   });
 
-  // A command left running, such as a dev server, does not wake the agent.
-  it("says only commands are running, not waited on", () => {
+  it("waits for a waking command in a mixed command roster", () => {
+    const detached = { taskId: "dev", kind: "command" as const, description: "Dev server" };
+    const waking = {
+      taskId: "bash",
+      kind: "command" as const,
+      description: "Run tests",
+      wakesAgent: true,
+    };
+    expect(presentPendingBackgroundWork([detached, waking])).toMatchObject({
+      title: "Waiting on 2 commands",
+      waiting: true,
+    });
+    expect(presentPendingBackgroundWork([detached])).toMatchObject({
+      title: "Running: Dev server",
+      waiting: false,
+    });
+  });
+
+  // A detached command, such as a dev server, does not wake the agent.
+  it("says detached commands are running, not waited on", () => {
     expect(
       presentPendingBackgroundWork([
         { taskId: "dev", kind: "command", description: "Start the shared dev server" },

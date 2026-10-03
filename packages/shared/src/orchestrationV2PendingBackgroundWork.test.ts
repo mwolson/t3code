@@ -20,6 +20,13 @@ describe("turnItemUpdateCanEndBackgroundWork", () => {
 });
 
 describe("backgroundWorkHoldsCompletion", () => {
+  it("holds completion for a waking command alongside a detached command", () => {
+    const detached = { taskId: "dev", kind: "command" as const };
+    const waking = { taskId: "bash", kind: "command" as const, wakesAgent: true };
+    expect(backgroundWorkHoldsCompletion([detached, waking])).toBe(true);
+    expect(backgroundWorkHoldsCompletion([detached])).toBe(false);
+  });
+
   const task = (
     taskId: string,
     kind: OrchestrationV2PendingBackgroundTask["kind"],
@@ -41,6 +48,27 @@ describe("backgroundWorkHoldsCompletion", () => {
 });
 
 describe("derivePendingBackgroundWork", () => {
+  it("preserves wake lifecycle when normalizing a command roster", () => {
+    const tasks = derivePendingBackgroundWork({
+      latestRun: { id: "run-1" as never, ordinal: 1, status: "completed" },
+      providerThreads: [
+        {
+          id: "pt-1" as never,
+          pendingBackgroundTasks: [
+            { taskId: "bash", description: "  npm test  ", kind: "command", wakesAgent: true },
+          ],
+        },
+      ],
+      turnItems: [],
+    });
+    expect(tasks).toEqual([
+      { taskId: "bash", description: "npm test", kind: "command", wakesAgent: true },
+    ]);
+    expect(backgroundWorkHoldsCompletion(tasks)).toBe(true);
+    expect(backgroundWorkHoldsCompletion([{ kind: "command" }])).toBe(false);
+    expect(backgroundWorkHoldsCompletion([{ kind: "command", wakesAgent: false }])).toBe(false);
+  });
+
   it("returns empty while the latest run is not settled", () => {
     const tasks = derivePendingBackgroundWork({
       latestRun: { id: "run-1" as never, ordinal: 1, status: "running" },

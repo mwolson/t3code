@@ -68,6 +68,20 @@ describe("scoped entity keys", () => {
 });
 
 describe("V2 client presentation", () => {
+  it("parks a completed shell at idle while a command can wake the agent", () => {
+    const pendingBackgroundTasks = [{ taskId: "bash", kind: "command" as const, wakesAgent: true }];
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      latestRunId: RunId.make("run-background-bash"),
+      activeRunId: null,
+      status: "completed",
+      pendingBackgroundTasks,
+    });
+    expect(shell.latestRun?.status).toBe("completed");
+    expect(shell.runtime).toMatchObject({ status: "idle", activeRunId: null });
+    expect(shell.pendingBackgroundTasks).toEqual(pendingBackgroundTasks);
+  });
+
   it("presents shell timestamps and status without constructing V1 state", () => {
     const shell = presentThreadShell(environmentId, v2ThreadShell);
     expect(shell.environmentId).toBe(environmentId);
