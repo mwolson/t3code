@@ -16,6 +16,9 @@ export function claudeBackgroundTaskAfterRootInput(): OrchestratorFixtureInput {
   return {
     steps: [
       { type: "message", text: CLAUDE_BACKGROUND_TASK_AFTER_ROOT_PROMPT },
+      { type: "await_replay_gate", label: "background_tasks_changed:empty" },
+      { type: "await_run_status", targetRunIndex: 1, status: "completed" },
+      { type: "capture_shell_snapshot", key: "background-bash-waiting" },
       {
         type: "release_replay_gate_after_waiting",
         label: "background_tasks_changed:empty",

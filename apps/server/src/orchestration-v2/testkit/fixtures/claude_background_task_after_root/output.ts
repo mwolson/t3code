@@ -1,5 +1,8 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import { EnvironmentId, type ProviderReplayTranscript } from "@t3tools/contracts";
+
+import { presentThreadShell } from "../../../../../../../packages/client-runtime/src/state/models.ts";
+import { presentPendingBackgroundWork } from "../../../../../../../packages/client-runtime/src/state/threadExecution.ts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -26,6 +29,26 @@ export function assertClaudeBackgroundTaskAfterRootOutput(
   const projection = projectionFor(result, transcript.scenario);
   assertSemanticProjectionIntegrity(projection);
   assertUserMessagesInclude(projection, [CLAUDE_BACKGROUND_TASK_AFTER_ROOT_PROMPT]);
+
+  const waitingShell = result.capturedShellSnapshots
+    .get("background-bash-waiting")
+    ?.threads.find((thread) => thread.id === projection.thread.id);
+  assert.isDefined(waitingShell);
+  assert.equal(waitingShell.status, "completed");
+  assert.equal(waitingShell.activeRunId, null);
+  assert.deepEqual(waitingShell.pendingBackgroundTasks, [
+    {
+      taskId: BACKGROUND_TASK_ID,
+      description: "sleep 25 && echo L2_BG_DONE",
+      kind: "command",
+      wakesAgent: true,
+    },
+  ]);
+  const presented = presentThreadShell(EnvironmentId.make("replay"), waitingShell);
+  assert.equal(presented.latestRun?.status, "completed");
+  assert.equal(presented.runtime?.status, "idle");
+  assert.deepEqual(presented.pendingBackgroundTasks, waitingShell.pendingBackgroundTasks);
+  assert.isTrue(presentPendingBackgroundWork(presented.pendingBackgroundTasks ?? [])?.waiting);
 
   const rootRun = projection.runs[0];
   assert.isDefined(rootRun);
