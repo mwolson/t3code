@@ -260,6 +260,11 @@ patchedDependencies:
   expo-glass-effect@58.0.3: patches/expo-glass-effect@58.0.3.patch
   expo-blur@58.0.3: patches/expo-blur@58.0.3.patch
   expo-audio@58.0.4: patches/expo-audio@58.0.4.patch
+  # Personal: extend Expo's Android prefab path workaround from pnpm's .pnpm store
+  # to aube's .aube store (google/prefab#187 cannot parse '=' in patch_hash paths).
+  # When Expo upgrades expo-modules-autolinking, retarget or drop this patch: aube
+  # silently skips a patch whose exact version is no longer installed.
+  expo-modules-autolinking@58.0.7: patches/expo-modules-autolinking@58.0.7.patch
   # Keep Clerk's token file owner-only; electron-store writes 0666 by default.
   "@clerk/electron@0.0.44": patches/@clerk__electron@0.0.44.patch
   "@clerk/expo@4.6.8": patches/@clerk__expo@4.6.8.patch
