@@ -34,6 +34,7 @@ import { toServerClock } from "@t3tools/client-runtime/clock";
 import type { SnoozePresetSetting } from "@t3tools/contracts/settings";
 import { canSnooze } from "@t3tools/client-runtime/state/thread-settled";
 import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
+import { presentWaitingRowStatus } from "@t3tools/client-runtime/state/thread-execution";
 import type { MenuAction } from "@react-native-menu/menu";
 import { useNavigation } from "@react-navigation/native";
 import { msg, T, useGT, useMessages } from "gt-react-native";
@@ -148,6 +149,12 @@ const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadListV2Status, StatusLabel>> =
     iconTintClassName: "accent-warning-foreground",
   },
 };
+const WAITING_STATUS_ICON_BY_KIND = {
+  background_task: "clock",
+  command: "terminal",
+  monitor: "eye",
+  subagent: "person.2",
+} as const;
 const DONE_STATUS_LABEL: StatusLabel = {
   label: msg("Done", { $context: "thread status, turn finished" }),
   icon: "checkmark.circle",
@@ -872,6 +879,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const isUnread = status === "ready" && threadHasUnseenCompletion(thread);
   const workingLabel = STATUS_LABEL_BY_STATUS[status];
   const showsWoke = status === "ready" && props.wokeAt !== null;
+  const waitingStatus =
+    status === "waiting" ? presentWaitingRowStatus(thread.pendingBackgroundTasks, m) : null;
   const statusEntry =
     (status === "working" && workingLabel !== undefined && thread.goal?.status === "active"
       ? {
@@ -879,10 +888,17 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           label: msg("Goal", { $context: "thread status, working toward a goal" }),
         }
       : workingLabel) ?? (isUnread ? DONE_STATUS_LABEL : undefined);
-  const statusLabel = statusEntry && {
-    ...statusEntry,
-    label: statusEntry.label === null ? null : m(statusEntry.label),
-  };
+  const statusLabel = waitingStatus
+    ? {
+        label: waitingStatus.label,
+        icon: WAITING_STATUS_ICON_BY_KIND[waitingStatus.kind],
+        className: "text-foreground-muted",
+        iconTintClassName: "accent-foreground-muted",
+      }
+    : statusEntry && {
+        ...statusEntry,
+        label: statusEntry.label === null ? null : m(statusEntry.label),
+      };
   const recede = shouldRecedeThreadRow({ status, selected });
   const isRegeneratingTitle = thread.titleRegeneration != null;
   // List items keep marked text so they stay the same objects across a language switch.
@@ -1445,7 +1461,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               </Text>
             </Pressable>
           ) : statusLabel ? (
-            <View className="flex-row items-center gap-1">
+            <View
+              className={cn(
+                "flex-row items-center gap-1",
+                waitingStatus !== null && "min-w-0 max-w-48 shrink",
+              )}
+            >
               <SymbolView
                 name={statusLabel.icon}
                 size={13}
@@ -1460,8 +1481,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               <Text
                 className={cn(
                   "text-xs font-t3-bold",
+                  waitingStatus !== null && "min-w-0 shrink",
                   selected ? selectedThreadRowColors.foregroundClassName : statusLabel.className,
                 )}
+                numberOfLines={1}
               >
                 {statusLabel.label}
                 {status === "working" ? (
@@ -1470,7 +1493,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                     startedAt={resolveThreadWorkingStartedAt(thread)}
                     leadingSpace={statusLabel.label !== null}
                   />
-                ) : status === "waiting" ? (
+                ) : null}
+                {status === "waiting" && waitingStatus === null ? (
                   <ThreadListV2Duration
                     environmentId={thread.environmentId}
                     startedAt={thread.latestRun?.completedAt ?? null}
@@ -1478,6 +1502,21 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                   />
                 ) : null}
               </Text>
+              {waitingStatus !== null ? (
+                // Outside the truncating label, so a long name never hides the elapsed time.
+                <Text
+                  className={cn(
+                    "shrink-0 text-xs font-t3-bold",
+                    selected ? selectedThreadRowColors.foregroundClassName : statusLabel.className,
+                  )}
+                >
+                  <ThreadListV2Duration
+                    environmentId={thread.environmentId}
+                    startedAt={thread.latestRun?.completedAt ?? null}
+                    leadingSpace={false}
+                  />
+                </Text>
+              ) : null}
             </View>
           ) : (
             <Text
