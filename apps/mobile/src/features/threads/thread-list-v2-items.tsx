@@ -29,6 +29,7 @@ import { AuthOrchestrationOperateScope, type EnvironmentMachineKind } from "@t3t
 import type { SnoozePresetSetting } from "@t3tools/contracts/settings";
 import { canSnooze } from "@t3tools/client-runtime/state/thread-settled";
 import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
+import { presentWaitingRowStatus } from "@t3tools/client-runtime/state/thread-execution";
 import type { MenuAction } from "@react-native-menu/menu";
 import { memo, useCallback, useMemo, useState, type ComponentProps } from "react";
 import { Pressable, useWindowDimensions, View } from "react-native";
@@ -130,6 +131,12 @@ const STATUS_LABEL_BY_STATUS: Partial<Record<ThreadListV2Status, StatusLabel>> =
     iconTintClassName: "accent-warning-foreground",
   },
 };
+const WAITING_STATUS_ICON_BY_KIND = {
+  background_task: "clock",
+  command: "terminal",
+  monitor: "eye",
+  subagent: "person.2",
+} as const;
 const DONE_STATUS_LABEL: StatusLabel = {
   label: "Done",
   icon: "checkmark.circle",
@@ -688,10 +695,21 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const isUnread = status === "ready" && threadHasUnseenCompletion(thread);
   const workingLabel = STATUS_LABEL_BY_STATUS[status];
   const showsWoke = status === "ready" && props.wokeAt !== null;
+  const waitingStatus =
+    status === "waiting" ? presentWaitingRowStatus(thread.pendingBackgroundTasks) : null;
   const statusLabel =
+    (waitingStatus
+      ? {
+          label: waitingStatus.label,
+          icon: WAITING_STATUS_ICON_BY_KIND[waitingStatus.kind],
+          className: "text-foreground-muted",
+          iconTintClassName: "accent-foreground-muted",
+        }
+      : undefined) ??
     (status === "working" && workingLabel !== undefined && thread.goal?.status === "active"
       ? { ...workingLabel, label: "Goal" }
-      : workingLabel) ?? (isUnread ? DONE_STATUS_LABEL : undefined);
+      : workingLabel) ??
+    (isUnread ? DONE_STATUS_LABEL : undefined);
   const recede = shouldRecedeThreadRow({ status, selected });
   const timeLabel = props.timeLabel;
 
@@ -1031,6 +1049,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         : null,
     [handleMenuAction, snoozePresetActions, swipeActions.secondary, thread.title],
   );
+  const accessibilityLabel = [
+    thread.title,
+    waitingStatus?.label,
+    props.hasQueuedMessages ? "messages queued to send" : undefined,
+  ]
+    .filter(Boolean)
+    .join(", ");
   const swipeAccessibilityHint = !canOperateThread
     ? "Opens the thread"
     : secondaryAction === null
@@ -1105,7 +1130,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               </Text>
             </Pressable>
           ) : statusLabel ? (
-            <View className="flex-row items-center gap-1">
+            <View
+              className={cn(
+                "flex-row items-center gap-1",
+                waitingStatus !== null && "min-w-0 max-w-48 shrink",
+              )}
+            >
               <SymbolView
                 name={statusLabel.icon}
                 size={13}
@@ -1120,9 +1150,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               <Text
                 className={cn(
                   "text-xs font-t3-bold",
+                  waitingStatus !== null && "min-w-0 shrink",
                   (status === "working" || status === "waiting") && "tabular-nums",
                   selected ? selectedThreadRowColors.foregroundClassName : statusLabel.className,
                 )}
+                numberOfLines={1}
               >
                 {statusLabel.label}
                 {status === "working" ? (
@@ -1280,9 +1312,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         interactionOpacity={rowAppearance.interactionOpacity}
         className={rowAppearance.className}
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={accessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         accessibilityActions={rowAccessibilityActions}
@@ -1313,9 +1343,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         interactionClassName={rowAppearance.interactionClassName}
         interactionOpacity={rowAppearance.interactionOpacity}
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={accessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         className={rowAppearance.className}

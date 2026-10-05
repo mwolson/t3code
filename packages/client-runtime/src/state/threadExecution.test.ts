@@ -20,6 +20,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { v2Projection } from "./orchestrationV2TestFixtures.ts";
 import {
+  presentWaitingRowStatus,
   deriveReportedModelSelection,
   deriveLatestThreadRun,
   deriveProviderSubagentStatus,
@@ -411,6 +412,36 @@ describe("provider-reported model selection", () => {
           { ...providerThread, providerInstanceId: ProviderInstanceId.make("other") },
         ],
       }),
+    ).toBeNull();
+  });
+});
+
+describe("presentWaitingRowStatus", () => {
+  it("names the one piece of work the agent waits on", () => {
+    expect(
+      presentWaitingRowStatus([
+        { taskId: "a", kind: "subagent", description: "Review src/math.ts" },
+      ]),
+    ).toEqual({ label: "Waiting on Review src/math.ts", kind: "subagent" });
+    expect(
+      presentWaitingRowStatus([
+        { taskId: "test", kind: "command", awaited: true, description: "npm test" },
+      ]),
+    ).toEqual({ label: "Waiting on npm test", kind: "command" });
+  });
+
+  // A dev server left running is not what the task waits on.
+  it("counts several pieces of work and leaves out commands the agent left running", () => {
+    expect(
+      presentWaitingRowStatus([
+        { taskId: "dev", kind: "command", description: "vp run dev" },
+        { taskId: "m", kind: "monitor", awaited: true, description: "Watch PR checks" },
+        { taskId: "a", kind: "subagent", description: "Review src/math.ts" },
+        { taskId: "b", kind: "subagent", description: "Write tests" },
+      ]),
+    ).toEqual({ label: "Waiting on 2 subagents and 1 monitor", kind: "subagent" });
+    expect(
+      presentWaitingRowStatus([{ taskId: "dev", kind: "command", description: "vp run dev" }]),
     ).toBeNull();
   });
 });
