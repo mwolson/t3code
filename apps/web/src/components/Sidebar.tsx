@@ -37,6 +37,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-settled";
 import { createInboxReturnTracker } from "@t3tools/client-runtime/state/thread-inbox";
 import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
+import { presentWaitingRowStatus } from "@t3tools/client-runtime/state/thread-execution";
 import {
   resolveSettledThreadTimestamp,
   sortSettledThreads,
@@ -68,6 +69,7 @@ import {
   AlarmClockIcon,
   AlarmClockOffIcon,
   ArrowRightLeftIcon,
+  BotIcon,
   CheckIcon,
   CircleAlertIcon,
   CircleCheckIcon,
@@ -1298,6 +1300,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Status hues follow the system-wide convention set by sidebar v1 and the
   // mobile Live Activity/widgets (amber approval, indigo input, sky working)
   // so a thread reads the same color everywhere it surfaces.
+  const waitingStatus =
+    status === "waiting" ? presentWaitingRowStatus(thread.pendingBackgroundTasks) : null;
   const topStatus =
     status === "working"
       ? {
@@ -1312,8 +1316,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         ? {
             // Waiting is calm background presence (post-settle background
             // roster), not active progress, so the label keeps full strength.
-            label: "Waiting",
-            icon: null,
+            // It names what the task waits on; the Working shelf already says
+            // the task is underway.
+            label: waitingStatus?.label ?? "Waiting",
+            icon: waitingStatus?.kind ?? null,
             className: "text-muted-foreground",
           }
         : status === "approval"
@@ -2015,7 +2021,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               ) : (
                 <span
                   className={cn(
-                    "group/sidebar-status-slot relative ml-auto flex h-5 min-w-8 shrink-0 items-stretch justify-end text-xs",
+                    "group/sidebar-status-slot relative ml-auto flex h-5 min-w-8 items-stretch justify-end text-xs",
+                    // A waiting label shrinks with a narrow sidebar so it ends in an
+                    // ellipsis at the card's edge; other statuses keep their width.
+                    waitingStatus !== null ? "shrink" : "shrink-0",
                     props.sweepAction !== null && "hidden",
                   )}
                 >
@@ -2026,9 +2035,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     className={cn(
                       isWokeStatus
                         ? "pointer-events-auto"
-                        : "pointer-events-none group-has-[:focus-visible]/sidebar-status-slot:absolute group-has-[:focus-visible]/sidebar-status-slot:right-0 group-has-[:focus-visible]/sidebar-status-slot:opacity-0 group-any-hover/sidebar-row:absolute group-any-hover/sidebar-row:right-0 group-any-hover/sidebar-row:opacity-0",
-                      "flex items-center self-center justify-self-end tabular-nums text-secondary-label transition-opacity",
-                      snoozeMenuOpen && "pointer-events-none absolute right-0 opacity-0",
+                        : // While fading out, the label stays inside the slot the actions
+                          // now fill, so a long waiting label cannot sweep over the project name.
+                          "pointer-events-none group-has-[:focus-visible]/sidebar-status-slot:absolute group-has-[:focus-visible]/sidebar-status-slot:inset-x-0 group-has-[:focus-visible]/sidebar-status-slot:overflow-hidden group-has-[:focus-visible]/sidebar-status-slot:opacity-0 group-any-hover/sidebar-row:absolute group-any-hover/sidebar-row:inset-x-0 group-any-hover/sidebar-row:overflow-hidden group-any-hover/sidebar-row:opacity-0",
+                      "flex min-w-0 items-center justify-end self-center tabular-nums text-secondary-label transition-opacity",
+                      snoozeMenuOpen &&
+                        "pointer-events-none absolute inset-x-0 overflow-hidden opacity-0",
                     )}
                   >
                     {topStatus ? (
@@ -2055,7 +2067,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                       ) : (
                         <span
                           className={cn(
-                            "inline-flex items-center gap-1 font-medium",
+                            "inline-flex min-w-0 items-center gap-1 font-medium",
                             topStatus.className,
                           )}
                         >
@@ -2069,11 +2081,24 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             <CircleAlertIcon aria-hidden className="size-4 shrink-0" />
                           ) : topStatus.icon === "done" ? (
                             <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
+                          ) : topStatus.icon === "subagent" ? (
+                            <BotIcon aria-hidden className="size-4 shrink-0" />
+                          ) : topStatus.icon === "command" ? (
+                            <TerminalIcon aria-hidden className="size-4 shrink-0" />
+                          ) : topStatus.icon === "monitor" ? (
+                            <EyeIcon aria-hidden className="size-4 shrink-0" />
+                          ) : topStatus.icon === "background_task" ? (
+                            <ClockIcon aria-hidden className="size-4 shrink-0" />
                           ) : null}
                           {/* The label alone is the live region: a role="status"
                             wrapper around the ticking duration would make
                             screen readers announce every second. */}
-                          <span role="status">{topStatus.label}</span>
+                          <span
+                            role="status"
+                            className={cn(waitingStatus !== null && "max-w-40 truncate")}
+                          >
+                            {topStatus.label}
+                          </span>
                           {status === "working" ? (
                             <span aria-hidden>
                               <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
