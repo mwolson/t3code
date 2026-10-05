@@ -19,6 +19,7 @@ import type {
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
 import type { EnvironmentMachineKind } from "@t3tools/contracts";
 import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
+import { presentWaitingRowStatus } from "@t3tools/client-runtime/state/thread-execution";
 import type { MenuAction } from "@react-native-menu/menu";
 import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { Alert, Pressable, useWindowDimensions, View } from "react-native";
@@ -589,7 +590,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   // so checking a thread on any device clears it everywhere.
   const isUnread = status === "ready" && threadHasUnseenCompletion(thread);
   const workingLabel = STATUS_LABEL_BY_STATUS[status];
+  // A waiting row names what the task waits on, in the time label's grey.
+  const waitingStatus =
+    status === "waiting" ? presentWaitingRowStatus(thread.pendingBackgroundTasks) : null;
   const statusLabel =
+    (waitingStatus ? { label: waitingStatus.label, className: undefined } : undefined) ??
     // A native /goal keeps the agent going across turns until it is met.
     (status === "working" && workingLabel !== undefined && thread.goal?.status === "active"
       ? { ...workingLabel, label: "Goal" }
@@ -918,6 +923,14 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         : null,
     [handleMenuAction, snoozePresetActions, swipeActions.secondary, thread.title],
   );
+  // VoiceOver reads the row as one element, so it carries what a waiting task waits on.
+  const accessibilityLabel = [
+    thread.title,
+    waitingStatus?.label,
+    props.hasQueuedMessages ? "messages queued to send" : undefined,
+  ]
+    .filter(Boolean)
+    .join(", ");
   const swipeAccessibilityHint =
     secondaryAction === null
       ? `Opens the thread. Swipe left to ${primaryAction.label.toLowerCase()}.`
@@ -960,11 +973,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         <Text
           className={cn(
             "text-xs tabular-nums",
+            waitingStatus !== null && "max-w-48",
             statusLabel?.className ??
               (selected
                 ? selectedThreadRowColors.foregroundClassName
                 : rowAppearance.tertiaryForegroundClassName),
           )}
+          numberOfLines={1}
         >
           {statusLabel?.label ?? timeLabel}
         </Text>
@@ -1121,9 +1136,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         interactionOpacity={rowAppearance.interactionOpacity}
         className={rowAppearance.className}
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={accessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         onPress={() => {
@@ -1153,9 +1166,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         interactionClassName={rowAppearance.interactionClassName}
         interactionOpacity={rowAppearance.interactionOpacity}
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={accessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         className={rowAppearance.className}

@@ -125,6 +125,27 @@ it.each(["idle", "running", "waiting"] as const)(
     expect(rendered.text).toHaveBeenCalledWith(status === "idle" ? "Waiting" : "Working");
   },
 );
+it("names the work a waiting row waits on", async () => {
+  await render({
+    thread: {
+      ...thread,
+      runtime: {
+        status: "idle",
+        activeRunId: null,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerName: "Codex",
+        lastError: null,
+        updatedAt: "2026-06-02T00:00:00.000Z",
+      },
+      pendingBackgroundTasks: [
+        { taskId: "a", kind: "subagent", description: "Review src/math.ts" },
+        { taskId: "b", kind: "subagent", description: "Write tests" },
+      ],
+    },
+  });
+  expect(rendered.text).toHaveBeenCalledWith("Waiting on 2 subagents");
+  expect(rendered.text).not.toHaveBeenCalledWith("Waiting");
+});
 it("keeps Done, settled timestamps and snoozed wake labels on recycled rows", async () => {
   await render({
     thread: {
