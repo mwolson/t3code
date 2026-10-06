@@ -133,6 +133,7 @@ function layerExecutorFor(input: {
               });
             }
           }),
+        failStartingRun: () => Effect.void,
         failFromDeadLetter: (request) => record(`failFromDeadLetter:${request.runId}`),
       }),
     ),
