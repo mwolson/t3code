@@ -47,7 +47,7 @@ import {
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
-import { makeProviderFailure, makeProviderFailureTurnItem } from "./ProviderFailure.ts";
+import { makeProviderFailure } from "./ProviderFailure.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import {
@@ -66,6 +66,24 @@ export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStart
 
 const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
 
+/**
+ * The starting run has no root node or attempt for guarded pre-start
+ * settlement. The durable repair path can still settle its remaining rows.
+ */
+export class ProviderTurnStartRunStateMissingError extends Schema.TaggedError<ProviderTurnStartRunStateMissingError>()(
+  "ProviderTurnStartRunStateMissingError",
+  {
+    runId: RunId,
+  },
+) {}
+
+export const isProviderTurnStartRunStateMissingError = Schema.is(
+  ProviderTurnStartRunStateMissingError,
+);
+
+const START_GAVE_UP_MESSAGE =
+  "T3 Code could not start this turn. Send the message again; if it keeps failing, check the server logs.";
+
 export interface ProviderTurnStartServiceV2Shape {
   /**
    * Starts the run's provider turn. When `willRetry` is true, a session open
@@ -83,6 +101,16 @@ export interface ProviderTurnStartServiceV2Shape {
     readonly error: string;
     readonly expectedAttemptId?: OrchestrationV2RunAttempt["id"] | null;
   }) => Effect.Effect<void, ProviderTurnStartError>;
+  /**
+   * Fails a run that is still `starting` because its start gave up. Without
+   * this it would stay `starting` until the user stops it or the server
+   * restarts. A run that already left `starting` is left alone.
+   */
+  readonly failStartingRun: (input: {
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+    readonly expectedAttemptId?: OrchestrationV2RunAttempt["id"] | null;
+  }) => Effect.Effect<void, ProviderTurnStartError | ProviderTurnStartRunStateMissingError>;
 }
 
 export class ProviderTurnStartServiceV2 extends Context.Service<
@@ -226,13 +254,19 @@ export const layer: Layer.Layer<
       readonly threadId: ThreadId;
       readonly runId: RunId;
       readonly willRetry?: boolean;
+      /** Fails the still-starting run instead of starting it. */
+      readonly failRun?: boolean;
+      readonly expectedAttemptId?: OrchestrationV2RunAttempt["id"] | null;
     }) {
       const { runId } = input;
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
       const run = projection.runs.find((candidate) => candidate.id === runId);
       if (run === undefined) {
+        if (input.failRun === true) return;
         return yield* new ProviderTurnStartError({ runId, cause: `Run ${runId} was not found.` });
       }
+      if (input.expectedAttemptId !== undefined && run.activeAttemptId !== input.expectedAttemptId)
+        return;
       if (run.status !== "starting") {
         // The effect is idempotent once the run has advanced or terminalized.
         return;
@@ -274,14 +308,10 @@ export const layer: Layer.Layer<
           transfer.status === "pending" &&
           transfer.resolution === null,
       );
-      if (
-        rootNode === undefined ||
-        attempt === undefined ||
-        providerThread === undefined ||
-        providerThread.providerSessionId === null ||
-        message === undefined ||
-        checkpointScope === undefined
-      ) {
+      if (rootNode === undefined || attempt === undefined) {
+        if (input.failRun === true) {
+          return yield* new ProviderTurnStartRunStateMissingError({ runId });
+        }
         return yield* new ProviderTurnStartError({
           runId,
           cause: `Run ${runId} is missing its execution projection state.`,
@@ -298,7 +328,7 @@ export const layer: Layer.Layer<
           /** Omitted when the run never started, so `startedAt` stays as projected. */
           readonly startedAt?: DateTime.Utc;
           readonly providerInstanceId: OrchestrationV2Run["providerInstanceId"];
-          readonly itemProviderThreadId: OrchestrationV2ProviderThread["id"];
+          readonly itemProviderThreadId: OrchestrationV2ProviderThread["id"] | null;
           readonly item:
             | Pick<
                 Extract<OrchestrationV2TurnItem, { type: "error" }>,
@@ -311,6 +341,24 @@ export const layer: Layer.Layer<
           /** Emitted after the run events when the provider thread should go idle. */
           readonly providerThreadUpdate?: OrchestrationV2ProviderThread;
         }) {
+          if (
+            input.status === "failed" &&
+            input.item.type === "error" &&
+            input.signal === "provider-turn-start-failure"
+          ) {
+            return yield* settleFailedStart({
+              threadId: projection.thread.id,
+              runId,
+              error: START_GAVE_UP_MESSAGE,
+              openFailure: {
+                signal: input.signal,
+                title: input.item.title ?? "Turn failed to start",
+                failure: input.item.failure,
+                now: input.now,
+                attemptId: attempt.id,
+              },
+            });
+          }
           const { now, status } = input;
           const started = input.startedAt === undefined ? {} : { startedAt: input.startedAt };
           const item: OrchestrationV2TurnItem = {
@@ -377,6 +425,36 @@ export const layer: Layer.Layer<
           });
         },
       );
+      // Failing the run needs only the state above, so a start that gave up
+      // over missing provider state can still be settled.
+      if (input.failRun === true) {
+        yield* settleRunBeforeStart({
+          signal: "provider-turn-start-failure",
+          status: "failed",
+          now: yield* DateTime.now,
+          providerInstanceId: run.providerInstanceId,
+          itemProviderThreadId: run.providerThreadId,
+          // The provider's own start failures are settled with its reason
+          // below. What reaches here is any other stage, so it is not blamed.
+          item: {
+            type: "error",
+            title: "Turn failed to start",
+            failure: makeProviderFailure({ message: START_GAVE_UP_MESSAGE }),
+          },
+        });
+        return;
+      }
+      if (
+        providerThread === undefined ||
+        providerThread.providerSessionId === null ||
+        message === undefined ||
+        checkpointScope === undefined
+      ) {
+        return yield* new ProviderTurnStartError({
+          runId,
+          cause: `Run ${runId} is missing its execution projection state.`,
+        });
+      }
       if (message.attachments.length === 0 && message.text.trimStart().startsWith("/")) {
         const isEmptyCompaction =
           message.text.trim().toLowerCase() === "/compact" && !projection.hasConversation;
@@ -1351,8 +1429,7 @@ export const layer: Layer.Layer<
         const failure =
           input.openFailure?.failure ??
           makeProviderFailure({
-            message: "Starting the provider turn failed permanently.",
-            retryable: false,
+            message: START_GAVE_UP_MESSAGE,
           });
         if (input.openFailure === undefined) {
           yield* Effect.logError("Provider turn start exhausted its retry budget", {
@@ -1698,46 +1775,36 @@ export const layer: Layer.Layer<
             });
           }
         }
-        if (providerThread !== undefined) {
-          events.push({
-            id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
-            type: "turn-item.updated",
+        events.push({
+          id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
+          type: "turn-item.updated",
+          threadId: projection.thread.id,
+          runId: run.id,
+          ...(rootNode === undefined ? {} : { nodeId: rootNode.id }),
+          providerInstanceId: run.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: idAllocator.derive.runSignalTurnItem({
+              runId: run.id,
+              signal: input.openFailure?.signal ?? "provider-turn-start-failure",
+            }),
             threadId: projection.thread.id,
             runId: run.id,
-            ...(rootNode === undefined ? {} : { nodeId: rootNode.id }),
-            providerInstanceId: run.providerInstanceId,
-            occurredAt: now,
-            payload: {
-              ...makeProviderFailureTurnItem({
-                idAllocator,
-                driver: providerThread.driver,
-                threadId: projection.thread.id,
-                runId: run.id,
-                nodeId: rootNode?.id ?? null,
-                providerThreadId: providerThread.id,
-                providerTurnId:
-                  attempt?.providerTurnId ??
-                  idAllocator.derive.providerTurn({
-                    driver: providerThread.driver,
-                    nativeTurnId: `failed:${activeAttemptId}`,
-                  }),
-                itemOrdinal: Math.max(0, ...projection.turnItems.map((item) => item.ordinal)) + 1,
-                failure,
-                occurredAt: now,
-              }),
-              ...(input.openFailure === undefined
-                ? {}
-                : {
-                    id: idAllocator.derive.runSignalTurnItem({
-                      runId: run.id,
-                      signal: input.openFailure.signal,
-                    }),
-                    title: input.openFailure.title,
-                    providerTurnId: null,
-                  }),
-            },
-          });
-        }
+            nodeId: rootNode?.id ?? null,
+            providerThreadId: run.providerThreadId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: Math.max(0, ...projection.turnItems.map((item) => item.ordinal)) + 1,
+            type: "error",
+            title: input.openFailure?.title ?? "Turn failed to start",
+            failure,
+            status: "failed",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+          },
+        });
         if (providerThread !== undefined && providerThread.status === "active") {
           // This rides the same guarded commit, so it only lands while the run
           // is still `starting` on our attempt and the binding is still ours.
@@ -1778,23 +1845,16 @@ export const layer: Layer.Layer<
       },
     );
 
+    const toStartError = (runId: RunId) => (cause: unknown) =>
+      isProviderTurnStartError(cause) ? cause : new ProviderTurnStartError({ runId, cause });
+    const toFailRunError = (runId: RunId) => (cause: unknown) =>
+      isProviderTurnStartRunStateMissingError(cause) ? cause : toStartError(runId)(cause);
     return ProviderTurnStartServiceV2.of({
-      start: (input) =>
-        start(input).pipe(
-          Effect.mapError((cause) =>
-            isProviderTurnStartError(cause)
-              ? cause
-              : new ProviderTurnStartError({ runId: input.runId, cause }),
-          ),
-        ),
+      start: (input) => start(input).pipe(Effect.mapError(toStartError(input.runId))),
+      failStartingRun: (input) =>
+        start({ ...input, failRun: true }).pipe(Effect.mapError(toFailRunError(input.runId))),
       failFromDeadLetter: (input) =>
-        settleFailedStart(input).pipe(
-          Effect.mapError((cause) =>
-            isProviderTurnStartError(cause)
-              ? cause
-              : new ProviderTurnStartError({ runId: input.runId, cause }),
-          ),
-        ),
+        settleFailedStart(input).pipe(Effect.mapError(toStartError(input.runId))),
     });
   }),
 );

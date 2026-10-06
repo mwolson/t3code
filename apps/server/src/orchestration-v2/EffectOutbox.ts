@@ -49,6 +49,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("provider-turn.start"),
     runId: RunId,
+    retryAfterFailure: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.interrupt"),
@@ -65,6 +66,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.restart"),
+    retryAfterFailure: Schema.optional(Schema.Boolean),
     providerSessionId: ProviderSessionId,
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
@@ -253,6 +255,8 @@ export interface EffectOutboxV2Shape {
     readonly workerId: string;
     readonly error: string;
     readonly delayMs: number;
+    /** The previous execution failed; a reclaimed lease has no known outcome. */
+    readonly executionFailed?: boolean;
   }) => Effect.Effect<boolean, EffectOutboxError>;
   readonly fail: (input: {
     readonly effectId: string;
@@ -657,7 +661,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             (cause) => new EffectOutboxError({ operation: "succeed", effectId, cause }),
           ),
         ),
-      retry: ({ effectId, workerId, error, delayMs }) =>
+      retry: ({ effectId, workerId, error, delayMs, executionFailed = false }) =>
         Effect.gen(function* () {
           const now = yield* DateTime.now;
           const nowIso = DateTime.formatIso(now);
@@ -672,7 +676,12 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               lease_owner = NULL,
               lease_expires_at = NULL,
               updated_at = ${nowIso},
-              last_error = ${error}
+              last_error = ${error},
+              payload_json = CASE
+                WHEN effect_type IN ('provider-turn.start', 'provider-turn.restart') THEN
+                  json_set(payload_json, '$.retryAfterFailure', json(${executionFailed ? "true" : "false"}))
+                ELSE payload_json
+              END
             WHERE effect_id = ${effectId}
               AND status = 'running'
               AND lease_owner = ${workerId}
