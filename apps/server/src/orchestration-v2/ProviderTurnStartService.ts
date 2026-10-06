@@ -51,7 +51,6 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import {
   knownProviderFailureMessage,
   makeProviderFailure,
-  makeProviderFailureTurnItem,
 } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
@@ -85,12 +84,28 @@ const refusedBeforePrompt = (error: unknown): boolean =>
   PROMPT_REFUSAL_TAGS.some((tag) => Predicate.isTagged(error, tag)) ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 
+export class ProviderTurnStartRunStateMissingError extends Schema.TaggedError<ProviderTurnStartRunStateMissingError>()(
+  "ProviderTurnStartRunStateMissingError",
+  { runId: RunId },
+) {}
+
+export const isProviderTurnStartRunStateMissingError = Schema.is(
+  ProviderTurnStartRunStateMissingError,
+);
+const START_GAVE_UP_MESSAGE =
+  "T3 Code could not start this turn. Send the message again; if it keeps failing, check the server logs.";
+
 export interface ProviderTurnStartServiceV2Shape {
   readonly start: (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly willRetry?: boolean;
   }) => Effect.Effect<void, ProviderTurnStartError>;
+  readonly failStartingRun: (input: {
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+    readonly expectedAttemptId?: OrchestrationV2RunAttempt["id"] | null;
+  }) => Effect.Effect<void, ProviderTurnStartError | ProviderTurnStartRunStateMissingError>;
   readonly failFromDeadLetter: (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
@@ -1533,6 +1548,7 @@ export const layer: Layer.Layer<
         }
         for (const providerTurn of projection.providerTurns.filter(
           (candidate) =>
+            input.openFailure?.signal !== "provider-turn-start-failure" &&
             candidate.runAttemptId !== null &&
             projection.attempts.some(
               (attemptRow) =>
@@ -1789,45 +1805,36 @@ export const layer: Layer.Layer<
             });
           }
         }
-        if (providerThread !== undefined) {
-          events.push({
-            id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
-            type: "turn-item.updated",
+        events.push({
+          id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
+          type: "turn-item.updated",
+          threadId: projection.thread.id,
+          runId: run.id,
+          ...(rootNode === undefined ? {} : { nodeId: rootNode.id }),
+          providerInstanceId: run.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: idAllocator.derive.runSignalTurnItem({
+              runId: run.id,
+              signal: input.openFailure?.signal ?? "provider-turn-start-failure",
+            }),
             threadId: projection.thread.id,
             runId: run.id,
-            ...(rootNode === undefined ? {} : { nodeId: rootNode.id }),
-            providerInstanceId: run.providerInstanceId,
-            occurredAt: now,
-            payload: {
-              ...makeProviderFailureTurnItem({
-                driver: providerThread.driver,
-                threadId: projection.thread.id,
-                runId: run.id,
-                nodeId: rootNode?.id ?? null,
-                providerThreadId: providerThread.id,
-                providerTurnId:
-                  attempt?.providerTurnId ??
-                  idAllocator.derive.providerTurn({
-                    driver: providerThread.driver,
-                    nativeTurnId: `failed:${activeAttemptId}`,
-                  }),
-                itemOrdinal: Math.max(0, ...projection.turnItems.map((item) => item.ordinal)) + 1,
-                failure,
-                occurredAt: now,
-              }),
-              ...(input.openFailure === undefined
-                ? {}
-                : {
-                    id: idAllocator.derive.runSignalTurnItem({
-                      runId: run.id,
-                      signal: input.openFailure.signal,
-                    }),
-                    title: input.openFailure.title,
-                    providerTurnId: null,
-                  }),
-            },
-          });
-        }
+            nodeId: rootNode?.id ?? null,
+            providerThreadId: run.providerThreadId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: Math.max(0, ...projection.turnItems.map((item) => item.ordinal)) + 1,
+            type: "error",
+            title: input.openFailure?.title ?? "Turn failed to start",
+            failure,
+            status: "failed",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+          },
+        });
         if (providerThread !== undefined && providerThread.status === "active") {
           // This rides the same guarded commit, so it only lands while the run
           // is still `starting` on our attempt and the binding is still ours.
@@ -1877,7 +1884,19 @@ export const layer: Layer.Layer<
           const providerTurn = yield* thread.worktreePath === null
             ? start(input)
             : withWorkspaceLease(path.resolve(thread.worktreePath), start(input));
-          if (providerTurn !== undefined) yield* providerTurn;
+          if (providerTurn !== undefined) {
+            yield* providerTurn.pipe(
+              Effect.catchCauseIf(
+                (cause) => !Cause.hasInterruptsOnly(cause),
+                (cause) =>
+                  Effect.logWarning(
+                    "Run execution failed after starting",
+                    { runId: input.runId },
+                    cause,
+                  ),
+              ),
+            );
+          }
         },
         (effect, input) =>
           effect.pipe(
@@ -1885,6 +1904,42 @@ export const layer: Layer.Layer<
               isProviderTurnStartError(cause)
                 ? cause
                 : new ProviderTurnStartError({ runId: input.runId, cause }),
+            ),
+          ),
+      ),
+      failStartingRun: Effect.fn("ProviderTurnStartService.failStartingRun")(
+        function* ({ threadId, runId, expectedAttemptId }) {
+          const projection = yield* projectionStore.getTurnStartContext(threadId, runId);
+          const run = projection.runs.find((candidate) => candidate.id === runId);
+          if (run === undefined || run.status !== "starting") return;
+          if (expectedAttemptId !== undefined && expectedAttemptId !== run.activeAttemptId) return;
+          const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
+          const attempt = projection.attempts.find(
+            (candidate) => candidate.id === run.activeAttemptId,
+          );
+          if (rootNode === undefined || attempt === undefined) {
+            return yield* new ProviderTurnStartRunStateMissingError({ runId });
+          }
+          yield* settleFailedStart({
+            threadId,
+            runId,
+            error: START_GAVE_UP_MESSAGE,
+            expectedAttemptId: attempt.id,
+            openFailure: {
+              signal: "provider-turn-start-failure",
+              title: "Turn failed to start",
+              failure: makeProviderFailure({ message: START_GAVE_UP_MESSAGE }),
+              now: yield* DateTime.now,
+              attemptId: attempt.id,
+            },
+          });
+        },
+        (effect, { runId }) =>
+          effect.pipe(
+            Effect.mapError((cause) =>
+              isProviderTurnStartRunStateMissingError(cause)
+                ? cause
+                : new ProviderTurnStartError({ runId, cause }),
             ),
           ),
       ),
