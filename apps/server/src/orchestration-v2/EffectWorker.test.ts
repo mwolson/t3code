@@ -31,6 +31,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
 const oldSessionId = ProviderSessionId.make("provider-session:effect-worker-restart:old");
@@ -84,6 +85,10 @@ function layerExecutorFor(input: {
   readonly continueAfterRestart?: boolean;
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
   readonly failDeadLetterCompensation?: Ref.Ref<boolean>;
+  readonly failRunFailure?: boolean;
+  readonly failRunStateMissing?: boolean;
+  readonly interruptFailure?: boolean;
+  readonly startInterrupted?: boolean;
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
@@ -97,6 +102,19 @@ function layerExecutorFor(input: {
             request.replacementProviderSessionId === undefined
               ? "interrupt"
               : `interrupt:${request.replacementProviderSessionId}`,
+          ).pipe(
+            Effect.andThen(
+              input.interruptFailure === true
+                ? Effect.fail(
+                    new ProviderTurnControlService.ProviderTurnControlError({
+                      threadId,
+                      operation: "interrupt",
+                      providerTurnId,
+                      cause: "simulated interrupt failure",
+                    }),
+                  )
+                : Effect.void,
+            ),
           ),
       }),
     ),
@@ -118,6 +136,7 @@ function layerExecutorFor(input: {
         start: () =>
           Effect.gen(function* () {
             yield* record("start");
+            if (input.startInterrupted === true) return yield* Effect.interrupt;
             if (
               input.failFirstStart !== undefined &&
               (yield* Ref.getAndSet(input.failFirstStart, false))
@@ -138,6 +157,21 @@ function layerExecutorFor(input: {
               return yield* new ProviderTurnStartService.ProviderTurnStartError({
                 runId: request.runId,
                 cause: "simulated dead-letter compensation failure",
+              });
+            }
+          }),
+        failStartingRun: () =>
+          Effect.gen(function* () {
+            yield* record("fail-run");
+            if (input.failRunStateMissing === true) {
+              return yield* new ProviderTurnStartService.ProviderTurnStartRunStateMissingError({
+                runId,
+              });
+            }
+            if (input.failRunFailure === true) {
+              return yield* new ProviderTurnStartService.ProviderTurnStartError({
+                runId,
+                cause: "simulated run failure write",
               });
             }
           }),
@@ -798,7 +832,7 @@ it.effect("safely retries after replacement cleanup succeeds and start fails", (
 
     const first = yield* Effect.gen(function* () {
       const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
-      return yield* Effect.exit(executor.execute(effect));
+      return yield* Effect.exit(executor.execute(effect, { willRetry: true }));
     }).pipe(Effect.provide(layer));
     assert.isTrue(Exit.isFailure(first));
 
@@ -884,13 +918,21 @@ it.effect("compensates a dead-lettered turn start before the terminal fail settl
   Effect.gen(function* () {
     const now = yield* DateTime.now;
     const workerId = "worker-dead-letter-compensation";
-    const claimedEffect = { ...startEffect(now), leaseOwner: workerId };
+    const claimedEffect: EffectOutbox.OrchestrationEffectV2 = {
+      ...startEffect(now),
+      leaseOwner: workerId,
+      request: {
+        type: "provider-turn.repair",
+        runId,
+        attemptId: null,
+        error: "simulated terminal start failure",
+      },
+    };
     const order = yield* Ref.make<ReadonlyArray<string>>([]);
     const compensations = yield* Ref.make<
       ReadonlyArray<{ readonly effectId: string; readonly error: string }>
     >([]);
     const outboxLayer = Layer.mock(EffectOutbox.EffectOutboxV2)({
-      beginRepair: () => Effect.succeed(true),
       claimNext: () => Effect.succeed(Option.some(claimedEffect)),
       get: () => Effect.succeed(Option.some(claimedEffect)),
       awaitCancellation: () => Effect.never,
@@ -946,12 +988,20 @@ it.effect("settles a dead letter when interrupted during compensation", () =>
   Effect.gen(function* () {
     const now = yield* DateTime.now;
     const workerId = "worker-dead-letter-compensation-interrupt";
-    const claimedEffect = { ...startEffect(now), leaseOwner: workerId };
+    const claimedEffect: EffectOutbox.OrchestrationEffectV2 = {
+      ...startEffect(now),
+      leaseOwner: workerId,
+      request: {
+        type: "provider-turn.repair",
+        runId,
+        attemptId: null,
+        error: "simulated terminal start failure",
+      },
+    };
     const compensationStarted = yield* Deferred.make<void>();
     const releaseCompensation = yield* Deferred.make<void>();
     const order = yield* Ref.make<ReadonlyArray<string>>([]);
     const outboxLayer = Layer.mock(EffectOutbox.EffectOutboxV2)({
-      beginRepair: () => Effect.succeed(true),
       claimNext: () => Effect.succeed(Option.some(claimedEffect)),
       get: () => Effect.succeed(Option.some(claimedEffect)),
       awaitCancellation: () => Effect.never,
@@ -1002,14 +1052,22 @@ it.effect("accepts durable cancellation when terminal outbox settlement loses ow
   Effect.gen(function* () {
     const now = yield* DateTime.now;
     const workerId = "worker-dead-letter-lost-lease";
-    const claimedEffect = { ...startEffect(now), leaseOwner: workerId };
+    const claimedEffect: EffectOutbox.OrchestrationEffectV2 = {
+      ...startEffect(now),
+      leaseOwner: workerId,
+      request: {
+        type: "provider-turn.repair",
+        runId,
+        attemptId: null,
+        error: "simulated terminal start failure",
+      },
+    };
     const compensationCount = yield* Ref.make(0);
     // The row is still owned at claim time; the cancellation lands while the
     // execution fails, so the terminal fail loses the lease and the post-fail
     // re-read sees the cancelled row.
     const failAttempted = yield* Ref.make(false);
     const outboxLayer = Layer.mock(EffectOutbox.EffectOutboxV2)({
-      beginRepair: () => Effect.succeed(true),
       claimNext: () => Effect.succeed(Option.some(claimedEffect)),
       get: () =>
         Ref.get(failAttempted).pipe(
@@ -1104,4 +1162,396 @@ it.effect("propagates a failing dead-letter compensation for retry", () =>
 
     assert.deepEqual(yield* Ref.get(events), [`failFromDeadLetter:${runId}`]);
   }),
+);
+
+it.effect("fails the run when the last start attempt fails", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const failFirstStart = yield* Ref.make(true);
+
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      yield* executor.execute(startEffect(now), { willRetry: false });
+    }).pipe(Effect.provide(layerExecutorFor({ events, failFirstStart })));
+
+    assert.deepEqual(yield* Ref.get(events), ["start", "fail-run"]);
+  }),
+);
+
+it.effect("fails the run when a restart's last attempt cannot interrupt the old turn", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const effect = restartEffect(now, { type: "detach" });
+
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      yield* executor.execute(effect, { willRetry: false });
+    }).pipe(Effect.provide(layerExecutorFor({ events, interruptFailure: true })));
+
+    assert.deepEqual(yield* Ref.get(events), ["interrupt", "fail-run"]);
+  }),
+);
+
+it.effect("does not fail the run when its last start attempt is interrupted", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+
+    const exit = yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      return yield* Effect.exit(executor.execute(startEffect(now), { willRetry: false }));
+    }).pipe(Effect.provide(layerExecutorFor({ events, startInterrupted: true })));
+
+    assert.isTrue(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
+    assert.deepEqual(yield* Ref.get(events), ["start"]);
+  }),
+);
+
+it.effect("returns the start failure when the run cannot be failed either", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const failFirstStart = yield* Ref.make(true);
+    const effect = restartEffect(now, { type: "detach" });
+
+    const error = yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      return yield* executor.execute(effect, { willRetry: false }).pipe(Effect.flip);
+    }).pipe(Effect.provide(layerExecutorFor({ events, failFirstStart, failRunFailure: true })));
+
+    assert.deepEqual(yield* Ref.get(events), ["interrupt", "detach", "start", "fail-run"]);
+    assert.include(Cause.pretty(Cause.fail(error)), "simulated first start failure");
+  }),
+);
+
+it.effect("returns an unsettleable run instead of the start failure", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const failFirstStart = yield* Ref.make(true);
+
+    const error = yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      return yield* executor.execute(startEffect(now), { willRetry: false }).pipe(Effect.flip);
+    }).pipe(
+      Effect.provide(layerExecutorFor({ events, failFirstStart, failRunStateMissing: true })),
+    );
+
+    assert.deepEqual(yield* Ref.get(events), ["start", "fail-run"]);
+    assert.isTrue(ProviderTurnStartService.isProviderTurnStartRunStateMissingError(error.cause));
+  }),
+);
+
+it.effect.each(["provider-turn.start", "provider-turn.restart"] as const)(
+  "keeps retrying a %s effect past its attempt budget",
+  (effectType) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const workerId = "worker-run-start-past-budget";
+      const claimedEffect: EffectOutbox.OrchestrationEffectV2 = {
+        ...restartEffect(now, { type: "detach" }),
+        ...(effectType === "provider-turn.start"
+          ? { request: { type: "provider-turn.start" as const, runId } }
+          : {}),
+        attemptCount: 5,
+        leaseOwner: workerId,
+      };
+      const retryDelays = yield* Ref.make<ReadonlyArray<number>>([]);
+      const terminalizations = yield* Ref.make(0);
+      const willRetry = yield* Ref.make<ReadonlyArray<boolean | undefined>>([]);
+      const outboxLayer = Layer.mock(EffectOutbox.EffectOutboxV2)({
+        claimNext: () => Effect.succeed(Option.some(claimedEffect)),
+        get: () => Effect.succeed(Option.some(claimedEffect)),
+        awaitCancellation: () => Effect.never,
+        clearCancellation: () => Effect.void,
+        beginRepair: () =>
+          Effect.fail(new EffectOutbox.EffectOutboxError({ operation: "begin-repair" })),
+        retry: ({ delayMs }) =>
+          Ref.update(retryDelays, (delays) => [...delays, delayMs]).pipe(Effect.as(true)),
+        fail: () => Ref.update(terminalizations, (count) => count + 1).pipe(Effect.as(true)),
+      });
+      const executorLayer = Layer.succeed(
+        EffectWorker.OrchestrationEffectExecutorV2,
+        EffectWorker.OrchestrationEffectExecutorV2.of({
+          compensateDeadLetter: () => Effect.void,
+          execute: (_effect, options) =>
+            Ref.update(willRetry, (seen) => [...seen, options?.willRetry]).pipe(
+              Effect.andThen(
+                Effect.gen(function* () {
+                  if (options?.beforeFailStartingRun) yield* options.beforeFailStartingRun();
+                }),
+              ),
+              Effect.catchCause(() =>
+                Effect.fail(
+                  new EffectWorker.OrchestrationEffectExecutionError({
+                    effectId: claimedEffect.id,
+                    effectType,
+                    cause: "simulated storage outage",
+                  }),
+                ),
+              ),
+            ),
+        }),
+      );
+      const workerLayer = EffectWorker.layerWithOptions({ workerId, maxAttempts: 5 }).pipe(
+        Layer.provide(Layer.merge(outboxLayer, executorLayer)),
+      );
+
+      assert.isTrue(
+        yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+          Effect.flatMap((worker) => worker.runOnce),
+          Effect.provide(workerLayer),
+        ),
+      );
+
+      // A failed execution remains retryable if its repair marker cannot be
+      // persisted. The durable retry distinguishes it from an unknown outcome.
+      assert.deepEqual(yield* Ref.get(willRetry), [false]);
+      assert.deepEqual(yield* Ref.get(retryDelays), [1_600]);
+      assert.equal(yield* Ref.get(terminalizations), 0);
+    }),
+);
+
+it.effect("fails a run-start effect for good when its run has no state left to settle", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const workerId = "worker-run-start-unsettleable";
+    const claimedEffect: EffectOutbox.OrchestrationEffectV2 = {
+      ...startEffect(now),
+      attemptCount: 5,
+      leaseOwner: workerId,
+    };
+    const retries = yield* Ref.make(0);
+    const terminalizations = yield* Ref.make(0);
+    const outboxLayer = Layer.mock(EffectOutbox.EffectOutboxV2)({
+      claimNext: () => Effect.succeed(Option.some(claimedEffect)),
+      get: () => Effect.succeed(Option.some(claimedEffect)),
+      awaitCancellation: () => Effect.never,
+      clearCancellation: () => Effect.void,
+      retry: () => Ref.update(retries, (count) => count + 1).pipe(Effect.as(true)),
+      fail: () => Ref.update(terminalizations, (count) => count + 1).pipe(Effect.as(true)),
+    });
+    const executorLayer = Layer.succeed(
+      EffectWorker.OrchestrationEffectExecutorV2,
+      EffectWorker.OrchestrationEffectExecutorV2.of({
+        compensateDeadLetter: () => Effect.void,
+        execute: () =>
+          Effect.fail(
+            new EffectWorker.OrchestrationEffectExecutionError({
+              effectId: claimedEffect.id,
+              effectType: claimedEffect.request.type,
+              cause: new ProviderTurnStartService.ProviderTurnStartRunStateMissingError({ runId }),
+            }),
+          ),
+      }),
+    );
+    const workerLayer = EffectWorker.layerWithOptions({ workerId, maxAttempts: 5 }).pipe(
+      Layer.provide(Layer.merge(outboxLayer, executorLayer)),
+    );
+
+    assert.isTrue(
+      yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+        Effect.flatMap((worker) => worker.runOnce),
+        Effect.provide(workerLayer),
+      ),
+    );
+
+    assert.equal(yield* Ref.get(retries), 0);
+    assert.equal(yield* Ref.get(terminalizations), 1);
+  }),
+);
+
+it.effect.each([false, true])(
+  "records repair ownership before failing the run (marker unavailable: %s)",
+  (markerUnavailable) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const failFirstStart = yield* Ref.make(true);
+      const workerId = "worker-start-repair-ownership";
+      const row = yield* Ref.make<EffectOutbox.OrchestrationEffectV2>({
+        ...startEffect(now),
+        leaseOwner: workerId,
+      });
+      const record = (event: string) => Ref.update(events, (seen) => [...seen, event]);
+      const outboxLayer = Layer.mock(EffectOutbox.EffectOutboxV2)({
+        claimNext: () => Ref.get(row).pipe(Effect.map(Option.some)),
+        get: () => Ref.get(row).pipe(Effect.map(Option.some)),
+        awaitCancellation: () => Effect.never,
+        clearCancellation: () => Effect.void,
+        beginRepair: () =>
+          Effect.gen(function* () {
+            yield* record("begin-repair");
+            if (markerUnavailable)
+              return yield* new EffectOutbox.EffectOutboxError({ operation: "begin-repair" });
+            yield* Ref.update(row, (effect) => ({
+              ...effect,
+              request: {
+                type: "provider-turn.repair" as const,
+                runId,
+                attemptId: RunAttemptId.make("attempt:repair-ownership"),
+                error: "start failed",
+              },
+            }));
+            return true;
+          }),
+        retry: ({ delayMs }) => record(`retry:${delayMs}`).pipe(Effect.as(true)),
+        fail: () => record("fail-effect").pipe(Effect.as(true)),
+      });
+      const workerLayer = EffectWorker.layerWithOptions({ workerId, maxAttempts: 5 }).pipe(
+        Layer.provide(Layer.merge(outboxLayer, layerExecutorFor({ events, failFirstStart }))),
+      );
+      yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+        Effect.flatMap((worker) => worker.runOnce),
+        Effect.provide(workerLayer),
+      );
+      assert.deepEqual(
+        yield* Ref.get(events),
+        markerUnavailable
+          ? ["start", "begin-repair", "retry:1600"]
+          : ["start", "begin-repair", "fail-run", "fail-effect"],
+      );
+    }),
+);
+
+it.effect.each(["provider-turn.start", "provider-turn.restart"] as const)(
+  "retries a known failed %s then preserves durable repair ownership",
+  (type) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const failFirstStart = yield* Ref.make(true);
+      const failFirstMarker = yield* Ref.make(true);
+      const initial =
+        type === "provider-turn.start" ? startEffect(now) : restartEffect(now, { type: "detach" });
+      const outboxLayer = Layer.effect(
+        EffectOutbox.EffectOutboxV2,
+        Effect.gen(function* () {
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          return EffectOutbox.EffectOutboxV2.of({
+            ...outbox,
+            beginRepair: (input) =>
+              Effect.gen(function* () {
+                if (yield* Ref.getAndSet(failFirstMarker, false))
+                  return yield* new EffectOutbox.EffectOutboxError({ operation: "begin-repair" });
+                return yield* outbox.beginRepair(input);
+              }),
+          });
+        }),
+      ).pipe(Layer.provide(EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))));
+      const dependencies = Layer.merge(
+        outboxLayer,
+        layerExecutorFor({ events, failFirstStart, failRunFailure: true }),
+      );
+      yield* Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        yield* outbox.enqueue([
+          {
+            id: initial.id,
+            commandId: initial.commandId,
+            threadId: initial.threadId,
+            request: initial.request,
+          },
+        ]);
+        assert.isTrue(yield* worker.runOnce);
+        const retry = Option.getOrThrow(yield* outbox.get(initial.id));
+        assert.equal(retry.status, "pending");
+        assert.equal(retry.request.type, type);
+        assert.equal(retry.attemptCount, 1);
+        assert.isFalse(yield* worker.runOnce);
+        yield* TestClock.adjust(100);
+        yield* Ref.set(failFirstStart, true);
+        assert.isTrue(Exit.isFailure(yield* Effect.exit(worker.runOnce)));
+        const repair = Option.getOrThrow(yield* outbox.get(initial.id));
+        assert.equal(repair.status, "pending");
+        assert.equal(repair.request.type, "provider-turn.repair");
+        assert.equal(repair.attemptCount, 2);
+        assert.isFalse(yield* worker.runOnce);
+        yield* TestClock.adjust(200);
+        assert.isTrue(yield* worker.runOnce);
+        const final = Option.getOrThrow(yield* outbox.get(initial.id));
+        assert.equal(final.status, "failed");
+        assert.equal(final.request.type, "provider-turn.repair");
+        assert.equal(final.attemptCount, 3);
+        assert.deepEqual(yield* Ref.get(events), [
+          ...(type === "provider-turn.restart" ? ["interrupt", "detach"] : []),
+          "start",
+          ...(type === "provider-turn.restart" ? ["interrupt", "detach"] : []),
+          "start",
+          "fail-run",
+          `failFromDeadLetter:${runId}`,
+        ]);
+      }).pipe(
+        Effect.provide(
+          EffectWorker.layerWithOptions({ workerId: "marker-recovery", maxAttempts: 1 }).pipe(
+            Layer.provideMerge(dependencies),
+          ),
+        ),
+      );
+    }),
+);
+
+it.effect.each(["provider-turn.start", "provider-turn.restart"] as const)(
+  "does not reuse a known %s failure after a later claim loses its outcome",
+  (type) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const initial =
+        type === "provider-turn.start" ? startEffect(now) : restartEffect(now, { type: "detach" });
+      const dependencies = Layer.merge(
+        EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+        layerExecutorFor({ events }),
+      );
+      yield* Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        yield* outbox.enqueue([
+          {
+            id: initial.id,
+            commandId: initial.commandId,
+            threadId: initial.threadId,
+            request: initial.request,
+          },
+        ]);
+        assert.isTrue(
+          Option.isSome(yield* outbox.claimNext({ workerId: "previous", leaseDurationMs: 1000 })),
+        );
+        assert.isTrue(
+          yield* outbox.retry({
+            effectId: initial.id,
+            workerId: "previous",
+            error: "known execution failure",
+            delayMs: 0,
+            executionFailed: true,
+          }),
+        );
+        assert.isTrue(
+          Option.isSome(yield* outbox.claimNext({ workerId: "previous", leaseDurationMs: 1000 })),
+        );
+        assert.isTrue(
+          yield* outbox.retry({
+            effectId: initial.id,
+            workerId: "previous",
+            error: "lost execution outcome",
+            delayMs: 0,
+          }),
+        );
+        assert.isTrue(yield* worker.runOnce);
+        const final = Option.getOrThrow(yield* outbox.get(initial.id));
+        assert.equal(final.status, "failed");
+        assert.equal(final.request.type, "provider-turn.repair");
+        assert.equal(final.attemptCount, 3);
+        assert.deepEqual(yield* Ref.get(events), [`failFromDeadLetter:${runId}`]);
+      }).pipe(
+        Effect.provide(
+          EffectWorker.layerWithOptions({ workerId: "reclaimed-start", maxAttempts: 1 }).pipe(
+            Layer.provideMerge(dependencies),
+          ),
+        ),
+      );
+    }),
 );
