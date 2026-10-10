@@ -3965,6 +3965,117 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       assert.lengthOf(offers, 1);
     }).pipe(Effect.scoped, Effect.provide(IdAllocator.layer)),
   );
+  // Continuation admission requires the provider to still hold undelivered
+  // output for its thread: here, a wake held for its turn.
+  it.effect.each(["delivered", "stopped", "dropped by a reconnect"] as const)(
+    "owns a held wake's output until it is %s",
+    (leaves) =>
+      Effect.gen(function* () {
+        const offers: Array<ProviderContinuationRequests.ProviderContinuationRequest> = [];
+        const ownedAtOffer: Array<boolean> = [];
+        let owned: Effect.Effect<boolean> = Effect.succeed(false);
+        const { runtime, thread } = yield* resumed([
+          ...backgroundLaunch(CHILD),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+          event("session.execution.succeeded", { sessionID: CHILD }),
+          event("session.inbox.enqueued", {
+            inboxID: "msg_report",
+            sessionID: SESSION,
+            item: {
+              type: "synthetic",
+              payload: {
+                text: `<subagent sessionID="${CHILD}" state="completed" description="Sleep">\nCHILD_OK\n</subagent>`,
+                description: "Sleep",
+                metadata: {
+                  source: "subagent",
+                  childID: CHILD,
+                  agent: "General",
+                  state: "completed",
+                },
+              },
+              delivery: "steer",
+            },
+          }),
+          // OpenCode starts the follow-up on its own; T3 holds it for its turn.
+          event("session.execution.started", { sessionID: SESSION }),
+          event("session.inbox.delivered", { sessionID: SESSION, inboxID: "msg_report" }),
+          event("session.text.ended", {
+            sessionID: SESSION,
+            assistantMessageID: "msg_followup",
+            ordinal: 0,
+            text: "CHILD_OK",
+          }),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+          ...(leaves === "dropped by a reconnect"
+            ? [
+                { type: "runtime_exit", status: "success" } as const,
+                out("event.subscribe"),
+                out("session.active"),
+                replyData("session.active", {}),
+              ]
+            : []),
+        ]).pipe(
+          Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+            offer: (request) =>
+              owned.pipe(
+                Effect.map((value) => {
+                  offers.push(request);
+                  ownedAtOffer.push(value);
+                }),
+              ),
+            take: Effect.never,
+          }),
+        );
+        owned = runtime.hasBufferedOutputForThread!(thread);
+        assert.isTrue(runtime.continuationDrainsOutput);
+        const terminals: Array<string> = [];
+        yield* runtime.events.pipe(
+          Stream.runForEach((event) =>
+            Effect.sync(() => {
+              if (event.type === "turn.terminal") terminals.push(event.status);
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        const settle = Effect.gen(function* () {
+          for (let attempt = 0; attempt < 5_000; attempt++) yield* Effect.yieldNow;
+        });
+        yield* runtime.startTurn(withLineage(thread));
+        yield* settle;
+        // Offered while held, and still held once OpenCode ended it.
+        assert.deepEqual(ownedAtOffer, [true]);
+        if (leaves === "dropped by a reconnect") {
+          assert.isFalse(yield* owned);
+          return;
+        }
+        assert.isTrue(yield* owned);
+        if (leaves === "stopped") {
+          yield* runtime.interruptTurn({
+            providerThread: thread,
+            providerTurnId: yield* providerTurnId,
+            requestRuntimeRestart: true,
+          });
+          assert.isFalse(yield* owned);
+          return;
+        }
+        yield* runtime.startTurn({
+          ...withLineage(thread),
+          runId: RunId.make("run:opencode2-adapter:wake"),
+          runOrdinal: 2,
+          providerTurnOrdinal: 2,
+          attemptId: RunAttemptId.make("attempt:opencode2-adapter:wake"),
+          message: {
+            ...turnInput(thread).message,
+            messageId: MessageId.make("message:opencode2-adapter:wake"),
+            createdBy: "agent" as const,
+            creationSource: "provider" as const,
+          },
+        });
+        yield* settle;
+        assert.deepEqual(terminals, ["completed", "completed"]);
+        assert.isFalse(yield* owned);
+      }).pipe(Effect.scoped, Effect.provide(IdAllocator.layer)),
+  );
 });
 
 describe("OpenCode2 adapter server connection", () => {
