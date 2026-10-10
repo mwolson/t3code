@@ -12,7 +12,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
   BundleNotSelfContainedError,
@@ -44,6 +44,7 @@ import {
   preflightMacDesktopBuild,
   preflightWindowsDesktopBuild,
   renderMacPasskeyEntitlements,
+  resolveMacWebAuthnEntitlements,
   resolveClerkPasskeyNativeArtifacts,
   resolveMacPasskeySigningConfiguration,
   resolveDesktopRuntimeDependencies,
@@ -77,6 +78,7 @@ import {
   WindowsDesktopBuildPrerequisitesMissingError,
   WindowsPackagedPayloadValidationError,
   WINDOWS_NATIVE_ASAR_UNPACK_GLOB,
+  stageCursorSdkPlatformPackages,
   WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT,
   WINDOWS_SERVER_ASAR_IGNORE_GLOBS,
   WINDOWS_SERVER_EXTRA_RESOURCES,
@@ -91,8 +93,14 @@ import {
   wslRuntimeArchiveStem,
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+
+// Keeps pnpm from auto-installing TypeScript, a types-only peer, into the app.
+const stagePackageExtensions = {
+  "electron-webauthn": { peerDependenciesMeta: { typescript: { optional: true } } },
+  "@electron-webauthn/macos": { peerDependenciesMeta: { typescript: { optional: true } } },
+};
 
 // A minimal stand-in for the Linux CLI release archive: one top-level
 // directory named after the archive stem holding the executable, the web
@@ -453,6 +461,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         os: ["darwin"],
         cpu: ["x64"],
       },
+      packageExtensions: stagePackageExtensions,
     });
     assert.deepStrictEqual(createStageWorkspaceConfig({ platform: "linux", arch: "x64" }), {
       supportedArchitectures: {
@@ -460,6 +469,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         cpu: ["x64"],
         libc: ["glibc"],
       },
+      packageExtensions: stagePackageExtensions,
     });
     // Windows stages only win32 natives; WSL runs the separately built Linux
     // CLI archive rather than anything installed here.
@@ -468,18 +478,21 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         os: ["win32"],
         cpu: ["x64"],
       },
+      packageExtensions: stagePackageExtensions,
     });
     assert.deepStrictEqual(createStageWorkspaceConfig({ platform: "win", arch: "arm64" }), {
       supportedArchitectures: {
         os: ["win32"],
         cpu: ["arm64"],
       },
+      packageExtensions: stagePackageExtensions,
     });
     assert.deepStrictEqual(createStageWorkspaceConfig({ platform: "mac", arch: "universal" }), {
       supportedArchitectures: {
         os: ["darwin"],
         cpu: ["arm64", "x64"],
       },
+      packageExtensions: stagePackageExtensions,
     });
   });
 
@@ -506,6 +519,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           cpu: ["x64"],
           libc: ["glibc"],
         },
+        packageExtensions: stagePackageExtensions,
         allowBuilds: {
           electron: true,
           "node-pty": true,
@@ -536,6 +550,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           os: ["darwin"],
           cpu: ["arm64"],
         },
+        packageExtensions: stagePackageExtensions,
       },
     );
   });
@@ -559,6 +574,9 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }
 
     assert.deepStrictEqual(DESKTOP_FILE_EXCLUSIONS, [
+      "!**/node_modules/@cursor/sdk-*/**/*",
+      "!apps/desktop/prod-resources/cursor-sdk",
+      "!apps/desktop/prod-resources/cursor-sdk/**/*",
       "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
       "!**/*.map",
       "!**/*.d.cts",
@@ -641,25 +659,21 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         { from: "apps/desktop/prod-resources/browser-secret", to: "browser-secret" },
       ]);
       assert.deepStrictEqual(win.extraResources, [
-        {
-          from: "apps/desktop/prod-resources/resource-monitor",
-          to: "resource-monitor",
-        },
+        ...DESKTOP_EXTRA_RESOURCES,
         ...WINDOWS_SERVER_EXTRA_RESOURCES,
         ...WSL_RUNTIME_EXTRA_RESOURCES,
       ]);
       // No Linux CLI archive means staging never writes the runtime, so
       // listing it here would fail the build on a missing source file.
       assert.deepStrictEqual(winWithoutWslRuntime.extraResources, [
-        {
-          from: "apps/desktop/prod-resources/resource-monitor",
-          to: "resource-monitor",
-        },
+        ...DESKTOP_EXTRA_RESOURCES,
         ...WINDOWS_SERVER_EXTRA_RESOURCES,
       ]);
       assert.deepStrictEqual(win.nsis, { differentialPackage: true });
       // The Claude SDK platform packages and .bin shims never ship.
       assert.deepStrictEqual(WINDOWS_SERVER_ASAR_IGNORE_GLOBS, [
+        "**/node_modules/@cursor/sdk-*",
+        "**/node_modules/@cursor/sdk-*/**",
         "**/node_modules/@anthropic-ai/claude-agent-sdk-*",
         "**/node_modules/@anthropic-ai/claude-agent-sdk-*/**",
         "**/node_modules/.bin",
@@ -687,6 +701,24 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).desktop, {
         entry: { StartupWMClass: "com.t3tools.T3Code" },
       });
+      // macOS also offers itself as a web browser, so it can be chosen as the default.
+      assert.deepStrictEqual((mac.mac as Record<string, unknown>).protocols, [
+        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
+      ]);
+      // macOS lists a default browser only when it also opens web pages as documents.
+      const macInfo = (mac.mac as { extendInfo: Record<string, unknown> }).extendInfo;
+      assert.deepStrictEqual(macInfo.CFBundleDocumentTypes, [
+        {
+          CFBundleTypeName: "Web page",
+          CFBundleTypeRole: "Viewer",
+          LSHandlerRank: "Alternate",
+          LSItemContentTypes: ["public.html", "public.xhtml"],
+        },
+      ]);
+      assert.deepStrictEqual(linux.toolsets, { appimage: "1.0.3" });
+      assert.notProperty(mac, "toolsets");
+      assert.notProperty(win, "toolsets");
       assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
       assert.deepStrictEqual(linux.files, [...DESKTOP_FILE_EXCLUSIONS, ...LINUX_FILE_EXCLUSIONS]);
       assert.deepStrictEqual(win.files, DESKTOP_FILE_EXCLUSIONS);
@@ -743,6 +775,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       resolveMergedStageDependencies({
         platform: "mac",
         serverDependencies: {
+          "@cursor/sdk": "1.0.22",
           "@anthropic-ai/claude-agent-sdk": "^0.3.170",
           "@ff-labs/fff-node": "0.9.4",
           "@opencode-ai/sdk": "^1.3.15",
@@ -757,6 +790,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         fffNodeVersion: "0.9.4",
       }),
       {
+        "@cursor/sdk": "1.0.22",
         "@ff-labs/fff-node": "0.9.4",
         "node-pty": "1.1.0",
         "@napi-rs/keyring": "1.3.0",
@@ -782,6 +816,58 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       },
     );
   });
+
+  it.effect("ships Cursor platform assets outside asar for spawning and native loading", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cursor-helpers-" });
+        const nodeModules = path.join(root, "node_modules");
+        const destination = path.join(root, "resources/node_modules/@cursor");
+        const cursorDirectory = symlinksSupported
+          ? path.join(root, "store/@cursor")
+          : path.join(nodeModules, "@cursor");
+        yield* fs.makeDirectory(path.join(cursorDirectory, "sdk"), { recursive: true });
+        if (symlinksSupported) {
+          yield* fs.makeDirectory(path.join(nodeModules, "@cursor"), { recursive: true });
+          yield* fs.symlink(
+            path.join(cursorDirectory, "sdk"),
+            path.join(nodeModules, "@cursor/sdk"),
+          );
+        }
+        const helpers = [
+          "sdk-darwin-arm64/bin/rg",
+          "sdk-darwin-arm64/bin/cursorsandbox",
+          "sdk-darwin-arm64/vendor/tree-sitter/index.js",
+          "sdk-darwin-arm64/vendor/tree-sitter/binding.node",
+          "sdk-darwin-arm64/vendor/tree-sitter-bash/binding.node",
+          "sdk-darwin-arm64/package.json",
+          "sdk-win32-x64/bin/rg.exe",
+        ];
+        for (const helper of helpers) {
+          const source = path.join(cursorDirectory, helper);
+          yield* fs.makeDirectory(path.dirname(source), { recursive: true });
+          yield* fs.writeFileString(source, "fixture helper", { mode: 0o755 });
+        }
+        yield* stageCursorSdkPlatformPackages(nodeModules, destination);
+        for (const helper of helpers) {
+          assert.equal(yield* fs.readFileString(path.join(destination, helper)), "fixture helper");
+          const packagedPath = `node_modules/@cursor/${helper}`;
+          assert.isTrue(
+            DESKTOP_FILE_EXCLUSIONS.some((glob) =>
+              NodePath.matchesGlob(packagedPath, glob.slice(1)),
+            ),
+          );
+          assert.isTrue(
+            WINDOWS_SERVER_ASAR_IGNORE_GLOBS.some((glob) =>
+              NodePath.matchesGlob(packagedPath, glob),
+            ),
+          );
+        }
+      }),
+    ),
+  );
 
   it("excludes node-pty binaries for the other Windows architecture", () => {
     assert.deepStrictEqual(resolveWindowsServerAsarIgnoreGlobs("x64"), [
@@ -1195,7 +1281,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.isBelow(result.fileCount, WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT);
         assert.deepStrictEqual(secondAsar, firstAsar);
       }),
-    ).pipe(Effect.provideService(HostProcessPlatform, "linux")),
+    ).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect("accepts an embedded Linux CLI release archive with a matching digest", () =>
@@ -1215,11 +1301,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
         assert.equal(result.packagedAppDir, fixture.packagedAppDir);
       }),
-    ).pipe(Effect.provideService(HostProcessPlatform, "linux")),
+    ).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 
-  for (const targetArch of ["x64", "arm64"] as const) {
-    it.effect(`accepts an embedded archive with the Linux ${targetArch} node-pty prebuild`, () =>
+  it.effect.each(["x64", "arm64"] as const)(
+    "accepts an embedded archive with the Linux %s node-pty prebuild",
+    (targetArch) =>
       Effect.scoped(
         Effect.gen(function* () {
           const fixture = yield* makeWindowsPayloadFixture({
@@ -1238,34 +1325,33 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
           assert.equal(result.packagedAppDir, fixture.packagedAppDir);
         }),
-      ).pipe(Effect.provideService(HostProcessPlatform, "linux")),
-    );
+      ).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+  );
 
-    it.effect(
-      `rejects a node-pty prebuild for the wrong architecture in a Linux ${targetArch} archive`,
-      () =>
-        Effect.scoped(
-          Effect.gen(function* () {
-            const fixture = yield* makeWindowsPayloadFixture({
-              copyUnpackedNatives: true,
-              wslRuntime: "valid",
-              targetArch,
-              ptyPrebuildArch: targetArch === "x64" ? "arm64" : "x64",
-            });
-            const error = yield* validateWindowsPackagedPayload({
-              stageDistDir: fixture.stageDistDir,
-              appExecutableName: fixture.appExecutableName,
-              targetArch,
-              appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
-              expectWslRuntime: true,
-            }).pipe(Effect.flip);
+  it.effect.each(["x64", "arm64"] as const)(
+    "rejects a node-pty prebuild for the wrong architecture in a Linux %s archive",
+    (targetArch) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* makeWindowsPayloadFixture({
+            copyUnpackedNatives: true,
+            wslRuntime: "valid",
+            targetArch,
+            ptyPrebuildArch: targetArch === "x64" ? "arm64" : "x64",
+          });
+          const error = yield* validateWindowsPackagedPayload({
+            stageDistDir: fixture.stageDistDir,
+            appExecutableName: fixture.appExecutableName,
+            targetArch,
+            appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+            expectWslRuntime: true,
+          }).pipe(Effect.flip);
 
-            assert.instanceOf(error, WindowsPackagedPayloadValidationError);
-            assert.equal(error.reason, "wsl-runtime-invalid");
-          }),
-        ),
-    );
-  }
+          assert.instanceOf(error, WindowsPackagedPayloadValidationError);
+          assert.equal(error.reason, "wsl-runtime-invalid");
+        }),
+      ),
+  );
 
   it.effect("rejects an embedded archive built for a different release version", () =>
     Effect.scoped(
@@ -1430,8 +1516,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.provide(
         Layer.mergeAll(
           spawnerLayer,
-          Layer.succeed(HostProcessPlatform, "win32"),
-          Layer.succeed(HostProcessArchitecture, "x64"),
+          Layer.succeed(HostProcess.Platform, "win32"),
+          Layer.succeed(HostProcess.Architecture, "x64"),
         ),
       ),
     );
@@ -1473,8 +1559,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.provide(
         Layer.mergeAll(
           spawnerLayer,
-          Layer.succeed(HostProcessPlatform, "linux"),
-          Layer.succeed(HostProcessArchitecture, "x64"),
+          Layer.succeed(HostProcess.Platform, "linux"),
+          Layer.succeed(HostProcess.Architecture, "x64"),
         ),
       ),
     );
@@ -1509,8 +1595,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.provide(
         Layer.mergeAll(
           spawnerLayer,
-          Layer.succeed(HostProcessPlatform, "darwin"),
-          Layer.succeed(HostProcessArchitecture, "arm64"),
+          Layer.succeed(HostProcess.Platform, "darwin"),
+          Layer.succeed(HostProcess.Architecture, "arm64"),
         ),
       ),
     );
@@ -1555,8 +1641,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.provide(
         Layer.mergeAll(
           spawnerLayer,
-          Layer.succeed(HostProcessPlatform, "win32"),
-          Layer.succeed(HostProcessArchitecture, "x64"),
+          Layer.succeed(HostProcess.Platform, "win32"),
+          Layer.succeed(HostProcess.Architecture, "x64"),
         ),
       ),
     );
@@ -1584,8 +1670,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ).pipe(
       Effect.provide(
         Layer.mergeAll(
-          Layer.succeed(HostProcessPlatform, "win32"),
-          Layer.succeed(HostProcessArchitecture, "x64"),
+          Layer.succeed(HostProcess.Platform, "win32"),
+          Layer.succeed(HostProcess.Architecture, "x64"),
         ),
       ),
     ),
@@ -1696,7 +1782,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.instanceOf(error, BundleNotSelfContainedError);
         assert.include(error.output, "t3code-deliberately-missing-package");
       }),
-    ).pipe(Effect.provideService(HostProcessPlatform, "linux")),
+    ).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect("preserves both Linux icon resize failures with structural context", () => {
@@ -1832,7 +1918,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       T3CODE_CLERK_PASSKEY_RP_DOMAINS:
         " Clerk.Example.com,example.clerk.accounts.dev,clerk.example.com ",
     });
-    const entitlements = renderMacPasskeyEntitlements(configuration);
+    const entitlements = renderMacPasskeyEntitlements(configuration, {
+      touchIdKeychainAccessGroup: undefined,
+      browserPasskeys: false,
+    });
 
     assert.deepStrictEqual(configuration.rpDomains, [
       "clerk.example.com",
@@ -1842,6 +1931,78 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
+    assert.notInclude(entitlements, "keychain-access-groups");
+    assert.notInclude(entitlements, "com.apple.developer.web-browser.public-key-credential");
+  });
+
+  it("grants in-app browser passkey entitlements only when the provisioning profile does", () => {
+    const configuration = { appId: "com.t3tools.t3code", teamId: "ABC1234567" };
+    // Profiles are CMS envelopes around a plain XML plist.
+    const profile = (entitlements: string, outside = "") =>
+      `0\x82\x1f\x9a\x06\t*\x86H<?xml version="1.0"?><plist version="1.0"><dict>${outside}<key>Entitlements</key><dict>${entitlements}</dict></dict></plist>\x00\x01`;
+    const teamWildcardGroups = `<key>keychain-access-groups</key>
+      <array>
+        <string>ABC1234567.*</string>
+        <string>com.apple.token</string>
+      </array>`;
+
+    assert.deepStrictEqual(resolveMacWebAuthnEntitlements(profile(""), configuration), {
+      touchIdKeychainAccessGroup: undefined,
+      browserPasskeys: false,
+    });
+    assert.deepStrictEqual(
+      resolveMacWebAuthnEntitlements(
+        profile("<key>keychain-access-groups</key><array><string>OTHERTEAM1.*</string></array>"),
+        configuration,
+      ),
+      { touchIdKeychainAccessGroup: undefined, browserPasskeys: false },
+    );
+    // Only real values inside the Entitlements dict count: not comments, not
+    // explicit false, not keys elsewhere in the profile.
+    assert.deepStrictEqual(
+      resolveMacWebAuthnEntitlements(
+        profile(
+          `<!-- ${teamWildcardGroups}
+          <key>com.apple.developer.web-browser.public-key-credential</key><true/> -->
+          <key>com.apple.developer.web-browser.public-key-credential</key><false/>`,
+          teamWildcardGroups,
+        ),
+        configuration,
+      ),
+      { touchIdKeychainAccessGroup: undefined, browserPasskeys: false },
+    );
+    assert.deepStrictEqual(
+      resolveMacWebAuthnEntitlements(
+        profile(
+          `${teamWildcardGroups}
+          <key>com.apple.developer.web-browser.public-key-credential</key>
+          <true/>`,
+        ),
+        configuration,
+      ),
+      {
+        touchIdKeychainAccessGroup: "ABC1234567.com.t3tools.t3code.webauthn",
+        browserPasskeys: true,
+      },
+    );
+
+    const entitlements = renderMacPasskeyEntitlements(
+      { ...configuration, rpDomains: ["clerk.example.com"], provisioningProfilePath: "" },
+      resolveMacWebAuthnEntitlements(
+        profile(
+          `${teamWildcardGroups}<key>com.apple.developer.web-browser.public-key-credential</key><true/>`,
+        ),
+        configuration,
+      ),
+    );
+    assert.match(
+      entitlements,
+      /<key>keychain-access-groups<\/key>\s*<array>\s*<string>ABC1234567\.com\.t3tools\.t3code\.webauthn<\/string>\s*<\/array>/u,
+    );
+    assert.match(
+      entitlements,
+      /<key>com\.apple\.developer\.web-browser\.public-key-credential<\/key>\s*<true\/>/u,
+    );
   });
 
   it("rejects incomplete macOS passkey signing configuration", () => {
@@ -1939,6 +2100,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
       assert.deepStrictEqual(mac.protocols, [
         { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
       ]);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
@@ -1983,6 +2145,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("stages the resource monitor as an external executable resource", () => {
     assert.deepStrictEqual(DESKTOP_EXTRA_RESOURCES, [
+      {
+        from: "apps/desktop/prod-resources/cursor-sdk",
+        to: "node_modules/@cursor",
+      },
       {
         from: "apps/desktop/prod-resources/resource-monitor",
         to: "resource-monitor",
@@ -2186,8 +2352,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
-            Layer.succeed(HostProcessPlatform, "win32"),
-            Layer.succeed(HostProcessArchitecture, "x64"),
+            Layer.succeed(HostProcess.Platform, "win32"),
+            Layer.succeed(HostProcess.Architecture, "x64"),
             ConfigProvider.layer(
               ConfigProvider.fromEnv({
                 env: {

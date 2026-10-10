@@ -1,10 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - Effect has no incremental digest.
 import { ProviderDriverKind, type ProviderInstallState } from "@t3tools/contracts";
-import {
-  HostProcessArchitecture,
-  HostProcessEnvironment,
-  HostProcessPlatform,
-} from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveCommandPath, resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Clock from "effect/Clock";
 import * as Cause from "effect/Cause";
@@ -22,11 +18,11 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as NodeCrypto from "node:crypto";
-import { ServerConfig } from "../config.ts";
-import { BUNDLED_MODEL_MANIFEST, ModelManifest } from "./ModelManifest.ts";
+import * as ServerConfig from "../config.ts";
+import * as ModelManifest from "./ModelManifest.ts";
 import { resolveProviderCompatibility } from "./providerCompatibility.ts";
 
 const DRIVER = ProviderDriverKind.make("codex");
@@ -144,7 +140,7 @@ export class CodexInstallation extends Context.Service<
   static readonly layer = Layer.effect(
     CodexInstallation,
     Effect.gen(function* () {
-      const config = yield* ServerConfig;
+      const config = yield* ServerConfig.ServerConfig;
       return yield* makeCodexInstallation({ baseDir: config.baseDir });
     }),
   );
@@ -162,16 +158,16 @@ const isRunning = (state: ProviderInstallState) =>
 export const makeCodexInstallation = Effect.fn("makeCodexInstallation")(function* (
   options: CodexInstallationOptions,
 ) {
-  const manifestService = yield* ModelManifest;
+  const manifestService = yield* ModelManifest.ModelManifest;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   const http = yield* HttpClient.HttpClient;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const serviceScope = yield* Effect.scope;
-  const platform = yield* HostProcessPlatform;
-  const environment = yield* HostProcessEnvironment;
-  const arch = yield* HostProcessArchitecture;
+  const platform = yield* HostProcess.Platform;
+  const environment = yield* HostProcess.Environment;
+  const arch = yield* HostProcess.Architecture;
   const asset =
     options.releaseAsset === undefined
       ? resolveCodexReleaseAsset(platform, arch)
@@ -266,7 +262,11 @@ export const makeCodexInstallation = Effect.fn("makeCodexInstallation")(function
     const manifest = yield* manifestService.current;
     return (
       resolveProviderCompatibility(manifest.compatibility, DRIVER, version) ??
-      resolveProviderCompatibility(BUNDLED_MODEL_MANIFEST.compatibility, DRIVER, version)
+      resolveProviderCompatibility(
+        ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,
+        DRIVER,
+        version,
+      )
     );
   });
   const resolveManaged = Effect.fn("CodexInstallation.resolveManaged")(
@@ -307,7 +307,7 @@ export const makeCodexInstallation = Effect.fn("makeCodexInstallation")(function
     args: ReadonlyArray<string>,
   ) {
     const resolved = yield* resolveSpawnCommand(command, args).pipe(
-      Effect.provideService(HostProcessPlatform, platform),
+      Effect.provideService(HostProcess.Platform, platform),
     );
     const child = yield* spawner.spawn(
       ChildProcess.make(resolved.command, resolved.args, { shell: resolved.shell }),
@@ -331,7 +331,7 @@ export const makeCodexInstallation = Effect.fn("makeCodexInstallation")(function
   const resolveLocal = Effect.fn("CodexInstallation.resolveLocal")(
     function* () {
       const executablePath = yield* resolveCommandPath("codex", { env: environment }).pipe(
-        Effect.provideService(HostProcessPlatform, platform),
+        Effect.provideService(HostProcess.Platform, platform),
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.provideService(Path.Path, path),
       );
