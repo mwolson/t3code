@@ -12,6 +12,7 @@ import {
   commandDisplayText,
   commandProgramName,
 } from "@t3tools/client-runtime/work-log/command-label";
+import { unwrapSoleMarkdownFence } from "../../markdown-clipboard";
 import {
   liveActivityToolStatus,
   normalizeCompactToolLabel,
@@ -703,8 +704,9 @@ export function resolveAssistantMessageCopyState({
 }) {
   const hasText = text !== null && text.trim().length > 0;
   const visible = showCopyButton && hasText && !streaming;
+  const copyText = visible ? unwrapSoleMarkdownFence(renderCodexDirectivesForCopy(text)) : text;
   return {
-    text: hasText ? (visible ? renderCodexDirectivesForCopy(text) : text) : null,
+    text: hasText ? copyText : null,
     visible,
   };
 }
