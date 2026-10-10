@@ -12,6 +12,7 @@ import {
   type OrchestrationV2ThreadShell,
   type OrchestrationV2TurnItem,
   OrchestratorMcpFailure,
+  type OrchestratorMcpCapabilitiesInput,
   type OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpCreateThreadsInput,
   type OrchestratorMcpCreateThreadsResult,
@@ -94,6 +95,8 @@ import {
 import * as Metrics from "../observability/Metrics.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
+const DEFAULT_CAPABILITIES_MODEL_LIMIT = 50;
+const MAX_CAPABILITIES_MODEL_LIMIT = 100;
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
 // Events that can make a delegated task terminal: the parent's task record,
@@ -123,6 +126,7 @@ type TerminalTaskStatus = Extract<
 export interface OrchestratorMcpServiceShape {
   readonly capabilities: (
     scope: McpInvocationScope,
+    input: OrchestratorMcpCapabilitiesInput,
   ) => Effect.Effect<OrchestratorMcpCapabilitiesResult, OrchestratorMcpFailure>;
   readonly delegateTask: (
     scope: McpInvocationScope,
@@ -278,6 +282,43 @@ function providerConstraints(
     constraints.push("Provider is not authenticated.");
   }
   return constraints;
+}
+
+function capabilityModelCatalog(
+  provider: ServerProvider,
+  input: {
+    readonly model: string | undefined;
+    readonly modelCursor: number | undefined;
+    readonly modelLimit: number | undefined;
+    readonly includeModelOptions: boolean;
+  },
+) {
+  const matchingModels =
+    input.model === undefined
+      ? provider.models
+      : provider.models.filter((model) => model.slug === input.model);
+  const cursor = input.model === undefined ? (input.modelCursor ?? 0) : 0;
+  const requestedLimit = input.modelLimit ?? DEFAULT_CAPABILITIES_MODEL_LIMIT;
+  const limit =
+    input.model === undefined ? Math.min(requestedLimit, MAX_CAPABILITIES_MODEL_LIMIT) : 1;
+  const page = matchingModels.slice(cursor, cursor + limit);
+  const nextCursor = cursor + page.length < matchingModels.length ? cursor + page.length : null;
+  const models = page.map((model) => {
+    const summary = {
+      id: model.slug,
+      label: model.name ?? null,
+    };
+    const optionDescriptors = model.capabilities?.optionDescriptors;
+    if (!input.includeModelOptions || optionDescriptors === undefined) {
+      return summary;
+    }
+    return { ...summary, options: optionDescriptors };
+  });
+  return {
+    models,
+    modelsNextCursor: nextCursor,
+    modelsTotal: matchingModels.length,
+  };
 }
 
 /**
@@ -1767,11 +1808,52 @@ const make = Effect.gen(function* () {
         return { status, secretRef: secretRef.value };
       }).pipe(Effect.withSpan("OrchestratorMcpService.requestSecret")),
 
-    capabilities: (scope) =>
+    capabilities: (scope, input) =>
       Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
         const providers = yield* loadProviders;
         const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
+        const expandedProviderInstanceId = input.providerInstanceId ?? undefined;
+        const requestedModel = input.model ?? undefined;
+        const modelCursor = input.modelCursor ?? undefined;
+        const modelLimit = input.modelLimit ?? undefined;
+        const includeModelOptions = input.includeModelOptions ?? false;
+        const expandedProvider = providers.find(
+          (provider) => provider.instanceId === expandedProviderInstanceId,
+        );
+        if (
+          expandedProviderInstanceId === undefined &&
+          (requestedModel !== undefined ||
+            modelCursor !== undefined ||
+            modelLimit !== undefined ||
+            includeModelOptions)
+        ) {
+          return yield* failure(
+            "invalid_request",
+            "providerInstanceId is required to expand a model catalog.",
+          );
+        }
+        if (expandedProviderInstanceId !== undefined && expandedProvider === undefined) {
+          return yield* failure(
+            "provider_unavailable",
+            `Provider instance ${expandedProviderInstanceId} is not registered.`,
+          );
+        }
+        if (includeModelOptions && requestedModel === undefined) {
+          return yield* failure(
+            "invalid_request",
+            "includeModelOptions requires an exact model id.",
+          );
+        }
+        if (
+          requestedModel !== undefined &&
+          !expandedProvider?.models.some((model) => model.slug === requestedModel)
+        ) {
+          return yield* failure(
+            "model_unavailable",
+            `Model ${requestedModel} is not advertised by provider ${expandedProviderInstanceId}.`,
+          );
+        }
         return {
           parentThreadId: parent?.thread.id ?? null,
           inheritedProviderInstanceId: parent?.thread.modelSelection.instanceId ?? null,
@@ -1786,15 +1868,15 @@ const make = Effect.gen(function* () {
             return {
               providerInstanceId: provider.instanceId,
               driverKind: provider.driver,
-              displayName: provider?.displayName ?? null,
-              models:
-                provider?.models.map((model) => ({
-                  id: model.slug,
-                  label: model.name ?? null,
-                  ...(model.capabilities?.optionDescriptors === undefined
-                    ? {}
-                    : { options: model.capabilities.optionDescriptors }),
-                })) ?? [],
+              displayName: provider.displayName ?? null,
+              ...(provider.instanceId === expandedProviderInstanceId
+                ? capabilityModelCatalog(provider, {
+                    model: requestedModel,
+                    modelCursor,
+                    modelLimit,
+                    includeModelOptions,
+                  })
+                : {}),
               canRunChildTask: constraints.length === 0,
               canRunCrossProviderChildTask: constraints.length === 0,
               constraints: [...constraints],
