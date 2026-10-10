@@ -1,6 +1,8 @@
 import { upgradeLegacyContextMessage } from "@t3tools/shared/composerContextLegacy";
 import { buildProjectThreadStartTurnInput } from "./projectThreadStartTurn";
 import {
+  EnvironmentId,
+  ThreadId,
   ProjectId,
   ProviderInstanceId,
   ComposerContextId,
@@ -11,6 +13,7 @@ import {
   collectComposerContextReferences,
   formatComposerContextReference,
   projectComposerContextForProvider,
+  toKindScopedComposerContextId,
 } from "@t3tools/shared/composerContextReferences";
 import { describe, expect, it } from "vite-plus/test";
 import {
@@ -23,6 +26,7 @@ import {
   uploadedComposerContext,
   serializeComposerMessageForServer,
   pullRequestComposerContext,
+  threadComposerContext,
 } from "./composerContext";
 
 const terminal = {
@@ -61,6 +65,49 @@ const annotation = {
 };
 
 describe("mobile composer context", () => {
+  it("attaches a colon-containing thread id without failing schema validation", () => {
+    const ref = {
+      environmentId: EnvironmentId.make("environment-1"),
+      threadId: ThreadId.make("thread:project:proj-livetest:123"),
+    };
+    const record = threadComposerContext(ref, "Reference thread");
+    expect(ComposerContextId.make(record.contextId)).toBe(record.contextId);
+    expect(composerContextSendBlockReason({ version: 1, records: [record] })).toBeNull();
+    expect(
+      collectComposerContextReferences(formatComposerContextReference(record))[0],
+    ).toMatchObject({
+      contextId: record.contextId,
+    });
+    expect(record.threadId).toBe(ref.threadId);
+  });
+
+  it.each([
+    "safe-thread-id",
+    "thread_safe-thread-id",
+    "thread:project:proj-livetest:123",
+    "thread:delegated-task:command%3A123",
+    "a".repeat(200),
+  ])("uses the shared kind-scoped thread context identity for %s", (threadId) => {
+    const ref = {
+      environmentId: EnvironmentId.make("environment-1"),
+      threadId: ThreadId.make(threadId),
+    };
+    expect(threadComposerContext(ref, "Reference thread").contextId).toBe(
+      toKindScopedComposerContextId("thread", threadId),
+    );
+  });
+
+  it("folds an unsafe thread id into a stable slug and digest", () => {
+    const record = threadComposerContext(
+      {
+        environmentId: EnvironmentId.make("environment-1"),
+        threadId: ThreadId.make("thread:project:proj-livetest:123"),
+      },
+      "Reference thread",
+    );
+    expect(record.contextId).toBe("thread_thread-project-proj-livetest-123-fe25c96d8ec667ca");
+  });
+
   it("rejects a malformed record instead of allowing the wire decoder to drop its payload", () => {
     expect(
       composerContextSendBlockReason({
@@ -207,6 +254,25 @@ describe("mobile composer context", () => {
 });
 
 describe("host context compatibility", () => {
+  it("scopes and folds raw pull-request context ids like web review comments", () => {
+    const record = pullRequestComposerContext(
+      {
+        number: 42,
+        title: "Fix checkout",
+        url: "https://github.com/example/repo/pull/42",
+        headBranch: "fix-checkout",
+        baseBranch: "main",
+        state: "open",
+        isDraft: false,
+      },
+      "pull-request:command%3A123",
+    );
+    expect(record.contextId).toBe(
+      toKindScopedComposerContextId("review-comment", "pull-request:command%3A123"),
+    );
+    expect(composerContextSendBlockReason({ version: 1, records: [record] })).toBeNull();
+  });
+
   it.each(["existing-thread", "new-task"])("serializes %s sends for an older host", (path) => {
     const pr = pullRequestComposerContext(
       {

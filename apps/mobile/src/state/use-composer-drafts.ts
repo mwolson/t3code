@@ -2,7 +2,6 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   EnvironmentId as EnvironmentIdSchema,
   ModelSelection as ModelSelectionSchema,
-  ComposerContextId,
   ComposerContextRecord,
   COMPOSER_CONTEXT_MAX_RECORDS,
   ForwardCompatibleArray,
@@ -31,6 +30,8 @@ import {
   formatComposerContextReference,
   sanitizeComposerContextLabel,
   replaceComposerContextReferences,
+  toComposerContextId,
+  toKindScopedComposerContextId,
 } from "@t3tools/shared/composerContextReferences";
 import { imageMimeType } from "@t3tools/shared/image";
 import { videoMimeType } from "@t3tools/shared/video";
@@ -483,7 +484,7 @@ export function resetComposerDraftsLoadState(): void {
 
 function attachmentContextRecord(
   attachment: DraftComposerAttachment,
-  contextId = ComposerContextId.make(attachment.id),
+  contextId = toKindScopedComposerContextId(attachment.type, attachment.id),
 ) {
   const common = {
     version: 1 as const,
@@ -526,11 +527,13 @@ function restoreMissingComposerFileReferences(draft: ComposerDraft): ComposerDra
         candidate.attachmentId === attachment.id,
     );
     if (!record) {
-      const baseId = attachment.id.replace(/[^a-z0-9_-]/gi, "_").slice(0, 110) || "file";
+      const baseId = toKindScopedComposerContextId(attachment.type, attachment.id);
       let contextId = baseId;
-      for (let suffix = 2; usedIds.has(contextId); suffix += 1) contextId = `${baseId}_${suffix}`;
+      for (let suffix = 2; usedIds.has(contextId); suffix += 1) {
+        contextId = toComposerContextId(`${baseId}_${suffix}`);
+      }
       usedIds.add(contextId);
-      record = attachmentContextRecord(attachment, ComposerContextId.make(contextId));
+      record = attachmentContextRecord(attachment, contextId);
       records.push(record);
       changed = true;
     }
