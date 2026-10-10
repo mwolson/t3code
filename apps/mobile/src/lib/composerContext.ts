@@ -130,7 +130,7 @@ export function pullRequestComposerContext(
   return {
     version: 1,
     kind: "review-comment",
-    contextId: ComposerContextId.make(id),
+    contextId: toKindScopedComposerContextId("review-comment", id),
     label: path
       ? sanitizeComposerContextLabel(path.split("/").at(-1) ?? path, "file")
       : `#${metadata.number}`,
