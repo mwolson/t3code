@@ -12,7 +12,7 @@ import {
   composerAttachmentsStillUploading,
 } from "./composer-attachment-uploads";
 import { useAtomValue } from "@effect/atom-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { type ProviderApprovalDecision, type RuntimeRequestId } from "@t3tools/contracts";
 import {
@@ -118,6 +118,16 @@ export function useSelectedThreadRequests() {
       appAtomRegistry.set(userInputDraftsByRequestKeyAtom, { ...existing, [requestKey]: seeded });
     }
   }, [activePendingUserInput, selectedThreadShell]);
+  const displayedRequestRef = useRef<{
+    request: typeof activePendingUserInput;
+    thread: typeof selectedThreadShell;
+  } | null>(null);
+  useLayoutEffect(() => {
+    displayedRequestRef.current = { request: activePendingUserInput, thread: selectedThreadShell };
+    return () => {
+      displayedRequestRef.current = null;
+    };
+  }, [activePendingUserInput, selectedThreadShell]);
   const questionServerConfigs = useServerConfigs();
   const attachmentDrafts = useAtomValue(composerDraftsAtom);
   const preparationCounts = useAtomValue(questionAttachmentPreparationAtom);
@@ -212,9 +222,15 @@ export function useSelectedThreadRequests() {
 
   const onChangeUserInputCustomAnswer = useCallback(
     (requestId: RuntimeRequestId, questionId: string, customAnswer: string) => {
-      const question = activePendingUserInputs
-        .find((request) => request.requestId === requestId)
-        ?.questions.find((entry) => entry.id === questionId);
+      const displayed = displayedRequestRef.current;
+      if (
+        !displayed?.request ||
+        displayed.request.requestId !== requestId ||
+        displayed.thread?.id !== selectedThreadShell?.id ||
+        displayed.thread?.environmentId !== selectedThreadShell?.environmentId
+      )
+        return;
+      const question = displayed.request.questions.find((entry) => entry.id === questionId);
       if (!selectedThreadShell || !question) {
         return;
       }
@@ -222,7 +238,7 @@ export function useSelectedThreadRequests() {
       const requestKey = scopedRequestKey(selectedThreadShell.environmentId, requestId);
       setUserInputDraftCustomAnswer(requestKey, question, customAnswer);
     },
-    [activePendingUserInputs, selectedThreadShell],
+    [selectedThreadShell],
   );
 
   const onRespondToApproval = useCallback(
