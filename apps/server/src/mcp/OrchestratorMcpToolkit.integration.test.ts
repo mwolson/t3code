@@ -702,6 +702,15 @@ describe("orchestrator MCP toolkit", () => {
             Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
             Layer.provide(
               Layer.mock(ProjectService.ProjectService)({
+                getByWorkspaceRoot: (directory) =>
+                  Effect.succeed(
+                    directory === cwd
+                      ? Option.some({
+                          id: ProjectId.make("project:mcp-foreign"),
+                          deletedAt: null,
+                        } as never)
+                      : Option.none(),
+                  ),
                 getById: (id) =>
                   Effect.succeed(
                     id === projectId
@@ -2723,6 +2732,92 @@ describe("orchestrator MCP toolkit", () => {
             expect(foreignListed.threads.map((thread) => thread.threadId)).toEqual([
               foreignThreadId,
             ]);
+            const crossProjectInput = {
+              clientRequestId: "create-cross-project-batch",
+              threads: [
+                { title: "Cross-project empty", projectDirectory: cwd },
+                {
+                  title: "Cross-project prompted",
+                  projectDirectory: cwd,
+                  prompt: createdThreadPrompt,
+                },
+              ],
+            };
+            const crossProjectCall = yield* invoke("create_threads", crossProjectInput);
+            expect(crossProjectCall.isError).toBe(false);
+            const crossProjectCreated = yield* decodeCreateThreadsResult(
+              crossProjectCall.structuredContent,
+            );
+            expect(crossProjectCreated.threads).toHaveLength(2);
+            for (const createdThread of crossProjectCreated.threads) {
+              const projection = yield* orchestrator.getThreadProjection(createdThread.threadId);
+              expect(projection.thread).toMatchObject({
+                projectId: "project:mcp-foreign",
+                branch: null,
+                worktreePath: null,
+                lineage: { parentThreadId: null, relationshipToParent: null },
+              });
+              const read = yield* invoke("t3_thread_read", { threadId: createdThread.threadId });
+              expect(read.structuredContent).toMatchObject({
+                thread: { projectId: "project:mcp-foreign" },
+              });
+            }
+            const crossProjectRun = yield* waitForProjection(
+              orchestrator,
+              crossProjectCreated.threads[1]!.threadId,
+              (projection) => projection.runs.some((run) => run.status === "completed"),
+            );
+            expect(
+              crossProjectRun.messages
+                .filter((message) => message.role === "user")
+                .map((message) => message.text),
+            ).toEqual([createdThreadPrompt]);
+            const repeatedCrossProjectCall = yield* invoke("create_threads", crossProjectInput);
+            const repeatedCrossProject = yield* decodeCreateThreadsResult(
+              repeatedCrossProjectCall.structuredContent,
+            );
+            expect(repeatedCrossProject.threads.map((thread) => thread.threadId)).toEqual(
+              crossProjectCreated.threads.map((thread) => thread.threadId),
+            );
+            const crossProjectIds = new Set(
+              crossProjectCreated.threads.map((thread) => thread.threadId),
+            );
+            const crossProjectRecords = (yield* orchestrator.getThreadProjection(
+              parentThreadId,
+            )).turnItems.filter(
+              (item) => item.type === "thread_created" && crossProjectIds.has(item.targetThreadId),
+            );
+            expect(crossProjectRecords).toHaveLength(2);
+            expect(crossProjectRecords).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  targetThreadId: crossProjectCreated.threads[0]!.threadId,
+                  targetRunId: null,
+                }),
+                expect.objectContaining({
+                  targetThreadId: crossProjectCreated.threads[1]!.threadId,
+                  targetRunId: crossProjectCreated.threads[1]!.runId,
+                }),
+              ]),
+            );
+            yield* orchestrator.dispatch({
+              type: "thread.delete",
+              commandId: CommandId.make("command:mcp-cross-project:delete-empty"),
+              threadId: crossProjectCreated.threads[0]!.threadId,
+            });
+            const deletedRetryCall = yield* invoke("create_threads", crossProjectInput);
+            expect(deletedRetryCall.isError).toBe(true);
+            crossProjectIds.delete(crossProjectCreated.threads[0]!.threadId);
+            const crossProjectList = yield* invoke("t3_thread_list", {
+              projectId: "project:mcp-foreign",
+            });
+            const crossProjectListed = yield* decodeThreadListResult(
+              crossProjectList.structuredContent,
+            );
+            expect(crossProjectListed.threads.map((thread) => thread.threadId)).toEqual(
+              expect.arrayContaining([...crossProjectIds, foreignThreadId]),
+            );
+
             const listCall = yield* invoke("t3_thread_list", {
               includeSubagents: false,
               limit: 100,
