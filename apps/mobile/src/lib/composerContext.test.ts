@@ -9,6 +9,7 @@ import {
   collectComposerContextReferences,
   formatComposerContextReference,
   projectComposerContextForProvider,
+  toKindScopedComposerContextId,
 } from "@t3tools/shared/composerContextReferences";
 import { describe, expect, it } from "vite-plus/test";
 import {
@@ -332,7 +333,9 @@ describe("host context compatibility", () => {
       state: "open" as const,
       isDraft: false,
     };
-    const record = pullRequestComposerContext(metadata, "pr-42", "src/checkout.ts");
+    const id = "pull-request:command%3A123";
+    const record = pullRequestComposerContext(metadata, id, "src/checkout.ts");
+    expect(record.contextId).toBe(toKindScopedComposerContextId("review-comment", id));
     expect(record.filePath).toBe("src/checkout.ts");
     const prompt = projectComposerContextForProvider({
       text: formatComposerContextReference(record),
