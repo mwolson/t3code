@@ -488,6 +488,103 @@ function buildSnapShotTimelineEntry(previewUrl?: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("lets an external selection pass through the minimap until every mouse button is released", async () => {
+    const listeners = new Map<string, Set<EventListener>>();
+    vi.stubGlobal("window", {
+      ...window,
+      addEventListener: (type: string, listener: EventListener) => {
+        const callbacks = listeners.get(type) ?? new Set();
+        callbacks.add(listener);
+        listeners.set(type, callbacks);
+      },
+      removeEventListener: (type: string, listener: EventListener) => {
+        listeners.get(type)?.delete(listener);
+      },
+    });
+    const viewport = {
+      getBoundingClientRect: () => ({ width: 1400, height: 900, top: 0 }),
+      querySelector: () => ({ getBoundingClientRect: () => ({ width: 768 }) }),
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(private readonly callback: () => void) {}
+        observe() {
+          this.callback();
+        }
+        disconnect() {}
+      },
+    );
+    let renderer!: ReactTestRenderer;
+    try {
+      await act(async () => {
+        renderer = create(
+          <MessagesTimeline
+            {...buildProps()}
+            timelineEntries={Array.from({ length: 3 }, (_, index) => {
+              const entry = buildUserTimelineEntry(`Prompt ${index}`);
+              return {
+                ...entry,
+                id: `entry-${index}`,
+                message: { ...entry.message, id: MessageId.make(`message-${index}`) },
+              };
+            })}
+          />,
+          {
+            createNodeMock: (element) => {
+              const props = element.props;
+              return props !== null &&
+                typeof props === "object" &&
+                "data-assistant-citation-viewport" in props
+                ? viewport
+                : null;
+            },
+          },
+        );
+      });
+      const minimap = () => renderer.root.findByProps({ "data-testid": "timeline-minimap" });
+      const strip = () =>
+        minimap()
+          .findAllByType("div")
+          .find((node) => node.props.style?.width !== undefined)!;
+      const navigationTargets = () =>
+        minimap()
+          .findAllByType("span")
+          .filter((node) => node.props.className?.includes("z-10"));
+      const release = async (type: string, buttons: number) => {
+        await act(() => {
+          for (const listener of [...(listeners.get(type) ?? [])])
+            listener(new MouseEvent(type, { buttons }));
+        });
+      };
+      expect(strip().props.className).toContain("pointer-events-auto");
+      expect(navigationTargets()).toHaveLength(2);
+      await act(() => strip().props.onMouseMove?.({ buttons: 1 }));
+      expect(strip().props.className).toContain("pointer-events-none");
+      expect(
+        navigationTargets().every((node) => node.props.className.includes("pointer-events-none")),
+      ).toBe(true);
+      await release("mouseup", 2);
+      expect(strip().props.className).toContain("pointer-events-none");
+      await release("mousemove", 0);
+      expect(strip().props.className).toContain("pointer-events-auto");
+      expect(
+        navigationTargets().every((node) => node.props.className.includes("pointer-events-auto")),
+      ).toBe(true);
+      await act(() => strip().props.onMouseDown?.());
+      await act(() => strip().props.onMouseMove?.({ buttons: 1 }));
+      expect(strip().props.className).toContain("pointer-events-auto");
+      await release("mouseup", 0);
+      await act(() => strip().props.onMouseMove?.({ buttons: 1 }));
+      expect(strip().props.className).toContain("pointer-events-none");
+    } finally {
+      await act(() => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it.each(["user", "assistant"] as const)(
     "copies a sole fence through the actual %s Copy handler",
     async (role) => {
