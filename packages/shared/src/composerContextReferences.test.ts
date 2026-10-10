@@ -11,6 +11,8 @@ import {
   projectComposerContextForProvider,
   replaceComposerContextReferences,
   sanitizeComposerContextLabel,
+  toComposerContextId,
+  toKindScopedComposerContextId,
 } from "./composerContextReferences.ts";
 
 const ctx = (value: string) => value as ComposerContextId;
@@ -37,6 +39,22 @@ describe("href codec", () => {
     ]) {
       expect(parseComposerContextHref(bad), bad).toBeNull();
     }
+  });
+});
+
+describe("thread context ids", () => {
+  it("mints the id every client and already-persisted draft agrees on", () => {
+    // Web and mobile both key a thread chip by this id; changing the folding would orphan
+    // persisted drafts and stop re-attaching the same thread from reusing its chip.
+    const contextId = toKindScopedComposerContextId(
+      "thread",
+      "thread:mcp:3f2b9c1e-8d4a-4b6f-9e2a-7c5d1f0a8b3e:review:0",
+    );
+    expect(contextId).toBe("thread_thread-mcp-3f2b9c1e-8d4a-4b6f-9e2a-7c5d1f-eb08d08e203412f1");
+    const link = formatComposerContextReference({ kind: "thread", contextId, label: "Review" });
+    expect(collectComposerContextReferences(`see ${link}`)).toEqual([
+      expect.objectContaining({ kind: "thread", contextId, label: "Review" }),
+    ]);
   });
 });
 
@@ -296,5 +314,29 @@ describe("provider projection", () => {
     expect(projected).toContain('<context kind="terminal" id="ctx_t" unavailable="true"/>');
     expect(projected).not.toContain("another payload");
     expect(projected).not.toContain("boom");
+  });
+});
+
+describe("toComposerContextId", () => {
+  it("keeps same-kind raw IDs distinct when one contains the namespace prefix", () => {
+    expect(toKindScopedComposerContextId("image", "x")).toBe("image_x");
+    expect(toKindScopedComposerContextId("image", "image_x")).toBe("image_image_x");
+  });
+  it("keeps ids that already fit the grammar and folds the rest deterministically", () => {
+    expect(toComposerContextId("file-comment-1700-1")).toBe("file-comment-1700-1");
+    const folded = toComposerContextId("pull-request-selection:src/a.ts:4-9");
+    expect(folded).toMatch(/^pull-request-selection-src-a-ts-4-9-[0-9a-f]{16}$/);
+    expect(toComposerContextId("pull-request-selection:src/a.ts:4-9")).toBe(folded);
+    expect(toComposerContextId("pull-request-selection:src/b.ts:4-9")).not.toBe(folded);
+    expect(toComposerContextId("::")).toMatch(/^ctx-[0-9a-f]{16}$/);
+  });
+  it("tells apart producer ids that agree past the slug's truncation point", () => {
+    // The slug keeps 48 characters, so only the digest distinguishes these two.
+    const shared = `pull-request-finding:${"a".repeat(60)}`;
+    const first = toComposerContextId(`${shared}:1`);
+    const second = toComposerContextId(`${shared}:2`);
+
+    expect(first).not.toBe(second);
+    expect(first.length).toBeLessThanOrEqual(128);
   });
 });
