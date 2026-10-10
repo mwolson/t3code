@@ -9,9 +9,8 @@ import {
 import * as Haptics from "expo-haptics";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-native";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
-import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
+import { AssistantForkButton } from "./AssistantForkButton";
 import {
   type OrchestrationMessageContext,
   ThreadId,
@@ -144,7 +143,6 @@ import {
   deriveThreadWorkLogSizing,
   type LayoutVariant,
 } from "../../lib/layout";
-import { uuidv4 } from "../../lib/uuid";
 import {
   resolveMarkdownFontSizes,
   resolveNativeMarkdownTypography,
@@ -203,17 +201,12 @@ import { useLiveThreadLinkLabels } from "../../state/entities";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { composerDocumentAttachmentRecord } from "../../lib/composerContext";
 import * as Option from "effect/Option";
-import { appAtomRegistry } from "../../state/atom-registry";
-import { environmentThreadShells, threadEnvironment } from "../../state/threads";
-import { useAtomCommand } from "../../state/use-atom-command";
-import { useV2ItemSupport } from "../../state/v2-item-support";
 import {
   basename,
   fileRoutePathSegments,
   isAbsolutePath,
   resolveWorkspaceRelativeFilePath,
 } from "../files/filePath";
-import { waitForThreadShellReady } from "./threadForkNavigation";
 import { resolveUserMessageIntentBadge } from "./userMessageIntentBadge";
 import { fileChipMenu, resolveFileChipTarget, type FileChipAction } from "./fileChipMenu";
 import { useFileChipShare } from "./useFileChipShare";
@@ -305,90 +298,6 @@ export interface ThreadFeedProps {
   readonly onEndFollowEnabledChange?: (enabled: boolean) => void;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
   readonly onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
-}
-
-async function waitForThreadShell(
-  environmentId: EnvironmentId,
-  threadId: ThreadId,
-): Promise<boolean> {
-  const atom = environmentThreadShells.threadShellAtom(scopeThreadRef(environmentId, threadId));
-  return waitForThreadShellReady({
-    read: () => appAtomRegistry.get(atom) !== null,
-  });
-}
-
-function AssistantForkButton(props: {
-  readonly environmentId: EnvironmentId;
-  readonly iconColor: ColorValue;
-  readonly projectedItem: OrchestrationV2ProjectedTurnItem;
-  readonly sourceTitle: string;
-}) {
-  const support = useV2ItemSupport({
-    environmentId: props.environmentId,
-    sourceThreadId: props.projectedItem.sourceThreadId,
-    sourceItemId: props.projectedItem.sourceItemId,
-  });
-  const forkFromRun = useAtomCommand(threadEnvironment.forkFromRun, "fork from response");
-  const navigation = useNavigation();
-  const [busy, setBusy] = useState(false);
-  const canFork = canForkProjectedAssistantItem({
-    projectedItem: props.projectedItem,
-    capabilities: support.providerSession?.capabilities,
-  });
-  const runId = props.projectedItem.item.runId;
-
-  if (!canFork || runId === null) return null;
-
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel="Fork from this response"
-      disabled={busy}
-      onPress={() => {
-        const targetThreadId = ThreadId.make(uuidv4());
-        setBusy(true);
-        void Haptics.selectionAsync();
-        void forkFromRun({
-          environmentId: props.environmentId,
-          input: {
-            sourceThreadId: props.projectedItem.sourceThreadId,
-            targetThreadId,
-            runId,
-            title: `${props.sourceTitle} fork`,
-            creationSource: "mobile",
-          },
-        })
-          .then(async (result) => {
-            if (result._tag !== "Success") return;
-            const targetThreadReady = await waitForThreadShell(props.environmentId, targetThreadId);
-            if (!targetThreadReady) {
-              Alert.alert(
-                "Fork created",
-                "Its thread data did not reach this client. Reconnect and try opening it from the thread list.",
-              );
-              return;
-            }
-            navigation.navigate("Thread", {
-              environmentId: props.environmentId,
-              threadId: targetThreadId,
-            });
-          })
-          .finally(() => setBusy(false));
-      }}
-      className="h-7 w-7 items-center justify-center disabled:opacity-40"
-    >
-      {busy ? (
-        <ActivityIndicator size="small" />
-      ) : (
-        <SymbolView
-          name="arrow.triangle.branch"
-          size={13}
-          tintColor={props.iconColor}
-          type="monochrome"
-        />
-      )}
-    </Pressable>
-  );
 }
 
 function MessageAttachmentImage(props: {
