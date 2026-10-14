@@ -268,20 +268,26 @@ export const makeDiscovery = Effect.gen(function* () {
     refineUnknownRemote: ({ context }) => {
       // Identity resolution also probes providers before a web base URL is known.
       const url = URL.parse(context.provider.baseUrl);
-      if (!url?.host) return Effect.succeed(null);
+      if (!url?.host) return Effect.succeed({ provider: null, settled: true });
       return api.credential(url.host).pipe(
         Effect.as(true),
-        Effect.catchTags({ GitHubHostDisabledError: () => Effect.succeed(true) }),
-        Effect.orElseSucceed(() => false),
-        Effect.map((known) =>
-          known
+        Effect.catchTags({
+          GitHubCliMissingError: () => Effect.succeed(false),
+          GitHubHostDisabledError: () => Effect.succeed(true),
+          GitHubNotSignedInError: () => Effect.succeed(false),
+        }),
+        Effect.map((known) => ({
+          provider: known
             ? ({
                 kind: SourceControlProviderKind.make("github"),
                 name: "GitHub Self-Hosted",
                 baseUrl: context.provider.baseUrl,
               } as const)
             : null,
-        ),
+          settled: true,
+        })),
+        // gh timed out or failed, so it is unknown whether it holds a login for the host.
+        Effect.orElseSucceed(() => ({ provider: null, settled: false })),
       );
     },
   } satisfies SourceControlManagedCliDiscoverySpec;

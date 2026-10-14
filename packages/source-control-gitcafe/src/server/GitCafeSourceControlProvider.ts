@@ -118,7 +118,7 @@ export const makeDiscovery = Effect.gen(function* () {
           }),
         ),
       ),
-    refineUnknownRemote: () => Effect.succeed(null),
+    refineUnknownRemote: () => Effect.succeed({ provider: null, settled: true }),
   } satisfies SourceControlManagedCliDiscoverySpec;
 });
 

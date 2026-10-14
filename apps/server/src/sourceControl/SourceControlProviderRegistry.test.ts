@@ -2,12 +2,23 @@ import { SourceControlProviderKind } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PlatformError from "effect/PlatformError";
+import * as PubSub from "effect/PubSub";
 import * as Redacted from "effect/Redacted";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
-import { VcsRepositoryDetectionError } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  VcsProcessSpawnError,
+  VcsProcessTimeoutError,
+  VcsRepositoryDetectionError,
+} from "@t3tools/contracts";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as ServerConfig from "../config.ts";
@@ -54,6 +65,9 @@ function makeRegistry(input: {
   readonly process?: Partial<VcsProcess.VcsProcess["Service"]>;
   readonly githubApi?: Partial<GitHubApi.GitHubApi["Service"]>;
   readonly gitlab?: Partial<GitLabCli.GitLabCli["Service"]>;
+  readonly forgejo?: Partial<ForgejoCli.ForgejoCli["Service"]>;
+  readonly settings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
+  readonly started?: Effect.Effect<unknown>;
   readonly resolve?: VcsDriverRegistry.VcsDriverRegistry["Service"]["resolve"];
 }) {
   const driver = {
@@ -99,6 +113,7 @@ function makeRegistry(input: {
   });
 
   return SourceControlProviderRegistry.make.pipe(
+    Effect.tap(input.started ?? Effect.void),
     Effect.provide(
       Layer.mergeAll(
         NodeServices.layer,
@@ -118,7 +133,9 @@ function makeRegistry(input: {
         Layer.mock(AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli)({}),
         Layer.mock(BitbucketApi.BitbucketApi)({}),
         Layer.mock(BitbucketPullRequestApi.BitbucketPullRequestApi)({}),
-        ServerSettings.ServerSettingsService.layerTest(),
+        input.settings
+          ? Layer.mock(ServerSettings.ServerSettingsService)(input.settings)
+          : ServerSettings.ServerSettingsService.layerTest(),
         Layer.mock(GitHubPullRequestApi.GitHubPullRequestApi)({}),
         Layer.mock(GitHubApi.GitHubApi)({
           // No GitHub credential unless a test supplies one, so custom hosts stay unclaimed.
@@ -128,7 +145,10 @@ function makeRegistry(input: {
         Layer.mock(GitVcsDriver.GitVcsDriver)({}),
         Layer.mock(GitLabCli.GitLabCli)(input.gitlab ?? {}),
         Layer.mock(GitLabPullRequestCli.GitLabPullRequestCli)({}),
-        Layer.mock(ForgejoCli.ForgejoCli)({ listLogins: () => Effect.succeed([]) }),
+        Layer.mock(ForgejoCli.ForgejoCli)({
+          listLogins: () => Effect.succeed([]),
+          ...input.forgejo,
+        }),
         Layer.mock(GitCafeApi.GitCafeApi)({}),
         Layer.mock(GitCafeCredentials.GitCafeCredentials)({
           cliEnv: () => Effect.succeed({}),
@@ -457,5 +477,292 @@ it.effect("skips GitHub discovery for the identity resolver's empty base URL", (
       "https://githubenterprise.dev.example.com",
     );
     assert.deepStrictEqual(hosts, ["githubenterprise.dev.example.com"]);
+  }),
+);
+
+const notFound = (command: string, cwd: string, module = "ChildProcess", method = "spawn") =>
+  new VcsProcessSpawnError({
+    operation: "test",
+    command,
+    cwd,
+    cause: PlatformError.systemError({ _tag: "NotFound", module, method }),
+  });
+
+const resolveUnknown = (
+  registry: SourceControlProviderRegistry.SourceControlProviderRegistry["Service"],
+  repository: string,
+  host = "git.example.internal",
+) =>
+  registry.resolveHandle({
+    cwd: `/${repository}`,
+    context: {
+      provider: {
+        kind: SourceControlProviderKind.make("unknown"),
+        name: host.toLowerCase(),
+        baseUrl: `https://${host.toLowerCase()}`,
+      },
+      remoteName: "origin",
+      remoteUrl: `git@${host}:team/${repository}.git`,
+    },
+  });
+
+it.effect("asks once for every checkout of a server no integration claims", () =>
+  Effect.gen(function* () {
+    const asked: Array<string> = [];
+    const release = yield* Deferred.make<void>();
+    const registry = yield* makeRegistry({
+      remotes: [],
+      process: {
+        run: ({ command, cwd }) => {
+          asked.push(command);
+          return Deferred.await(release).pipe(Effect.andThen(Effect.fail(notFound(command, cwd))));
+        },
+      },
+      forgejo: {
+        listLogins: ({ command = "tea", cwd }) => {
+          asked.push(command);
+          const cause = notFound(command, cwd);
+          return Effect.fail(new ForgejoCli.ForgejoCliError({ command, cwd, detail: "", cause }));
+        },
+      },
+    });
+
+    // Each caller runs until it waits, so once all have started the first probe is still open.
+    const started = yield* Effect.forEach(["a", "b", "c"], () => Deferred.make<void>());
+    const callers = yield* Effect.forEach(
+      ["a", "b", "c"],
+      (repository, index) =>
+        Deferred.succeed(started[index]!, undefined).pipe(
+          Effect.andThen(resolveUnknown(registry, repository)),
+        ),
+      { concurrency: "unbounded" },
+    ).pipe(Effect.forkChild);
+    yield* Effect.forEach(started, Deferred.await);
+    assert.deepStrictEqual(asked, ["glab"]);
+    yield* Deferred.succeed(release, undefined);
+    const handles = yield* Fiber.join(callers);
+    yield* resolveUnknown(registry, "d");
+    assert.deepStrictEqual(
+      handles.map((handle) => [handle.provider.kind, handle.context?.remoteUrl]),
+      ["a", "b", "c"].map((name) => ["unknown", `git@git.example.internal:team/${name}.git`]),
+    );
+    assert.deepStrictEqual(asked, ["glab", "fj", "tea"]);
+
+    // A login made in a terminal sends no signal, so the server is asked again later.
+    yield* TestClock.adjust("5 minutes");
+    yield* resolveUnknown(registry, "a");
+    assert.strictEqual(asked.length, 6);
+  }),
+);
+
+it.effect.each(["tea", "gh"] as const)("asks again after %s could not run", (failing) =>
+  Effect.gen(function* () {
+    let attempts = 0;
+    const fail = <E>(error: E) => {
+      attempts += 1;
+      return Effect.fail(error);
+    };
+    const registry = yield* makeRegistry({
+      remotes: [],
+      process: { run: ({ command, cwd }) => Effect.fail(notFound(command, cwd)) },
+      githubApi: {
+        credential: (host) =>
+          failing === "gh"
+            ? fail(new GitHubCredentials.GitHubCliFailedError({ host, cause: "timeout" }))
+            : Effect.fail(new GitHubCredentials.GitHubNotSignedInError({ host })),
+      },
+      forgejo: {
+        listLogins: ({ command, cwd }) =>
+          failing === "tea" && command !== "fj"
+            ? fail(new ForgejoCli.ForgejoCliError({ command: "tea", cwd, detail: "Failed." }))
+            : Effect.succeed([]),
+      },
+    });
+    for (const repository of ["a", "b"]) {
+      const handle = yield* resolveUnknown(registry, repository);
+      assert.strictEqual(handle.provider.kind, "unknown");
+    }
+    assert.strictEqual(attempts, 2);
+  }),
+);
+
+const glabReply = (stderr: string, exitCode = 1) =>
+  Effect.succeed(processOutput("", { stderr, exitCode: ChildProcessSpawner.ExitCode(exitCode) }));
+const glabLogin = (host = "git.example.internal") =>
+  glabReply(`${host}\n  ✓ Logged in to ${host} as maria (keyring)\n`, 0);
+
+it.effect.each([
+  { name: "a login", replies: [glabLogin()], found: ["gitlab", "gitlab"], asks: 1 },
+  {
+    name: "a login under the remote's spelling",
+    host: "Git.Example.Internal",
+    replies: [glabLogin("Git.Example.Internal")],
+    found: ["gitlab", "gitlab"],
+    asks: 1,
+  },
+  ...[
+    ["no login", "x git.example.internal has not been authenticated with glab"],
+    ["no login on glab 1.22", "x git.example.internal not authenticated with glab"],
+    ["no instances", "no GitLab instances have been authenticated with glab"],
+    ["no instance on glab 1.22", "No GitLab instance has been authenticated with glab"],
+  ].map(([name, message]) => ({
+    name,
+    host: undefined,
+    replies: [glabReply(message!)],
+    found: ["unknown", "unknown"],
+    asks: 1,
+  })),
+  {
+    name: "a failed check",
+    replies: [glabReply("git.example.internal\n  x git.example.internal: API call failed\n")],
+    found: ["unknown", "unknown"],
+    asks: 2,
+  },
+  {
+    name: "a timeout",
+    replies: [
+      Effect.fail(
+        new VcsProcessTimeoutError({ operation: "test", command: "glab", cwd: "/a", timeoutMs: 1 }),
+      ),
+    ],
+    found: ["unknown", "unknown"],
+    asks: 2,
+  },
+  {
+    name: "a check failed in a missing checkout",
+    replies: [Effect.fail(notFound("glab", "/a", "FileSystem", "access")), glabLogin()],
+    found: ["unknown", "gitlab"],
+    asks: 2,
+  },
+])("asks glab about the remote's own host and keeps $name", (scenario) =>
+  Effect.gen(function* () {
+    const host = scenario.host ?? "git.example.internal";
+    const asked: Array<ReadonlyArray<string>> = [];
+    const registry = yield* makeRegistry({
+      remotes: [],
+      process: {
+        // glab holds a login only under the host's exact spelling.
+        run: ({ args, cwd }) => {
+          asked.push([cwd, ...args]);
+          return args[3] === host
+            ? (scenario.replies[asked.length - 1] ?? scenario.replies[0]!)
+            : glabReply("x git.example.internal has not been authenticated with glab");
+        },
+      },
+    });
+    const found = yield* Effect.forEach(["a", "b"], (repository) =>
+      resolveUnknown(registry, repository, host).pipe(Effect.map(({ provider }) => provider.kind)),
+    );
+    assert.deepStrictEqual(found, scenario.found);
+    assert.deepStrictEqual(
+      asked,
+      ["/a", "/b"]
+        .slice(0, scenario.asks)
+        .map((cwd) => [cwd, "auth", "status", "--hostname", host]),
+    );
+  }),
+);
+
+it.effect("does not keep a tea login found while fj could not be read", () =>
+  Effect.gen(function* () {
+    let fjReadable = false;
+    const loginAt = (port: number) => ({
+      name: "login",
+      url: `https://git.example.internal:${port}`,
+      ssh_host: "git.example.internal",
+      user: "maria",
+      default: "true",
+    });
+    const registry = yield* makeRegistry({
+      remotes: [],
+      process: { run: ({ command, cwd }) => Effect.fail(notFound(command, cwd)) },
+      forgejo: {
+        listLogins: ({ command, cwd }) =>
+          command === "fj" && !fjReadable
+            ? Effect.fail(new ForgejoCli.ForgejoCliError({ command, cwd, detail: "Unreadable." }))
+            : Effect.succeed([loginAt(command === "fj" ? 4000 : 3000)]),
+      },
+    });
+    const fallback = yield* resolveUnknown(registry, "a");
+    assert.strictEqual(fallback.context?.provider.baseUrl, "https://git.example.internal:3000");
+    fjReadable = true;
+    const recovered = yield* resolveUnknown(registry, "b");
+    assert.strictEqual(recovered.context?.provider.baseUrl, "https://git.example.internal:4000");
+  }),
+);
+
+it.effect.each([
+  { first: "https://host-a.example/repo.git", second: "https://host-b.example/repo.git" },
+  { first: "ssh://git@host-a.example/repo.git", second: "ssh://git@host-b.example/repo.git" },
+  { first: "https://host.example:8443/repo.git", second: "https://host.example:9443/repo.git" },
+])("keeps the lookups for $first and $second apart", ({ first, second }) =>
+  Effect.gen(function* () {
+    const asked: Array<string | undefined> = [];
+    const registry = yield* makeRegistry({
+      remotes: [],
+      process: { run: ({ command, cwd }) => Effect.fail(notFound(command, cwd)) },
+      forgejo: {
+        listLogins: ({ command, remoteUrl }) => {
+          if (command === "tea") asked.push(remoteUrl);
+          return Effect.succeed([]);
+        },
+      },
+    });
+    for (const remoteUrl of [first, second]) {
+      // The identity resolver's context, where the remote alone names the server.
+      const provider = {
+        kind: SourceControlProviderKind.make("unknown"),
+        name: "Unknown",
+        baseUrl: "",
+      };
+      yield* registry.resolveHandle({
+        cwd: "/repo",
+        context: { provider, remoteName: "origin", remoteUrl },
+      });
+    }
+    assert.deepStrictEqual(asked, [first, second]);
+  }),
+);
+
+it.effect("asks again once Settings change", () =>
+  Effect.gen(function* () {
+    const changes = yield* PubSub.unbounded<typeof DEFAULT_SERVER_SETTINGS>();
+    const handled = yield* Effect.forEach([0, 1], () => Deferred.make<void>());
+    let changeCount = 0;
+    const markHandled = Effect.suspend(() => Deferred.succeed(handled[changeCount++]!, undefined));
+    let signedIn = false;
+    const registry = yield* makeRegistry({
+      remotes: [],
+      settings: {
+        subscribeChanges: PubSub.subscribe(changes).pipe(
+          Effect.map((subscription) =>
+            // A change is marked handled once the registry asks for the next one.
+            Stream.fromSubscription(subscription).pipe(
+              Stream.flatMap((settings) =>
+                Stream.concat(Stream.make(settings), Stream.fromEffectDrain(markHandled)),
+              ),
+            ),
+          ),
+        ),
+      },
+      // Saved as the registry finishes starting, before its consumer has run.
+      started: PubSub.publish(changes, DEFAULT_SERVER_SETTINGS),
+      process: { run: ({ command, cwd }) => Effect.fail(notFound(command, cwd)) },
+      githubApi: {
+        credential: (host) =>
+          signedIn
+            ? Effect.succeed({ token: Redacted.make("token"), fingerprint: `${host}:fingerprint` })
+            : Effect.fail(new GitHubCredentials.GitHubNotSignedInError({ host })),
+      },
+    });
+    yield* Deferred.await(handled[0]!);
+    assert.strictEqual((yield* resolveUnknown(registry, "a")).provider.kind, "unknown");
+    signedIn = true;
+    assert.strictEqual((yield* resolveUnknown(registry, "b")).provider.kind, "unknown");
+
+    // A token saved for the host in Settings.
+    yield* PubSub.publish(changes, DEFAULT_SERVER_SETTINGS);
+    yield* Deferred.await(handled[1]!);
+    assert.strictEqual((yield* resolveUnknown(registry, "c")).provider.kind, "github");
   }),
 );
