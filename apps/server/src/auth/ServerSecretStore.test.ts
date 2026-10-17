@@ -148,6 +148,44 @@ it.layer(NodeServices.layer)("ServerSecretStore.layer", (it) => {
     }).pipe(Effect.provide(layerConcurrentCreateSecretStore())),
   );
 
+  it.effect("does not publish a sequence reservation when syncing its temporary file fails", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const failingSync = Layer.succeed(FileSystem.FileSystem, {
+        ...fileSystem,
+        open: (path, options) =>
+          fileSystem.open(path, options).pipe(
+            Effect.map((file) => ({
+              ...file,
+              sync: Effect.fail(
+                PlatformError.systemError({
+                  _tag: "PermissionDenied",
+                  module: "FileSystem",
+                  method: "sync",
+                  pathOrDescriptor: path,
+                }),
+              ),
+            })),
+          ),
+      });
+      yield* Effect.gen(function* () {
+        const secrets = yield* ServerSecretStore.ServerSecretStore;
+        const error = yield* secrets
+          .set("personal-relay-publish-seq-floor", new TextEncoder().encode("12345"))
+          .pipe(Effect.flip);
+        assert.equal(error._tag, "SecretStorePersistError");
+        assert.isTrue(Option.isNone(yield* secrets.get("personal-relay-publish-seq-floor")));
+      }).pipe(
+        Effect.provide(
+          ServerSecretStore.layer.pipe(
+            Layer.provide(layerServerConfig()),
+            Layer.provide(failingSync),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("propagates read failures other than missing-file errors", () =>
     Effect.gen(function* () {
       const secretStore = yield* ServerSecretStore.ServerSecretStore;

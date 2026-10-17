@@ -9,7 +9,7 @@ import * as Layer from "effect/Layer";
 import * as Planetscale from "alchemy/Planetscale";
 
 import { PublishClientConfig, tokenDigest } from "./src/clientConfig.ts";
-import * as RelayDb from "./src/db.ts";
+import * as RelayDb from "./src/dbResources.ts";
 import { RelayObservability } from "./src/observability.ts";
 import { ManagedEndpointZone, RelayApiZone } from "./src/zone.ts";
 import * as RelayWorker from "./src/worker.ts";

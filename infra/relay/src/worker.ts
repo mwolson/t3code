@@ -39,6 +39,7 @@ import * as EnvironmentLinks from "./environments/EnvironmentLinks.ts";
 import * as ManagedEndpointAllocations from "./environments/ManagedEndpointAllocations.ts";
 import * as LiveActivities from "./agentActivity/LiveActivities.ts";
 import * as RelayDb from "./db.ts";
+import * as RelayDbResources from "./dbResources.ts";
 import {
   RelayApnsDeliveryDeadLetterQueue,
   RelayApnsDeliveryQueue,
@@ -55,7 +56,7 @@ import * as RelayConfiguration from "./Config.ts";
 import * as AgentActivityPublisher from "./agentActivity/AgentActivityPublisher.ts";
 import * as ApnsClient from "./agentActivity/ApnsClient.ts";
 import * as ApnsProviderTokens from "./agentActivity/ApnsProviderTokens.ts";
-import * as ApnsDeliveryQueue from "./agentActivity/ApnsDeliveryQueue.ts";
+import * as ApnsDeliveryQueueCloudflare from "./agentActivity/ApnsDeliveryQueueCloudflare.ts";
 import * as ApnsDeliveries from "./agentActivity/ApnsDeliveries.ts";
 import * as CloudflareApiPause from "./environments/CloudflareApiPause.ts";
 import * as EnvironmentConnector from "./environments/EnvironmentConnector.ts";
@@ -164,7 +165,9 @@ export const layer = Api.make(
 
     const cloudMintPrivateKey = yield* cloudMintKeyPair.privateKey;
     const cloudMintPublicKey = yield* cloudMintKeyPair.publicKey;
-    const hyperdrive = yield* Cloudflare.Hyperdrive.Connect(yield* RelayDb.RelayHyperdrive);
+    const hyperdrive = yield* Cloudflare.Hyperdrive.Connect(
+      yield* RelayDbResources.RelayHyperdrive,
+    );
     // Named prepared statements collide behind Hyperdrive's transaction-mode
     // pool: sql-pg < 4.0.0-rc.117 names them `effect1..N` per connection, and
     // inside a transaction a Bind can reach another request's statement
@@ -290,7 +293,10 @@ export const layer = Api.make(
       ),
       Layer.provideMerge(ApnsClient.layer.pipe(Layer.provideMerge(ApnsProviderTokens.layer))),
       Layer.provideMerge(
-        ApnsDeliveryQueue.layerCloudflareQueues(apnsDeliveryQueueSender, alchemyRuntimeContext),
+        ApnsDeliveryQueueCloudflare.layerCloudflareQueues(
+          apnsDeliveryQueueSender,
+          alchemyRuntimeContext,
+        ),
       ),
       Layer.provideMerge(Layer.mergeAll(AgentActivityRows.layer, Devices.layer, layerHookInbox)),
       Layer.provideMerge(EnvironmentCredentials.layer),

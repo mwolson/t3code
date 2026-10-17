@@ -115,6 +115,10 @@
       // React Native codegen discovers component specifications by filename.
       "entry": ["src/*NativeComponent.ts!"],
     },
+    "infra/personal-relay": {
+      "entry": ["src/main.ts!", "src/adminEntry.ts!", "scripts/*.ts"],
+      "ignoreDependencies": ["drizzle-orm"],
+    },
     "infra/relay": {
       "entry": ["alchemy.run.ts!", "src/persistence/schema.ts!"],
     },
