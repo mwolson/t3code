@@ -163,6 +163,16 @@ export class ServerSecretStore extends Context.Service<
   }
 >()("t3/auth/ServerSecretStore") {}
 
+// Some names carry text from outside the server; one with a separator would leave the directory.
+const resolveSecretPath = (
+  path: Path.Path,
+  directory: string,
+  name: string,
+): Effect.Effect<string, SecretStoreNameError> =>
+  /[/\\\0]/.test(name)
+    ? Effect.fail(new SecretStoreNameError({ resource: `secret ${JSON.stringify(name)}` }))
+    : Effect.succeed(path.join(directory, `${name}.bin`));
+
 /** @public */
 export const make = Effect.gen(function* () {
   const crypto = yield* SecureRandom.SecureRandom;
@@ -181,17 +191,12 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  // Some names carry text from outside the server; one with a separator would leave the directory.
-  const resolveSecretPath = (name: string): Effect.Effect<string, SecretStoreNameError> =>
-    /[/\\\0]/.test(name)
-      ? Effect.fail(new SecretStoreNameError({ resource: `secret ${JSON.stringify(name)}` }))
-      : Effect.succeed(path.join(serverConfig.secretsDir, `${name}.bin`));
   const emptySecretRepair = yield* Semaphore.make(1);
   const isMissingOrNonEmpty = (secret: Option.Option<Uint8Array>) =>
     Option.isNone(secret) || secret.value.byteLength > 0;
 
   const get: ServerSecretStore["Service"]["get"] = (name) =>
-    resolveSecretPath(name).pipe(
+    resolveSecretPath(path, serverConfig.secretsDir, name).pipe(
       Effect.flatMap((secretPath) =>
         fileSystem.readFile(secretPath).pipe(
           Effect.map((bytes) => Option.some(Uint8Array.from(bytes))),
@@ -211,7 +216,7 @@ export const make = Effect.gen(function* () {
     );
 
   const set: ServerSecretStore["Service"]["set"] = (name, value) =>
-    resolveSecretPath(name).pipe(
+    resolveSecretPath(path, serverConfig.secretsDir, name).pipe(
       Effect.flatMap((secretPath) => setAt(name, secretPath, value)),
       Effect.withSpan("ServerSecretStore.set"),
     );
@@ -230,6 +235,10 @@ export const make = Effect.gen(function* () {
         return Effect.gen(function* () {
           yield* fileSystem.writeFile(tempPath, value);
           yield* fileSystem.chmod(tempPath, 0o600);
+          yield* Effect.gen(function* () {
+            const file = yield* fileSystem.open(tempPath, { flag: "r+" });
+            yield* file.sync;
+          }).pipe(Effect.scoped);
           yield* fileSystem.rename(tempPath, secretPath);
           yield* fileSystem.chmod(secretPath, 0o600);
         }).pipe(
@@ -253,7 +262,9 @@ export const make = Effect.gen(function* () {
   // `link` publishes the fully written temp file under the final name, or fails with
   // AlreadyExists, so a concurrent reader never observes a partially written secret.
   const create: ServerSecretStore["Service"]["create"] = (name, value) =>
-    resolveSecretPath(name).pipe(Effect.flatMap((secretPath) => createAt(name, secretPath, value)));
+    resolveSecretPath(path, serverConfig.secretsDir, name).pipe(
+      Effect.flatMap((secretPath) => createAt(name, secretPath, value)),
+    );
 
   const createAt = (name: string, secretPath: string, value: Uint8Array) =>
     crypto.uuidV4().pipe(
@@ -345,7 +356,7 @@ export const make = Effect.gen(function* () {
     );
 
   const remove: ServerSecretStore["Service"]["remove"] = (name) =>
-    resolveSecretPath(name).pipe(
+    resolveSecretPath(path, serverConfig.secretsDir, name).pipe(
       Effect.flatMap((secretPath) =>
         fileSystem.remove(secretPath).pipe(
           Effect.catch((cause) =>
@@ -374,3 +385,41 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(ServerSecretStore, make);
+
+export const layerReadOnly = Layer.effect(
+  ServerSecretStore,
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const config = yield* ServerConfig.ServerConfig;
+    const denied = Effect.fail(
+      new SecretStorePersistError({
+        resource: "read-only enrollment secrets",
+        cause: "write disabled",
+      }),
+    );
+    const deny = (operation: string) =>
+      Effect.fn(`ServerSecretStore.readOnly.${operation}`)(function* () {
+        return yield* denied;
+      });
+    return ServerSecretStore.of({
+      get: Effect.fn("ServerSecretStore.readOnly.get")(function* (name) {
+        const secretPath = yield* resolveSecretPath(path, config.secretsDir, name);
+        return yield* fs.readFile(secretPath).pipe(
+          Effect.asSome,
+          Effect.catch((cause) =>
+            cause.reason._tag === "NotFound"
+              ? Effect.succeedNone
+              : Effect.fail(
+                  new SecretStoreReadError({ resource: "enrollment signing key", cause }),
+                ),
+          ),
+        );
+      }),
+      set: deny("set"),
+      create: deny("create"),
+      remove: deny("remove"),
+      getOrCreateRandom: deny("getOrCreateRandom"),
+    });
+  }),
+);

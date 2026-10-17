@@ -13,6 +13,7 @@ import { Command, Flag, GlobalFlag } from "effect/cli";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as BackgroundRelaySettings from "../relay/BackgroundRelaySettings.ts";
+import * as EnrollmentProof from "../relay/EnrollmentProof.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
 const encodeStatus = Schema.encodeEffect(
@@ -151,7 +152,42 @@ const clear = Command.make("clear", projectLocationFlags).pipe(
   ),
 );
 
+const encodeProof = Schema.encodeEffect(
+  Schema.fromJsonString(Schema.Struct({ proof: Schema.String })),
+);
+
+const enrollmentProof = Command.make("enrollment-proof", {
+  ...projectLocationFlags,
+  relayUrl: Flag.String("relay-url"),
+  label: Flag.String("label").pipe(Flag.optional),
+}).pipe(
+  Command.withDescription("Create a ten-minute proof for private background relay enrollment."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      yield* EnrollmentProof.validate({
+        relayUrl: flags.relayUrl,
+        label: Option.getOrUndefined(flags.label),
+      });
+      const config = yield* resolveCliAuthConfig(flags, yield* GlobalFlag.LogLevel, {
+        readOnly: true,
+      });
+      const result = yield* EnrollmentProof.make({
+        relayUrl: flags.relayUrl,
+        label: Option.getOrUndefined(flags.label),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(EnrollmentProof.layerIdentity, ServerSecretStore.layerReadOnly).pipe(
+            Layer.provide(ServerConfig.layer(config)),
+            Layer.provide(Layer.succeed(References.MinimumLogLevel, "Error")),
+          ),
+        ),
+      );
+      yield* Console.log(yield* encodeProof(result));
+    }).pipe(Effect.provideService(References.MinimumLogLevel, "Error")),
+  ),
+);
+
 export const backgroundRelayCommand = Command.make("background-relay").pipe(
   Command.withDescription("Configure a separate relay for background agent activity."),
-  Command.withSubcommands([set, status, clear]),
+  Command.withSubcommands([set, status, clear, enrollmentProof]),
 );

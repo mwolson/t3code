@@ -2,6 +2,15 @@
   "name": "t3code-relay",
   "private": true,
   "type": "module",
+  "exports": {
+    "./Config": "./src/Config.ts",
+    "./db": "./src/db.ts",
+    "./spanAttributes": "./src/spanAttributes.ts",
+    "./agentActivity/*": "./src/agentActivity/*.ts",
+    "./auth/*": "./src/auth/*.ts",
+    "./environments/*": "./src/environments/*.ts",
+    "./persistence/schema": "./src/persistence/schema.ts"
+  },
   "scripts": {
     "deploy": "alchemy deploy",
     "push:android:smoke": "node scripts/android-push-smoke.ts",
