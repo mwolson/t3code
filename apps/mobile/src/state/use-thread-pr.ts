@@ -4,7 +4,7 @@ import {
   createLinkedPullRequestSummaryAtomFamily,
   pullRequestDetailToVcsStatus,
 } from "@t3tools/client-runtime/state/pull-requests";
-import type { EnvironmentId, PullRequestSummary } from "@t3tools/contracts";
+import type { EnvironmentId, PullRequestSummary, VcsStatusResult } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { Atom } from "effect/reactivity";
 import { useMessages } from "gt-react-native";
@@ -18,6 +18,7 @@ import { useEnvironmentQuery } from "./query";
 import { ThreadPrDemandContext } from "./thread-pr-demand";
 import {
   knownPullRequestSummary,
+  presentThreadBranchStatusPr,
   rememberBounded,
   resolveThreadPrSource,
   presentThreadPr,
@@ -78,7 +79,10 @@ export function withKnownPullRequestSummary<
   return initialSummary === undefined ? params : { ...params, initialSummary };
 }
 
-export function useThreadPr(thread: EnvironmentThreadShell): ThreadPrPresentation | null {
+export function useThreadPr(
+  thread: EnvironmentThreadShell,
+  branchStatus?: VcsStatusResult | null,
+): ThreadPrPresentation | null {
   const demand = use(ThreadPrDemandContext);
   const resolve = useMessages();
   const supportsLinks = useAtomValue(
@@ -128,12 +132,13 @@ export function useThreadPr(thread: EnvironmentThreadShell): ThreadPrPresentatio
       ? null
       : presentThreadPr(
           pullRequestDetailToVcsStatus(summary),
-          {
-            kind: summary.provider,
-            name: summary.provider,
-            baseUrl: "",
-          },
+          { kind: summary.provider, name: summary.provider, baseUrl: "" },
           resolve,
+          { checksState: summary.checksState, mergeability: summary.mergeability },
         );
-  return linkedPresentation ?? summaryPresentation;
+  return (
+    linkedPresentation ??
+    summaryPresentation ??
+    presentThreadBranchStatusPr(thread, branchStatus, supportsLinks, resolve)
+  );
 }

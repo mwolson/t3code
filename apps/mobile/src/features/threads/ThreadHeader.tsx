@@ -1,5 +1,13 @@
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { useGT, useMessages } from "gt-react-native";
+import { Platform } from "react-native";
 
+import { useNavigateToPullRequest } from "../../native/useOpenPullRequest";
+import { useThreadPr } from "../../state/use-thread-pr";
+import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
+import { ThreadPrHeaderButton } from "./ThreadPrHeaderButton";
+import { budgetAndroidThreadHeader } from "./thread-header-android-budget";
+import { threadPrHeaderForm } from "./thread-pr-header-presentation";
 import { AppBar } from "../../components/ui/AppBar";
 import type { AppBarAction, AppBarMenu } from "../../components/ui/AppBar.types";
 import {
@@ -15,6 +23,8 @@ import {
 } from "./ThreadGitControls";
 
 export function ThreadHeader(props: {
+  readonly thread: EnvironmentThreadShell;
+  readonly paneWidth?: number | null;
   readonly title: string;
   readonly subtitle: string;
   readonly gitControls: ThreadGitControlsProps;
@@ -45,7 +55,44 @@ export function ThreadHeader(props: {
       ]
     : [];
   const menus = [gitMenu, terminalMenu].filter((menu): menu is AppBarMenu => menu !== null);
+  const paneWidth = props.paneWidth ?? panes.contentPaneWidth;
+  const form = threadPrHeaderForm(paneWidth);
+  const pr = useThreadPr(props.thread, props.gitControls.gitStatus);
+  const openPullRequest = useNavigateToPullRequest();
+  const pullRequest =
+    pr === null ? undefined : (
+      <ThreadPrHeaderButton
+        pr={pr}
+        links={props.thread.pullRequests}
+        form={form}
+        onOpen={(url) => void openPullRequest(url, props.thread)}
+      />
+    );
+  const { buttonSize } = useAndroidControlSizing();
+  const directActions = budgetAndroidThreadHeader({
+    headerWidth: paneWidth,
+    buttonSize,
+    actionCount: actions.length,
+    trailingControls: 1 + (pr === null ? 0 : form === "regular" ? 2 : 1),
+  });
+  const androidMenuItems: AppBarMenu["items"] = [
+    ...actions.slice(directActions).map((action) => ({
+      id: action.accessibilityLabel,
+      title: action.accessibilityLabel,
+      icon: typeof action.icon === "string" ? action.icon : action.icon.android,
+      selected: action.selected,
+      disabled: action.disabled,
+      onPress: action.onPress,
+    })),
+    ...menus.map((menu) => ({ id: menu.title, title: menu.title, items: menu.items })),
+  ];
+  // A PR with no workspace has no Git, Terminal or overflowed actions to put in the menu.
+  const androidMenus: AppBarMenu[] =
+    androidMenuItems.length === 0
+      ? []
+      : [{ title: gt("More actions"), icon: "ellipsis", items: androidMenuItems }];
 
+  const showAndroidPrMenu = Platform.OS === "android" && pr !== null;
   return (
     <AppBar
       title={props.title}
@@ -61,8 +108,9 @@ export function ThreadHeader(props: {
             }
           : undefined
       }
-      actions={actions}
-      menus={menus}
+      actions={showAndroidPrMenu ? actions.slice(0, directActions) : actions}
+      menus={showAndroidPrMenu ? androidMenus : menus}
+      beforeLastControl={pullRequest}
       hideBottomBorder
     />
   );
