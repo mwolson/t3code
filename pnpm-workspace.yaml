@@ -310,6 +310,8 @@ packageExtensions:
       vite-plus: "catalog:"
 
 patchedDependencies:
+  # Keep Clerk's token file owner-only; electron-store writes 0666 by default.
+  "@clerk/electron@0.1.1": patches/@clerk__electron@0.1.1.patch
   # Link bundled Oniguruma on Android and use React Native's fbjni version.
   react-native-shiki-engine@0.3.12: patches/react-native-shiki-engine@0.3.12.patch
   alchemy@2.0.0-beta.80: patches/alchemy@2.0.0-beta.80.patch
