@@ -3,6 +3,7 @@ import { ProjectId, type ThreadPullRequestLink, type VcsStatusResult } from "@t3
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  presentThreadBranchStatusPr,
   presentThreadLinkedPullRequests,
   presentThreadPr,
   resolveThreadPrSource,
@@ -219,5 +220,63 @@ describe("resolveThreadPrSource compatibility", () => {
         { threadPullRequests: true },
       ),
     ).toMatchObject({ linkedPresentation: { number: 3, state: null }, pullRequestRef: null });
+  });
+});
+
+describe("presentThreadBranchStatusPr", () => {
+  const branchStatus = {
+    refName: "codex/desktop-style-pr-indicator",
+    pr: { ...pullRequest, state: "open" },
+  } as VcsStatusResult;
+  const thread = { branch: "codex/desktop-style-pr-indicator", pullRequests: [] };
+  const snapshots = { threadPullRequests: true };
+
+  it("falls back to the live branch status when no reference is persisted", () => {
+    expect(
+      resolveThreadPrSource(
+        { ...thread, linkedPullRequest: null, branchPullRequest: null },
+        snapshots,
+      ),
+    ).toEqual({ linkedPresentation: null, pullRequestRef: null });
+    expect(presentThreadBranchStatusPr(thread, branchStatus, snapshots)).toMatchObject({
+      number: 3774,
+      state: "open",
+      url: pullRequest.url,
+      accessibilityLabel: "#3774 pull request open",
+    });
+  });
+
+  it("ignores a live status that describes a different branch", () => {
+    expect(
+      presentThreadBranchStatusPr({ ...thread, branch: "main" }, branchStatus, snapshots),
+    ).toBeNull();
+    expect(
+      presentThreadBranchStatusPr({ ...thread, branch: null }, branchStatus, snapshots),
+    ).toBeNull();
+  });
+
+  it("never replaces an unsynced explicit link", () => {
+    const pullRequests = [linkedPr(1, { snapshot: null })];
+    expect(
+      resolveThreadPrSource(
+        { pullRequests, linkedPullRequest: null, branchPullRequest: null },
+        snapshots,
+      ).linkedPresentation,
+    ).toMatchObject({
+      number: 1,
+      state: null,
+      accessibilityLabel: "#1 pull request status pending",
+    });
+    expect(
+      presentThreadBranchStatusPr({ ...thread, pullRequests }, branchStatus, snapshots),
+    ).toBeNull();
+  });
+
+  it("lets stale snapshots on a server without array support fall through to the branch", () => {
+    expect(
+      presentThreadBranchStatusPr({ ...thread, pullRequests: [linkedPr(3)] }, branchStatus, {
+        threadPullRequests: false,
+      }),
+    ).toMatchObject({ number: 3774 });
   });
 });

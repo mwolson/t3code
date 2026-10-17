@@ -1067,6 +1067,7 @@ function ThreadRouteContent(
     <>
       {activeInspectorRenderer ? <InspectorPaneRoleActivation /> : null}
       <ThreadHeader
+        thread={selectedThread}
         title={selectedThread.title}
         subtitle={headerSubtitle}
         headerColor={headerColor}

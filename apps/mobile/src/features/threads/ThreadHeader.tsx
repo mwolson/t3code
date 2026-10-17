@@ -1,14 +1,19 @@
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { useMemo } from "react";
 import { AppBar } from "../../components/ui/AppBar";
+import { useOpenPullRequest } from "../../native/useOpenPullRequest";
+import { useThreadPr } from "../../state/use-thread-pr";
 import { ScreenHeaderButton } from "../../components/ui/ScreenHeaderButton";
 import type { AppBarAction } from "../../components/ui/AppBar.types";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import type { ThreadInspectorMode } from "./thread-inspector-content-stack";
+import { ThreadPrHeaderButton } from "./ThreadPrHeaderButton";
 import { useThreadHeaderOptions } from "./useThreadHeaderOptions";
 import { useWorkspaceListNavigation } from "../workspace/useAndroidWorkspaceNavigation";
 
 export function ThreadHeader(
-  props: Parameters<typeof useThreadHeaderOptions>[0] & {
+  props: Omit<Parameters<typeof useThreadHeaderOptions>[0], "pullRequest"> & {
+    readonly thread: EnvironmentThreadShell;
     readonly hasThreadCwd: boolean;
     readonly hasWorkspaceRoot: boolean;
     readonly fileInspectorSupported: boolean;
@@ -21,7 +26,26 @@ export function ThreadHeader(
   const returnToList = useWorkspaceListNavigation("threads");
   const { layout, panes, toggleAuxiliaryPane } = useAdaptiveWorkspaceLayout();
   const { onOpenTerminal, onMergeBack } = props.gitControls;
-  const native = useThreadHeaderOptions(props);
+  const pr = useThreadPr(props.thread, props.gitControls.gitStatus);
+  const openPullRequest = useOpenPullRequest();
+  const links = props.thread.pullRequests;
+  const pullRequest = useMemo(
+    () =>
+      pr === null
+        ? null
+        : {
+            key: JSON.stringify([pr, links]),
+            element: (
+              <ThreadPrHeaderButton
+                pr={pr}
+                links={links}
+                onOpen={(url) => void openPullRequest(url)}
+              />
+            ),
+          },
+    [links, openPullRequest, pr],
+  );
+  const native = useThreadHeaderOptions({ ...props, pullRequest });
   const androidHeaderActions = useMemo<ReadonlyArray<AppBarAction>>(() => {
     const actions: AppBarAction[] = [];
     if (props.onReturnToThread) {
@@ -83,18 +107,21 @@ export function ThreadHeader(
         options={native.options}
         optionsVersion={native.optionsVersion}
         trailing={
-          props.fileInspectorSupported && props.hasThreadCwd ? (
-            <ScreenHeaderButton
-              accessibilityLabel={
-                props.inspectorMode !== null && panes.auxiliaryPaneVisible
-                  ? "Hide inspector"
-                  : "Show inspector"
-              }
-              icon="sidebar.right"
-              selected={props.inspectorMode !== null && panes.auxiliaryPaneVisible}
-              onPress={props.onToggleInspector}
-            />
-          ) : null
+          <>
+            {pullRequest?.element}
+            {props.fileInspectorSupported && props.hasThreadCwd ? (
+              <ScreenHeaderButton
+                accessibilityLabel={
+                  props.inspectorMode !== null && panes.auxiliaryPaneVisible
+                    ? "Hide inspector"
+                    : "Show inspector"
+                }
+                icon="sidebar.right"
+                selected={props.inspectorMode !== null && panes.auxiliaryPaneVisible}
+                onPress={props.onToggleInspector}
+              />
+            ) : null}
+          </>
         }
         onBack={layout.usesSplitView ? undefined : returnToList}
         actions={androidHeaderActions}

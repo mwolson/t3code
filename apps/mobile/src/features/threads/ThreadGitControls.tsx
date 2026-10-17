@@ -18,7 +18,7 @@ import {
 } from "@t3tools/client-runtime/state/vcs";
 import { useNavigation } from "@react-navigation/native";
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, type ReactElement } from "react";
 import { useEnvironmentScope } from "../../state/session";
 import {
   basename,
@@ -107,6 +107,7 @@ type ThreadGitControlsProps = ThreadGitMenuProps & {
   readonly terminalSessions: ReadonlyArray<TerminalMenuSession>;
   readonly showActionControls?: boolean;
   readonly showDirectFileControl?: boolean;
+  readonly pullRequestControl?: ReactElement | undefined;
   readonly onOpenTerminal: (terminalId?: string | null) => void;
   readonly onOpenNewTerminal: () => void;
   readonly onRunProjectScript: (script: ProjectScript) => Promise<void>;
@@ -533,6 +534,9 @@ export function ThreadGitControls(props: ThreadGitControlsProps) {
         />
       ) : null}
       {showActionControls ? createNativeHeaderMenu(threadGitMenuDefinition(props, model)) : null}
+      {props.pullRequestControl ? (
+        <Toolbar.Custom>{props.pullRequestControl}</Toolbar.Custom>
+      ) : null}
     </Toolbar>
   );
 }

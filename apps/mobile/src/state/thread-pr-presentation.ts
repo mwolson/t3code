@@ -1,6 +1,8 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type {
   ExecutionEnvironmentCapabilities,
+  PullRequestChecksState,
+  PullRequestMergeability,
   ThreadPullRequestLink,
   VcsStatusResult,
 } from "@t3tools/contracts";
@@ -24,6 +26,13 @@ export interface ThreadPrPresentation {
   readonly label: string;
   readonly accessibilityLabel: string;
   readonly textClassName: string;
+  readonly checksState: PullRequestChecksState | null;
+  readonly mergeability: PullRequestMergeability | null;
+}
+
+interface ThreadPrSignals {
+  readonly checksState?: PullRequestChecksState | null | undefined;
+  readonly mergeability?: PullRequestMergeability | undefined;
 }
 
 const PR_STATE_TEXT_CLASS: Record<ThreadPr["state"], string> = {
@@ -35,6 +44,7 @@ const PR_STATE_TEXT_CLASS: Record<ThreadPr["state"], string> = {
 export function presentThreadPr(
   pr: ThreadPr,
   provider: VcsStatusResult["sourceControlProvider"] | null | undefined,
+  signals: ThreadPrSignals = {},
 ): ThreadPrPresentation {
   const { changeRequest } = sourceControlClients.get(provider?.kind);
   const isDraft = pr.state === "open" && pr.isDraft === true;
@@ -49,6 +59,8 @@ export function presentThreadPr(
     label: String(pr.number),
     accessibilityLabel: `#${pr.number} ${changeRequest.singular} ${isDraft ? "draft" : pr.state}`,
     textClassName: isDraft ? "text-foreground-muted" : PR_STATE_TEXT_CLASS[pr.state],
+    checksState: pr.isDraft === true ? null : (signals.checksState ?? null),
+    mergeability: signals.mergeability ?? null,
   };
 }
 
@@ -96,6 +108,8 @@ export function presentThreadLinkedPullRequests(
         : isMultiple && state === "closed"
           ? "text-adaptive-rose-600-400"
           : PR_STATE_TEXT_CLASS[state],
+    checksState: isMultiple || snapshot?.isDraft === true ? null : (snapshot?.checksState ?? null),
+    mergeability: isMultiple ? null : (snapshot?.mergeability ?? null),
   };
 }
 
@@ -116,4 +130,21 @@ export function resolveThreadPrSource(
           ? thread.branchPullRequest
           : (thread.linkedPullRequest ?? thread.branchPullRequest)) ?? null);
   return { linkedPresentation, pullRequestRef };
+}
+
+// Desktop shows the live branch status PR only when no current linked PR blocks it,
+// and only while that status still describes the thread's branch.
+export function presentThreadBranchStatusPr(
+  thread: Pick<EnvironmentThreadShell, "branch" | "pullRequests">,
+  gitStatus: VcsStatusResult | null | undefined,
+  capabilities: Pick<ExecutionEnvironmentCapabilities, "threadPullRequests"> | undefined,
+): ThreadPrPresentation | null {
+  if (
+    capabilities?.threadPullRequests === true &&
+    resolveThreadCurrentPullRequestLink(thread.pullRequests) !== null
+  ) {
+    return null;
+  }
+  if (!gitStatus?.pr || thread.branch === null || gitStatus.refName !== thread.branch) return null;
+  return presentThreadPr(gitStatus.pr, gitStatus.sourceControlProvider);
 }
