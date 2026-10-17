@@ -9,7 +9,7 @@ import * as Layer from "effect/Layer";
 import * as Planetscale from "@alchemy.run/planetscale";
 
 import { PublishClientConfig, tokenDigest } from "./src/clientConfig.ts";
-import * as RelayDb from "./src/db.ts";
+import * as RelayDb from "./src/dbResources.ts";
 import { MobileSourceMapsUploadCredentials, RelayObservability } from "./src/observability.ts";
 import { isPreviewStage } from "./src/previewStages.ts";
 import { PreviewTunnelSweep, PreviewTunnelSweepProvider } from "./src/previewTunnelSweep.ts";

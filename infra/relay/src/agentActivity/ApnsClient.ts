@@ -208,7 +208,7 @@ export class ApnsClient extends Context.Service<
   }
 >()("t3code-relay/agentActivity/ApnsClient") {}
 
-const make = Effect.gen(function* () {
+export const make = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
   const providerTokens = yield* ApnsProviderTokens.ApnsProviderTokens;
 

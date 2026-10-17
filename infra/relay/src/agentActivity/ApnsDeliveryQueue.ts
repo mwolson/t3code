@@ -1,5 +1,3 @@
-import * as Alchemy from "alchemy";
-import * as Cloudflare from "@alchemy.run/cloudflare";
 import * as Crypto from "effect/Crypto";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -43,12 +41,21 @@ export class ApnsDeliveryQueueSendError extends Schema.TaggedError<ApnsDeliveryQ
 
 export type ApnsDeliveryQueueError = ApnsDeliveryQueueSendError;
 
+export class ApnsDeliveryQueueSenderError extends Schema.TaggedError<ApnsDeliveryQueueSenderError>()(
+  "ApnsDeliveryQueueSenderError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Failed to send an APNs delivery job.";
+  }
+}
+
 export class ApnsDeliveryQueueSender extends Context.Service<
   ApnsDeliveryQueueSender,
   {
     readonly send: (
       body: SignedApnsDeliveryJob,
-    ) => Effect.Effect<void, Cloudflare.Queues.SendError>;
+    ) => Effect.Effect<void, ApnsDeliveryQueueSenderError>;
   }
 >()("t3code-relay/agentActivity/ApnsDeliveryQueue/ApnsDeliveryQueueSender") {}
 
@@ -76,7 +83,7 @@ export class ApnsDeliveryQueue extends Context.Service<
   }
 >()("t3code-relay/agentActivity/ApnsDeliveryQueue") {}
 
-const make = Effect.gen(function* () {
+export const make = Effect.gen(function* () {
   const sender = yield* ApnsDeliveryQueueSender;
   const crypto = yield* Crypto.Crypto;
   const config = yield* RelayConfiguration.RelayConfiguration;
@@ -207,23 +214,3 @@ const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(ApnsDeliveryQueue, make);
-
-export const layerCloudflareQueues = (
-  sender: Cloudflare.Queues.WriteQueueClient,
-  alchemyRuntimeContext: Alchemy.BaseRuntimeContext,
-) =>
-  layer.pipe(
-    Layer.provide(
-      Layer.succeed(
-        ApnsDeliveryQueueSender,
-        ApnsDeliveryQueueSender.of({
-          send: Effect.fn("ApnsDeliveryQueueSender.send")(
-            function* (body) {
-              return yield* sender.send(body);
-            },
-            Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
-          ),
-        }),
-      ),
-    ),
-  );

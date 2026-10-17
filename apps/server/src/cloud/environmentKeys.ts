@@ -76,6 +76,21 @@ const persistEnvironmentKeyPair = Effect.fn("persistEnvironmentKeyPair")(functio
   );
 });
 
+export const getExistingEnvironmentKeyPairFromSecretStore = Effect.fn(function* (
+  secrets: ServerSecretStore.ServerSecretStore["Service"],
+) {
+  const existing = yield* readEnvironmentKeyPair(secrets);
+  if (Option.isSome(existing)) return existing;
+  const privateKey = yield* secrets.get(CLOUD_LINK_PRIVATE_KEY);
+  const publicKey = yield* secrets.get(CLOUD_LINK_PUBLIC_KEY);
+  if (Option.isNone(privateKey) || Option.isNone(publicKey))
+    return Option.none<EnvironmentKeyPair>();
+  return Option.some({
+    privateKey: bytesToString(privateKey.value),
+    publicKey: bytesToString(publicKey.value),
+  });
+});
+
 export const getOrCreateEnvironmentKeyPairFromSecretStore = Effect.fn(function* (
   secrets: ServerSecretStore.ServerSecretStore["Service"],
 ) {

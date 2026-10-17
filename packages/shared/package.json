@@ -503,6 +503,10 @@
       "types": "./src/PtyAdapter.ts",
       "import": "./src/PtyAdapter.ts"
     },
+    "./personalRelay": {
+      "types": "./src/personalRelay.ts",
+      "import": "./src/personalRelay.ts"
+    },
     "./markdownMath": {
       "types": "./src/markdownMath.ts",
       "import": "./src/markdownMath.ts"

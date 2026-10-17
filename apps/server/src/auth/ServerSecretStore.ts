@@ -201,6 +201,10 @@ export const make = Effect.gen(function* () {
         return Effect.gen(function* () {
           yield* fileSystem.writeFile(tempPath, value);
           yield* fileSystem.chmod(tempPath, 0o600);
+          yield* Effect.gen(function* () {
+            const file = yield* fileSystem.open(tempPath, { flag: "r+" });
+            yield* file.sync;
+          }).pipe(Effect.scoped);
           yield* fileSystem.rename(tempPath, secretPath);
           yield* fileSystem.chmod(secretPath, 0o600);
         }).pipe(
@@ -329,3 +333,40 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(ServerSecretStore, make);
+
+export const layerReadOnly = Layer.effect(
+  ServerSecretStore,
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const config = yield* ServerConfig.ServerConfig;
+    const denied = Effect.fail(
+      new SecretStorePersistError({
+        resource: "read-only enrollment secrets",
+        cause: "write disabled",
+      }),
+    );
+    const deny = (operation: string) =>
+      Effect.fn(`ServerSecretStore.readOnly.${operation}`)(function* () {
+        return yield* denied;
+      });
+    return ServerSecretStore.of({
+      get: Effect.fn("ServerSecretStore.readOnly.get")(function* (name) {
+        return yield* fs.readFile(path.join(config.secretsDir, `${name}.bin`)).pipe(
+          Effect.asSome,
+          Effect.catch((cause) =>
+            cause.reason._tag === "NotFound"
+              ? Effect.succeedNone
+              : Effect.fail(
+                  new SecretStoreReadError({ resource: "enrollment signing key", cause }),
+                ),
+          ),
+        );
+      }),
+      set: deny("set"),
+      create: deny("create"),
+      remove: deny("remove"),
+      getOrCreateRandom: deny("getOrCreateRandom"),
+    });
+  }),
+);
