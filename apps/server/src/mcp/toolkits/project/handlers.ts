@@ -131,7 +131,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           return yield* new OrchestratorMcpFailure({
             code: "invalid_request",
             message:
-              "Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.",
+              "Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and pages their models when given providerInstanceId.",
           });
         const result = yield* ThreadMessageIntake.launchThread({
           commandId,
