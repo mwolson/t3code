@@ -160,12 +160,14 @@ export function NativeStackScreenOptions(props: {
       ) as NativeStackNavigationOptions)
     : undefined;
 
-  useLayoutEffect(() => {
+  // Re-entering during a native push/pop produces unbalanced appearance transitions
+  // and a Home list that still paints but no longer receives taps.
+  const applyOptionsIfFocused = () => {
     if (!tabActive) {
       lastAppliedOptionsSignatureRef.current = undefined;
       return;
     }
-    if (!navigation || !stableOptions) {
+    if (!navigation || !stableOptions || !navigation.isFocused()) {
       return;
     }
     const signature = optionsSignature([stableOptions, props.optionsVersion]);
@@ -174,6 +176,21 @@ export function NativeStackScreenOptions(props: {
     }
     lastAppliedOptionsSignatureRef.current = signature;
     navigation.setOptions(stableOptions);
+  };
+
+  useLayoutEffect(() => {
+    applyOptionsIfFocused();
+  }, [navigation, props.optionsVersion, stableOptions, tabActive]);
+
+  useEffect(() => {
+    if (!navigation) {
+      return;
+    }
+    const unsubscribe = navigation.addListener("focus", () => {
+      lastAppliedOptionsSignatureRef.current = undefined;
+      applyOptionsIfFocused();
+    });
+    return unsubscribe;
   }, [navigation, props.optionsVersion, stableOptions, tabActive]);
 
   useEffect(() => {
