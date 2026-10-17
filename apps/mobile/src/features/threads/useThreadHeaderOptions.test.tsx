@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { VcsStatusResult } from "@t3tools/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -10,6 +11,7 @@ const harness = vi.hoisted(() => ({
   setOptionsCalls: 0,
   renderedRightItems: [] as Array<ReadonlyArray<Record<string, unknown>>>,
   navigatedRoutes: [] as string[],
+  pr: null as import("../../state/thread-pr-presentation").ThreadPrPresentation | null,
 }));
 
 vi.mock("@react-navigation/native", () => {
@@ -33,6 +35,8 @@ vi.mock("@react-navigation/native", () => {
   };
 });
 vi.mock("../../native/useOpenPullRequest", () => ({ useOpenPullRequest: () => () => {} }));
+vi.mock("../../state/use-thread-pr", () => ({ useThreadPr: () => harness.pr }));
+vi.mock("./ThreadPrHeaderButton", () => ({ ThreadPrHeaderButton: () => null }));
 
 vi.mock("../../state/session", () => ({ useEnvironmentScope: () => true }));
 vi.mock("../../components/ui/AppBar", async () => {
@@ -63,6 +67,7 @@ vi.mock("../settings/appearance/AppearancePreferencesProvider", () => ({
 import { ThreadHeader } from "./ThreadHeader";
 
 const projectScripts: never[] = [];
+const thread = { pullRequests: [] } as unknown as EnvironmentThreadShell;
 
 function status(
   files: ReadonlyArray<string>,
@@ -90,6 +95,7 @@ function status(
 function Header(props: { readonly gitStatus: VcsStatusResult | null; readonly title?: string }) {
   return (
     <ThreadHeader
+      thread={thread}
       title={props.title ?? "Thread"}
       subtitle=""
       headerColor="#000"
@@ -152,6 +158,7 @@ afterEach(() => {
   harness.setOptionsCalls = 0;
   harness.renderedRightItems = [];
   harness.navigatedRoutes = [];
+  harness.pr = null;
 });
 
 describe("ThreadHeader", () => {
@@ -174,6 +181,36 @@ describe("ThreadHeader", () => {
       render(<Header gitStatus={status([])} />);
     }
     expect(harness.setOptionsCalls).toBe(applied);
+  });
+
+  it("ends the right items with the pull request button and re-applies it on state changes", () => {
+    const pr = (state: "open" | "merged") =>
+      ({
+        number: 1006,
+        state,
+        kind: "pull-request",
+        others: 0,
+        isDraft: false,
+        updatedAt: null,
+        url: "https://github.com/t3tools/t3code/pull/1006",
+        label: "1006",
+        accessibilityLabel: `#1006 pull request ${state}`,
+        textClassName: "",
+        checksState: null,
+        mergeability: null,
+      }) as const;
+    render(<Header gitStatus={status([])} />);
+    expect(harness.renderedRightItems.at(-1)?.at(-1)?.type).not.toBe("custom");
+
+    harness.pr = pr("open");
+    render(<Header gitStatus={status([])} />);
+    const applied = harness.setOptionsCalls;
+    expect(harness.renderedRightItems.at(-1)?.at(-1)?.type).toBe("custom");
+    expect(harness.renderedRightItems.at(-1)?.[0]?.identifier).toBe("thread-right-git");
+
+    harness.pr = pr("merged");
+    render(<Header gitStatus={status([])} />);
+    expect(harness.setOptionsCalls).toBeGreaterThan(applied);
   });
 
   it("re-applies menu actions when the default ref changes behind the same label", async () => {
