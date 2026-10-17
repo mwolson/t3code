@@ -16,6 +16,11 @@ export function claudeBackgroundTaskWakeInput(): OrchestratorFixtureInput {
   return {
     steps: [
       { type: "message", text: CLAUDE_BACKGROUND_TASK_WAKE_PROMPT },
+      { type: "await_run_status", targetRunIndex: 1, status: "completed" },
+      { type: "release_replay_gate", label: "notification:background-wake:1" },
+      { type: "await_run_status", targetRunIndex: 2, status: "running" },
+      { type: "capture_shell_snapshot", key: "wake-before-output" },
+      { type: "release_replay_gate", label: "output:background-wake:1" },
       {
         type: "await_run_status",
         targetRunIndex: 2,

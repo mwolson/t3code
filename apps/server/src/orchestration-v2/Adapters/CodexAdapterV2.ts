@@ -4819,6 +4819,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                       providerThreadId: context.providerThread.id,
                       driver: CODEX_PROVIDER,
                       detail: codexBackgroundCommandDetail(payload.item),
+                      delivery: "message_text",
                       notification: {
                         ...backgroundWorkNotification([
                           {
@@ -6401,6 +6402,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         };
 
         const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
+          preservesSelectionOnSameSelectionFailure: true,
+          reappliesFullSelection: (selection) =>
+            Effect.succeed(
+              getModelSelectionStringOptionValue(selection, "reasoningEffort") !== undefined &&
+                getCodexServiceTierOptionValue(selection) !== undefined &&
+                (selection.options ?? []).every((option) =>
+                  ["reasoningEffort", "serviceTier", "fastMode"].includes(option.id),
+                ),
+            ),
           instanceId: adapterOptions.instanceId,
           driver: CODEX_PROVIDER,
           providerSessionId: input.providerSessionId,
