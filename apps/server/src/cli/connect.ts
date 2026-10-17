@@ -49,6 +49,8 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ExternalLauncher from "../process/externalLauncher.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
+import * as BackgroundRelaySettings from "../relay/BackgroundRelaySettings.ts";
+import { backgroundRelayCommand } from "./backgroundRelay.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import { resolveCliCommand } from "./invocation.ts";
 import * as CliService from "./service.ts";
@@ -146,6 +148,7 @@ interface CloudCliStatus {
   readonly revoked: boolean;
   readonly cloudUserId: string | null;
   readonly relayUrl: string | null;
+  readonly backgroundRelayUrl: string | null;
   readonly publishAgentActivity: boolean;
   readonly relayClient: RelayClient.RelayClientStatus;
   readonly linkMode: CliState.CliDesiredLinkMode;
@@ -674,6 +677,10 @@ const connectStatusCommand = Command.make("status", {
         // A publish-only link has no tunnel for other devices to reach.
         const reachability =
           desired && linkMode === "managed" ? yield* checkLiveReachability() : null;
+        const background = yield* Effect.flatMap(
+          BackgroundRelaySettings.BackgroundRelaySettings,
+          (settings) => settings.read,
+        ).pipe(Effect.provide(BackgroundRelaySettings.layerSaved));
         const status: CloudCliStatus = {
           desired,
           authenticated,
@@ -684,6 +691,7 @@ const connectStatusCommand = Command.make("status", {
           publishAgentActivity: isAgentActivityPublishingEnabledValue(
             Option.isSome(publishAgentActivity) ? bytesToString(publishAgentActivity.value) : null,
           ),
+          backgroundRelayUrl: background?.url ?? null,
           relayClient: executable,
           linkMode,
           reachability,
@@ -827,6 +835,7 @@ export const connectCommand = Command.make("connect", {
     ),
   ),
   Command.withSubcommands([
+    backgroundRelayCommand,
     connectLoginCommand,
     connectLinkCommand,
     connectPublishCommand,
