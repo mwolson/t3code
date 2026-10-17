@@ -9,7 +9,10 @@ const mocks = vi.hoisted(() => ({
     clear?: ReturnType<typeof vi.fn>;
     openLiveUpdateSettings?: ReturnType<typeof vi.fn>;
   } | null,
-  config: { scheme: ["t3code-preview"], extra: { iosPersonalTeamBuild: false } },
+  config: {
+    scheme: ["t3code-preview"],
+    extra: { iosPersonalTeamBuild: false, iosPushRelay: undefined as boolean | undefined },
+  },
   requireModule: vi.fn(),
 }));
 
@@ -34,6 +37,7 @@ beforeEach(() => {
   mocks.openSettings.mockReset().mockResolvedValue(undefined);
   mocks.native = { configure: vi.fn(), clear: vi.fn() };
   mocks.config.extra.iosPersonalTeamBuild = false;
+  mocks.config.extra.iosPushRelay = undefined;
   mocks.requireModule.mockReset().mockImplementation(() => mocks.native);
 });
 
@@ -68,6 +72,7 @@ describe("Android native notification capability", () => {
       await import("./androidNotifications");
     const { supportsAgentAwarenessPush } = await import("./capabilities");
     mocks.config.extra.iosPersonalTeamBuild = true;
+    mocks.config.extra.iosPushRelay = false;
     expect(supportsAgentAwarenessPush()).toBe(true);
     configureAndroidAgentNotifications("device", "user", false);
     expect(mocks.native?.configure).toHaveBeenCalledWith("device", "user", "t3code-preview", false);
@@ -88,12 +93,16 @@ describe("Android native notification capability", () => {
     },
   );
 
-  it("preserves the iOS personal-team restriction without loading Android code", async () => {
+  it("requires a relay opt-in for personal iOS builds without loading Android code", async () => {
     mocks.os = "ios";
     const { supportsAgentAwarenessPush } = await import("./capabilities");
     expect(supportsAgentAwarenessPush()).toBe(true);
     mocks.config.extra.iosPersonalTeamBuild = true;
     expect(supportsAgentAwarenessPush()).toBe(false);
+    mocks.config.extra.iosPushRelay = false;
+    expect(supportsAgentAwarenessPush()).toBe(false);
+    mocks.config.extra.iosPushRelay = true;
+    expect(supportsAgentAwarenessPush()).toBe(true);
     expect(mocks.requireModule).not.toHaveBeenCalled();
   });
 });

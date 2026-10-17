@@ -331,25 +331,28 @@ describe("makeRelayDeviceRegistrationRequest", () => {
     expect(resolveApsEnvironment(undefined)).toBe("production");
   });
 
-  it("disables push features in Personal Team relay registrations", () => {
-    Constants.expoConfig!.extra = { iosPersonalTeamBuild: true };
+  it.each([false, true])(
+    "sets personal relay registration preferences for opt-in %j",
+    (iosPushRelay) => {
+      Constants.expoConfig!.extra = { iosPersonalTeamBuild: true, iosPushRelay };
 
-    expect(
-      makeRelayDeviceRegistrationRequest({
-        deviceId: "device-1",
-        label: "Julius's iPhone",
-        iosMajorVersion: 18,
-        appVersion: "1.0.0",
-        pushToken: "apns-token",
-        pushToStartToken: "push-to-start-token",
-        notificationsEnabled: true,
-        preferences: {},
-      }).preferences,
-    ).toMatchObject({
-      liveActivitiesEnabled: false,
-      notificationsEnabled: false,
-    });
-  });
+      expect(
+        makeRelayDeviceRegistrationRequest({
+          deviceId: "device-1",
+          label: "Julius's iPhone",
+          iosMajorVersion: 18,
+          appVersion: "1.0.0",
+          pushToken: "apns-token",
+          pushToStartToken: "push-to-start-token",
+          notificationsEnabled: true,
+          preferences: {},
+        }).preferences,
+      ).toMatchObject({
+        liveActivitiesEnabled: iosPushRelay,
+        notificationsEnabled: iosPushRelay,
+      });
+    },
+  );
 
   it("marks notification delivery disabled when APNs permission is unavailable", () => {
     expect(
@@ -514,6 +517,23 @@ describe("makeRelayDeviceRegistrationRequest", () => {
 
     expect(end).toHaveBeenCalledWith("immediate");
     expect(appStateMock.listeners).toHaveLength(0);
+  });
+
+  it("ends existing Live Activities on sign-out when this build has no push relay", () => {
+    Constants.expoConfig!.extra = { iosPersonalTeamBuild: true, iosPushRelay: false };
+    const end = vi.fn(() => Promise.resolve());
+    widgetMocks.getInstances.mockReturnValue([
+      {
+        getPushToken: vi.fn(() => Promise.resolve("activity-token")),
+        addPushTokenListener: vi.fn(),
+        end,
+      },
+    ] as never);
+    setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-user-a"));
+
+    setAgentAwarenessRelayTokenProvider(null);
+
+    expect(end).toHaveBeenCalledWith("immediate");
   });
 
   it.effect("refreshes APNs registration for connected environments after settings changes", () => {
@@ -899,35 +919,40 @@ describe("makeRelayDeviceRegistrationRequest", () => {
     expect(widgetMocks.start).not.toHaveBeenCalled();
   });
 
-  it("seeds the Live Activity for publishing and pre-capability environments", async () => {
-    setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-user-a"));
-    environmentConfigsMock.configs.set("env-publishing", {
-      environment: { capabilities: { agentActivityPublishing: true } },
-    });
+  it.each([false, true])(
+    "seeds the Live Activity for publishing and pre-capability environments (personal: %j)",
+    async (personal) => {
+      if (personal)
+        Constants.expoConfig!.extra = { iosPersonalTeamBuild: true, iosPushRelay: true };
+      setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-user-a"));
+      environmentConfigsMock.configs.set("env-publishing", {
+        environment: { capabilities: { agentActivityPublishing: true } },
+      });
 
-    vi.mocked(loadPreferences).mockResolvedValueOnce({
-      liveActivitiesEnabled: true,
-    } as Preferences);
-    armAgentAwarenessLiveActivityForLocalWork({
-      environmentId: "env-publishing" as EnvironmentId,
-      threadTitle: "Fix the flaky test",
-      projectTitle: "t3code",
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(widgetMocks.start).toHaveBeenCalledTimes(1);
+      vi.mocked(loadPreferences).mockResolvedValueOnce({
+        liveActivitiesEnabled: true,
+      } as Preferences);
+      armAgentAwarenessLiveActivityForLocalWork({
+        environmentId: "env-publishing" as EnvironmentId,
+        threadTitle: "Fix the flaky test",
+        projectTitle: "t3code",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(widgetMocks.start).toHaveBeenCalledTimes(1);
 
-    widgetMocks.start.mockClear();
-    vi.mocked(loadPreferences).mockResolvedValueOnce({
-      liveActivitiesEnabled: true,
-    } as Preferences);
-    armAgentAwarenessLiveActivityForLocalWork({
-      environmentId: "env-pre-capability" as EnvironmentId,
-      threadTitle: "Fix the flaky test",
-      projectTitle: "t3code",
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(widgetMocks.start).toHaveBeenCalledTimes(1);
-  });
+      widgetMocks.start.mockClear();
+      vi.mocked(loadPreferences).mockResolvedValueOnce({
+        liveActivitiesEnabled: true,
+      } as Preferences);
+      armAgentAwarenessLiveActivityForLocalWork({
+        environmentId: "env-pre-capability" as EnvironmentId,
+        threadTitle: "Fix the flaky test",
+        projectTitle: "t3code",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(widgetMocks.start).toHaveBeenCalledTimes(1);
+    },
+  );
   it.effect.each(["ios", "android"] as const)(
     "does not enable %s notifications when a token rotates after permission is revoked",
     (os) => {
@@ -1124,4 +1149,117 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       }).pipe(Effect.provide(layerRelayTest));
     },
   );
+  it.effect(
+    "omits personal device tokens and disables relay preferences without the opt-in",
+    () => {
+      Constants.expoConfig!.extra = {
+        iosPersonalTeamBuild: true,
+        iosPushRelay: false,
+        relay: { url: "https://personal-disabled.example.test" },
+      };
+      const getPermissions = vi.mocked(Notifications.getPermissionsAsync);
+      const getToken = vi.mocked(Notifications.getDevicePushTokenAsync);
+      getPermissions.mockClear();
+      getToken.mockClear();
+      setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-personal"));
+      return Effect.gen(function* () {
+        const client = yield* ManagedRelay.ManagedRelayClient;
+        const register = vi
+          .spyOn(client, "registerDevice")
+          .mockReturnValue(Effect.succeed({ ok: true }));
+        yield* runBackgroundOperations();
+        expect(register).toHaveBeenCalledOnce();
+        const payload = register.mock.calls[0]![0].payload;
+        expect(payload).not.toHaveProperty("pushToken");
+        expect(payload).not.toHaveProperty("pushToStartToken");
+        expect(payload.preferences).toMatchObject({
+          notificationsEnabled: false,
+          liveActivitiesEnabled: false,
+        });
+        expect(getPermissions).not.toHaveBeenCalled();
+        expect(getToken).not.toHaveBeenCalled();
+      }).pipe(Effect.provide(layerRelayTest));
+    },
+  );
+
+  it.effect("skips activity token lookup and listeners without the personal relay opt-in", () => {
+    Constants.expoConfig!.extra = { iosPersonalTeamBuild: true, iosPushRelay: false };
+    const activity = { getPushToken: vi.fn(), addPushTokenListener: vi.fn() };
+    return Effect.gen(function* () {
+      expect(yield* registerLiveActivityPushToken({ activity: activity as never })).toBe(false);
+      expect(activity.getPushToken).not.toHaveBeenCalled();
+      expect(activity.addPushTokenListener).not.toHaveBeenCalled();
+    }).pipe(Effect.provide(layerRelayTest));
+  });
+
+  it.effect(
+    "skips foreground priming and existing activity registration without the personal relay opt-in",
+    () => {
+      Constants.expoConfig!.extra = {
+        iosPersonalTeamBuild: true,
+        iosPushRelay: false,
+        relay: { url: "https://personal-foreground.example.test" },
+      };
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-personal"));
+      return Effect.gen(function* () {
+        yield* refreshActiveLiveActivityRemoteRegistration();
+        expect(widgetMocks.getInstances).not.toHaveBeenCalled();
+        expect(widgetMocks.start).not.toHaveBeenCalled();
+        expect(fetchMock).not.toHaveBeenCalled();
+      }).pipe(Effect.provide(layerRelayTest));
+    },
+  );
+
+  it("does not arm a personal Live Activity without the relay opt-in", () => {
+    Constants.expoConfig!.extra = { iosPersonalTeamBuild: true, iosPushRelay: false };
+    setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-personal"));
+    const preferences = vi.mocked(loadPreferences);
+    preferences.mockClear();
+    armAgentAwarenessLiveActivityForLocalWork({
+      environmentId: "env-1" as EnvironmentId,
+      threadTitle: "Task",
+      projectTitle: "Project",
+    });
+    expect(preferences).not.toHaveBeenCalled();
+    expect(widgetMocks.start).not.toHaveBeenCalled();
+  });
+
+  it.effect("primes and registers a personal Live Activity when the relay is enabled", () => {
+    Constants.expoConfig!.extra = {
+      iosPersonalTeamBuild: true,
+      iosPushRelay: true,
+      relay: { url: "https://personal-enabled.example.test" },
+    };
+    const activity = {
+      getPushToken: vi.fn(() => Promise.resolve("personal-activity-token")),
+      addPushTokenListener: vi.fn(),
+    };
+    widgetMocks.start.mockReturnValue(activity);
+    setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-personal"));
+    return Effect.gen(function* () {
+      const client = yield* ManagedRelay.ManagedRelayClient;
+      const aggregate = {
+        title: "T3 Code",
+        subtitle: "Working",
+        activeCount: 1,
+        updatedAt: "2026-10-17T00:00:00.000Z",
+        activities: [],
+      };
+      const snapshot = vi
+        .spyOn(client, "getAgentActivitySnapshot")
+        .mockReturnValue(Effect.succeed({ aggregate }));
+      const register = vi
+        .spyOn(client, "registerLiveActivity")
+        .mockReturnValue(Effect.succeed({ ok: true }));
+      yield* refreshActiveLiveActivityRemoteRegistration();
+      expect(snapshot).toHaveBeenCalledOnce();
+      expect(widgetMocks.start).toHaveBeenCalledWith(aggregate, expect.any(Date));
+      expect(register).toHaveBeenCalledWith({
+        clerkToken: "clerk-personal",
+        payload: { deviceId: "device-1", activityPushToken: "personal-activity-token" },
+      });
+    }).pipe(Effect.provide(layerRelayTest));
+  });
 });

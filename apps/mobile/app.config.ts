@@ -14,6 +14,7 @@ const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
   (APP_VARIANT === "development" ? "appVersion" : "fingerprint");
 
+const personalTeamId = repoEnv.T3CODE_IOS_TEAM_ID?.trim();
 const personalTeamBundleIdentifier = repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
 const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
 
@@ -28,6 +29,14 @@ if (
   throw new Error(
     "T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID must be a reverse-DNS identifier such as com.example.t3code when T3CODE_IOS_PERSONAL_TEAM=1.",
   );
+}
+
+if (
+  isIosPersonalTeamBuild &&
+  personalTeamId !== undefined &&
+  !/^[A-Z0-9]{10}$/.test(personalTeamId)
+) {
+  throw new Error("T3CODE_IOS_TEAM_ID must be ten uppercase letters or digits.");
 }
 
 const DEVELOPMENT_ASSETS = {
@@ -195,10 +204,7 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
   "expo-sharing",
   {
     ios: {
-      // Personal Teams cannot sign App Groups or extension targets. Keep the
-      // reduced-capability local build usable while release builds expose the
-      // real system share target.
-      enabled: !isIosPersonalTeamBuild,
+      enabled: true,
       extensionBundleIdentifier: `${iosBundleIdentifier}.sharing`,
       appGroupId: `group.${iosBundleIdentifier}`,
       activationRule: {
@@ -250,13 +256,17 @@ const config: ExpoConfig = {
     // Pin code signing to the T3 Tools team so non-interactive `expo run:ios`
     // does not fall back to a personal team (which cannot sign app groups,
     // Sign in with Apple, or push notification entitlements).
-    appleTeamId: "ARK85ZXQ4Z",
-    associatedDomains: [
-      `applinks:${variant.relyingParty}`,
-      `webcredentials:${variant.relyingParty}`,
-    ],
+    appleTeamId: isIosPersonalTeamBuild ? personalTeamId : "ARK85ZXQ4Z",
+    ...(!isIosPersonalTeamBuild
+      ? {
+          associatedDomains: [
+            `applinks:${variant.relyingParty}`,
+            `webcredentials:${variant.relyingParty}`,
+          ],
+        }
+      : {}),
     entitlements: {
-      "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
+      "keychain-access-groups": [`$(AppIdentifierPrefix)${iosBundleIdentifier}`],
     },
     infoPlist: {
       UISupportedInterfaceOrientations: [
@@ -343,9 +353,8 @@ const config: ExpoConfig = {
     ],
     "expo-secure-store",
     "expo-sqlite",
-    ...(isIosPersonalTeamBuild
-      ? [sharingPlugin]
-      : ["./plugins/withShareExtensionDisplayName.cjs", sharingPlugin]),
+    "./plugins/withShareExtensionDisplayName.cjs",
+    sharingPlugin,
     [
       "expo-notifications",
       {
@@ -450,7 +459,8 @@ const config: ExpoConfig = {
     // expo-widgets' — its dangerous mod wipes ios/ExpoWidgetsTarget/ (which
     // would delete the asset catalog) and its xcodeproj mod creates the widget
     // target (which must exist before the compile phase can be attached).
-    ...(!isIosPersonalTeamBuild ? ["./plugins/withWidgetLogoAsset.cjs", widgetsPlugin] : []),
+    "./plugins/withWidgetLogoAsset.cjs",
+    widgetsPlugin,
     "./plugins/withAndroidCleartextTraffic.cjs",
     "./plugins/withAndroidGradleHeap.cjs",
     "./plugins/withAndroidInputBackground.cjs",
@@ -463,6 +473,9 @@ const config: ExpoConfig = {
   extra: {
     appVariant: APP_VARIANT,
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
+    ...(isIosPersonalTeamBuild
+      ? { iosPushRelay: repoEnv.T3CODE_IOS_PERSONAL_PUSH_RELAY === "1" }
+      : {}),
     relay: {
       url: repoEnv.T3CODE_RELAY_URL ?? null,
     },
