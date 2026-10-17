@@ -2050,6 +2050,7 @@ function claudePendingBackgroundTask(input: {
 }): OrchestrationV2PendingBackgroundTask {
   return {
     taskId: input.taskId,
+    ...(input.taskType === "local_bash" && !input.startedByMonitor ? { wakesAgent: true } : {}),
     kind: input.startedByMonitor
       ? "monitor"
       : ((input.taskType === null
