@@ -1,6 +1,7 @@
 import {
   ProjectId,
   type PullRequestSummary,
+  type VcsStatusResult,
   SourceControlProviderKind,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
@@ -8,6 +9,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   knownPullRequestSummary,
+  presentThreadBranchStatusPr,
   presentThreadLinkedPullRequests,
   rememberBounded,
   resolveThreadPrSource,
@@ -54,6 +56,15 @@ describe("presentThreadLinkedPullRequests", () => {
   });
 
   it("names a single link with its host's term", () => {
+    const link = linkedPr(7);
+    expect(
+      presentThreadLinkedPullRequests([
+        {
+          ...link,
+          snapshot: { ...link.snapshot!, checksState: "failing", mergeability: "conflicting" },
+        },
+      ]),
+    ).toMatchObject({ checksState: "failing", mergeability: "conflicting" });
     expect(presentThreadLinkedPullRequests([linkedPr(7)])?.accessibilityLabel).toBe(
       "#7 pull request open",
     );
@@ -173,5 +184,45 @@ describe("rememberBounded", () => {
       ["a", 3],
       ["c", 4],
     ]);
+  });
+});
+
+const pullRequest: NonNullable<VcsStatusResult["pr"]> = {
+  number: 3774,
+  title: "Desktop-style pull request indicator",
+  url: "https://github.com/t3tools/t3code/pull/3774",
+  baseRef: "main",
+  headRef: "codex/desktop-style-pr-indicator",
+  state: "merged",
+};
+
+describe("presentThreadBranchStatusPr", () => {
+  const branchStatus = {
+    refName: "codex/desktop-style-pr-indicator",
+    pr: { ...pullRequest, state: "open" },
+  } as VcsStatusResult;
+  const thread = { branch: "codex/desktop-style-pr-indicator", pullRequests: [] };
+
+  it("fills in the live branch pull request only when no current link blocks it", () => {
+    expect(
+      resolveThreadPrSource({ ...thread, linkedPullRequest: null, branchPullRequest: null }, true),
+    ).toEqual({ linkedPresentation: null, pullRequestRef: null });
+    expect(presentThreadBranchStatusPr(thread, branchStatus, true)).toMatchObject({
+      number: 3774,
+      state: "open",
+      url: pullRequest.url,
+      accessibilityLabel: "#3774 pull request open",
+    });
+
+    expect(
+      presentThreadBranchStatusPr({ ...thread, branch: "main" }, branchStatus, true),
+    ).toBeNull();
+    const unsynced = [linkedPr(1, { snapshot: null })];
+    expect(
+      presentThreadBranchStatusPr({ ...thread, pullRequests: unsynced }, branchStatus, true),
+    ).toBeNull();
+    expect(
+      presentThreadBranchStatusPr({ ...thread, pullRequests: [linkedPr(3)] }, branchStatus, false),
+    ).toMatchObject({ number: 3774 });
   });
 });

@@ -233,6 +233,7 @@ function AppBarView(props: AppBarProps & { readonly searchState?: SearchState })
           </>
         ) : undefined
       }
+      beforeLastControl={props.beforeLastControl}
     />
   );
   if (!search) {

@@ -2,7 +2,7 @@ import { Toolbar } from "./Toolbar";
 import { AppActivityIndicator } from "./AppActivityIndicator";
 import type { HeaderBarButtonMailSearchToolbarItem } from "react-native-screens";
 import { NavigationContext } from "@react-navigation/native";
-import { use, useId, useLayoutEffect } from "react";
+import { use, useId, useLayoutEffect, type ReactNode } from "react";
 import { View } from "react-native";
 import { createNativeHeaderMenu } from "./nativeHeaderMenu.ios";
 import { ScreenHeaderButton } from "./ScreenHeaderButton";
@@ -90,6 +90,35 @@ export function AppBar(props: AppBarProps) {
     !compactSearch &&
     NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED &&
     isDuoDevice(deviceType);
+  const rightControls: ReactNode[] = [
+    ...(props.actions?.map(({ loading, ...action }) =>
+      loading ? (
+        <Toolbar.Custom key={action.accessibilityLabel}>
+          <View
+            accessibilityLabel={action.accessibilityLabel}
+            className="size-9 items-center justify-center"
+          >
+            <AppActivityIndicator color={action.tintColor} />
+          </View>
+        </Toolbar.Custom>
+      ) : (
+        <ScreenHeaderButton
+          key={action.accessibilityLabel}
+          {...action}
+          icon={iosIcon(action.icon)}
+          separateBackground={action.separateBackground ?? true}
+        />
+      ),
+    ) ?? []),
+    ...visibleMenus.map(createNativeHeaderMenu),
+  ];
+  if (props.beforeLastControl) {
+    rightControls.splice(
+      Math.min(1, rightControls.length),
+      0,
+      <Toolbar.Custom key="before-last">{props.beforeLastControl}</Toolbar.Custom>,
+    );
+  }
   if (props.embedded || props.sheet) return null;
   return (
     <>
@@ -191,29 +220,11 @@ export function AppBar(props: AppBarProps) {
       {props.actions?.length ||
       visibleMenus.length ||
       props.trailing ||
+      props.beforeLastControl ||
       props.confirm ||
       closeInspector ? (
         <Toolbar placement="right">
-          {props.actions?.map(({ loading, ...action }) =>
-            loading ? (
-              <Toolbar.Custom key={action.accessibilityLabel}>
-                <View
-                  accessibilityLabel={action.accessibilityLabel}
-                  className="size-9 items-center justify-center"
-                >
-                  <AppActivityIndicator color={action.tintColor} />
-                </View>
-              </Toolbar.Custom>
-            ) : (
-              <ScreenHeaderButton
-                key={action.accessibilityLabel}
-                {...action}
-                icon={iosIcon(action.icon)}
-                separateBackground={action.separateBackground ?? true}
-              />
-            ),
-          )}
-          {visibleMenus.map(createNativeHeaderMenu)}
+          {rightControls}
           {props.trailing}
           {props.confirm?.loading ? (
             <Toolbar.Custom>
