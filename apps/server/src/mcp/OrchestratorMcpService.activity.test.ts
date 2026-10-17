@@ -13,6 +13,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "vite-plus/test";
 
@@ -137,6 +138,7 @@ it("readThread prefers activity-run status over a newer cancelled queued run", a
   const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
+        Path.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
           getThreadRecords: (threadId) =>
@@ -203,6 +205,7 @@ it("readThread prefers waiting activity status over a newer cancelled queued run
   const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
+        Path.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
           getThreadRecords: (threadId) =>
@@ -326,6 +329,7 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
   const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
+        Path.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
           getThreadRecords: (threadId) => {
@@ -425,6 +429,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
   const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
+        Path.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getThreadRecords: (threadId) => {
             if (threadId === parentThreadId) return Effect.succeed(parentProjection);

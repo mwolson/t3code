@@ -58,6 +58,11 @@ describe("orchestrator MCP tool guidance", () => {
     assert.include(timeoutText, "does not cancel the child");
   });
 
+  it("exposes known-project targeting only for ordinary thread creation", () => {
+    assert.include(CreateThreadsTool.description ?? "", "projectDirectory");
+    assert.include(DelegateTaskTool.description ?? "", "always inherit this thread's project");
+  });
+
   it("documents slim and paginated capability discovery", () => {
     const schema = Tool.getJsonSchema(OrchestratorCapabilitiesTool) as {
       readonly properties?: Readonly<Record<string, { readonly description?: unknown }>>;
