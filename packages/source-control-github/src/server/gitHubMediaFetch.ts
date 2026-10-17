@@ -3,6 +3,7 @@ import * as SourceControlHost from "@t3tools/source-control-core/server/SourceCo
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 import {
   FetchHttpClient,
   HttpClient,
@@ -10,11 +11,14 @@ import {
   type HttpClientResponse,
 } from "effect/http";
 
-import { GITHUB_CREDENTIALED_MEDIA_HOSTS } from "../shared/gitHubMedia.ts";
+import { GITHUB_CREDENTIALED_MEDIA_HOSTS, gitHubReleaseAsset } from "../shared/gitHubMedia.ts";
 
 import * as GitHubCredentials from "./GitHubCredentials.ts";
 import { resolveGitHubRepository } from "./gitHubRepositoryResolution.ts";
 import * as GitHubRest from "./GitHubRest.ts";
+
+/** A private release's bytes download only through the API, by asset id. */
+const API_HOST = "api.github.com";
 
 /**
  * Everything a redirect leads to — the presigned object stores GitHub hands assets off to —
@@ -23,7 +27,8 @@ import * as GitHubRest from "./GitHubRest.ts";
  */
 const isCredentialedHost = (url: string) => {
   try {
-    return GITHUB_CREDENTIALED_MEDIA_HOSTS.has(new URL(url).hostname.toLowerCase());
+    const hostname = new URL(url).hostname.toLowerCase();
+    return hostname === API_HOST || GITHUB_CREDENTIALED_MEDIA_HOSTS.has(hostname);
   } catch {
     return false;
   }
@@ -44,6 +49,19 @@ const SIGNED_ATTACHMENT_URL_PATTERN =
 /** GitHub signs these for five minutes; reuse one for less so a video seek never gets a stale one. */
 const SIGNED_URL_CACHE_TTL_MS = 4 * 60_000;
 const SIGNED_URL_CACHE_MAX_ENTRIES = 64;
+
+const decodeRelease = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    truncated: Schema.Literal(false),
+    body: Schema.fromJsonString(
+      Schema.Struct({
+        assets: Schema.Array(
+          Schema.Struct({ id: Schema.Int.check(Schema.isGreaterThan(0)), name: Schema.String }),
+        ),
+      }),
+    ),
+  }),
+);
 
 export const make = Effect.gen(function* () {
   const credentials = yield* GitHubCredentials.GitHubCredentials;
@@ -73,6 +91,9 @@ export const make = Effect.gen(function* () {
           HttpClientRequest.get(target).pipe(
             HttpClientRequest.setHeaders({
               ...headers,
+              ...(new URL(target).hostname === API_HOST
+                ? { "x-github-api-version": "2022-11-28", "user-agent": "t3code" }
+                : {}),
               // The bytes are streamed straight through, so never let an encoding layer in.
               "accept-encoding": "identity",
               ...(authorization === null ? {} : { authorization }),
@@ -164,8 +185,39 @@ export const make = Effect.gen(function* () {
       cachedEntry !== undefined && now - cachedEntry.at < SIGNED_URL_CACHE_TTL_MS
         ? cachedEntry.url
         : null;
-    let response = yield* fetchFollowingRedirects(cached ?? request.url, request.headers, bearer);
-    if (cached === null && response?.headers["content-type"]?.startsWith("text/html")) {
+    const release = gitHubReleaseAsset(new URL(request.url));
+    let response: HttpClientResponse.HttpClientResponse | null = null;
+    if (release !== null && bearer !== null) {
+      response = yield* Effect.gen(function* () {
+        const path = `repos/${encodeURIComponent(release.owner)}/${encodeURIComponent(release.repo)}/releases`;
+        const metadata = yield* api.rest({
+          host: "github.com",
+          operation: "getReleaseByTag",
+          path: `${path}/tags/${encodeURIComponent(release.tag)}`,
+        });
+        const decoded = yield* decodeRelease(metadata);
+        const match = decoded.body.assets.find((candidate) => candidate.name === release.name);
+        if (match === undefined) return null;
+        return yield* fetchFollowingRedirects(
+          `https://${API_HOST}/${path}/assets/${match.id}`,
+          { ...request.headers, accept: "application/octet-stream" },
+          bearer,
+        );
+      }).pipe(Effect.orElseSucceed(() => null));
+    }
+    // A public release loads without the token, which a release download never needs.
+    if (response === null || (release !== null && response.status >= 400)) {
+      response = yield* fetchFollowingRedirects(
+        cached ?? request.url,
+        request.headers,
+        release === null ? bearer : null,
+      );
+    }
+    if (
+      release === null &&
+      cached === null &&
+      response?.headers["content-type"]?.startsWith("text/html")
+    ) {
       const signed = yield* signedAttachmentUrl(request.url, request.cwd, now);
       if (signed !== null) {
         response = yield* fetchFollowingRedirects(signed, request.headers, bearer);
