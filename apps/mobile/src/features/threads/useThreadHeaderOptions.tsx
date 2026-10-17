@@ -1,5 +1,6 @@
 import { useWorkspaceSidebarHeaderItem } from "../layout/useWorkspaceSidebarHeaderItem";
 import { StackActions, useNavigation } from "@react-navigation/native";
+import type { ReactElement } from "react";
 import { threadHeaderAppearance } from "./thread-header-appearance";
 import { isDuoDevice } from "../../lib/device-type";
 import type { AppNativeStackNavigationOptions } from "../../native/StackHeader";
@@ -21,6 +22,10 @@ export function useThreadHeaderOptions(props: {
   readonly headerColor: string;
   readonly usesNativeHeaderGlass: boolean;
   readonly gitControls: Parameters<typeof ThreadGitControls>[0];
+  readonly pullRequest: {
+    readonly key: string;
+    readonly element: ReactElement;
+  } | null;
   readonly onReturnToThread?: () => void;
   readonly draft?: boolean;
 }) {
@@ -32,6 +37,18 @@ export function useThreadHeaderOptions(props: {
   const sidebarHeaderItem = useWorkspaceSidebarHeaderItem();
   const threadCenterHeaderItems = useThreadGitCenterHeaderItems(props.gitControls);
   const compactRightHeaderItems = useThreadGitRightHeaderItems(props.gitControls);
+  // `pullRequest.key` versions the element. Trailing items run right to left, so index 1 puts
+  // the button just left of the rightmost one, inside their glass group: spacers for its own
+  // capsule would split the group in three.
+  const pullRequestElement = props.pullRequest?.element;
+  const withPullRequest = (items: NativeHeaderItems): NativeHeaderItems =>
+    props.pullRequest === null
+      ? items
+      : [
+          ...items.slice(0, 1),
+          { type: "custom", element: props.pullRequest.element },
+          ...items.slice(1),
+        ];
   const splitLeftHeaderItems: NativeHeaderItems = [
     ...(!usesDuoHeader
       ? [
@@ -89,7 +106,9 @@ export function useThreadHeaderOptions(props: {
         : () => compactHomeHeaderItems,
     // The workspace navigator adds compose to the Duo detail column's bar.
     unstable_headerRightItems: () =>
-      usesDuoHeader || layout.usesSplitView ? threadCenterHeaderItems : compactRightHeaderItems,
+      withPullRequest(
+        usesDuoHeader || layout.usesSplitView ? threadCenterHeaderItems : compactRightHeaderItems,
+      ),
     unstable_headerToolbarItems: () => [],
     unstable_headerSubtitle: props.usesNativeHeaderGlass ? props.subtitle : undefined,
     contentStyle: undefined,
@@ -108,11 +127,16 @@ export function useThreadHeaderOptions(props: {
       gitStatus?.isDefaultRef,
       gitStatus?.refName,
       gitStatus?.pr?.url,
+      props.pullRequest?.key,
     ],
     sidebar: false,
     fallback:
       !layout.usesSplitView && !props.usesNativeHeaderGlass ? (
-        <ThreadGitControls {...props.gitControls} showActionControls />
+        <ThreadGitControls
+          {...props.gitControls}
+          pullRequestControl={pullRequestElement}
+          showActionControls
+        />
       ) : null,
   };
 }

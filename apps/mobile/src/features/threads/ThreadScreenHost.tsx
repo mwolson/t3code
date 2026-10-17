@@ -32,6 +32,28 @@ function createThreadScreenStore() {
 }
 const ThreadScreenContext = createContext<ReturnType<typeof createThreadScreenStore> | null>(null);
 
+function createPaneWidthStore() {
+  let width: number | null = null;
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => width,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    set: (next: number) => {
+      if (next === width) return;
+      width = next;
+      for (const listener of listeners) listener();
+    },
+  };
+}
+const ThreadScreenPaneWidthContext = createContext<ReturnType<typeof createPaneWidthStore> | null>(
+  null,
+);
+
 function ThreadScreenOutlet() {
   const store = useContext(ThreadScreenContext)!;
   const content = useSyncExternalStore(store.subscribe, store.getSnapshot);
@@ -53,12 +75,18 @@ function ThreadScreenOutlet() {
 // the keyboard host, or the editor. Publish before paint to avoid an intermediate frame.
 export function ThreadScreenHost({ children }: { readonly children: ReactNode }) {
   const [store] = useState(createThreadScreenStore);
+  const [paneWidth] = useState(createPaneWidthStore);
   return (
     <ThreadScreenContext.Provider value={store}>
-      {children}
-      <View className="flex-1 bg-screen android:bg-header">
-        <ThreadScreenOutlet />
-      </View>
+      <ThreadScreenPaneWidthContext.Provider value={paneWidth}>
+        {children}
+        <View
+          className="flex-1 bg-screen android:bg-header"
+          onLayout={(event) => paneWidth.set(event.nativeEvent.layout.width)}
+        >
+          <ThreadScreenOutlet />
+        </View>
+      </ThreadScreenPaneWidthContext.Provider>
     </ThreadScreenContext.Provider>
   );
 }
@@ -85,4 +113,10 @@ export function ThreadScreenFallback({
     store.publish({ fallback: children, header });
   });
   return null;
+}
+
+/** Selects from the thread pane's measured width (null before the first layout). */
+export function useThreadScreenPaneWidth<T>(select: (width: number | null) => T): T {
+  const store = useContext(ThreadScreenPaneWidthContext)!;
+  return useSyncExternalStore(store.subscribe, () => select(store.getSnapshot()));
 }
