@@ -14,6 +14,7 @@ import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Console from "effect/Console";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import type * as Digest from "effect/crypto/Digest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -49,11 +50,13 @@ import * as RelayTracing from "../cloud/relayTracing.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ExternalLauncher from "../process/externalLauncher.ts";
+import * as BackgroundRelaySettings from "../relay/BackgroundRelaySettings.ts";
 import {
   isProcessAlive,
   readLiveServerRuntimeState,
   readPersistedServerRuntimeState,
 } from "../serverRuntimeState.ts";
+import { backgroundRelayCommand } from "./backgroundRelay.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import * as RunningServer from "./runningServer.ts";
 import { resolveHostCliHint } from "./invocation.ts";
@@ -152,6 +155,7 @@ interface CloudCliStatus {
   readonly revoked: boolean;
   readonly cloudUserId: string | null;
   readonly relayUrl: string | null;
+  readonly backgroundRelayUrl: string | null;
   readonly publishAgentActivity: boolean;
   readonly relayClient: RelayClient.RelayClientStatus;
   readonly linkMode: CliState.CliDesiredLinkMode;
@@ -524,6 +528,7 @@ export const runCloudCommand = Effect.fn("cloud.cli.run_cloud_command")(function
     | EnvironmentAuth.EnvironmentAuth
     | BootService.BootService
     | SecureRandom.SecureRandom
+    | Digest.Digest
     | FileSystem.FileSystem
     | Path.Path
     | HttpClient.HttpClient
@@ -708,6 +713,14 @@ const connectStatusCommand = Command.make("status", {
         // A publish-only link has no tunnel for other devices to reach.
         const reachability =
           desired && linkMode === "managed" ? yield* checkLiveReachability() : null;
+        const background = yield* Effect.flatMap(
+          BackgroundRelaySettings.BackgroundRelaySettings,
+          (settings) => settings.read,
+        ).pipe(
+          Effect.provide(BackgroundRelaySettings.layerSaved),
+          Effect.orElseSucceed(() => undefined),
+          Effect.provideService(References.MinimumLogLevel, "Error"),
+        );
         const status: CloudCliStatus = {
           desired,
           authenticated,
@@ -718,6 +731,7 @@ const connectStatusCommand = Command.make("status", {
           publishAgentActivity: isAgentActivityPublishingEnabledValue(
             Option.isSome(publishAgentActivity) ? bytesToString(publishAgentActivity.value) : null,
           ),
+          backgroundRelayUrl: background?.url ?? null,
           relayClient: executable,
           linkMode,
           reachability,
@@ -818,6 +832,7 @@ const connectLogoutCommand = Command.make("logout", {
 
 // `t3 connect` itself is `t3 up --connect`, in up.ts.
 export const connectSubcommands = [
+  backgroundRelayCommand,
   connectLoginCommand,
   connectLinkCommand,
   connectPublishCommand,
