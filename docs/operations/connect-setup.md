@@ -41,8 +41,23 @@ snapshot requests to a different relay while keeping environment discovery, link
 on `T3CODE_RELAY_URL`. Set `T3CODE_BACKGROUND_RELAY_URL` to the background relay's HTTPS origin
 before building the mobile app. Omit it to use the normal T3 Connect relay for everything.
 
-On each publishing server, supply these runtime environment variables through its service's secret
-configuration, then restart the server:
+On each publishing server, save its background relay credential without putting it in shell arguments:
+
+```sh
+t3 connect background-relay set --url https://background.example.com --credential-stdin < environment-credential.txt
+```
+
+Add `--issuer <origin>` if the relay uses a distinct issuer. The CLI accepts a `t3env_` environment
+credential on stdin and never prints it. Inspect the saved configuration with
+`t3 connect background-relay status --json`, or remove the saved override with
+`t3 connect background-relay clear`. `t3 connect status --json` also reports the saved `backgroundRelayUrl`.
+An unlinked server observes a saved change within one minute; configured servers
+check every five seconds.
+The server republishes current activity until the relay acknowledges it. The existing activity
+sharing switch still applies.
+
+Runtime environment overrides take precedence over the saved configuration, are not visible to
+the CLI, and remain fixed until the server restarts:
 
 - `T3CODE_BACKGROUND_RELAY_URL`: the same background relay origin.
 - `T3CODE_BACKGROUND_RELAY_ENVIRONMENT_CREDENTIAL`: that relay's environment credential.
@@ -51,8 +66,9 @@ configuration, then restart the server:
 
 The environment's existing agent activity publishing switch still controls sharing. A configured
 background relay replaces the activity destination; it does not publish a second copy to T3 Connect.
-Remove the runtime overrides and rebuild the mobile app without the build override to restore the
-single-relay configuration. Existing T3 Connect credentials are not replaced.
+Clear the saved configuration, remove any runtime overrides, and rebuild the mobile app without
+the build override to restore the single-relay configuration. Invalid saved configuration disables
+activity publishing until it is replaced or cleared. Existing T3 Connect credentials are not replaced.
 
 This only selects an already-provisioned relay. It must accept the mobile app's existing Clerk
 identity, link the environment's signing key to that account, and have push credentials for the app's
