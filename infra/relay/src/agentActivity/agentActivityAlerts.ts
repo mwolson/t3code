@@ -45,7 +45,7 @@ function isAttentionPhase(phase: string): boolean {
   return phase === "waiting_for_approval" || phase === "waiting_for_input";
 }
 
-function alertAllowedForPhase(
+export function alertAllowedForPhase(
   preferences: RelayAgentAwarenessPreferences | null,
   phase: string,
 ): boolean {

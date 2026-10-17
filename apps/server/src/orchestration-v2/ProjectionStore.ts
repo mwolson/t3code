@@ -1016,6 +1016,9 @@ export type AgentAwarenessThread = ProjectThreadAwarenessV2Input["thread"] &
     | "projectId"
     | "creationSource"
     | "latestRunCompletedAt"
+    | "latestRunRequestedAt"
+    | "latestRunStartedAt"
+    | "createdAt"
     | "archivedAt"
     | "activeRunId"
     | "latestRunId"
@@ -7235,6 +7238,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ...(state.thread.delegatedFrom === undefined
                 ? {}
                 : { delegatedFrom: state.thread.delegatedFrom }),
+              createdAt: state.thread.createdAt,
+              latestRunRequestedAt: state.latestRunRequestedAt,
+              latestRunStartedAt: state.latestRunStartedAt,
               archivedAt: state.thread.archivedAt,
               activeRunId: state.activeRunId,
               latestRunId: state.latestRunId,
