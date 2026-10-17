@@ -9,6 +9,13 @@ export function latestRootProviderFailure(
   run: OrchestrationV2Run | null,
   turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
 ): OrchestrationV2ProviderFailure | null {
+  return latestRootProviderFailureItem(run, turnItems)?.failure ?? null;
+}
+
+export function latestRootProviderFailureItem(
+  run: OrchestrationV2Run | null,
+  turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
+): Extract<OrchestrationV2TurnItem, { type: "error" }> | null {
   if (run?.status !== "failed") return null;
   let latest: Extract<OrchestrationV2TurnItem, { type: "error" }> | null = null;
   for (const item of turnItems) {
@@ -28,12 +35,20 @@ export function latestRootProviderFailure(
       latest = item;
     }
   }
-  return latest?.failure ?? null;
+  return latest;
+}
+
+export function providerFailureOccurredAt(
+  item: Extract<OrchestrationV2TurnItem, { type: "error" }> | null,
+): string | null {
+  const at = item?.completedAt ?? item?.startedAt;
+  return at == null ? null : DateTime.formatIso(at);
 }
 
 export function threadErrorSummary(
   failure: OrchestrationV2ProviderFailure | null,
   sessionError: string | null,
+  occurrence?: { readonly sessionErrorAt?: string | null; readonly failureAt?: string | null },
 ) {
   const currentFailure =
     sessionError !== null && sessionError !== failure?.message ? null : failure;
@@ -41,6 +56,13 @@ export function threadErrorSummary(
     usageLimitResetAt:
       currentFailure?.class === "usage_limit" ? (currentFailure.resetAt ?? null) : null,
     lastError: sessionError ?? failure?.message ?? null,
+    // Identity follows the source that supplied the text, not an unrelated refresh.
+    lastErrorAt:
+      sessionError !== null
+        ? (occurrence?.sessionErrorAt ?? null)
+        : failure !== null
+          ? (occurrence?.failureAt ?? null)
+          : null,
     lastErrorClass:
       sessionError !== null && sessionError !== failure?.message ? null : (failure?.class ?? null),
   };
