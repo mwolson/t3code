@@ -132,14 +132,20 @@ export function useNewThreadHandler() {
       );
       const projectDefaultModelSelection = projectSettings.settings.defaultModelSelection;
       const defaultRuntimeMode = projectSettings.settings.defaultRuntimeMode;
-      const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
-        resolveNewThreadModelSelectionOverride({
+      const resolveModelSelectionOverride = (destinationDraftId: DraftId) => {
+        const { stickyActiveProvider, stickyModelSelectionByProvider } =
+          useComposerDraftStore.getState();
+        return resolveNewThreadModelSelectionOverride({
           projectDefaultSelection: projectDefaultModelSelection ?? null,
+          stickySelection: stickyActiveProvider
+            ? (stickyModelSelectionByProvider[stickyActiveProvider] ?? null)
+            : null,
           carrySelection: carryModelSelection,
           carrySourceDraftId:
             currentRouteTarget?.kind === "draft" ? currentRouteTarget.draftId : null,
           destinationDraftId,
         });
+      };
       const resolveDefaultEnvMode = async (): Promise<DraftThreadEnvMode> => {
         const consultProjectFile =
           project !== undefined && projectSettings.settings.defaultThreadEnvMode === null;
