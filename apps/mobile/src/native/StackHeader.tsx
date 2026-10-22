@@ -160,13 +160,24 @@ function stabilizeOptionFunctions(
   return value;
 }
 
+// Stabilize item callbacks before a header factory captures them. Native headers
+// retain those items even when an equivalent options signature skips setOptions.
+export function useStableOptionFunctions<T>(value: T): T {
+  const latestFunctions = useRef(new Map<string, (...args: unknown[]) => unknown>());
+  const wrappers = useRef(new Map<string, (...args: unknown[]) => unknown>());
+  return stabilizeOptionFunctions(value, "value", latestFunctions.current, wrappers.current) as T;
+}
+
 export function NativeStackScreenOptions(props: {
   readonly options?: AppNativeStackNavigationOptions;
   /**
    * Causes dynamic native header factories to be reapplied when their closed-over
    * menu content changes. Factory functions are intentionally stabilized, so
    * their source alone cannot capture a menu that was initially empty while
-   * asynchronous data was loading.
+   * asynchronous data was loading. The native header keeps the item callbacks
+   * from the factory's last run, so a factory passed here directly must also
+   * change this value when its callbacks close over changing state.
+   * `NativeHeaderToolbar` items already stay current.
    */
   readonly optionsVersion?: unknown;
   readonly listeners?: Record<string, (event: never) => void>;

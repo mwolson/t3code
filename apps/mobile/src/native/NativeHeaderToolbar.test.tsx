@@ -1,5 +1,5 @@
 import type { NativeStackHeaderItem } from "@react-navigation/native-stack";
-import { act, createContext, type ReactElement } from "react";
+import { act, createContext, useState, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 
@@ -148,3 +148,56 @@ it("applies a custom header element rendered inside a navigation container", () 
   renderConnecting("Reconnecting");
   expect(renderedCustomLabel()).toBe("Reconnecting");
 });
+
+function AddressScreen(props: { readonly menu: boolean }) {
+  const [address, setAddress] = useState("");
+  const submit = () => harness.openedDocuments.push(address);
+  return (
+    <>
+      <input aria-label="Address" onInput={(event) => setAddress(event.currentTarget.value)} />
+      <NativeHeaderToolbar placement="right">
+        {props.menu ? (
+          <NativeHeaderToolbar.Menu title="Environment">
+            <NativeHeaderToolbar.MenuAction disabled={!address} onPress={submit}>
+              Add environment
+            </NativeHeaderToolbar.MenuAction>
+          </NativeHeaderToolbar.Menu>
+        ) : (
+          <NativeHeaderToolbar.Button
+            label="Add environment"
+            disabled={!address}
+            onPress={submit}
+          />
+        )}
+      </NativeHeaderToolbar>
+    </>
+  );
+}
+
+it.each([false, true])(
+  "submits the latest typed address from a retained header action (menu: %s)",
+  (menu) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    root = createRoot(container);
+    act(() => root!.render(<AddressScreen key={String(menu)} menu={menu} />));
+    const input = container.querySelector("input")!;
+    act(() => {
+      input.value = "h";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const applied = harness.setOptionsCalls;
+    act(() => {
+      input.value = "hi";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(harness.setOptionsCalls).toBe(applied);
+    const item = harness.renderedItems[0];
+    if (item?.type === "button") {
+      act(() => item.onPress?.());
+    } else {
+      act(() => openRenderedDocument());
+    }
+    expect(harness.openedDocuments.at(-1)).toBe("hi");
+  },
+);
