@@ -699,7 +699,10 @@ internal class SelectionAwareEditText(context: Context) : EditText(context) {
 
   private fun pasteContextOrImages(): Boolean {
     val payload = T3ComposerClipboard.read(context)
-    if (payload["html"]?.contains("data-t3-context-fragment=") == true) {
+    if (
+      !payload["fragment"].isNullOrEmpty() ||
+      payload["html"]?.contains("data-t3-context-fragment=") == true
+    ) {
       pasteContextListener?.invoke(payload)
       return true
     }
