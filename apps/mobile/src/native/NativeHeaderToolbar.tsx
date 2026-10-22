@@ -17,7 +17,7 @@ import {
 import type { ColorValue } from "react-native";
 import type { HeaderBarButtonSearchBarPlacementItem } from "react-native-screens";
 import { NativeWorkspaceTabActivityContext } from "./v5-workspace-context";
-import { NativeStackScreenOptions } from "./StackHeader";
+import { NativeStackScreenOptions, useStableOptionFunctions } from "./StackHeader";
 
 function useNativeStackNavigation(): NativeStackNavigationProp<ParamListBase> | null {
   return useNavigation<NativeStackNavigationProp<ParamListBase>>();
@@ -234,7 +234,9 @@ function NativeHeaderToolbarRoot(props: {
   const route = useRoute();
   const tabActivity = use(NativeWorkspaceTabActivityContext);
   const isTabActive = tabActivity?.isActive;
-  const items = useMemo(() => collectToolbarItems(props.children), [props.children]);
+  const items = useStableOptionFunctions(
+    useMemo(() => collectToolbarItems(props.children), [props.children]),
+  );
   // UIKit's search placement item belongs to the toolbar, never a header group.
   const headerItems = useMemo(
     () => items.filter((item): item is NativeStackHeaderItem => item.type !== "searchBarPlacement"),
