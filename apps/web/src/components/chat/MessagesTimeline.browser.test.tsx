@@ -386,3 +386,16 @@ describe("compact reasoning math", () => {
     ]);
   });
 });
+
+describe("MessagesTimeline sole fenced copy", () => {
+  it.each(["user", "assistant"] as const)(
+    "copies %s messages without the outer fence",
+    async (role) => {
+      setup();
+      await using screen = await renderTimeline([message("```bash\necho hello\n```", { role })]);
+      using clipboard = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+      await click(screen.button("Copy message"));
+      expect(clipboard).toHaveBeenCalledWith("echo hello");
+    },
+  );
+});
