@@ -317,6 +317,189 @@ const seedParentWithTerminalTask = (input: {
   });
 
 it.layer(layerTest)("delegated completion delivery repairs", (it) => {
+  const queueCommandCompletion = (input: {
+    readonly threadId: ThreadId;
+    readonly label: string;
+    readonly senderThreadId?: ThreadId;
+    readonly selection?: ModelSelection;
+  }) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      // Codex offers command completions as message_text wakes, which the
+      // continuation worker dispatches as server-created queued notifications.
+      return yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(`command:coalesce:${input.threadId}:${input.label}`),
+        threadId: input.threadId,
+        messageId: MessageId.make(`message:coalesce:${input.threadId}:${input.label}`),
+        text: `Background command completed: ${input.label}\nOutput tail: ${input.label}_OUTPUT`,
+        notification: {
+          source: { kind: "command" },
+          outcome: "completed",
+          summary: "Background command finished",
+          detail: input.label,
+        },
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+        modelSelection: input.selection ?? modelSelection,
+        ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+      });
+    });
+  const completeParentAndAwaitStart = (input: {
+    readonly threadId: ThreadId;
+    readonly parentRunId: RunId;
+    readonly startingRunId: RunId;
+    readonly now: DateTime.Utc;
+  }) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const projection = yield* orchestrator.getThreadProjection(input.threadId);
+      const parent = projection.runs.find((run) => run.id === input.parentRunId)!;
+      const afterSequence = yield* sink.latestSequence();
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make(`${input.threadId}:parent-complete`),
+            type: "run.updated",
+            threadId: input.threadId,
+            runId: parent.id,
+            occurredAt: input.now,
+            payload: { ...parent, status: "completed", completedAt: input.now },
+          },
+        ],
+      });
+      yield* sink.stream({ afterSequence, eventType: "run.updated" }).pipe(
+        Stream.filter(
+          ({ event }) =>
+            event.type === "run.updated" &&
+            event.payload.id === input.startingRunId &&
+            event.payload.status === "starting",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+      );
+    });
+  const seedActiveCodexParent = (label: string, now: DateTime.Utc) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make(`thread:codex-coalescing:${label}`);
+      const parentRunId = RunId.make(`${threadId}:run`);
+      yield* seedParentWithTerminalTask({
+        threadId,
+        now,
+        runId: parentRunId,
+        projectId: ProjectId.make(`${threadId}:project`),
+        rootNodeId: NodeId.make(`${threadId}:root`),
+        taskId: NodeId.make(`${threadId}:task`),
+        deliveryState: "delivered",
+      });
+      return { threadId, parentRunId };
+    });
+
+  it.effect(
+    "batches compatible command notifications without changing sender or promotion ownership",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const now = yield* DateTime.now;
+        const { threadId, parentRunId } = yield* seedActiveCodexParent("compatibility", now);
+        const send = (
+          label: string,
+          options: { readonly senderThreadId?: ThreadId; readonly selection?: ModelSelection } = {},
+        ) => queueCommandCompletion({ threadId, label, ...options });
+        const messageIdFor = (label: string) =>
+          MessageId.make(`message:coalesce:${threadId}:${label}`);
+        yield* send("A");
+        for (const kind of ["user", "peer", "native-task"] as const) {
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`command:coalesce:${threadId}:${kind}`),
+            threadId,
+            messageId: messageIdFor(kind),
+            text: kind,
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: kind === "user" ? "user" : "agent",
+            creationSource: kind === "user" ? "web" : kind === "peer" ? "provider" : "server",
+            ...(kind === "native-task"
+              ? {
+                  notification: {
+                    source: { kind: "background_task" as const },
+                    outcome: "completed" as const,
+                    summary: "Background task finished",
+                  },
+                }
+              : {}),
+          });
+        }
+        const sender = ThreadId.make("command:sender");
+        yield* send("SENDER", { senderThreadId: sender });
+        yield* send("SENDER2", { senderThreadId: sender });
+        yield* send("MODEL", { selection: { ...modelSelection, model: "other-model" } });
+        yield* send("B");
+        const queued = yield* orchestrator.getThreadProjection(threadId);
+        const first = queued.messages.find((message) => message.id === messageIdFor("A"))!;
+        assert.include(first.text, "A_OUTPUT");
+        assert.include(first.text, "B_OUTPUT");
+        assert.equal(first.notification?.detail, "A\n\nB");
+        assert.isUndefined(first.senderThreadId);
+        assert.notInclude(first.text, "SENDER_OUTPUT");
+        assert.notInclude(first.text, "MODEL_OUTPUT");
+        const senderMessage = queued.messages.find(
+          (message) => message.id === messageIdFor("SENDER"),
+        )!;
+        assert.equal(senderMessage.senderThreadId, sender);
+        assert.include(senderMessage.text, "SENDER2_OUTPUT");
+        assert.equal(senderMessage.notification?.detail, "SENDER\n\nSENDER2");
+        const modelMessage = queued.messages.find(
+          (message) => message.id === messageIdFor("MODEL"),
+        )!;
+        assert.equal(
+          queued.runs.find((run) => run.userMessageId === modelMessage.id)?.modelSelection.model,
+          "other-model",
+        );
+        assert.lengthOf(
+          queued.runs.filter((run) => run.status === "queued"),
+          6,
+        );
+        assert.isFalse(queued.messages.some((message) => message.id === messageIdFor("B")));
+        assert.isFalse(queued.messages.some((message) => message.id === messageIdFor("SENDER2")));
+        for (const kind of ["user", "peer", "native-task"]) {
+          assert.equal(
+            queued.messages.find((message) => message.id === messageIdFor(kind))?.text,
+            kind,
+          );
+        }
+        const firstRun = queued.runs.find((run) => run.userMessageId === first.id)!;
+        yield* completeParentAndAwaitStart({
+          threadId,
+          parentRunId,
+          startingRunId: firstRun.id,
+          now,
+        });
+        yield* send("C");
+        const promoted = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(
+          promoted.messages.find((message) => message.id === first.id)?.text,
+          first.text,
+        );
+        assert.isTrue(
+          promoted.runs.some(
+            (run) => run.status === "queued" && run.userMessageId === messageIdFor("C"),
+          ),
+        );
+        const activity = promoted.turnItems.find(
+          (item) => item.runId === firstRun.id && item.type === "notification",
+        );
+        assert.equal(activity?.type, "notification");
+        if (activity?.type !== "notification") return;
+        assert.equal(activity.summary, "Background commands finished");
+        assert.equal(activity.detail, "A\n\nB");
+      }),
+  );
+
   it.effect(
     "interrupting a completion wake disposes both cohorts without reviving them on late results",
     () =>
