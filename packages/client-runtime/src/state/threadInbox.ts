@@ -9,13 +9,21 @@ type WorkingThreadInput = Pick<
   | "pendingSubagentRequest"
   | "interactionMode"
   | "latestRun"
+  | "pendingBackgroundTasks"
   | "runtime"
 >;
 
 export function isThreadWorking(thread: WorkingThreadInput): boolean {
   if (thread.hasPendingApprovals || thread.hasPendingUserInput) return false;
   if (thread.pendingSubagentRequest != null) return false;
-  if (!threadRuntimeIsActive(thread.runtime) && thread.runtime?.status !== "idle") return false;
+  if (thread.runtime?.status === "failed") return false;
+  if (
+    !threadRuntimeIsActive(thread.runtime) &&
+    thread.runtime?.status !== "idle" &&
+    thread.pendingBackgroundTasks.length === 0
+  ) {
+    return false;
+  }
   const run = thread.latestRun;
   const runSettled =
     run !== null &&
