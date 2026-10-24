@@ -37,7 +37,11 @@ import {
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
-import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
+import {
+  ProviderOptionDescriptor,
+  ProviderOptionSelection,
+  ProviderOptionSelectionValue,
+} from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)).annotate({
@@ -524,6 +528,25 @@ export const OrchestratorMcpThreadInterruptResult = Schema.Struct({
 export type OrchestratorMcpThreadInterruptResult = typeof OrchestratorMcpThreadInterruptResult.Type;
 
 export const OrchestratorMcpCapabilitiesInput = Schema.Struct({
+  providerInstanceId: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)).annotate({
+    description:
+      "Provider instance whose model catalog to expand. Omit for the summary-only response.",
+  }),
+  model: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)).annotate({
+    description: "Optional exact model id to return from the expanded provider catalog.",
+  }),
+  modelCursor: Schema.optionalKey(Schema.NullOr(NonNegativeInt)).annotate({
+    description: "Zero-based cursor for the expanded model catalog. Defaults 0.",
+  }),
+  modelLimit: Schema.optionalKey(
+    Schema.NullOr(PositiveInt.check(Schema.isLessThanOrEqualTo(100))),
+  ).annotate({
+    description: "Maximum models to return from the expanded catalog. Defaults 50; maximum 100.",
+  }),
+  includeModelOptions: Schema.optionalKey(Schema.NullOr(Schema.Boolean)).annotate({
+    description:
+      "Include option descriptors for the exact requested model. Defaults false and requires model.",
+  }),
   search: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(200)).annotate({
       description:
@@ -540,7 +563,7 @@ export const OrchestratorMcpModelOption = Schema.Struct({
 });
 export type OrchestratorMcpModelOption = typeof OrchestratorMcpModelOption.Type;
 
-export const OrchestratorMcpProviderCapability = Schema.Struct({
+const OrchestratorMcpProviderSummaryCapability = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   driverKind: ProviderDriverKind,
   displayName: Schema.NullOr(Schema.String),
@@ -552,6 +575,8 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
       options: Schema.optional(Schema.Array(OrchestratorMcpModelOption)),
     }),
   ),
+  modelsNextCursor: Schema.optionalKey(Schema.Never),
+  modelsTotal: Schema.optionalKey(Schema.Never),
   /** Models left out of `models`: unlisted visible models, or matches past the cap with `search`. */
   omittedModels: Schema.optional(NonNegativeInt),
   runtimeModes: Schema.optional(Schema.Array(RuntimeMode)),
@@ -559,6 +584,24 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
   canRunCrossProviderChildTask: Schema.Boolean,
   constraints: Schema.Array(Schema.String),
 });
+const OrchestratorMcpProviderCatalogCapability = Schema.Struct({
+  ...OrchestratorMcpProviderSummaryCapability.fields,
+  models: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      label: Schema.optionalKey(Schema.String),
+      options: Schema.optionalKey(Schema.Array(ProviderOptionDescriptor)),
+    }),
+  ),
+  modelsNextCursor: Schema.NullOr(NonNegativeInt),
+  modelsTotal: NonNegativeInt,
+  omittedModels: Schema.optionalKey(Schema.Never),
+});
+
+export const OrchestratorMcpProviderCapability = Schema.Union([
+  OrchestratorMcpProviderCatalogCapability,
+  OrchestratorMcpProviderSummaryCapability,
+]);
 export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
