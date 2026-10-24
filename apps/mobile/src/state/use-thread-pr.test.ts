@@ -1,7 +1,11 @@
-import { ProjectId, type ThreadPullRequestLink } from "@t3tools/contracts";
+import { ProjectId, type VcsStatusResult, type ThreadPullRequestLink } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { presentThreadLinkedPullRequests, resolveThreadPrSource } from "./thread-pr-presentation";
+import {
+  presentThreadBranchStatusPr,
+  presentThreadLinkedPullRequests,
+  resolveThreadPrSource,
+} from "./thread-pr-presentation";
 
 function linkedPr(
   number: number,
@@ -100,5 +104,51 @@ describe("resolveThreadPrSource compatibility", () => {
         { threadPullRequests: true },
       ),
     ).toMatchObject({ linkedPresentation: { number: 3, state: null }, pullRequestRef: null });
+  });
+});
+
+const pullRequest: NonNullable<VcsStatusResult["pr"]> = {
+  number: 3774,
+  title: "Desktop-style pull request indicator",
+  url: "https://github.com/t3tools/t3code/pull/3774",
+  baseRef: "main",
+  headRef: "codex/desktop-style-pr-indicator",
+  state: "merged",
+};
+
+describe("presentThreadBranchStatusPr", () => {
+  const branchStatus = {
+    refName: "codex/desktop-style-pr-indicator",
+    pr: { ...pullRequest, state: "open" },
+  } as VcsStatusResult;
+  const thread = { branch: "codex/desktop-style-pr-indicator", pullRequests: [] };
+  const snapshots = { threadPullRequests: true };
+
+  it("fills in the live branch pull request only when no current link blocks it", () => {
+    expect(
+      resolveThreadPrSource(
+        { ...thread, linkedPullRequest: null, branchPullRequest: null },
+        snapshots,
+      ),
+    ).toEqual({ linkedPresentation: null, pullRequestRef: null });
+    expect(presentThreadBranchStatusPr(thread, branchStatus, snapshots)).toMatchObject({
+      number: 3774,
+      state: "open",
+      url: pullRequest.url,
+      accessibilityLabel: "#3774 pull request open",
+    });
+
+    expect(
+      presentThreadBranchStatusPr({ ...thread, branch: "main" }, branchStatus, snapshots),
+    ).toBeNull();
+    const unsynced = [linkedPr(1, { snapshot: null })];
+    expect(
+      presentThreadBranchStatusPr({ ...thread, pullRequests: unsynced }, branchStatus, snapshots),
+    ).toBeNull();
+    expect(
+      presentThreadBranchStatusPr({ ...thread, pullRequests: [linkedPr(3)] }, branchStatus, {
+        threadPullRequests: false,
+      }),
+    ).toMatchObject({ number: 3774 });
   });
 });

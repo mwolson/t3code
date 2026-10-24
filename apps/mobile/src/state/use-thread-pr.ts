@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import type { VcsStatusResult } from "@t3tools/contracts";
 import {
   createLinkedPullRequestSummaryAtomFamily,
   pullRequestDetailToVcsStatus,
@@ -13,6 +14,7 @@ import { appAtomRegistry } from "./atom-registry";
 import { serverEnvironment } from "./server";
 import { useEnvironmentQuery } from "./query";
 import {
+  presentThreadBranchStatusPr,
   resolveThreadPrSource,
   presentThreadPr,
   type ThreadPrPresentation,
@@ -39,7 +41,10 @@ export {
   type ThreadPrPresentation,
 } from "./thread-pr-presentation";
 
-export function useThreadPr(thread: EnvironmentThreadShell): ThreadPrPresentation | null {
+export function useThreadPr(
+  thread: EnvironmentThreadShell,
+  branchStatus?: VcsStatusResult | null,
+): ThreadPrPresentation | null {
   const supportsLinks = useAtomValue(
     serverEnvironment.configValueAtom(thread.environmentId),
     (config) => config?.environment.capabilities.threadPullRequests === true,
@@ -85,11 +90,11 @@ export function useThreadPr(thread: EnvironmentThreadShell): ThreadPrPresentatio
     const summary = pullRequestSummary.data;
     return summary === null
       ? undefined
-      : presentThreadPr(pullRequestDetailToVcsStatus(summary), {
-          kind: summary.provider,
-          name: summary.provider,
-          baseUrl: "",
-        });
+      : presentThreadPr(
+          pullRequestDetailToVcsStatus(summary),
+          { kind: summary.provider, name: summary.provider, baseUrl: "" },
+          { checksState: summary.checksState, mergeability: summary.mergeability },
+        );
   }, [pullRequestRef, pullRequestSummary.data]);
 
   useEffect(() => {
@@ -117,5 +122,15 @@ export function useThreadPr(thread: EnvironmentThreadShell): ThreadPrPresentatio
     });
   }, [live, snapshotIdentity, threadKey]);
 
-  return linkedPresentation ?? (live === undefined ? snapshot : live);
+  const branchStatusPresentation = useMemo(
+    () =>
+      presentThreadBranchStatusPr(
+        { branch: thread.branch, pullRequests: thread.pullRequests },
+        branchStatus,
+        { threadPullRequests: supportsLinks },
+      ),
+    [branchStatus, supportsLinks, thread.branch, thread.pullRequests],
+  );
+
+  return linkedPresentation ?? (live === undefined ? snapshot : live) ?? branchStatusPresentation;
 }

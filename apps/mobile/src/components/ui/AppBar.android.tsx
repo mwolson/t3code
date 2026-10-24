@@ -188,6 +188,7 @@ export function AppBar(props: AppBarProps) {
           </>
         ) : undefined
       }
+      beforeLastControl={props.beforeLastControl}
     />
   );
   return (
