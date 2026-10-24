@@ -1757,7 +1757,7 @@ describe("OpenCodeAdapterV2", () => {
           modelSelection,
           runtimePolicy: policy,
         })
-        .pipe(Effect.forkScoped);
+        .pipe(Effect.exit, Effect.forkScoped);
 
       yield* Effect.promise(() => promptStarted.promise);
       const running = yield* runtime.readThreadSnapshot({ providerThread });
@@ -1767,7 +1767,7 @@ describe("OpenCodeAdapterV2", () => {
         .pipe(Effect.forkScoped);
 
       yield* Effect.promise(() => abortCalled.promise);
-      yield* Fiber.join(start);
+      assert.isTrue(Exit.isFailure(yield* Fiber.join(start)));
       yield* Fiber.join(interrupt);
       yield* Effect.promise(() =>
         nativeEvents.push({

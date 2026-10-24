@@ -101,6 +101,25 @@ const modelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5.4",
 } satisfies ModelSelection;
+// Lifecycle fixtures do not start a provider. Retain the selection evidence
+// that a real adapter-buffered wake supplies for each notification dispatch.
+const captureProviderWakeSelection = Effect.fnUntraced(function* () {
+  const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const runtime: Pick<
+    ProviderAdapter.ProviderAdapterV2SessionRuntime,
+    "bufferedExecutionSelection" | "hasBufferedOutputForThread"
+  > = {
+    bufferedExecutionSelection: () => Effect.succeed(modelSelection),
+    hasBufferedOutputForThread: () => Effect.succeed(true),
+  };
+  const sessionSpy = vi
+    .spyOn(sessions, "get")
+    .mockReturnValueOnce(
+      Effect.succeed(Option.some(runtime as ProviderAdapter.ProviderAdapterV2SessionRuntime)),
+    );
+  yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
+});
+
 const alternateInstanceId = ProviderInstanceId.make("codex_alternate");
 
 const layerVcsDriverRegistryTest = VcsDriverRegistry.layer.pipe(
@@ -3754,6 +3773,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           modelSelection,
           dispatchMode: { type: "queue_after_active" },
         });
+      yield* captureProviderWakeSelection();
       yield* queueMessage("settle-automatic-notification", true);
 
       const holdQueueAfterRestart = (commandId: string) =>
@@ -3968,6 +3988,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           modelSelection,
           dispatchMode: { type: "start_immediately" },
         });
+        if (automatic) yield* captureProviderWakeSelection();
         yield* orchestrator.dispatch({
           type: "message.dispatch",
           createdBy: automatic ? "agent" : "user",
@@ -4036,6 +4057,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         yield* Effect.yieldNow;
 
         const activeCompletedAt = yield* DateTime.now;
+        if (automatic) yield* captureProviderWakeSelection();
         yield* eventSink.write({
           events: [
             {
@@ -4187,6 +4209,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         });
       yield* dispatch("prompt", false);
       yield* dispatch("queued", false);
+      yield* captureProviderWakeSelection();
       yield* dispatch("early-wake", true);
       yield* orchestrator.dispatch({
         type: "queued-run.reorder",
@@ -4195,6 +4218,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         runId: (yield* runFor("queued")).id,
         beforeRunId: null,
       });
+      yield* captureProviderWakeSelection();
       yield* dispatch("late-wake", true);
       assert.isUndefined((yield* runFor("early-wake")).workStartedAt);
 
@@ -4232,6 +4256,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const millis = (value: DateTime.Utc | undefined) =>
         value === undefined ? undefined : DateTime.toEpochMillis(value);
 
+      yield* captureProviderWakeSelection();
       yield* settle("prompt", now);
       assert.equal(yield* Queue.take(startedRunIds), (yield* runFor("early-wake")).id);
       assert.equal(millis((yield* runFor("early-wake")).workStartedAt), millis(now));
@@ -4241,6 +4266,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.isUndefined((yield* runFor("queued")).workStartedAt);
 
       const queuedStartedAt = DateTime.add(now, { minutes: 10 });
+      yield* captureProviderWakeSelection();
       yield* settle("queued", queuedStartedAt);
       assert.equal(yield* Queue.take(startedRunIds), (yield* runFor("late-wake")).id);
       assert.equal(millis((yield* runFor("late-wake")).workStartedAt), millis(queuedStartedAt));
@@ -4569,6 +4595,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           worktreePath: process.cwd(),
         });
         for (const type of ["start_immediately", "queue_after_active"] as const) {
+          if (creationSource === "provider" && type === "queue_after_active")
+            yield* captureProviderWakeSelection();
           yield* orchestrator.dispatch({
             type: "message.dispatch",
             commandId: CommandId.make(`${threadId}:${type}`),
@@ -4606,6 +4634,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           threadId,
           modelSelection: currentSelection,
         });
+        if (creationSource === "provider") yield* captureProviderWakeSelection();
         yield* eventSink.write({
           events: [
             {
@@ -4627,6 +4656,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         });
         const expectedThreadId =
           creationSource === "provider" ? queued.providerThreadId : current.id;
+        if (creationSource === "provider") yield* captureProviderWakeSelection();
         yield* orchestrator.resumeQueuedRuns;
         const after = yield* orchestrator.getThreadProjection(threadId);
         const delivered = after.runs.find((run) => run.id === queued.id)!;
@@ -5322,7 +5352,7 @@ it.layer(layerTest)("snooze queued runs", (it) => {
           modelSelection,
           dispatchMode: { type: "queue_after_active" },
           createdBy: kind === "user" ? "user" : "agent",
-          creationSource: kind === "user" ? "web" : "provider",
+          creationSource: kind === "user" ? "web" : "server",
           ...(kind === "notification"
             ? {
                 notification: {
