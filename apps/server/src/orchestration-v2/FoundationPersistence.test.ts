@@ -4068,12 +4068,11 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         assert.isDefined(errorItem);
         if (errorItem?.type === "error") {
           assert.equal(errorItem.status, "failed");
-          assert.include(
-            errorItem.failure.message,
-            settlesInStart
-              ? "Restart session unavailable"
-              : "Starting the provider turn failed permanently",
-          );
+          let expectedFailure = "Starting the provider turn failed permanently";
+          if (settlesInStart) expectedFailure = "Restart session unavailable";
+          else if (failureMode === "start-dead-letter")
+            expectedFailure = "T3 Code could not start this turn.";
+          assert.include(errorItem.failure.message, expectedFailure);
         }
         assert.equal(
           projection.subagents.find((candidate) => candidate.id === subagentNodeId)?.status,
