@@ -820,6 +820,8 @@ const PendingBackgroundTaskFields = {
   description: Schema.optional(TrimmedNonEmptyString),
   /** The subagent task that started this work and waits on it. */
   parentTaskId: Schema.optional(TrimmedNonEmptyString),
+  /** Completion wakes the agent for follow-up work, rather than leaving a detached command. */
+  wakesAgent: Schema.optional(Schema.Boolean),
 };
 
 export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
@@ -836,10 +838,11 @@ export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
     Schema.Struct({ ...PendingBackgroundTaskFields, kind: Schema.Literal("background_task") }),
   ],
   (kind) => Schema.Struct({ ...PendingBackgroundTaskFields, kind }),
-  ({ taskId, description, parentTaskId }) => ({
+  ({ taskId, description, parentTaskId, wakesAgent }) => ({
     taskId,
     ...(description === undefined ? {} : { description }),
     ...(parentTaskId === undefined ? {} : { parentTaskId }),
+    ...(wakesAgent === undefined ? {} : { wakesAgent }),
     kind: "background_task",
   }),
 );
