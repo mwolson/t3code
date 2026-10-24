@@ -1383,6 +1383,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
             <ThreadFeed
               environmentId={props.environmentId}
               threadId={props.selectedThread.id}
+              detailThreadId={props.selectedThreadDetailRef?.threadId ?? null}
               workspaceRoot={props.threadCwd}
               feed={props.selectedThreadFeed}
               pendingHandoff={props.pendingHandoff}

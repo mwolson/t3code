@@ -7,6 +7,8 @@ import {
   workflowOpeningParentThreadId,
   type RuntimeSubagent,
 } from "@t3tools/client-runtime/state/subagentRuntime";
+import type { EnvironmentThread } from "@t3tools/client-runtime/state/shell";
+import { Atom } from "effect/reactivity";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useState } from "react";
 import { Pressable, View } from "react-native";
@@ -18,12 +20,17 @@ import { useMarkdownCodeHighlight } from "./markdownCodeHighlightState";
 import { SubagentRow } from "./SubagentRow";
 import { WorkLogBlock } from "./work-log-layout";
 
+const EMPTY_THREAD_ATOM = Atom.make<EnvironmentThread | null>(null);
+
 // A script longer than this many lines shows its head until opened.
 const FOLDED_SCRIPT_LINES = 10;
 
 /** The workflow opening for a thread, or null; the parent's detail loads only for a workflow. */
-export function useWorkflowOpening(environmentId: EnvironmentId, threadId: ThreadId) {
-  const threadAtom = environmentThreadDetails.threadAtom(scopeThreadRef(environmentId, threadId));
+export function useWorkflowOpening(environmentId: EnvironmentId, threadId: ThreadId | null) {
+  const threadAtom =
+    threadId === null
+      ? EMPTY_THREAD_ATOM
+      : environmentThreadDetails.threadAtom(scopeThreadRef(environmentId, threadId));
   // Selected as a primitive so an ordinary thread's updates never change the result.
   const parentId = useAtomValue(threadAtom, (thread) =>
     thread === null
@@ -37,7 +44,9 @@ export function useWorkflowOpening(environmentId: EnvironmentId, threadId: Threa
     parentId === null ? null : (thread?.projection ?? null),
   );
   const parentSubagents = useAtomValue(
-    environmentThreadDetails.threadAtom(scopeThreadRef(environmentId, parentId ?? threadId)),
+    parentId === null
+      ? EMPTY_THREAD_ATOM
+      : environmentThreadDetails.threadAtom(scopeThreadRef(environmentId, parentId)),
     (parent) => (parentId === null ? null : (parent?.projection.subagents ?? null)),
   );
   return projection === null
