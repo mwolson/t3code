@@ -42,6 +42,7 @@ import {
   getAgentLiveActivities,
   startAgentLiveActivity,
 } from "./agentLiveActivity";
+import { resolvePersonalBackgroundRoute } from "../cloud/personalBackgroundRoute";
 import { resolveCloudPublicConfig } from "../cloud/publicConfig";
 import { supportsAgentAwarenessPush } from "./capabilities";
 import { makeRelayDeviceRegistrationRequest, resolveApsEnvironment } from "./registrationPayload";
@@ -94,6 +95,7 @@ const LIVE_ACTIVITY_STALE_AFTER_MS = 10 * 60_000;
 const liveActivityStaleDate = () => new Date(Date.now() + LIVE_ACTIVITY_STALE_AFTER_MS);
 const registeredActivityPushTokens = new Map<string, number>();
 let androidDeviceReplayedAt: number | null = null;
+let iosDeviceRegisteredAtMs: number | null = null;
 let pushTokenSubscription: { remove: () => void } | null = null;
 let appStateSubscription: { remove: () => void } | null = null;
 
@@ -150,8 +152,15 @@ export function mergeAgentAwarenessRegistrationPreferences(
 }
 
 function readRelayConfig(): { readonly url: string } | null {
-  const { url, backgroundUrl } = resolveCloudPublicConfig().relay;
-  const relayUrl = backgroundUrl ?? url;
+  const extra = Constants.expoConfig?.extra;
+  let relayUrl: string | null;
+  if (extra?.iosPersonalTeamBuild === true) {
+    const route = resolvePersonalBackgroundRoute(extra);
+    relayUrl = route.kind === "private" ? route.url : null;
+  } else {
+    const { url, backgroundUrl } = resolveCloudPublicConfig().relay;
+    relayUrl = backgroundUrl ?? url;
+  }
   if (!relayUrl) {
     logRegistrationDebug("relay registration skipped; relay config missing");
     return null;
@@ -161,7 +170,7 @@ function readRelayConfig(): { readonly url: string } | null {
 }
 
 function canRegisterRemoteLiveActivities(): boolean {
-  return Platform.OS === "ios";
+  return Platform.OS === "ios" && supportsAgentAwarenessPush();
 }
 
 function canRegisterPushNotifications(): boolean {
@@ -189,6 +198,7 @@ export function setAgentAwarenessRelayTokenProvider(
       clearAndroidAgentNotifications();
     }
     androidDeviceReplayedAt = null;
+    iosDeviceRegisteredAtMs = null;
     deviceRegistrationGeneration++;
     activeDeviceRegistration = null;
     pendingDeviceRegistration = null;
@@ -241,6 +251,7 @@ export function releaseAgentAwarenessRelayTokenProvider(): void {
   activeDeviceRegistration = null;
   pendingDeviceRegistration = null;
   androidDeviceReplayedAt = null;
+  iosDeviceRegisteredAtMs = null;
   pushTokenSubscription?.remove();
   pushTokenSubscription = null;
   appStateSubscription?.remove();
@@ -388,11 +399,18 @@ const registerDeviceWithRelay = Effect.fn("remoteRegistration.registerDeviceWith
     body.platform === "android" &&
     (androidDeviceReplayedAt === null ||
       Date.now() - androidDeviceReplayedAt >= ACTIVITY_TOKEN_REREGISTER_INTERVAL_MS);
+  const needsIosRefresh =
+    body.platform === "ios" &&
+    Constants.expoConfig?.extra?.iosPersonalTeamBuild === true &&
+    supportsAgentAwarenessPush() &&
+    (iosDeviceRegisteredAtMs === null ||
+      Date.now() - iosDeviceRegisteredAtMs >= ACTIVITY_TOKEN_REREGISTER_INTERVAL_MS);
   if (
     persisted &&
     persisted.identity === identity &&
     persisted.signature === signature &&
-    !needsAndroidReplay
+    !needsAndroidReplay &&
+    !needsIosRefresh
   ) {
     setRegistrationStatus("registered");
     logRegistrationDebug("relay device registration skipped; already registered for account", {
@@ -420,6 +438,7 @@ const registerDeviceWithRelay = Effect.fn("remoteRegistration.registerDeviceWith
     return;
   }
   if (body.platform === "android") androidDeviceReplayedAt = Date.now();
+  if (body.platform === "ios") iosDeviceRegisteredAtMs = Date.now();
   setRegistrationStatus("registered");
   yield* Effect.promise(() =>
     saveAgentAwarenessRegistrationRecord({
@@ -819,7 +838,7 @@ function dismissEndedLocalLiveActivities(): void {
 }
 
 function endLocalLiveActivities(context: string): void {
-  if (!canRegisterRemoteLiveActivities()) {
+  if (Platform.OS !== "ios") {
     return;
   }
   dismissEndedLocalLiveActivities();
@@ -906,6 +925,7 @@ export function __resetAgentAwarenessRemoteRegistrationForTest(): void {
   pendingDeviceRegistration = null;
   registrationStatus = "unknown";
   androidDeviceReplayedAt = null;
+  iosDeviceRegisteredAtMs = null;
   registrationStatusListeners.clear();
   registeredActivityPushTokens.clear();
   activityPushTokenLocks.clear();
