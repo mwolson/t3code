@@ -256,6 +256,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     readonly startupPresentation?: ServerConfig.StartupPresentation;
     readonly forceAutoBootstrapProjectFromCwd?: boolean;
     readonly rejectRunningServer?: boolean;
+    readonly readOnly?: boolean;
   },
 ) {
   const { findAvailablePort } = yield* NetService.NetService;
@@ -344,13 +345,16 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
       });
     }
   }
-  yield* fs.makeDirectory(cwd, { recursive: true });
-  yield* ServerConfig.ensureServerDirectories(derivedPaths);
+  if (!options?.readOnly) {
+    yield* fs.makeDirectory(cwd, { recursive: true });
+    yield* ServerConfig.ensureServerDirectories(derivedPaths);
+  }
   const persistedObservabilitySettings = yield* loadPersistedObservabilitySettings(
     derivedPaths.settingsPath,
   );
   const serverTracePath = env.traceFile ?? derivedPaths.serverTracePath;
-  yield* fs.makeDirectory(path.dirname(serverTracePath), { recursive: true });
+  if (!options?.readOnly)
+    yield* fs.makeDirectory(path.dirname(serverTracePath), { recursive: true });
   const startupPresentation = options?.startupPresentation ?? "browser";
   const isHeadlessStartup = startupPresentation === "headless";
   const noBrowser = Option.getOrElse(
@@ -501,6 +505,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
 export const resolveCliAuthConfig = (
   flags: CliAuthLocationFlags,
   cliLogLevel: Option.Option<LogLevel.LogLevel>,
+  options?: { readonly readOnly?: boolean },
 ) =>
   resolveServerConfig(
     {
@@ -518,6 +523,7 @@ export const resolveCliAuthConfig = (
       tailscaleServePort: Option.none(),
     },
     cliLogLevel,
+    options,
   );
 
 const DurationShorthandPattern = /^(?<value>\d+)(?<unit>ms|s|m|h|d|w)$/i;

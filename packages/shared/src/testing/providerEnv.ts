@@ -10,6 +10,8 @@ const KEPT_ENV = new Set([
   "T3CODE_TRANSFER_BUDGET_RESULT_PATH",
   // Opt-in: points the HtmlRender tests at a headless browser, which they skip without.
   "T3CODE_TEST_HEADLESS_SHELL",
+  // Personal relay integration tests use an owned loopback Postgres container.
+  "T3CODE_PERSONAL_RELAY_TEST_DATABASE_URL",
 ]);
 
 if (process.env.T3CODE_TEST_KEEP_PROVIDER_ENV !== "1") {

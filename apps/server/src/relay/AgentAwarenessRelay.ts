@@ -11,7 +11,15 @@ import {
   type RelayAgentActivityPublishProofPayload,
   type RelayAgentActivityState,
 } from "@t3tools/contracts/relay";
-import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
+import {
+  agentAwarenessTransition,
+  personalPublishClaims,
+  type PersonalPublishClaims,
+} from "@t3tools/shared/personalRelay";
+import * as EventStore from "../orchestration-v2/EventStore.ts";
+import * as CompletionEligibility from "./CompletionEligibility.ts";
+import * as PublishSequence from "./PublishSequence.ts";
+import { projectThreadAwarenessV2, type AgentAwarenessState } from "@t3tools/shared/agentAwareness";
 import { turnItemUpdateCanEndBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
@@ -160,12 +168,15 @@ export const makeAgentAwarenessPublishWorker = Effect.fnUntraced(function* <R>(
   return { enqueue, drain: worker.drain };
 });
 
-function agentAwarenessPublishIdentity(state: RelayAgentActivityState | null): string {
+function agentAwarenessPublishIdentity(
+  state: RelayAgentActivityState | null,
+  transitionId: string | null = null,
+): string {
   if (state === null) {
     return "null";
   }
   const { updatedAt: _updatedAt, ...meaningfulState } = state;
-  return JSON.stringify(meaningfulState);
+  return JSON.stringify({ state: meaningfulState, transitionId });
 }
 
 function resolveAgentActivityPublishingStartupState(input: {
@@ -194,7 +205,7 @@ const encodeRelayConfiguration = Schema.encodeEffect(
 
 function sanitizeRelayAgentActivityState(
   state: RelayAgentActivityState | null,
-): RelayAgentActivityState | null {
+): AgentAwarenessState | null {
   if (state === null) {
     return null;
   }
@@ -251,7 +262,7 @@ function deliveryStats(
 
 function signRelayAgentActivityPublishProof(input: {
   readonly privateKey: string;
-  readonly payload: RelayAgentActivityPublishProofPayload;
+  readonly payload: RelayAgentActivityPublishProofPayload & PersonalPublishClaims;
 }) {
   return signRelayJwt({
     privateKey: input.privateKey,
@@ -267,10 +278,12 @@ const makePublishProof = Effect.fn("makePublishProof")(function* (input: {
   readonly threadId: ThreadId;
   readonly state: RelayAgentActivityState | null;
   readonly jti: string;
+  readonly claims: PersonalPublishClaims;
 }) {
   const now = yield* DateTime.now;
   const expiresAt = DateTime.add(now, { minutes: 5 });
   const payload = {
+    ...input.claims,
     iss: `t3-env:${input.environmentId}`,
     aud: normalizeRelayIssuer(input.relayIssuer),
     sub: input.environmentId,
@@ -280,7 +293,7 @@ const makePublishProof = Effect.fn("makePublishProof")(function* (input: {
     environmentId: input.environmentId as RelayAgentActivityPublishProofPayload["environmentId"],
     threadId: input.threadId,
     state: input.state,
-  } satisfies RelayAgentActivityPublishProofPayload;
+  } satisfies RelayAgentActivityPublishProofPayload & PersonalPublishClaims;
   return yield* signRelayAgentActivityPublishProof({ privateKey: input.privateKey, payload });
 });
 
@@ -309,7 +322,7 @@ function resolveAgentAwarenessRelayPublishSnapshot(input: {
   readonly project: Option.Option<Project>;
 }): {
   readonly projectId: string | null;
-  readonly state: RelayAgentActivityState | null;
+  readonly state: AgentAwarenessState | null;
   readonly reason: "snapshot" | "thread-not-found" | "project-not-found";
 } {
   if (Option.isNone(input.thread)) {
@@ -342,7 +355,8 @@ function resolveAgentAwarenessRelayPublishSnapshot(input: {
 function terminalWorkSinceStart(thread: OrchestrationV2ThreadShell, startedAt: number): boolean {
   return (
     thread.latestRunCompletedAt != null &&
-    DateTime.toEpochMillis(thread.latestRunCompletedAt) > startedAt
+    (DateTime.toEpochMillis(thread.latestRunCompletedAt) > startedAt ||
+      (thread.status === "completed" && DateTime.toEpochMillis(thread.updatedAt) > startedAt))
   );
 }
 
@@ -377,6 +391,9 @@ export function resolveAgentAwarenessRelayActiveThreadIds(input: {
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const backgroundRelay = yield* BackgroundRelaySettings.BackgroundRelaySettings;
+  const sequence = yield* PublishSequence.PublishSequence;
+  const completionEligibility = yield* CompletionEligibility.make;
+  const events = yield* EventStore.EventStoreV2;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -510,6 +527,7 @@ export const make = Effect.gen(function* () {
       readonly projectId: string | null;
       readonly state: RelayAgentActivityState | null;
       readonly reason: string;
+      readonly claims: PersonalPublishClaims;
     }) {
       if (cachedRelayClient === undefined) {
         cachedRelayClient = yield* makeRelayClient(relayConfig);
@@ -522,6 +540,7 @@ export const make = Effect.gen(function* () {
         threadId,
         state: input.state,
         jti: yield* crypto.randomUUIDv4(),
+        claims: input.claims,
       });
 
       yield* Effect.logInfo("publishing agent activity for thread", {
@@ -557,6 +576,7 @@ export const make = Effect.gen(function* () {
     // Per-thread shell read: this publish runs for every activity-relevant
     // domain event, so materializing the full shell here would make the cost
     // of one thread's activity proportional to how many threads exist.
+    const observedSequence = yield* events.latestSequence({ threadId });
     const threadShell = yield* threads.getThreadShell(threadId);
     if (
       threadShell?.lineage.relationshipToParent === "subagent" &&
@@ -581,17 +601,11 @@ export const make = Effect.gen(function* () {
       thread,
       project,
     });
-    const publishIdentity = agentAwarenessPublishIdentity(snapshot.state);
+    const transition = Option.isSome(thread)
+      ? agentAwarenessTransition({ thread: thread.value, state: snapshot.state })
+      : null;
+    const publishIdentity = agentAwarenessPublishIdentity(snapshot.state, transition?.id ?? null);
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
-    if (
-      (snapshot.state?.phase === "completed" || snapshot.state?.phase === "failed") &&
-      !publishedStateByThread.has(threadId)
-    ) {
-      if (Option.isNone(thread) || !terminalWorkSinceStart(thread.value, startedAt)) {
-        outcome("acknowledged");
-        return;
-      }
-    }
     const published = publishedStateByThread.get(threadId);
     if (published?.revision === relayConfig.revision && published.identity === publishIdentity) {
       outcome("acknowledged");
@@ -608,6 +622,21 @@ export const make = Effect.gen(function* () {
       return;
     }
 
+    const completionEligibleAt =
+      snapshot.state?.phase === "completed" && Option.isSome(thread)
+        ? yield* completionEligibility(thread.value, observedSequence)
+        : null;
+    if (
+      (snapshot.state?.phase === "completed" || snapshot.state?.phase === "failed") &&
+      !publishedStateByThread.has(threadId)
+    ) {
+      const terminalAt =
+        completionEligibleAt ?? (Option.isSome(thread) ? thread.value.latestRunCompletedAt : null);
+      if (terminalAt == null || DateTime.toEpochMillis(terminalAt) <= startedAt) {
+        outcome("acknowledged");
+        return;
+      }
+    }
     // - null (tombstone) while the previous published state was live: deletes
     //   the thread from every armed card mid-conversation.
     // - completed as the thread's FIRST published state: sessions boot at
@@ -664,6 +693,18 @@ export const make = Effect.gen(function* () {
       projectId: snapshot.projectId,
       state: snapshot.state,
       reason: snapshot.reason,
+      claims: Option.isSome(thread)
+        ? personalPublishClaims({
+            sequence: yield* sequence.next,
+            thread: thread.value,
+            state: snapshot.state,
+            completionEligibleAt,
+          })
+        : {
+            t3_publish_seq: yield* sequence.next,
+            t3_transition: null,
+            t3_transition_eligible_at: null,
+          },
     }).pipe(withRelayClientTracing);
     outcome("acknowledged");
     publishConfirmDeadlines.delete(threadId);
@@ -907,5 +948,11 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(AgentAwarenessRelay, make).pipe(
-  Layer.provide(BackgroundRelaySettings.layer),
+  Layer.provide(
+    Layer.mergeAll(
+      BackgroundRelaySettings.layer,
+      EventStore.layerFromOrchestrationEventStore,
+      PublishSequence.layer,
+    ),
+  ),
 );
