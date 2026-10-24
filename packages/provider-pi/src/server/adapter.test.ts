@@ -524,6 +524,46 @@ const startTurn = Effect.fnUntraced(function* (
   });
 });
 
+describe("Pi abort outcome", () => {
+  it.effect("fails a turn that ends on an abort and completes one that recovers", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      for (const [runOrdinal, stopReasons] of [
+        [1, ["aborted"]],
+        [2, ["aborted", "stop"]],
+      ] as const) {
+        yield* startTurn(runtime, providerThread, "default", [], "Respond", undefined, runOrdinal);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        for (const stopReason of stopReasons) {
+          yield* fake.emit({
+            type: "message_end",
+            message: { role: "assistant", content: [], stopReason },
+          });
+        }
+        yield* fake.emit({ type: "agent_settled" });
+        const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+        assert.equal(terminal.type, "turn.terminal");
+        if (terminal.type !== "turn.terminal") return;
+        assert.equal(terminal.runOrdinal, runOrdinal);
+        if (runOrdinal === 1) {
+          assert.equal(terminal.status, "failed");
+          assert.equal(terminal.failure?.message, "Pi aborted the response before completion.");
+        } else {
+          assert.equal(terminal.status, "completed");
+          assert.isNull(terminal.failure);
+        }
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+});
+
 describe("PiAdapterV2", () => {
   it.effect("emits a new occurrence for the same failure after the next turn clears it", () =>
     Effect.gen(function* () {
