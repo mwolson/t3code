@@ -336,6 +336,7 @@ export interface ThreadFeedProps {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly threadTitle: string;
+  readonly detailThreadId: ThreadId | null;
   readonly workspaceRoot?: string | null;
   readonly feed: ReadonlyArray<ThreadFeedEntry>;
   readonly pendingHandoff?: HandoffEndpoints | null;
@@ -1935,7 +1936,7 @@ function useThreadFeedPresentation(
 
 export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const { listRef, onEndFollowEnabledChange, onHeaderMaterialVisibilityChange } = props;
-  const workflowOpening = useWorkflowOpening(props.environmentId, props.threadId);
+  const workflowOpening = useWorkflowOpening(props.environmentId, props.detailThreadId);
   const deviceType = useDeviceType();
   const duoColumns = useNativeWorkspaceColumnsSupported() && isDuoDevice(deviceType);
   const openPullRequest = useOpenPullRequest();
