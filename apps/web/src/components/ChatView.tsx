@@ -294,11 +294,7 @@ import {
   getProviderStatusBannerKey,
   shouldShowProviderStatusBanner,
 } from "./chat/ProviderStatusBanner";
-import {
-  getThreadErrorBannerKey,
-  isThreadErrorBannerDismissedForSession,
-  shouldShowThreadErrorBanner,
-} from "./chat/ThreadErrorBanner";
+import { useThreadErrorState } from "./chat/useThreadErrorState";
 import { QueuedRunsControl, type QueuedRunsControlHandle } from "./chat/QueuedRunsControl";
 import { useThreadLinkedPullRequest } from "./pullRequest/useThreadLinkedPullRequest";
 import { useProactivePanels } from "../hooks/useProactivePanels";
@@ -362,11 +358,7 @@ import {
 import { useDraftHeroLayoutTransition } from "./chat/useDraftHeroLayoutTransition";
 import { useLocalDispatchState } from "./chat/useLocalDispatchState";
 import { draftFanoutSelectionsAtom, draftSendState } from "./chat/chatViewSend";
-import {
-  isCompactCommandMessage,
-  type LocalThreadErrorEntry,
-  makeThreadErrorSetter,
-} from "./ChatView.logic";
+import { isCompactCommandMessage, makeThreadErrorSetter } from "./ChatView.logic";
 
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_MODELS: ServerProvider["models"] = [];
@@ -655,12 +647,6 @@ export default function ChatView(props: ChatViewProps) {
   const feedbackUploading = feedbackSubmissions.some(
     (submission) => submission.status === "uploading",
   );
-  const [localDraftErrorsByDraftId, setLocalDraftErrorsByDraftId] = useState<
-    Record<string, LocalThreadErrorEntry>
-  >({});
-  const [localServerErrorsByThreadKey, setLocalServerErrorsByThreadKey] = useState<
-    Record<string, LocalThreadErrorEntry>
-  >({});
   const isRevertingCheckpoint = useComposerDraftStore((store) =>
     store.rewindingThreadKeys.has(routeThreadKey),
   );
@@ -729,28 +715,6 @@ export default function ChatView(props: ChatViewProps) {
     ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
     : null;
   const fallbackDraftProject = useProject(fallbackDraftProjectRef);
-  const localDraftError = serverThread
-    ? null
-    : ((draftId ? localDraftErrorsByDraftId[draftId]?.message : null) ?? null);
-  const localServerError = localServerErrorsByThreadKey[routeThreadKey]?.message ?? null;
-  const promotedDraftError =
-    serverThread && draftId ? localDraftErrorsByDraftId[draftId] : undefined;
-  if (promotedDraftError !== undefined && draftId) {
-    const remainingDraftErrors = { ...localDraftErrorsByDraftId };
-    delete remainingDraftErrors[draftId];
-    setLocalDraftErrorsByDraftId(remainingDraftErrors);
-    const currentEntry = localServerErrorsByThreadKey[routeThreadKey];
-    if (
-      currentEntry === undefined ||
-      (currentEntry.at <= promotedDraftError.at &&
-        currentEntry.message !== promotedDraftError.message)
-    ) {
-      setLocalServerErrorsByThreadKey({
-        ...localServerErrorsByThreadKey,
-        [routeThreadKey]: promotedDraftError,
-      });
-    }
-  }
   const localDraftThread = draftThread
     ? buildLocalDraftThread(
         threadId,
@@ -874,20 +838,19 @@ export default function ChatView(props: ChatViewProps) {
           threadId: parentSubagentThreadRef.threadId,
           title: parentSubagentThread?.title ?? "Parent thread",
         };
-  const threadError = isServerThread
-    ? (localServerError ?? serverRuntime?.lastError ?? null)
-    : localDraftError;
-  const threadErrorBannerKey = getThreadErrorBannerKey(routeThreadKey, threadError);
-  const visibleThreadError = shouldShowThreadErrorBanner(
-    routeThreadKey,
-    threadError,
-    isThreadErrorBannerDismissedForSession(threadErrorBannerKey),
-  )
-    ? threadError
-    : null;
-  const [, setThreadErrorBannerDismissTick] = useState(0);
-  const threadErrorIsServerRuntimeError =
-    localServerError === null && visibleThreadError === serverRuntime?.lastError;
+  const {
+    error: visibleThreadError,
+    currentError: threadError,
+    errorClass: threadErrorClass,
+    errorCode: threadErrorCode,
+    dismiss: dismissThreadError,
+    setError: setLocalThreadError,
+  } = useThreadErrorState({
+    threadKey: routeThreadKey,
+    draftId,
+    isServerThread,
+    runtime: isServerThread ? (serverRuntime ?? null) : null,
+  });
   const defaultRuntimeMode = resolveProjectSettings(settings, activeThread?.projectId ?? null)
     .settings.defaultRuntimeMode;
   const runtimeMode =
@@ -1270,8 +1233,7 @@ export default function ChatView(props: ChatViewProps) {
       serverThreadId !== undefined && serverThreadEnvironmentId !== undefined
         ? { threadId: serverThreadId, environmentId: serverThreadEnvironmentId }
         : null,
-    setLocalServerErrorsByThreadKey,
-    setLocalDraftErrorsByDraftId,
+    setLocalThreadError,
   });
   const {
     pendingApprovals,
@@ -3186,17 +3148,10 @@ export default function ChatView(props: ChatViewProps) {
               providerStatusBannerKey={providerStatusBannerKey}
               setDismissedProviderStatusBannerKey={setDismissedProviderStatusBannerKey}
               onOpenProviderSetup={openProviderSetupStable}
-              threadId={activeThread.id}
               threadError={timelineThreadError}
-              threadErrorClass={
-                threadErrorIsServerRuntimeError ? (serverRuntime?.lastErrorClass ?? null) : null
-              }
-              threadErrorCode={
-                threadErrorIsServerRuntimeError ? (serverRuntime?.lastErrorCode ?? null) : null
-              }
-              threadErrorBannerKey={threadErrorBannerKey}
-              setThreadError={setThreadError}
-              setThreadErrorBannerDismissTick={setThreadErrorBannerDismissTick}
+              threadErrorClass={threadErrorClass}
+              threadErrorCode={threadErrorCode}
+              onDismissThreadError={dismissThreadError}
             />
             <div
               {...conversationArea}
