@@ -7,8 +7,9 @@ import type {
   NativeStackNavigationOptions,
   NativeStackNavigationProp,
 } from "@react-navigation/native-stack";
-import { isValidElement, use, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { isValidElement, use, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  NativePrimaryColumnContext,
   NativeWorkspaceTabActivityContext,
   WorkspaceSlotOptionsContext,
 } from "./v5-workspace-context";
@@ -191,9 +192,12 @@ export function NativeStackScreenOptions(props: {
   const navigation = useNativeStackNavigation();
   const setOptions = useScreenOptionsWriter();
   const tabActive = use(NativeWorkspaceTabActivityContext)?.active ?? true;
+  // A presented primary column stays visible while its detail owns navigation focus.
+  const primaryColumnPresented = use(NativePrimaryColumnContext)?.presented === true;
   const lastAppliedOptionsSignatureRef = useRef<string | undefined>(undefined);
   const latestOptionFunctionsRef = useRef(new Map<string, (...args: unknown[]) => unknown>());
   const optionFunctionWrappersRef = useRef(new Map<string, (...args: unknown[]) => unknown>());
+  const [focusEpoch, setFocusEpoch] = useState(0);
 
   // Stabilizing records each factory's latest closure, so it runs in the commit
   // phase: a render React discards must not leak its closures into the header.
@@ -214,10 +218,13 @@ export function NativeStackScreenOptions(props: {
       lastAppliedOptionsSignatureRef.current = undefined;
       return;
     }
-    if (!setOptions || !normalizedOptions) {
+    // Re-entering during a native push/pop produces unbalanced appearance transitions
+    // and a Home list that still paints but no longer receives taps.
+    const hidden = navigation?.isFocused() === false && !primaryColumnPresented;
+    if (!setOptions || !normalizedOptions || hidden) {
       return;
     }
-    const signature = optionsSignature([stableOptions, props.optionsVersion]);
+    const signature = optionsSignature([stableOptions, props.optionsVersion, focusEpoch]);
     if (lastAppliedOptionsSignatureRef.current === signature) {
       return;
     }
@@ -234,7 +241,23 @@ export function NativeStackScreenOptions(props: {
         optionFunctionWrappersRef.current,
       ) as NativeStackNavigationOptions,
     );
-  }, [setOptions, props.options, props.optionsVersion, tabActive]);
+  }, [
+    focusEpoch,
+    navigation,
+    primaryColumnPresented,
+    setOptions,
+    props.options,
+    props.optionsVersion,
+    tabActive,
+  ]);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reapplies header options when the screen regains focus, since changes made while hidden were skipped
+  useEffect(() => {
+    if (!navigation) {
+      return;
+    }
+    return navigation.addListener("focus", () => setFocusEpoch((epoch) => epoch + 1));
+  }, [navigation]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes the given listeners to navigator events for the screen's lifetime
   useEffect(() => {
