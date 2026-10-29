@@ -85,6 +85,7 @@ import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "./thread-sw
 import { useFabScroll } from "./FabScrollContext";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { ThreadListFilters } from "./ThreadListFilters";
+import { hasHomeThreads } from "./homeThreadList";
 
 interface HomeScreenProps {
   readonly projects: ReadonlyArray<EnvironmentProject>;
@@ -642,10 +643,11 @@ export function HomeScreen(props: HomeScreenProps) {
     workingShelfEnabled,
   };
 
-  const hasAnyThreads =
-    props.threads.some((thread) => thread.archivedAt === null) ||
-    props.pendingTasks.length > 0 ||
-    threadListV2Layout.settledCount > 0;
+  const hasAnyThreads = hasHomeThreads({
+    threads: props.threads,
+    pendingTaskCount: props.pendingTasks.length,
+    settledCount: threadListV2Layout.settledCount,
+  });
   const selectedEnvironmentLabel =
     props.selectedEnvironmentId === null
       ? null
