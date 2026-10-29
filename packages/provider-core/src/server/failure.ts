@@ -34,6 +34,10 @@ export class ContextHandoffBackgroundWorkError extends Schema.TaggedError<Contex
     return "The target provider still has background work running. Wait for it to finish or stop it before retrying the handoff.";
   }
 }
+import {
+  PROVIDER_BUFFERED_OUTPUT_MESSAGE,
+  PROVIDER_RUNNING_WORK_MESSAGE,
+} from "./ProviderAdapter.ts";
 
 export const MAX_PROVIDER_FAILURE_MESSAGE_LENGTH = 4_096;
 const MAX_PROVIDER_FAILURE_CODE_LENGTH = 128;
@@ -94,6 +98,10 @@ function curatedCauseMessages(cause: unknown): {
       if (typeof cause !== "object") break;
       const tag = (cause as Record<string, unknown>)._tag;
       switch (tag) {
+        case "ProviderAdapterRunningWorkError":
+          return { known: PROVIDER_RUNNING_WORK_MESSAGE, category: categoryMessage() };
+        case "ProviderAdapterBufferedOutputError":
+          return { known: PROVIDER_BUFFERED_OUTPUT_MESSAGE, category: categoryMessage() };
         case "ContextHandoffBudgetError":
           return { known: new ContextHandoffBudgetError().message, category: categoryMessage() };
         case "ContextHandoffBackgroundWorkError":
@@ -105,6 +113,7 @@ function curatedCauseMessages(cause: unknown): {
         case "ClaudeBackgroundWorkBlocksQueryReplacementError":
         case "ClaudeAppendSystemPromptFileError":
         case "ClaudeAppendSystemPromptMissingValueError":
+        case "ClaudeInitializationTimeoutError":
         case "ClaudeSettingsLaunchArgError":
         case "ClaudeMcpRegistrationTimeoutError":
         case "CursorModelUnavailableError":

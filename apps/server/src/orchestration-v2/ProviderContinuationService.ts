@@ -96,7 +96,15 @@ export const layer = Layer.effectDiscard(
             );
           }
           if (request.clearIfCurrent !== undefined) {
-            yield* request.clearIfCurrent();
+            yield* request.clearIfCurrent({
+              suppressReofferWhile: threads.getThreadRecords(request.threadId, []).pipe(
+                Effect.map(
+                  (current) =>
+                    current.thread.archivedAt !== null || current.thread.deletedAt !== null,
+                ),
+                Effect.catchCause(() => Effect.succeed(true)),
+              ),
+            });
           } else if (request.dispatchIfCurrent !== undefined) {
             yield* request.dispatchIfCurrent(Effect.void);
           }
@@ -275,6 +283,10 @@ export const layer = Layer.effectDiscard(
                   ),
                   Effect.forkScoped,
                 );
+              } else if (request.clearIfCurrent !== undefined) {
+                // A failed native dispatch creates no turn to release its offer.
+                // The adapter bounds re-offers until new wake evidence arrives.
+                yield* request.clearIfCurrent();
               }
             }),
           ),

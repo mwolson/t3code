@@ -374,7 +374,32 @@ export class ProviderAdapterProtocolError extends Schema.TaggedError<ProviderAda
   }
 }
 
+export const PROVIDER_BUFFERED_OUTPUT_MESSAGE =
+  "Earlier background output from this conversation has not been delivered yet. Try again after it arrives.";
+export const PROVIDER_RUNNING_WORK_MESSAGE =
+  "This change would replace a provider process with running background work. Wait for it to finish or explicitly Stop it before trying again.";
+
+export class ProviderAdapterBufferedOutputError extends Schema.TaggedError<ProviderAdapterBufferedOutputError>()(
+  "ProviderAdapterBufferedOutputError",
+  { driver: ProviderDriverKind, providerThreadId: ProviderThreadId },
+) {
+  override get message(): string {
+    return PROVIDER_BUFFERED_OUTPUT_MESSAGE;
+  }
+}
+
+export class ProviderAdapterRunningWorkError extends Schema.TaggedError<ProviderAdapterRunningWorkError>()(
+  "ProviderAdapterRunningWorkError",
+  { driver: ProviderDriverKind },
+) {
+  override get message(): string {
+    return PROVIDER_RUNNING_WORK_MESSAGE;
+  }
+}
+
 export const ProviderAdapterV2Error = Schema.Union([
+  ProviderAdapterBufferedOutputError,
+  ProviderAdapterRunningWorkError,
   ProviderAdapterCapabilitiesError,
   ProviderAdapterOpenSessionError,
   ProviderAdapterCloseSessionError,
@@ -414,6 +439,8 @@ export interface ProviderAdapterV2EnsureThreadInput {
 }
 
 export interface ProviderAdapterV2TurnInput {
+  /** The manager has no acknowledged selection for this resident binding. */
+  readonly reapplySelection?: boolean;
   readonly appThread: OrchestrationV2AppThread;
   readonly threadId: ThreadId;
   readonly runId: RunId;
@@ -547,11 +574,52 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly events: Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>;
   /** Manager runtimes broadcast independent subscriptions; adapters may expose only a single-consumer stream. */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
+  /** Resident native binding, including a detached binding awaiting replacement. */
+  readonly hasResidentBinding?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<boolean>;
+  /** Output retained by this native binding, not its running-work roster. */
+  readonly hasBufferedOutputForThread?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<boolean>;
+  /** Complete producing-turn selection retained with native output, even after query exit. */
+  readonly bufferedExecutionSelection?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<ModelSelection | null>;
+  /** Adopt owned native output with unknown selection without replacing its binding.
+   * Draining it cannot establish selection; a user prompt still needs native acknowledgement.
+   */
+  readonly canAdoptUnselectedBufferedOutput?: (
+    providerThread: OrchestrationV2ProviderThread,
+    selection: ModelSelection,
+  ) => Effect.Effect<boolean>;
+  /** Last acknowledged complete selection on the same still-live native query. */
+  readonly liveExecutionSelection?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<ModelSelection | null>;
+  /** A failed same-selection start cannot change native selection configuration. */
+  readonly preservesSelectionOnSameSelectionFailure?: boolean;
+  /** True only when every supported selection field is explicit in the next wire request. */
+  readonly reappliesFullSelection?: (selection: ModelSelection) => Effect.Effect<boolean>;
+  /** Continuations only deliver existing output and cannot acknowledge configuration. */
+  readonly continuationDrainsOutput?: boolean;
+  /** Settled configuration check after a real start succeeds. Deterministic
+   * degradation can acknowledge the request; buffered output keeps its applied label.
+   */
+  readonly selectionAcknowledged?: (selection: ModelSelection) => Effect.Effect<boolean>;
+  /** Residency-owned evidence; absent or null means selection is not established. */
+  readonly executionSelection?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<ModelSelection | null>;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   /** Root-subscription probe; replacement checks opt in to subagents owned by the live process. */
   readonly hasPendingBackgroundWorkForThread?: (
     providerThread: OrchestrationV2ProviderThread,
     options?: { readonly includeSubagents?: boolean },
+  ) => Effect.Effect<boolean>;
+  /** Native work a replacement process would stop, independently of ingestion ownership. */
+  readonly hasRunningBackgroundWorkForThread?: (
+    providerThread: OrchestrationV2ProviderThread,
   ) => Effect.Effect<boolean>;
   /** Set only if all session background tasks end with its process; otherwise threads must keep Waiting. */
   readonly backgroundTasksEndWithProcess?: true;
@@ -575,6 +643,11 @@ export interface ProviderAdapterV2SessionRuntime {
       readonly providerThread: OrchestrationV2ProviderThread;
     },
   ) => Effect.Effect<boolean, ProviderAdapterV2Error>;
+  /**
+   * Success acknowledges the full requested selection after native configuration or prompt
+   * acceptance; deterministically skipped or rejected options settle without claiming application.
+   * Caching or scheduling setup does not acknowledge; failure or interruption establishes nothing.
+   */
   readonly startTurn: (
     input: ProviderAdapterV2TurnInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;

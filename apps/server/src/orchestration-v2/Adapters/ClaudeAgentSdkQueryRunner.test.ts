@@ -111,6 +111,58 @@ it.effect("forks a session stored under the instance's own CLAUDE_CONFIG_DIR", (
     }).pipe(Effect.provide(forkRunnerLayer)),
   ).pipe(Effect.provide(NodeServices.layer)),
 );
+it.effect("opens a query only after Claude acknowledges initialization", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const initialize = Promise.withResolvers<unknown>();
+      const initializing = Promise.withResolvers<void>();
+      let completedOpen = false;
+      const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(() => {
+        initializing.resolve();
+        return {
+          initializationResult: () => initialize.promise,
+          close: () => {},
+          next: () => Promise.resolve({ done: true, value: undefined }),
+          return: () => Promise.resolve({ done: true, value: undefined }),
+          [Symbol.asyncIterator]() {
+            return this;
+          },
+        } as unknown as ClaudeSdk.Query;
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+      const runner = yield* ClaudeAgentSdkQueryRunner;
+      const opening = yield* runner
+        .open({
+          threadId: ThreadId.make("thread-initialization"),
+          providerSessionId: ProviderSessionId.make("session-initialization"),
+          options: {
+            sessionId: "native-session-initialization",
+            model: "claude-sonnet-4-6",
+            tools: [],
+            permissionMode: "default",
+            effort: "high",
+          },
+        })
+        .pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              completedOpen = true;
+            }),
+          ),
+          Effect.forkChild({ startImmediately: true }),
+        );
+      yield* Effect.promise(() => initializing.promise);
+      assert.isFalse(completedOpen, "scheduling initialization is not acknowledgment");
+      initialize.resolve({ commands: [], models: [] });
+      const session = yield* Fiber.join(opening);
+      assert.isTrue(completedOpen);
+      yield* session.close;
+    }).pipe(Effect.provide(forkRunnerLayer)),
+  ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+const acknowledgeInitialization = () => Promise.resolve({ commands: [], models: [] });
+
 const realQueryRunner = layerQueryRunner.pipe(
   Layer.provide(PortScanner.layerTest),
   Layer.provide(
@@ -163,6 +215,7 @@ it.effect("reopens a stalled MCP registration before delivering the resumed prom
         if (typeof prompt === "string") throw new Error("Expected streaming input");
         prompts.push(prompt);
         return {
+          initializationResult: acknowledgeInitialization,
           setMcpServers: prompts.length === 1 ? firstRegistration : secondRegistration,
           close: prompts.length === 1 ? firstClose : secondClose,
           [Symbol.asyncDispose]: async () => {
@@ -237,6 +290,7 @@ it.effect.each([true, false])("only retries after confirmed process exit: %s", (
           cleanupProgress.resolve("retry");
         }
         return {
+          initializationResult: acknowledgeInitialization,
           setMcpServers: () => {
             registrationStarted.resolve();
             return first
@@ -287,6 +341,7 @@ it.effect("stops retrying MCP registration after two timeouts and reports the ca
       const querySpy = vi.spyOn(ClaudeSdk, "query").mockImplementation(() => {
         const started = querySpy.mock.calls.length === 1 ? firstRegistration : secondRegistration;
         return {
+          initializationResult: acknowledgeInitialization,
           setMcpServers: () => {
             started.resolve();
             return new Promise<ClaudeSdk.McpSetServersResult>(() => {});
@@ -319,6 +374,103 @@ it.effect("stops retrying MCP registration after two timeouts and reports the ca
   ),
 );
 
+it.effect("reopens a resumed query whose initialization stalls before delivering its prompt", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const initializationStarted = Promise.withResolvers<void>();
+      const prompts: AsyncIterable<ClaudeSdk.SDKUserMessage>[] = [];
+      const disposed = vi.fn(async () => {});
+      const secondRegistration = vi.fn(async () => ({
+        added: ["t3-code"],
+        removed: [],
+        errors: {},
+      }));
+      const querySpy = vi.spyOn(ClaudeSdk, "query").mockImplementation(({ prompt }) => {
+        if (typeof prompt === "string") throw new Error("Expected streaming input");
+        prompts.push(prompt);
+        const first = prompts.length === 1;
+        return {
+          initializationResult: () => {
+            if (!first) return acknowledgeInitialization();
+            initializationStarted.resolve();
+            return new Promise(() => {});
+          },
+          setMcpServers: secondRegistration,
+          close: vi.fn(),
+          [Symbol.asyncDispose]: disposed,
+        } as unknown as ClaudeSdk.Query;
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(() => querySpy.mockRestore()));
+      const runner = yield* ClaudeAgentSdkQueryRunner;
+      const opening = yield* runner.open(resumedMcpQueryInput).pipe(Effect.forkChild);
+      yield* Effect.promise(() => initializationStarted.promise);
+      yield* TestClock.adjust("90 seconds");
+      const session = yield* Fiber.join(opening);
+      yield* Effect.addFinalizer(() => session.close.pipe(Effect.orDie));
+
+      assert.equal(querySpy.mock.calls.length, 2);
+      assert.equal(disposed.mock.calls.length, 1);
+      assert.equal(querySpy.mock.calls[1]![0].options?.resume, FORK_SESSION_ID);
+      assert.deepEqual(secondRegistration.mock.calls, [[resumedMcpQueryInput.options.mcpServers]]);
+      const message = {
+        type: "user",
+        message: { role: "user", content: "Continue where you left off." },
+        parent_tool_use_id: null,
+        session_id: FORK_SESSION_ID,
+      } satisfies ClaudeSdk.SDKUserMessage;
+      yield* session.offer(message);
+      assert.isTrue((yield* Effect.promise(() => prompts[0]![Symbol.asyncIterator]().next())).done);
+      const delivered = yield* Effect.promise(() => prompts[1]![Symbol.asyncIterator]().next());
+      assert.deepEqual(delivered.value, message);
+    }).pipe(Effect.provide(realQueryRunner)),
+  ),
+);
+
+it.effect("stops reopening after two stalled initializations and reports the cause", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const firstInitialization = Promise.withResolvers<void>();
+      const secondInitialization = Promise.withResolvers<void>();
+      const disposed = vi.fn(async () => {});
+      const setMcpServers = vi.fn();
+      const querySpy = vi.spyOn(ClaudeSdk, "query").mockImplementation(() => {
+        const started =
+          querySpy.mock.calls.length === 1 ? firstInitialization : secondInitialization;
+        return {
+          initializationResult: () => {
+            started.resolve();
+            return new Promise(() => {});
+          },
+          setMcpServers,
+          [Symbol.asyncDispose]: disposed,
+        } as unknown as ClaudeSdk.Query;
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(() => querySpy.mockRestore()));
+      const runner = yield* ClaudeAgentSdkQueryRunner;
+      const opening = yield* runner
+        .open(resumedMcpQueryInput)
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Effect.promise(() => firstInitialization.promise);
+      yield* TestClock.adjust("90 seconds");
+      yield* Effect.promise(() => secondInitialization.promise);
+      yield* TestClock.adjust("90 seconds");
+      const result = yield* Fiber.join(opening);
+
+      assert.equal(result._tag, "Failure");
+      if (result._tag !== "Failure") return;
+      assert.equal(querySpy.mock.calls.length, 2);
+      assert.equal(disposed.mock.calls.length, 2);
+      assert.equal(setMcpServers.mock.calls.length, 0);
+      assert.equal(
+        makeProviderFailure({
+          cause: { _tag: "ProviderAdapterTurnStartError", cause: result.failure },
+        }).message,
+        "Claude did not finish starting. Retry the turn; if it keeps failing, check Claude and the server logs.",
+      );
+    }).pipe(Effect.provide(realQueryRunner)),
+  ),
+);
+
 it.effect("cancels a stalled registration without retrying or retaining its prompt queue", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -327,6 +479,7 @@ it.effect("cancels a stalled registration without retrying or retaining its prom
       const querySpy = vi.spyOn(ClaudeSdk, "query").mockImplementation(
         () =>
           ({
+            initializationResult: acknowledgeInitialization,
             setMcpServers: () => {
               registrationStarted.resolve();
               return new Promise<ClaudeSdk.McpSetServersResult>(() => {});
@@ -357,6 +510,7 @@ it.effect("does not reuse a fresh session ID after MCP registration times out", 
       const querySpy = vi.spyOn(ClaudeSdk, "query").mockImplementation(
         () =>
           ({
+            initializationResult: acknowledgeInitialization,
             setMcpServers: () => {
               registrationStarted.resolve();
               return new Promise<ClaudeSdk.McpSetServersResult>(() => {});
@@ -383,6 +537,13 @@ it.effect("does not reuse a fresh session ID after MCP registration times out", 
     }).pipe(Effect.provide(realQueryRunner)),
   ),
 );
+
+// The runner waits for Claude to acknowledge its initialize control request.
+const ANSWER_INITIALIZE = [
+  "IFS= read -r request",
+  `request_id=$(printf '%s' "$request" | sed 's/.*"request_id":"\\([^"]*\\)".*/\\1/')`,
+  `printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"commands":[],"models":[]}}}\\n' "$request_id"`,
+];
 
 function fakeClaudeCli(script: string): string {
   const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-claude-cli-"));
@@ -416,6 +577,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI pro
           'dir=$(dirname "$0")',
           'sleep 600 > "$dir/alive" &',
           'echo $! > "$dir/leftover.pid"',
+          ...ANSWER_INITIALIZE,
           "cat > /dev/null",
         ].join("\n"),
       );
@@ -517,6 +679,7 @@ describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("Claude CLI pro
         [
           'dir=$(dirname "$0")',
           `printf '%s' "$${PortScanner.AGENT_THREAD_ENV}" > "$dir/thread"`,
+          ...ANSWER_INITIALIZE,
           "cat > /dev/null",
         ].join("\n"),
       );
