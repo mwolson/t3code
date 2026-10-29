@@ -1438,7 +1438,9 @@ describe("AssetAccess", () => {
         range: "bytes=0-4",
         cookie: "session",
       });
-      expect(fetched).toEqual([{ url: media.fetchUrl, headers: { range: "bytes=0-4" } }]);
+      expect(fetched).toEqual([
+        { url: media.fetchUrl, headers: { range: "bytes=0-4" }, cwd: "/repo" },
+      ]);
       expect(response.status).toBe(206);
       // The upstream sent no type, so it comes from the file name the host gave the media.
       expect(response.headers["content-type"]).toBe("image/png");

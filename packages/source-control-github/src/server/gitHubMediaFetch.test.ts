@@ -1,11 +1,19 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Redacted from "effect/Redacted";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitHubMediaFetch from "./gitHubMediaFetch.ts";
+import * as GitHubRest from "./GitHubRest.ts";
+
+const unusedServices = Layer.mergeAll(
+  Layer.mock(GitHubRest.GitHubRest)({}),
+  TestSourceControlHost.layer(),
+);
 
 describe("GitHubMediaFetch", () => {
   it.effect("loads private media immediately after login with the GitHub credential", () => {
@@ -34,7 +42,7 @@ describe("GitHubMediaFetch", () => {
                   source: "gh" as const,
                   fingerprint: "fingerprint",
                 }),
-        }),
+        }).pipe(Layer.merge(unusedServices)),
       ),
       Effect.provideService(
         HttpClient.HttpClient,
@@ -78,7 +86,7 @@ describe("GitHubMediaFetch", () => {
               source: "gh" as const,
               fingerprint: "fingerprint",
             }),
-        }),
+        }).pipe(Layer.merge(unusedServices)),
       ),
       Effect.provideService(
         HttpClient.HttpClient,
@@ -101,4 +109,96 @@ describe("GitHubMediaFetch", () => {
       Effect.scoped,
     );
   });
+
+  it.effect.each([
+    ["a checkout", []],
+    ["a bare repository root", ["--git-dir=."]],
+  ] as const)(
+    "loads an SSO organization's uploads in %s through the signed URL the API renders",
+    ([, gitDir]) => {
+      const rendered: Array<unknown> = [];
+      const requests: Array<{ url: string; authorization: string | undefined }> = [];
+      const signed = "https://private-user-images.githubusercontent.com/1/2-sso.png?jwt=a.b&x=1";
+      return Effect.gen(function* () {
+        const fetchMedia = yield* GitHubMediaFetch.make;
+        const request = {
+          url: "https://github.com/user-attachments/assets/0f5c0e6e-sso",
+          headers: {},
+          cwd: "/sso-repo",
+        };
+        expect((yield* fetchMedia(request))?.status).toBe(200);
+        expect((yield* fetchMedia(request))?.status).toBe(200);
+        // Rendered once with the checkout's repository as context, then reused.
+        expect(rendered).toEqual([
+          { text: `![](${request.url})`, mode: "gfm", context: "owner/private" },
+        ]);
+        // github.com answers the token with the SSO sign-in page; the signed URL authorizes
+        // itself, so the token never leaves GitHub and a cached one skips the page entirely.
+        expect(requests).toEqual([
+          { url: request.url, authorization: "Bearer signed-in" },
+          { url: signed, authorization: undefined },
+          { url: signed, authorization: undefined },
+        ]);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            TestSourceControlHost.layer({
+              git: {
+                // git refuses an implicit bare root, so only the matching layout lists remotes.
+                execute: (input) =>
+                  Effect.succeed(
+                    input.cwd === "/sso-repo" &&
+                      input.args.join(" ") === [...gitDir, "remote", "-v"].join(" ")
+                      ? TestSourceControlHost.processOutput(
+                          "origin\thttps://github.com/owner/private.git (fetch)\n" +
+                            "origin\thttps://github.com/owner/private.git (push)\n",
+                        )
+                      : TestSourceControlHost.processOutput("", {
+                          stderr: "fatal: cannot use bare repository",
+                          exitCode: ChildProcessSpawner.ExitCode(128),
+                        }),
+                  ),
+              },
+            }),
+            Layer.mock(GitHubRest.GitHubRest)({
+              rest: (input) =>
+                Effect.sync(() => {
+                  rendered.push(input.body);
+                  return {
+                    status: 200,
+                    headers: {},
+                    body: `<p><img src="${signed.replace("&", "&amp;")}" alt=""></p>`,
+                    truncated: false,
+                    invalidUtf8: false,
+                  };
+                }),
+            }),
+            Layer.mock(GitHubCredentials.GitHubCredentials)({
+              get: (host) =>
+                Effect.succeed({
+                  host,
+                  token: Redacted.make("signed-in"),
+                  source: "gh" as const,
+                  fingerprint: "fingerprint",
+                }),
+            }),
+          ),
+        ),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) => {
+            requests.push({ url: request.url, authorization: request.headers.authorization });
+            const contentType = request.url === signed ? "image/png" : "text/html; charset=utf-8";
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                new Response(null, { status: 200, headers: { "content-type": contentType } }),
+              ),
+            );
+          }),
+        ),
+        Effect.scoped,
+      );
+    },
+  );
 });
