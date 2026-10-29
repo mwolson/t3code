@@ -6,6 +6,7 @@ import {
   MessageId,
   NodeId,
   ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
+  type OrchestratorMcpCapabilitiesInput,
   type OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpTarget,
   type OrchestrationV2ThreadShell,
@@ -1348,10 +1349,13 @@ describe("OrchestratorMcpService provider resolution", () => {
       },
     ];
 
-    const capabilitiesWith = (search?: string) =>
+    const capabilitiesWith = (input: string | OrchestratorMcpCapabilitiesInput = {}) =>
       Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        return yield* service.capabilities(scope, search === undefined ? {} : { search });
+        return yield* service.capabilities(
+          scope,
+          typeof input === "string" ? { search: input } : input,
+        );
       }).pipe(
         Effect.provide(
           layerOrchestratorService.pipe(
@@ -1441,6 +1445,66 @@ describe("OrchestratorMcpService provider resolution", () => {
           models: ["gpt-5"],
           omitted: 0,
         });
+      }),
+    );
+
+    it.effect(
+      "pages the complete visible catalog in user order including legacy and custom models",
+      () =>
+        Effect.gen(function* () {
+          const first = (yield* capabilitiesWith({
+            providerInstanceId: opencodeInstanceId,
+            modelLimit: 5,
+          })).providers[1]!;
+          assert.equal(first.modelsTotal, 12);
+          assert.equal(first.modelsNextCursor, 5);
+          assert.deepEqual(
+            first.models.map((entry) => entry.id),
+            ["oc/m12", "oc/m01", "oc/m03", "oc/m04", "oc/m05"],
+          );
+          const last = (yield* capabilitiesWith({
+            providerInstanceId: opencodeInstanceId,
+            modelCursor: 5,
+          })).providers[1]!;
+          assert.equal(last.modelsNextCursor, null);
+          assert.equal(last.modelsTotal, 12);
+          assert.deepEqual(
+            last.models.map((entry) => entry.id),
+            ["oc/m06", "oc/m07", "oc/m08", "oc/m09", "oc/m10", "oc/m11", "oc-custom"],
+          );
+          const empty = (yield* capabilitiesWith({
+            providerInstanceId: opencodeInstanceId,
+            modelCursor: 100,
+          })).providers[1]!;
+          assert.deepEqual(empty.models, []);
+          assert.equal(empty.modelsNextCursor, null);
+          const searched = (yield* capabilitiesWith({
+            providerInstanceId: opencodeInstanceId,
+            search: "OC M1",
+            modelLimit: 2,
+          })).providers[1]!;
+          assert.deepEqual(
+            searched.models.map((entry) => entry.id),
+            ["oc/m12", "oc/m10"],
+          );
+          assert.equal(searched.modelsTotal, 3);
+          assert.equal(searched.modelsNextCursor, 2);
+        }),
+    );
+
+    it.effect("returns full descriptors only for an explicitly expanded exact model", () =>
+      Effect.gen(function* () {
+        const input = { providerInstanceId: codexInstanceId, model: "gpt-6" };
+        const compact = (yield* capabilitiesWith(input)).providers[0]!;
+        assert.deepEqual(compact.models, [{ id: "gpt-6", label: "Sol" }]);
+        assert.equal(compact.modelsTotal, 1);
+        assert.equal(compact.modelsNextCursor, null);
+        const expanded = (yield* capabilitiesWith({ ...input, includeModelOptions: true }))
+          .providers[0]!;
+        assert.deepEqual(
+          expanded.models[0]?.options,
+          catalog[0]!.models[0]!.capabilities!.optionDescriptors,
+        );
       }),
     );
 
