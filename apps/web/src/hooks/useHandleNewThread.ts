@@ -146,14 +146,20 @@ export function createNewThreadHandler(router: AnyRouter) {
     );
     const projectDefaultModelSelection = projectSettings.settings.defaultModelSelection;
     const defaultRuntimeMode = projectSettings.settings.defaultRuntimeMode;
-    const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
-      resolveNewThreadModelSelectionOverride({
+    const resolveModelSelectionOverride = (destinationDraftId: DraftId) => {
+      const { stickyActiveProvider, stickyModelSelectionByProvider } =
+        useComposerDraftStore.getState();
+      return resolveNewThreadModelSelectionOverride({
         projectDefaultSelection: projectDefaultModelSelection ?? null,
+        stickySelection: stickyActiveProvider
+          ? (stickyModelSelectionByProvider[stickyActiveProvider] ?? null)
+          : null,
         carrySelection: carryModelSelection,
         carrySourceDraftId:
           currentRouteTarget?.kind === "draft" ? currentRouteTarget.draftId : null,
         destinationDraftId,
       });
+    };
     const resolveDefaultEnvMode = async (): Promise<DraftThreadEnvMode> => {
       // Environment queries wait for a connection, so reading the project file on an
       // offline machine would never settle and the draft would never open.
