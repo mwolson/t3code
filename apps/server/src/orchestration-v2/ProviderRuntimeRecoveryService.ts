@@ -204,8 +204,25 @@ export const make = Effect.gen(function* () {
       stoppedThisPass: ReadonlyMap<string, RecoverySession> = new Map(),
     ) {
       const now = yield* DateTime.now;
+      const repairRunIds = new Set(
+        yield* (
+          projection.runs.some((run) => run.status === "starting")
+            ? outbox.getRepairRunIds(projection.thread.id)
+            : Effect.succeed([])
+        ).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderRuntimeRecoveryError({
+                operation: "reconcile",
+                threadId: projection.thread.id,
+                cause,
+              }),
+          ),
+        ),
+      );
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
+        if (repairRunIds.has(run.id)) continue;
         if (run.status === "waiting") {
           const checkpointEffects = yield* outbox
             .listByCommandId(CommandId.make(`command:effect:checkpoint.capture:${run.id}`))
@@ -516,7 +533,10 @@ export const make = Effect.gen(function* () {
       const recoveredNonterminalRunIds = new Set(runs.map((run) => run.id));
       const cancelledStaleNodeIds = new Set<string>();
       for (const item of projection.turnItems ?? []) {
-        if (item.runId !== null && recoveredNonterminalRunIds.has(item.runId)) {
+        if (
+          item.runId !== null &&
+          (recoveredNonterminalRunIds.has(item.runId) || repairRunIds.has(item.runId))
+        ) {
           continue;
         }
         if (!isBackgroundCapableTurnItemType(item.type)) {
@@ -656,16 +676,17 @@ export const make = Effect.gen(function* () {
               now,
             )
           : undefined;
-      const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = continuationRun
-        ? [
-            {
-              id: `effect:restart-continuation:${continuationRun.id}`,
-              commandId,
-              threadId: projection.thread.id,
-              request: { type: "provider-runtime.continue", sourceRunId: continuationRun.id },
-            },
-          ]
-        : [];
+      const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> =
+        continuationRun && !repairRunIds.has(continuationRun.id)
+          ? [
+              {
+                id: `effect:restart-continuation:${continuationRun.id}`,
+                commandId,
+                threadId: projection.thread.id,
+                request: { type: "provider-runtime.continue", sourceRunId: continuationRun.id },
+              },
+            ]
+          : [];
       const stoppedSessions = projection.providerSessions.filter(
         (candidate) => candidate.status !== "stopped" && candidate.status !== "error",
       ).length;
