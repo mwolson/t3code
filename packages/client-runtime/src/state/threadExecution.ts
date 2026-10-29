@@ -413,6 +413,28 @@ export function presentProviderGoal(
   };
 }
 
+export interface WaitingRowStatus {
+  /** "Waiting on Review src/math.ts" or "Waiting on 2 subagents and 1 monitor". */
+  readonly label: string;
+  /** The kind that leads the label, for the row's icon. */
+  readonly kind: BackgroundWorkKind;
+}
+
+/** A waiting row names only work the agent waits on, never a dev server it left running. */
+export function presentWaitingRowStatus(
+  tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+): WaitingRowStatus | null {
+  const presentation = presentPendingBackgroundWork(
+    tasks.filter((task) => backgroundWorkHoldsCompletion([task])),
+  );
+  const [first] = presentation?.items ?? [];
+  if (presentation === null || first === undefined) return null;
+  return {
+    label: presentation.items.length === 1 ? `Waiting on ${first.label}` : presentation.title,
+    kind: first.kind,
+  };
+}
+
 export function notificationChildThreadId(
   source: OrchestrationV2NotificationSource,
 ): ThreadId | undefined {

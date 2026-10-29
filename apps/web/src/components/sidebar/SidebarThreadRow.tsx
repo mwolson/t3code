@@ -12,6 +12,7 @@ import {
   hasQueuedTurnStart,
   QUEUED_TURN_START_GRACE_MS,
 } from "@t3tools/client-runtime/state/thread-settled";
+import { presentWaitingRowStatus } from "@t3tools/client-runtime/state/thread-execution";
 import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
 import { resolveSettledThreadTimestamp } from "@t3tools/client-runtime/state/thread-sort";
 import { type EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
@@ -32,12 +33,14 @@ import {
   AlarmClockIcon,
   AlarmClockOffIcon,
   ArrowRightLeftIcon,
+  BotIcon,
   CheckIcon,
   CircleAlertIcon,
   CircleCheckIcon,
   CircleDashedIcon,
   CircleDotDashedIcon,
   ClockIcon,
+  EyeIcon,
   GitBranchIcon,
   MessageCircleQuestionIcon,
   PinIcon,
@@ -524,6 +527,10 @@ const TOP_STATUS_ICONS = {
   failed: CircleAlertIcon,
   done: CircleCheckIcon,
   woke: AlarmClockIcon,
+  background_task: ClockIcon,
+  command: TerminalIcon,
+  monitor: EyeIcon,
+  subagent: BotIcon,
 } as const;
 
 function TopStatusIcon(props: { icon: keyof typeof TOP_STATUS_ICONS; className: string }) {
@@ -720,6 +727,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     isActive: props.isActive,
     isSelected,
   });
+  const waitingStatus =
+    status === "waiting" ? presentWaitingRowStatus(thread.pendingBackgroundTasks) : null;
   const topStatus =
     status === "working"
       ? {
@@ -729,8 +738,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         }
       : status === "waiting"
         ? {
-            label: "Waiting",
-            icon: "waiting" as const,
+            label: waitingStatus?.label ?? "Waiting",
+            icon: waitingStatus?.kind ?? ("waiting" as const),
             className: "text-muted-foreground",
           }
         : status === "approval"
@@ -1299,12 +1308,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       // Folder rows have no status line, so the status takes the time slot.
                       <span
                         className={cn(
-                          "inline-flex items-center gap-1 text-xs font-medium",
+                          "inline-flex min-w-0 items-center gap-1 text-xs font-medium",
                           topStatus.className,
                         )}
                       >
                         <TopStatusIcon icon={topStatus.icon} className="size-3" />
-                        {topStatus.label}
+                        <span className={cn(waitingStatus !== null && "max-w-40 truncate")}>
+                          {topStatus.label}
+                        </span>
                       </span>
                     ) : (
                       <span className="text-xs">
@@ -1441,7 +1452,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ) : (
                 <span
                   className={cn(
-                    "group/sidebar-status-slot relative ml-auto flex h-5 min-w-8 shrink-0 items-stretch justify-end text-xs",
+                    "group/sidebar-status-slot relative ml-auto flex h-5 min-w-8 items-stretch justify-end text-xs",
+                    waitingStatus !== null ? "shrink" : "shrink-0",
                     props.sweepAction !== null && "hidden",
                   )}
                 >
@@ -1449,9 +1461,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                     className={cn(
                       isWokeStatus
                         ? "pointer-events-auto"
-                        : "pointer-events-none group-has-[:focus-visible]/sidebar-status-slot:absolute group-has-[:focus-visible]/sidebar-status-slot:right-0 group-has-[:focus-visible]/sidebar-status-slot:opacity-0 group-any-hover/sidebar-row:absolute group-any-hover/sidebar-row:right-0 group-any-hover/sidebar-row:opacity-0",
-                      "flex items-center self-center justify-self-end tabular-nums text-secondary-label",
-                      snoozeMenuOpen && "pointer-events-none absolute right-0 opacity-0",
+                        : "pointer-events-none group-has-[:focus-visible]/sidebar-status-slot:absolute group-has-[:focus-visible]/sidebar-status-slot:inset-x-0 group-has-[:focus-visible]/sidebar-status-slot:overflow-hidden group-has-[:focus-visible]/sidebar-status-slot:opacity-0 group-any-hover/sidebar-row:absolute group-any-hover/sidebar-row:inset-x-0 group-any-hover/sidebar-row:overflow-hidden group-any-hover/sidebar-row:opacity-0",
+                      "flex min-w-0 items-center justify-end self-center tabular-nums text-secondary-label",
+                      snoozeMenuOpen &&
+                        "pointer-events-none absolute inset-x-0 overflow-hidden opacity-0",
                     )}
                   >
                     {topStatus ? (
@@ -1478,7 +1491,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       ) : (
                         <span
                           className={cn(
-                            "inline-flex items-center gap-1 font-medium",
+                            "inline-flex min-w-0 items-center gap-1 font-medium",
                             topStatus.className,
                           )}
                         >
@@ -1486,7 +1499,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                           {/* Not a live region: a collapsed sidebar is inert, so
                             BackgroundThreadAnnouncer and the open thread's
                             timeline speak status changes instead. */}
-                          {topStatus.label}
+                          <span className={cn(waitingStatus !== null && "max-w-40 truncate")}>
+                            {topStatus.label}
+                          </span>
                           {status === "working" ? (
                             <span aria-hidden>
                               <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
