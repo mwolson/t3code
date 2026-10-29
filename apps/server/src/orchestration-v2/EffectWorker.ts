@@ -1,4 +1,4 @@
-import { CommandId } from "@t3tools/contracts";
+import { CommandId, type RunAttemptId, type RunId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -38,6 +38,8 @@ export class OrchestrationEffectExecutionError extends Schema.TaggedError<Orches
   },
 ) {}
 
+const isOrchestrationEffectExecutionError = Schema.is(OrchestrationEffectExecutionError);
+
 /**
  * Do not apply this to `provider-turn.restart`: that compound effect also runs
  * detach and start. Swallowing a start failure that happens to mention
@@ -56,10 +58,37 @@ function isNonRetryableProviderTurnControlFailure(effectType: string, errorText:
   );
 }
 
+/**
+ * Effects that move a run out of `starting`. Giving up on one would leave its
+ * run `starting` until the user stops it or the server restarts, so the worker
+ * keeps known failed executions retryable past the attempt budget. Exhausted
+ * claims with an unknown outcome repair without repeating provider startup.
+ */
+const ownsStartingRun = (effectType: EffectOutbox.OrchestrationEffectV2["request"]["type"]) =>
+  effectType === "provider-turn.start" || effectType === "provider-turn.restart";
+
+/** Whether a start effect failed because its run has no state left to settle. */
+const cannotSettleRun = (cause: Cause.Cause<unknown>) =>
+  Cause.findErrorOption(cause).pipe(
+    Option.exists(
+      (error) =>
+        ProviderTurnStartService.isProviderTurnStartRunStateMissingError(error) ||
+        (isOrchestrationEffectExecutionError(error) &&
+          ProviderTurnStartService.isProviderTurnStartRunStateMissingError(error.cause)),
+    ),
+  );
+
 export interface OrchestrationEffectExecutorV2Shape {
   readonly execute: (
     effect: EffectOutbox.OrchestrationEffectV2,
-    options?: { readonly willRetry: boolean },
+    options?: {
+      readonly willRetry: boolean;
+      /** Persist repair ownership before the last attempt tries to fail the run. */
+      readonly beforeFailStartingRun?: () => Effect.Effect<
+        RunAttemptId | null,
+        EffectOutbox.EffectOutboxError
+      >;
+    },
   ) => Effect.Effect<void, OrchestrationEffectExecutionError>;
   /** Settle owned work before the outbox becomes terminal. Failed repairs remain retryable. */
   readonly compensateDeadLetter: (
@@ -99,6 +128,39 @@ export const layerExecutor: Layer.Layer<
       yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const settings = yield* ServerSettings.ServerSettingsService;
+    const startRun = Effect.fn("OrchestrationEffectExecutor.startRun")(function* (
+      effect: EffectOutbox.OrchestrationEffectV2,
+      runId: RunId,
+      willRetry: boolean,
+      beforeFailStartingRun?: () => Effect.Effect<
+        RunAttemptId | null,
+        EffectOutbox.EffectOutboxError
+      >,
+    ) {
+      return yield* providerTurnStart.start({ threadId: effect.threadId, runId, willRetry }).pipe(
+        Effect.catchCauseIf(
+          (cause) => !willRetry && !Cause.hasInterruptsOnly(cause),
+          (cause) =>
+            Effect.gen(function* () {
+              yield* Effect.logWarning(
+                "Last run start attempt failed",
+                {
+                  effectId: effect.id,
+                  effectType: effect.request.type,
+                  runId,
+                },
+                cause,
+              );
+              const expectedAttemptId = yield* beforeFailStartingRun?.() ?? Effect.void;
+              yield* providerTurnStart.failStartingRun({
+                threadId: effect.threadId,
+                runId,
+                ...(expectedAttemptId === undefined ? {} : { expectedAttemptId }),
+              });
+            }),
+        ),
+      );
+    });
     return OrchestrationEffectExecutorV2.of({
       execute: Effect.fn("OrchestrationEffectExecutorV2.execute")(function (effect, options) {
         const willRetry = options?.willRetry ?? false;
@@ -165,18 +227,21 @@ export const layerExecutor: Layer.Layer<
                 ),
               );
           case "provider-turn.start":
-            return providerTurnStart
-              .start({ threadId: effect.threadId, runId: effect.request.runId, willRetry })
-              .pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new OrchestrationEffectExecutionError({
-                      effectId: effect.id,
-                      effectType: effect.request.type,
-                      cause,
-                    }),
-                ),
-              );
+            return startRun(
+              effect,
+              effect.request.runId,
+              willRetry,
+              options?.beforeFailStartingRun,
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
           case "provider-turn.interrupt": {
             const request = effect.request;
             return providerTurnControl
@@ -381,11 +446,7 @@ export const layerExecutor: Layer.Layer<
                       : Effect.void,
                 ),
                 Effect.andThen(
-                  providerTurnStart.start({
-                    threadId: effect.threadId,
-                    runId: effect.request.runId,
-                    willRetry,
-                  }),
+                  startRun(effect, effect.request.runId, willRetry, options?.beforeFailStartingRun),
                 ),
                 Effect.mapError(
                   (cause) =>
@@ -789,7 +850,6 @@ export const layerWithOptions = (
             effect.request.type === "provider-turn.start" ||
             effect.request.type === "provider-turn.restart"
           ) {
-            // A crash before this marker commits still loses repair intent during process recovery.
             const owned = yield* outbox.beginRepair({
               effectId: effect.id,
               workerId,
@@ -797,8 +857,21 @@ export const layerWithOptions = (
               error,
             });
             if (!owned) return false;
+            effect = {
+              ...effect,
+              request: {
+                type: "provider-turn.repair",
+                runId: effect.request.runId,
+                attemptId: null,
+                error,
+              },
+            };
             const stored = yield* outbox.get(effect.id);
-            if (Option.isNone(stored)) return false;
+            if (Option.isNone(stored) || stored.value.request.type !== "provider-turn.repair")
+              return yield* new EffectOutbox.EffectOutboxError({
+                operation: "begin-repair",
+                effectId: effect.id,
+              });
             effect = stored.value;
           }
           yield* executor.compensateDeadLetter(effect, error);
@@ -827,7 +900,7 @@ export const layerWithOptions = (
           if (Option.isNone(claimed)) {
             return false;
           }
-          const effect = claimed.value;
+          let effect = claimed.value;
           // Arm cancellation before rereading durable state to close the read-to-registration race.
           const cancellation = outbox
             .awaitCancellation(effect.id)
@@ -854,11 +927,14 @@ export const layerWithOptions = (
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
 
+          // An exhausted claim may follow a lost lease with an unknown start
+          // outcome. Repair it without executing the provider again.
           if (
             effect.request.type === "provider-turn.repair" ||
             (effect.attemptCount > maxAttempts &&
               (effect.request.type === "provider-turn.start" ||
-                effect.request.type === "provider-turn.restart"))
+                effect.request.type === "provider-turn.restart") &&
+              !effect.request.retryAfterFailure)
           ) {
             const error =
               effect.request.type === "provider-turn.repair"
@@ -873,8 +949,49 @@ export const layerWithOptions = (
               });
             return true;
           }
+          let repairStarted = false;
           const execution = executor
-            .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
+            .execute(effect, {
+              willRetry: effect.attemptCount < maxAttempts,
+              beforeFailStartingRun: Effect.fn("EffectWorker.beforeFailStartingRun")(function* () {
+                if (
+                  effect.request.type !== "provider-turn.start" &&
+                  effect.request.type !== "provider-turn.restart"
+                )
+                  return null;
+                // Recovery must retain this attempt's settlement even if the
+                // following projection read or guarded write fails.
+                const owned = yield* outbox.beginRepair({
+                  effectId: effect.id,
+                  workerId,
+                  runId: effect.request.runId,
+                  error: "T3 Code could not start this turn.",
+                });
+                if (!owned)
+                  return yield* new EffectOutbox.EffectOutboxError({
+                    operation: "begin-repair",
+                    effectId: effect.id,
+                  });
+                effect = {
+                  ...effect,
+                  request: {
+                    type: "provider-turn.repair",
+                    runId: effect.request.runId,
+                    attemptId: null,
+                    error: "T3 Code could not start this turn.",
+                  },
+                };
+                repairStarted = true;
+                const stored = yield* outbox.get(effect.id);
+                if (Option.isNone(stored) || stored.value.request.type !== "provider-turn.repair")
+                  return yield* new EffectOutbox.EffectOutboxError({
+                    operation: "begin-repair",
+                    effectId: effect.id,
+                  });
+                effect = stored.value;
+                return stored.value.request.attemptId;
+              }),
+            })
             .pipe(boundExecution(effect), Effect.as("executed" as const));
           const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
             Effect.ensuring(outbox.clearCancellation(effect.id)),
@@ -884,7 +1001,13 @@ export const layerWithOptions = (
           }
           if (Exit.isSuccess(exit)) {
             return yield* Effect.gen(function* () {
-              const completed = yield* outbox.succeed({ effectId: effect.id, workerId });
+              const completed = yield* repairStarted
+                ? outbox.fail({
+                    effectId: effect.id,
+                    workerId,
+                    error: "T3 Code could not start this turn.",
+                  })
+                : outbox.succeed({ effectId: effect.id, workerId });
               if (!completed) {
                 if (yield* wasCancelled(effect.id)) return true;
                 return yield* new OrchestrationEffectWorkerError({
@@ -911,20 +1034,27 @@ export const layerWithOptions = (
             updated = yield* outbox
               .succeed({ effectId: effect.id, workerId })
               .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)));
-          } else if (effect.attemptCount < maxAttempts) {
+          } else if (repairStarted && !cannotSettleRun(exit.cause)) {
+            return yield* Effect.failCause(exit.cause).pipe(
+              Effect.onError((cause) => requeueClaim(effect, cause)),
+            );
+          } else if (
+            effect.attemptCount < maxAttempts ||
+            (ownsStartingRun(effect.request.type) && !cannotSettleRun(exit.cause))
+          ) {
             updated = yield* outbox
               .retry({
                 effectId: effect.id,
                 workerId,
                 error,
+                executionFailed: ownsStartingRun(effect.request.type),
                 delayMs: Math.min(30_000, 100 * 2 ** Math.max(0, effect.attemptCount - 1)),
               })
               .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
-          } else if (
-            effect.request.type === "provider-turn.start" ||
-            effect.request.type === "provider-turn.restart"
-          ) {
-            updated = yield* settleRepair(effect, error);
+          } else if (cannotSettleRun(exit.cause)) {
+            updated = yield* outbox
+              .fail({ effectId: effect.id, workerId, error })
+              .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           } else {
             updated = yield* executor.compensateDeadLetter(effect, error).pipe(
               Effect.andThen(outbox.fail({ effectId: effect.id, workerId, error })),
