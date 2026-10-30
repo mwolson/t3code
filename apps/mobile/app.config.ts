@@ -1,5 +1,7 @@
 import type { ExpoConfig } from "expo/config";
 
+import { resolvePersonalBackgroundRoute } from "./src/features/cloud/personalBackgroundRoute.ts";
+
 import { BRAND_ASSET_PATHS } from "../../scripts/lib/brand-assets.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 
@@ -10,10 +12,24 @@ Object.assign(process.env, repoEnv);
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
+const personalPushRelay = repoEnv.T3CODE_IOS_PERSONAL_PUSH_RELAY === "1";
+if (
+  isIosPersonalTeamBuild &&
+  personalPushRelay &&
+  resolvePersonalBackgroundRoute({
+    iosPushRelay: personalPushRelay,
+    relay: { url: repoEnv.T3CODE_RELAY_URL, backgroundUrl: repoEnv.T3CODE_BACKGROUND_RELAY_URL },
+  }).kind === "disabled"
+) {
+  throw new Error(
+    "T3CODE_IOS_PERSONAL_PUSH_RELAY=1 requires T3CODE_BACKGROUND_RELAY_URL to be a private HTTPS origin distinct from the primary relay and t3.codes.",
+  );
+}
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
   (APP_VARIANT === "development" ? "appVersion" : "fingerprint");
 
+const personalTeamId = repoEnv.T3CODE_IOS_TEAM_ID?.trim();
 const personalTeamBundleIdentifier = repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
 const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
 
@@ -34,6 +50,14 @@ if (
   throw new Error(
     "T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID must be a reverse-DNS identifier such as com.example.t3code when T3CODE_IOS_PERSONAL_TEAM=1.",
   );
+}
+
+if (
+  isIosPersonalTeamBuild &&
+  personalTeamId !== undefined &&
+  !/^[A-Z0-9]{10}$/.test(personalTeamId)
+) {
+  throw new Error("T3CODE_IOS_TEAM_ID must be ten uppercase letters or digits.");
 }
 
 const DEVELOPMENT_ASSETS = {
@@ -199,8 +223,7 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
   "expo-sharing",
   {
     ios: {
-      // Personal Teams cannot sign App Groups or extension targets; keep local builds usable.
-      enabled: !isIosPersonalTeamBuild,
+      enabled: true,
       extensionBundleIdentifier: `${iosBundleIdentifier}.sharing`,
       appGroupId: `group.${iosBundleIdentifier}`,
       activationRule: {
@@ -235,7 +258,7 @@ const config: ExpoConfig = {
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
   updates: {
-    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
+    enabled: !isIosPersonalTeamBuild && repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
     url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
     checkAutomatically: "ON_LOAD",
     fallbackToCacheTimeout: 0,
@@ -246,13 +269,17 @@ const config: ExpoConfig = {
     requireFullScreen: process.env.T3_SHOWCASE_CAPTURE_BUILD === "1",
     bundleIdentifier: iosBundleIdentifier,
     // Avoid Personal Team fallback: it cannot sign App Groups, Apple sign-in or push entitlements.
-    appleTeamId: "ARK85ZXQ4Z",
-    associatedDomains: [
-      `applinks:${variant.relyingParty}`,
-      `webcredentials:${variant.relyingParty}`,
-    ],
+    appleTeamId: isIosPersonalTeamBuild ? personalTeamId : "ARK85ZXQ4Z",
+    ...(!isIosPersonalTeamBuild
+      ? {
+          associatedDomains: [
+            `applinks:${variant.relyingParty}`,
+            `webcredentials:${variant.relyingParty}`,
+          ],
+        }
+      : {}),
     entitlements: {
-      "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
+      "keychain-access-groups": [`$(AppIdentifierPrefix)${iosBundleIdentifier}`],
     },
     infoPlist: {
       UISupportedInterfaceOrientations: [
@@ -333,9 +360,8 @@ const config: ExpoConfig = {
     ],
     "expo-secure-store",
     "expo-sqlite",
-    ...(isIosPersonalTeamBuild
-      ? [sharingPlugin]
-      : ["./plugins/withShareExtensionDisplayName.cjs", sharingPlugin]),
+    "./plugins/withShareExtensionDisplayName.cjs",
+    sharingPlugin,
     [
       "expo-notifications",
       {
@@ -424,7 +450,8 @@ const config: ExpoConfig = {
     // Compile out the unused pedometer to avoid an iOS motion purpose string.
     ["expo-sensors", { motionPermission: false }],
     // Mods run in reverse order; expo-widgets must create and wipe the target before assets are added.
-    ...(!isIosPersonalTeamBuild ? ["./plugins/withWidgetLogoAsset.cjs", widgetsPlugin] : []),
+    "./plugins/withWidgetLogoAsset.cjs",
+    widgetsPlugin,
     "./plugins/withAndroidNetworkSecurityConfig.cjs",
     "./plugins/withAndroidGradleHeap.cjs",
     "./plugins/withAndroidInputBackground.cjs",
@@ -437,6 +464,7 @@ const config: ExpoConfig = {
   extra: {
     appVariant: APP_VARIANT,
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
+    ...(isIosPersonalTeamBuild ? { iosPushRelay: personalPushRelay } : {}),
     relay: {
       url: repoEnv.T3CODE_RELAY_URL ?? null,
       backgroundUrl: repoEnv.T3CODE_BACKGROUND_RELAY_URL ?? null,
