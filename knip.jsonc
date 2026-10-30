@@ -119,6 +119,10 @@
       // React Native codegen discovers component specifications by filename.
       "entry": ["src/*NativeComponent.ts!"],
     },
+    "infra/personal-relay": {
+      "entry": ["src/main.ts!", "src/adminEntry.ts!", "scripts/*.ts"],
+      "ignoreDependencies": ["drizzle-orm"],
+    },
     "infra/task-cache": {
       "ignore": ["vendor/**"],
       // The bootstrap and Vite+ hook are loaded by shell/package configuration.

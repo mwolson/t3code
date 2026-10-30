@@ -40,7 +40,7 @@ import * as DeliveryAttempts from "./DeliveryAttempts.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as RelayConfiguration from "../Config.ts";
 import * as ApnsDeliveryQueue from "./ApnsDeliveryQueue.ts";
-import { withSpanAttributes } from "../observability.ts";
+import { withSpanAttributes } from "../spanAttributes.ts";
 
 import {
   alertForAttentionTransition,
@@ -506,7 +506,7 @@ export class ApnsDeliveries extends Context.Service<
   }
 >()("t3code-relay/agentActivity/ApnsDeliveries") {}
 
-const make = Effect.gen(function* () {
+export const make = Effect.gen(function* () {
   const attempts = yield* DeliveryAttempts.DeliveryAttempts;
   const liveActivities = yield* LiveActivities.LiveActivities;
   const deliveryQueue = yield* ApnsDeliveryQueue.ApnsDeliveryQueue;
