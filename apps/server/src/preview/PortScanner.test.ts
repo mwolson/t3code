@@ -407,6 +407,13 @@ effectIt.effect("discovers owned listeners without sending HTTP or TLS probes", 
     expect(requests).toEqual([]);
 
     stdout = owned;
+    expect(yield* scanner.scan()).toHaveLength(0);
+    stdout = unowned;
+    yield* TestClock.adjust(Duration.seconds(3));
+    expect(yield* scanner.scan()).toHaveLength(0);
+    stdout = owned;
+    expect(yield* scanner.scan()).toHaveLength(0);
+    yield* TestClock.adjust(Duration.seconds(3));
     expect(yield* scanner.scan()).toHaveLength(1);
     expect(requests).toEqual([]);
 
@@ -565,6 +572,8 @@ effectIt.effect(
 
       procFiles["/proc/net/tcp"] = PROC_NET_TCP;
       procFiles["/proc/net/tcp6"] = PROC_NET_TCP6;
+      expect(yield* scanner.scan()).toEqual([]);
+      yield* TestClock.adjust(Duration.seconds(3));
       expect((yield* scanner.scan()).map(({ pid }) => pid)).toEqual([4242, 4242]);
       yield* scanner.retain.pipe(Effect.scoped);
       procFds["77"] = procFds["4242"]!;
@@ -774,6 +783,7 @@ effectIt.effect("rechecks the socket owner before stopping a Linux server withou
       .pipe(Effect.match({ onFailure: (error) => error.reason, onSuccess: () => null }));
     expect(signal).not.toHaveBeenCalled();
     expect(result).toBe("not-found");
+    yield* TestClock.adjust(Duration.seconds(3));
     expect(yield* scanner.scan()).toMatchObject([{ pid: 5000, port: 8765 }]);
     yield* scanner.stopServer({ pid: 5000, port: 8765 });
     expect(signal).toHaveBeenCalledExactlyOnceWith(5300, "SIGTERM");
@@ -997,6 +1007,8 @@ effectIt.effect.each(["linux", "darwin"] as const)(
         expect(yield* scanner.scan()).toEqual([]);
         environmentFails = false;
       }
+      expect(yield* scanner.scan()).toEqual([]);
+      yield* TestClock.adjust(Duration.seconds(3));
       expect(yield* scanner.scan()).toMatchObject([
         { port: agentPort, pid: 4242, terminal: null, agent: { threadId: "thread-agent" } },
       ]);
