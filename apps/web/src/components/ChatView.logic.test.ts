@@ -176,6 +176,35 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     ).toBe(false);
   });
 
+  it("acknowledges a message queued behind an idle compaction", () => {
+    const localDispatch = createLocalDispatchSnapshot(
+      makeThread({ latestRun: completedTurn, runtime: readySession }),
+      { latestUserMessageId: MessageId.make("message-before-send") },
+    );
+    // The shell hides the silent compaction run, so its runtime reports the queued message's run.
+    const queuedRun = {
+      ...completedTurn,
+      runId: RunId.make("turn-queued"),
+      status: "queued" as const,
+      requestedAt: "2026-03-29T00:01:00.000Z",
+      startedAt: null,
+      completedAt: null,
+    };
+
+    expect(
+      hasServerAcknowledgedLocalDispatch({
+        localDispatch,
+        phase: "running",
+        latestRun: queuedRun,
+        latestUserMessageId: MessageId.make("message-queued"),
+        runtime: { ...readySession, status: "queued" },
+        hasPendingApproval: false,
+        hasPendingUserInput: false,
+        threadError: null,
+      }),
+    ).toBe(true);
+  });
+
   it("waits for the matching running turn before acknowledging", () => {
     const localDispatch = createLocalDispatchSnapshot(
       makeThread({ latestRun: completedTurn, runtime: readySession }),
