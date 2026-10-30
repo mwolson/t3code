@@ -68,7 +68,12 @@ import {
   stagePendingTerminalLaunch,
 } from "../terminal/terminalLaunchContext";
 import type { ThreadDetailScreenProps } from "./ThreadDetailScreen";
-import { ThreadScreenBinding, ThreadScreenFallback, ThreadScreenHost } from "./ThreadScreenHost";
+import {
+  ThreadScreenBinding,
+  ThreadScreenFallback,
+  ThreadScreenHost,
+  useThreadScreenPaneWidth,
+} from "./ThreadScreenHost";
 import { draftRouteIdentity } from "./thread-route-state";
 import { NewTaskDraftRouteScreen, type NewTaskDraftRouteParams } from "./NewTaskDraftRouteScreen";
 import { GitOverviewSheet } from "./git/GitOverviewSheet";
@@ -97,6 +102,7 @@ import {
 } from "./thread-inspector-content-stack";
 import { threadRouteIsHydrating } from "./thread-route-hydration";
 import { ThreadHeader } from "./ThreadHeader";
+import { threadPrHeaderForm } from "./thread-pr-header-presentation";
 import {
   useAndroidWorkspaceBack,
   useWorkspaceBackNavigation,
@@ -434,6 +440,11 @@ function ThreadRouteContent(
   const threadId = firstRouteParam(params.threadId);
   const routeThreadIdentity =
     environmentIdRaw !== null && threadId !== null ? `${environmentIdRaw}:${threadId}` : null;
+  // The header spans the thread pane, so its measured width picks the pull request form.
+  // Selecting the form rather than the width re-renders only when the form changes.
+  const pullRequestForm = useThreadScreenPaneWidth((width) =>
+    threadPrHeaderForm(width ?? panes.contentPaneWidth),
+  );
   // The chosen mode survives thread switches; "route" only applies while the route
   // supplies an inspector, which is also the default whenever it does.
   const [chosenInspectorMode, setChosenInspectorMode] = useState<ThreadInspectorMode | null>(null);
@@ -956,6 +967,7 @@ function ThreadRouteContent(
           header={
             props.inspectorPresentation ? null : (
               <ThreadHeader
+                thread={selectedThread}
                 title={selectedThread.title}
                 subtitle={headerSubtitle}
                 headerColor={headerColor}
@@ -969,6 +981,7 @@ function ThreadRouteContent(
                 onOpenGitInspector={handleOpenGitInspector}
                 onOpenFilesInspector={handleOpenFilesInspector}
                 onReturnToThread={props.onReturnToThread}
+                pullRequestForm={pullRequestForm}
               />
             )
           }

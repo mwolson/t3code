@@ -11,6 +11,8 @@ export interface AppBarAction {
   readonly loading?: boolean;
   readonly selected?: boolean;
   readonly tintColor?: ColorValue;
+  /** Android keeps this action in the overflow menu. */
+  readonly overflowOnly?: boolean;
 }
 
 export type AppBarMenuItem =
@@ -71,6 +73,8 @@ export interface AppBarProps {
   /** Android: one title row with the subtitle inline. iOS ignores it. */
   readonly compact?: boolean;
   readonly trailing?: ReactNode;
+  /** Android places this just left of the rightmost control: trailing, overflow or last action. */
+  readonly beforeLastControl?: ReactNode;
   readonly matchSearchSurface?: boolean;
   readonly options?: AppNativeStackNavigationOptions;
   readonly optionsVersion?: unknown;

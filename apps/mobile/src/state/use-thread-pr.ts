@@ -4,7 +4,7 @@ import {
   createLinkedPullRequestSummaryAtomFamily,
   pullRequestDetailToVcsStatus,
 } from "@t3tools/client-runtime/state/pull-requests";
-import type { EnvironmentId, PullRequestSummary } from "@t3tools/contracts";
+import type { EnvironmentId, PullRequestSummary, VcsStatusResult } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { Atom } from "effect/reactivity";
 import { useMemo } from "react";
@@ -13,6 +13,7 @@ import { connectionAtomRuntime } from "../connection/runtime";
 import { serverEnvironment } from "./server";
 import { useEnvironmentQuery } from "./query";
 import {
+  presentThreadBranchStatusPr,
   rememberBounded,
   resolveThreadPrSource,
   presentThreadPr,
@@ -58,7 +59,10 @@ const pullRequestSummaryAtom = createLinkedPullRequestSummaryAtomFamily(
 
 export { type ThreadPr, type ThreadPrPresentation } from "./thread-pr-presentation";
 
-export function useThreadPr(thread: EnvironmentThreadShell): ThreadPrPresentation | null {
+export function useThreadPr(
+  thread: EnvironmentThreadShell,
+  branchStatus?: VcsStatusResult | null,
+): ThreadPrPresentation | null {
   const supportsLinks = useAtomValue(
     serverEnvironment.configValueAtom(thread.environmentId),
     (config) => config !== null,
@@ -97,10 +101,15 @@ export function useThreadPr(thread: EnvironmentThreadShell): ThreadPrPresentatio
   const summaryPresentation =
     summary === undefined
       ? null
-      : presentThreadPr(pullRequestDetailToVcsStatus(summary), {
-          kind: summary.provider,
-          name: summary.provider,
-          baseUrl: "",
-        });
-  return linkedPresentation ?? summaryPresentation;
+      : presentThreadPr(
+          pullRequestDetailToVcsStatus(summary),
+          { kind: summary.provider, name: summary.provider, baseUrl: "" },
+          { checksState: summary.checksState, mergeability: summary.mergeability },
+        );
+  const branchStatusPresentation = presentThreadBranchStatusPr(
+    { branch: thread.branch, pullRequests: thread.pullRequests },
+    branchStatus,
+    supportsLinks,
+  );
+  return linkedPresentation ?? summaryPresentation ?? branchStatusPresentation;
 }

@@ -19,6 +19,7 @@ import {
 import { useNavigation } from "@react-navigation/native";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 
+import type { ReactElement } from "react";
 import { useEnvironmentScope } from "../../state/session";
 import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
 import {
@@ -112,6 +113,7 @@ type ThreadGitControlsProps = ThreadGitMenuProps & {
   readonly terminalSessions: ReadonlyArray<TerminalMenuSession>;
   readonly showActionControls?: boolean;
   readonly showDirectFileControl?: boolean;
+  readonly pullRequestControl?: ReactElement | undefined;
   readonly onOpenTerminal: (terminalId?: string | null) => void;
   readonly onOpenNewTerminal: () => void;
   readonly onRunProjectScript: (script: ProjectScript) => Promise<void>;
@@ -435,6 +437,10 @@ export function ThreadGitControls(props: ThreadGitControlsProps) {
     return null;
   }
 
+  // Header items run right to left: the pull request button follows whichever item is rightmost.
+  const pullRequestControl = props.pullRequestControl ? (
+    <Toolbar.Custom>{props.pullRequestControl}</Toolbar.Custom>
+  ) : null;
   return (
     <Toolbar placement="right">
       {showActionControls && props.auxiliaryPaneControl ? (
@@ -445,6 +451,7 @@ export function ThreadGitControls(props: ThreadGitControlsProps) {
           separateBackground
         />
       ) : null}
+      {props.auxiliaryPaneControl ? pullRequestControl : null}
       {showActionControls ? (
         <Toolbar.Menu
           accessibilityLabel="Open terminal"
@@ -502,6 +509,7 @@ export function ThreadGitControls(props: ThreadGitControlsProps) {
           </Toolbar.MenuAction>
         </Toolbar.Menu>
       ) : null}
+      {props.auxiliaryPaneControl ? null : pullRequestControl}
       {showActionControls && props.showDirectFileControl ? (
         <Toolbar.Button
           accessibilityLabel="Open files"
