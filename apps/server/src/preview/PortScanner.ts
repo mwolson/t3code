@@ -72,6 +72,8 @@ export const AGENT_THREAD_ENV = "T3CODE_THREAD_ID";
 const PORT_DISCOVERY_ENV = "T3CODE_PORT_DISCOVERY";
 
 const POLL_INTERVAL = Duration.seconds(3);
+/** Build workers and test runners hold private ports for moments, so a new port waits this long. */
+const LISTENER_MIN_AGE_MS = Duration.toMillis(POLL_INTERVAL);
 const LSOF_TIMEOUT_MS = 5_000;
 const PROC_FD_WALK_LIMIT = 50_000;
 const SOCKET_OWNER_ATTEMPTS = 3;
@@ -192,17 +194,21 @@ const projectWebProbeSnapshot = (
   configuredUrls: ReadonlyArray<string>,
 ): ReadonlyArray<DiscoveredLocalServer> => {
   const visibleByServer = new Map<string, DiscoveredLocalServer>();
+  const configuredUrlByServer = new Map<string, string>();
   for (const raw of normalizeConfiguredUrls(configuredUrls)) {
     const url = new URL(raw);
     const port = urlPort(url);
     const serverKey = localServerKey(url.hostname, port);
+    if (!configuredUrlByServer.has(serverKey)) configuredUrlByServer.set(serverKey, raw);
     if (visibleByServer.has(serverKey)) continue;
     const configured = snapshot.configured.get(webProbeCacheKey(raw));
     if (configured) visibleByServer.set(serverKey, { ...configured, url: raw });
   }
   for (const server of snapshot.discovered) {
     const key = localServerKey(server.host, server.port);
-    if (!visibleByServer.has(key)) visibleByServer.set(key, server);
+    if (visibleByServer.has(key)) continue;
+    // A configured address that is failing its check is still where this listener opens.
+    visibleByServer.set(key, { ...server, url: configuredUrlByServer.get(key) ?? server.url });
   }
   return [...visibleByServer.values()].toSorted((left, right) => left.port - right.port);
 };
@@ -509,6 +515,9 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     retainCount: 0,
   });
   const webProbeCacheRef = yield* Ref.make<ReadonlyMap<string, WebProbeCacheEntry>>(new Map());
+  // When each owned listener was first seen. Null until the first listener read after idle, whose
+  // listeners are already running as far as a client that just opened can tell.
+  const listenerFirstSeenRef = yield* Ref.make<ReadonlyMap<string, number> | null>(null);
   const scanSemaphore = yield* Semaphore.make(1);
   const lsofMissingRef = yield* Ref.make(false);
   const windowsProcessNamesRef = yield* Ref.make<
@@ -727,16 +736,38 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     return groups;
   };
 
+  const settledListeners = Effect.fn("PortDiscovery.settledListeners")(function* (
+    owned: ReadonlyArray<DiscoveredLocalServer>,
+  ) {
+    const nowMillis = yield* Clock.currentTimeMillis;
+    const known = yield* Ref.get(listenerFirstSeenRef);
+    const firstSeen = new Map(
+      owned.map((server) => {
+        const key = `${server.pid}:${server.port}`;
+        return [
+          key,
+          known === null ? Number.NEGATIVE_INFINITY : (known.get(key) ?? nowMillis),
+        ] as const;
+      }),
+    );
+    yield* Ref.set(listenerFirstSeenRef, firstSeen);
+    return owned.filter(
+      (server) =>
+        nowMillis - (firstSeen.get(`${server.pid}:${server.port}`) ?? nowMillis) >=
+        LISTENER_MIN_AGE_MS,
+    );
+  });
+
   // Only configured URLs are requested. Owned listeners are listed as plain HTTP without a
   // request: owning a process says nothing about its protocol, and HTTP or TLS bytes break
   // binary ones such as Unity's test runner or Steam's IPC.
   const probeWebServers = Effect.fn("PortDiscovery.probeWebServers")(function* (
-    servers: ReadonlyArray<DiscoveredLocalServer>,
+    servers: ReadonlyArray<DiscoveredLocalServer> | null,
     configuredUrls: ReadonlyArray<string>,
   ) {
     const nowMillis = yield* Clock.currentTimeMillis;
     const cached = yield* Ref.get(webProbeCacheRef);
-    const groups = makeWebProbeGroups(servers, configuredUrls);
+    const groups = makeWebProbeGroups(servers ?? [], configuredUrls);
     const probed = yield* Effect.forEach(
       groups,
       (group) => {
@@ -767,7 +798,9 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
       if (probe.isWeb) configured.set(group.configuredKey, { ...group.server, url: group.url });
     }
     yield* Ref.set(webProbeCacheRef, nextCache);
-    return { discovered: servers.filter(isOwned), configured } satisfies WebProbeSnapshot;
+    // A failed listener read says nothing about which listeners are new.
+    const discovered = servers === null ? [] : yield* settledListeners(servers.filter(isOwned));
+    return { discovered, configured } satisfies WebProbeSnapshot;
   });
 
   // tasklist costs 200-300ms per PID; query visible servers with bounded concurrency and cache names.
@@ -876,14 +909,12 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
           ProcessTimeoutError: recoverWindowsProbeFailure,
         }),
       );
-      return yield* withWindowsProcessNames(
-        yield* probeWebServers(listeners ?? [], configuredUrls),
-      );
+      return yield* withWindowsProcessNames(yield* probeWebServers(listeners, configuredUrls));
     }
     const recoverLsofProbeFailure = recoverProcessProbeFailure("lsof");
     if (yield* Ref.get(lsofMissingRef)) {
       const fromProc = yield* scanProcListeners(resolveOwners);
-      return yield* probeWebServers(fromProc ?? [], configuredUrls);
+      return yield* probeWebServers(fromProc, configuredUrls);
     }
     const lsofResult = yield* processRunner
       .run({
@@ -912,7 +943,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
       );
     if (lsofResult !== null) return yield* probeWebServers(lsofResult, configuredUrls);
     const fromProc = yield* scanProcListeners(resolveOwners);
-    return yield* probeWebServers(fromProc ?? [], configuredUrls);
+    return yield* probeWebServers(fromProc, configuredUrls);
   });
 
   const scanSnapshot = Effect.fn("PortDiscovery.scanSnapshot")(
@@ -968,6 +999,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
       { ...state, retainCount: state.retainCount + 1 },
     ]);
     if (wasIdle) {
+      yield* scanSemaphore.withPermits(1)(Ref.set(listenerFirstSeenRef, null));
       yield* pollTick();
     }
   });

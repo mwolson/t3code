@@ -241,9 +241,10 @@ apps.
 
 ### Local servers
 
-The browser lists ports held by processes your terminals and agents started.
-T3 Code reads which process holds each port and never connects to it, so a
-listed port opens as `http://localhost:<port>` and might not be a web page. For
+The browser lists ports held by processes your terminals and agents started,
+once a port has stayed open for a few seconds. T3 Code reads which process holds
+each port and never connects to it, so a listed port opens as
+`http://localhost:<port>` and might not be a web page. For
 an HTTPS server or a specific path, set the **Preview URL** on the project
 script that starts it; T3 Code checks that address and opens it as written.
 

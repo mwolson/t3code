@@ -212,6 +212,19 @@ effectIt.effect("projects configured paths independently for simultaneous subscr
   }).pipe(Effect.scoped, Effect.provide(layer));
 });
 
+effectIt.effect("opens an owned listener at its configured URL while that URL is failing", () => {
+  const configuredUrl = `https://localhost:${LSOF_TEST_PORT}/app`;
+  const fetchFn = (() =>
+    Promise.resolve(new Response("starting", { status: 503 }))) as typeof globalThis.fetch;
+  const layer = layerLsofScanner({ pid: () => 1234, fetch: fetchFn });
+
+  return Effect.gen(function* () {
+    const scanner = yield* ownedScanner();
+    const servers = yield* scanner.scan([configuredUrl]);
+    expect(servers.map((server) => server.url)).toEqual([configuredUrl]);
+  }).pipe(Effect.provide(layer));
+});
+
 effectIt.effect(
   "keeps each subscriber's candidates when their combined union exceeds the per-client cap",
   () => {
@@ -339,6 +352,8 @@ effectIt.effect("discovers owned listeners without sending HTTP or TLS probes", 
     expect(requests).toEqual([]);
 
     stdout = owned;
+    expect(yield* scanner.scan()).toHaveLength(0);
+    yield* TestClock.adjust(Duration.seconds(3));
     expect(yield* scanner.scan()).toHaveLength(1);
     expect(requests).toEqual([]);
 
@@ -578,6 +593,7 @@ effectIt.effect("rechecks the socket owner before stopping a Linux server withou
       .pipe(Effect.match({ onFailure: (error) => error.reason, onSuccess: () => null }));
     expect(signal).not.toHaveBeenCalled();
     expect(result).toBe("not-found");
+    yield* TestClock.adjust(Duration.seconds(3));
     expect(yield* scanner.scan()).toMatchObject([{ pid: 5000, port: 8765 }]);
     yield* scanner.stopServer({ pid: 5000, port: 8765 });
     expect(signal).toHaveBeenCalledExactlyOnceWith(5300, "SIGTERM");
@@ -741,6 +757,8 @@ effectIt.effect.each(["linux", "darwin"] as const)(
         expect(yield* scanner.scan()).toEqual([]);
         environmentFails = false;
       }
+      expect(yield* scanner.scan()).toEqual([]);
+      yield* TestClock.adjust(Duration.seconds(3));
       expect(yield* scanner.scan()).toMatchObject([
         { port: agentPort, pid: 4242, terminal: null, agent: { threadId: "thread-agent" } },
       ]);
