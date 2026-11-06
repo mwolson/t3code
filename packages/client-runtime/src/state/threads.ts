@@ -317,6 +317,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   };
   if (resumeCache?.owner === owner) resumeCache.snapshot = committed;
   const awaitingCompletion = yield* Ref.make(false);
+  // A failed application may leave the cursor ahead of data, so recovery needs a snapshot.
+  const resyncFromSnapshot = yield* Ref.make(false);
   const applyLock = yield* Semaphore.make(1);
   // Save only completed data/cursor updates. A canceled scope must not cache
   // a cursor whose event has not reached the data yet.
@@ -674,13 +676,19 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     }
 
     if (item.kind === "snapshot") {
+      const resynced = yield* Ref.getAndSet(resyncFromSnapshot, false);
       yield* SubscriptionRef.set(lastSequence, item.snapshotSequence);
+      const projection = boundedSnapshotProjection(item);
+      if (resynced && projection.thread.deletedAt !== null) {
+        yield* setDeleted();
+        return;
+      }
       const hasProgressiveHistory =
         item.historyCursor !== undefined ||
         item.hasMoreHistory !== undefined ||
         item.latestLocalTurnOrdinal !== undefined;
       yield* setThread(
-        boundedSnapshotProjection(item),
+        projection,
         hasProgressiveHistory
           ? {
               history: {
@@ -1013,10 +1021,20 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   // A 404 can arrive before the thread exists, so a miss asks HTTP again while mounted.
   let httpMisses = 0;
   let defectRetries = 0;
-  const backOffAfterDefect = Effect.suspend(() => {
+  const backOffAfterDefect = Effect.gen(function* () {
     const retryDelay = subscriptionRetryDelay(THREAD_SUBSCRIPTION_RETRY_DELAY, defectRetries);
     defectRetries += 1;
-    return setStreamError(THREAD_SYNC_ERROR).pipe(Effect.andThen(Effect.sleep(retryDelay)));
+    yield* Ref.set(resyncFromSnapshot, true);
+    yield* Ref.set(resumingLive, false);
+    yield* Ref.set(awaitingCompletion, false);
+    yield* SubscriptionRef.update(state, (current) => {
+      let status = current.status;
+      if (status !== "deleted") {
+        status = Option.isSome(current.data) ? "synchronizing" : "empty";
+      }
+      return { ...current, status, error: Option.some(THREAD_SYNC_ERROR) };
+    });
+    yield* Effect.sleep(retryDelay);
   });
   const followThread = (): Effect.Effect<
     void,
@@ -1087,6 +1105,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
                         }
                       : EMPTY_THREAD_HISTORY_META;
                   yield* setThread(httpResult.snapshot.projection, { history });
+                  yield* Ref.set(resyncFromSnapshot, false);
                   yield* remember;
                 }),
               );
@@ -1110,7 +1129,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         }
 
         const sequence = yield* SubscriptionRef.get(lastSequence);
-        const canResume = Option.isSome(current.data);
+        const canResume = Option.isSome(current.data) && !(yield* Ref.get(resyncFromSnapshot));
         const acceptBoundedSnapshot = yield* Ref.get(acceptsBoundedSocketSnapshots);
 
         return {
