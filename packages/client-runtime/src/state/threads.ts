@@ -11,6 +11,7 @@ import {
 import { boundedSnapshotProjection } from "@t3tools/shared/orchestrationV2BoundedSnapshot";
 import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Scope from "effect/Scope";
@@ -54,6 +55,8 @@ import {
   type EnvironmentThreadState,
   type EnvironmentThreadStatus,
 } from "./threadState.ts";
+
+const MAX_RECOVERY_DELAY_MS = 30_000;
 
 function statusWithoutLiveData(
   data: Option.Option<OrchestrationV2ThreadProjection>,
@@ -252,6 +255,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   };
   if (resumeCache?.owner === owner) resumeCache.snapshot = committed;
   const awaitingCompletion = yield* Ref.make(false);
+  // Set after the subscription stopped on a defect: the cursor and data may be
+  // past events that never applied, so the next subscribe asks for a snapshot.
+  const resyncFromSnapshot = yield* Ref.make(false);
   const applyLock = yield* Semaphore.make(1);
   // Save only completed data/cursor updates. A canceled scope must not cache
   // a cursor whose event has not reached the data yet.
@@ -606,13 +612,20 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     }
 
     if (item.kind === "snapshot") {
+      yield* Ref.set(resyncFromSnapshot, false);
       yield* SubscriptionRef.set(lastSequence, item.snapshotSequence);
+      const projection = boundedSnapshotProjection(item);
+      // A resync snapshot replaces the replay that would have carried thread.deleted.
+      if (projection.thread.deletedAt !== null) {
+        yield* setDeleted();
+        return;
+      }
       const hasProgressiveHistory =
         item.historyCursor !== undefined ||
         item.hasMoreHistory !== undefined ||
         item.latestLocalTurnOrdinal !== undefined;
       yield* setThread(
-        boundedSnapshotProjection(item),
+        projection,
         hasProgressiveHistory
           ? {
               history: {
@@ -928,7 +941,40 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   });
 
   yield* markSynchronizing;
-  yield* Effect.forkScoped(
+  // A defect ends the subscription stream for good, while the mounted state
+  // keeps showing its last data. Back off and subscribe again from a snapshot.
+  const recoveryAttempts = yield* Ref.make(0);
+  const recoverSubscription = (
+    cause: Cause.Cause<unknown>,
+  ): Effect.Effect<void, never, EnvironmentSupervisor.EnvironmentSupervisor> =>
+    Cause.hasInterruptsOnly(cause)
+      ? Effect.interrupt
+      : Effect.gen(function* () {
+          const attempt = yield* Ref.getAndUpdate(recoveryAttempts, (count) => count + 1);
+          yield* Effect.logWarning("Thread subscription stopped; resubscribing.", {
+            environmentId,
+            threadId,
+            attempt,
+            cause: Cause.pretty(cause),
+          });
+          yield* Ref.set(resyncFromSnapshot, true);
+          yield* Ref.set(resumingLive, false);
+          yield* SubscriptionRef.update(state, (current) =>
+            current.status === "deleted"
+              ? current
+              : { ...current, status: "synchronizing" as const },
+          );
+          yield* Effect.sleep(
+            Duration.millis(Math.min(1_000 * 2 ** attempt, MAX_RECOVERY_DELAY_MS)),
+          );
+          return yield* subscribeWithRecovery;
+        });
+
+  const subscribeWithRecovery: Effect.Effect<
+    void,
+    never,
+    EnvironmentSupervisor.EnvironmentSupervisor
+  > = Effect.suspend(() =>
     subscribeDynamic(
       ORCHESTRATION_V2_WS_METHODS.subscribeThread,
       Effect.fn("EnvironmentThreadState.makeSubscribeInput")(function* (session) {
@@ -1002,7 +1048,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         }
 
         const sequence = yield* SubscriptionRef.get(lastSequence);
-        const canResume = Option.isSome(current.data);
+        const canResume = Option.isSome(current.data) && !(yield* Ref.get(resyncFromSnapshot));
         const acceptBoundedSnapshot = yield* Ref.get(acceptsBoundedSocketSnapshots);
 
         return {
@@ -1026,8 +1072,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         retryExpectedFailureAfter: "250 millis",
         resubscribe: foregroundResubscriptions,
       },
-    ).pipe(Stream.runForEachArray(applyItems)),
+    ).pipe(Stream.runForEachArray(applyItems), Effect.catchCause(recoverSubscription)),
   );
+  yield* Effect.forkScoped(subscribeWithRecovery);
 
   return state;
 });

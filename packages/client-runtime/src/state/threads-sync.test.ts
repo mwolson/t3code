@@ -15,6 +15,7 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -79,6 +80,8 @@ const BASE_PROJECTION: OrchestrationV2ThreadProjection = {
   thread: { ...v2Projection.thread, title: "Cached thread" },
 };
 
+class TestDefect extends Error {}
+
 type TestThreadInput = OrchestrationV2ThreadStreamItem | Error;
 
 function testSession(client: WsRpcProtocolClient): RpcSession.RpcSession {
@@ -142,7 +145,11 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   const streamFrom = (queue: Queue.Queue<TestThreadInput>) =>
     Stream.fromQueue(queue).pipe(
       Stream.mapEffect((input) =>
-        input instanceof Error ? Effect.fail(input) : Effect.succeed(input),
+        input instanceof TestDefect
+          ? Effect.die(input)
+          : input instanceof Error
+            ? Effect.fail(input)
+            : Effect.succeed(input),
       ),
     );
   const client = {
@@ -2076,6 +2083,62 @@ describe("EnvironmentThreads", () => {
 
       expect(Option.isNone(recovered.error)).toBe(true);
       expect(yield* SubscriptionRef.get(harness.subscriptionCount)).toBe(2);
+    }),
+  );
+
+  it.effect("resubscribes from a fresh snapshot after the stream dies", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_PROJECTION, completionMarker: true });
+      yield* Queue.offer(harness.inputs, synchronized());
+      yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+      expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(CACHED_SNAPSHOT_SEQUENCE);
+
+      const dieAndResubscribe = (expectedSubscriptions: number, delay: Duration.Input) =>
+        Effect.gen(function* () {
+          yield* Queue.offer(harness.inputs, new TestDefect("apply failed"));
+          yield* awaitThreadState(
+            harness.observed,
+            (value) => value.status === "synchronizing" && Option.isSome(value.error),
+          );
+          yield* TestClock.adjust(delay);
+          yield* SubscriptionRef.changes(harness.subscriptionCount).pipe(
+            Stream.filter((count) => count >= expectedSubscriptions),
+            Stream.runHead,
+          );
+          expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBeUndefined();
+        });
+
+      yield* dieAndResubscribe(2, "1 second");
+      yield* Queue.offerAll(harness.inputs, [
+        snapshot(
+          { ...BASE_PROJECTION, thread: { ...BASE_PROJECTION.thread, title: "Recovered thread" } },
+          CACHED_SNAPSHOT_SEQUENCE + 5,
+        ),
+        synchronized(),
+      ]);
+      const recovered = yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          value.status === "live" &&
+          Option.isSome(value.data) &&
+          value.data.value.thread.title === "Recovered thread",
+      );
+      expect(Option.isNone(recovered.error)).toBe(true);
+
+      // The resync snapshot stands in for the replay that would carry thread.deleted.
+      yield* dieAndResubscribe(3, "2 seconds");
+      yield* Queue.offer(
+        harness.inputs,
+        snapshot(
+          { ...BASE_PROJECTION, thread: { ...BASE_PROJECTION.thread, deletedAt: v2Now } },
+          CACHED_SNAPSHOT_SEQUENCE + 9,
+        ),
+      );
+      const removed = yield* awaitThreadState(
+        harness.observed,
+        (value) => value.status === "deleted",
+      );
+      expect(Option.isNone(removed.data)).toBe(true);
     }),
   );
 
