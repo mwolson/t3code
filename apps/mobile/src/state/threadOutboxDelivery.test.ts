@@ -1,4 +1,8 @@
-import { acknowledgedThreadMessagesAtom } from "./acknowledged-thread-messages";
+import {
+  acknowledgedThreadMessagesAtom,
+  forgetEchoedAcknowledgedThreadMessages,
+} from "./acknowledged-thread-messages";
+import { scopedThreadKey } from "../lib/scopedEntities";
 import {
   CommandId,
   EnvironmentId,
@@ -350,6 +354,22 @@ describe("thread outbox drain delivery cleanup", () => {
       completeQueuedMessageDelivery(second, harness.manager.revisionOf(second.messageId)),
     ).resolves.toBe("removed");
     expect(appAtomRegistry.get(acknowledgedThreadMessagesAtom)).toEqual([second]);
+  });
+
+  it("retires an acknowledged row once its thread echoes it, before paging can drop the echo", async () => {
+    const echoed = queuedMessage({ messageId: "first-prompt", text: "Delivered" });
+    const waiting = queuedMessage({ messageId: "awaiting-echo", text: "Also delivered" });
+    await harness.manager.enqueue(echoed);
+    await harness.manager.enqueue(waiting);
+    await completeQueuedMessageDelivery(echoed, harness.manager.revisionOf(echoed.messageId));
+    await completeQueuedMessageDelivery(waiting, harness.manager.revisionOf(waiting.messageId));
+    expect(appAtomRegistry.get(acknowledgedThreadMessagesAtom)).toEqual([echoed, waiting]);
+
+    const threadKey = scopedThreadKey(echoed.environmentId, echoed.threadId);
+    forgetEchoedAcknowledgedThreadMessages("other-thread", [{ id: echoed.messageId }]);
+    expect(appAtomRegistry.get(acknowledgedThreadMessagesAtom)).toEqual([echoed, waiting]);
+    forgetEchoedAcknowledgedThreadMessages(threadKey, [{ id: echoed.messageId }]);
+    expect(appAtomRegistry.get(acknowledgedThreadMessagesAtom)).toEqual([waiting]);
   });
 
   it("removes an acknowledged outbox item even when the sign-out archive write fails", async () => {

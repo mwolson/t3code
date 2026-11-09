@@ -13,7 +13,7 @@ import {
   deriveThreadRuntime,
   threadRuntimeHasInterruptibleRun,
 } from "@t3tools/client-runtime/state/thread-execution";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   CommandId,
@@ -47,7 +47,10 @@ import { resolveProviderInteractionMode } from "./legacy-plan-mode";
 import type { DraftComposerImageAttachment } from "../lib/composerImages";
 import { scopedThreadKey } from "../lib/scopedEntities";
 import { buildThreadFeed, createThreadFeedCache } from "../lib/threadActivity";
-import { acknowledgedThreadMessagesAtom } from "./acknowledged-thread-messages";
+import {
+  acknowledgedThreadMessagesAtom,
+  forgetEchoedAcknowledgedThreadMessages,
+} from "./acknowledged-thread-messages";
 import {
   appendPendingThreadMessages,
   selectPendingAcknowledgedMessages,
@@ -261,6 +264,16 @@ export function useThreadComposerState() {
       entry.pendingMessage ? { ...entry, acknowledged: true } : entry,
     );
   })();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- retires echoed rows in the app-wide acknowledged store, which outlives this thread's projection window
+  useEffect(() => {
+    if (selectedThreadKey === null || selectedThreadMessages === undefined) return;
+    const awaitingEcho = acknowledgedMessages.some(
+      (message) => scopedThreadKey(message.environmentId, message.threadId) === selectedThreadKey,
+    );
+    if (awaitingEcho) {
+      forgetEchoedAcknowledgedThreadMessages(selectedThreadKey, selectedThreadMessages);
+    }
+  }, [acknowledgedMessages, selectedThreadKey, selectedThreadMessages]);
 
   const preferencesResult = useAtomValue(mobilePreferencesAtom);
   const followUpBehavior = AsyncResult.isSuccess(preferencesResult)

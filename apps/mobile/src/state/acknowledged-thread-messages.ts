@@ -1,5 +1,6 @@
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
+import { scopedThreadKey } from "../lib/scopedEntities";
 import { appAtomRegistry } from "./atom-registry";
 import type { QueuedThreadMessage } from "./thread-outbox-model";
 import { environmentThreadDetails } from "./threads";
@@ -46,5 +47,20 @@ export function retainAcknowledgedThreadMessage(message: QueuedThreadMessage) {
 export function forgetAcknowledgedThreadMessage(message: QueuedThreadMessage) {
   writeAcknowledgedThreadMessages((current) =>
     current.filter((entry) => entry.messageId !== message.messageId),
+  );
+}
+
+// An echo seen once retires the row for good: bounded snapshots later page old
+// messages (and their runs) out, and the feed would show the row again.
+export function forgetEchoedAcknowledgedThreadMessages(
+  threadKey: string,
+  projectedMessages: ReadonlyArray<{ readonly id: string }>,
+) {
+  writeAcknowledgedThreadMessages((current) =>
+    current.filter(
+      (entry) =>
+        scopedThreadKey(entry.environmentId, entry.threadId) !== threadKey ||
+        !projectedMessages.some((projected) => projected.id === entry.messageId),
+    ),
   );
 }
