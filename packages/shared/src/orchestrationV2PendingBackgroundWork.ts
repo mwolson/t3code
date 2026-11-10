@@ -140,7 +140,8 @@ export function monitorHoldsWakeCompletion(
   );
 }
 
-type PendingBackgroundWorkRun = Pick<OrchestrationV2Run, "id" | "ordinal" | "status">;
+type PendingBackgroundWorkRun = Pick<OrchestrationV2Run, "id" | "ordinal" | "status"> &
+  Partial<Pick<OrchestrationV2Run, "delegatedCompletion">>;
 
 type PendingBackgroundWorkPullRequest = Pick<
   ThreadPullRequestLink,
@@ -315,6 +316,20 @@ export function derivePendingBackgroundWork(input: {
     }
 
     byTaskId.set(taskId, pendingTaskFromTurnItem(taskId, item));
+  }
+
+  for (const run of input.runs ?? []) {
+    const cohort = run.delegatedCompletion;
+    if (run.status === "rolled_back" || cohort?.disposition !== "open") continue;
+    for (const taskId of cohort.delivery?.taskIds ?? []) {
+      if (byTaskId.has(taskId)) continue;
+      byTaskId.set(taskId, {
+        taskId,
+        kind: "subagent",
+        description: "Delivering subagent result",
+        completionDelivery: true,
+      });
+    }
   }
 
   for (const task of pullRequestWatchTasks(input.pullRequests)) byTaskId.set(task.taskId, task);
