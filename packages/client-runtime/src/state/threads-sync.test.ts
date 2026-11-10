@@ -2322,6 +2322,76 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
+  it.effect.each(["stream", "apply"] as const)(
+    "resubscribes from a fresh snapshot after a %s failure",
+    (failure) =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ cached: BASE_PROJECTION, completionMarker: true });
+        yield* Queue.offer(harness.inputs, synchronized());
+        yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+        expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(CACHED_SNAPSHOT_SEQUENCE);
+
+        const dieAndResubscribe = (
+          expectedSubscriptions: number,
+          delay: "1 second" | "2 seconds",
+        ) =>
+          Effect.gen(function* () {
+            const brokenSnapshot = {
+              ...snapshot(BASE_PROJECTION, CACHED_SNAPSHOT_SEQUENCE + 1),
+              get snapshotSequence(): number {
+                throw new Error("Snapshot application failed");
+              },
+            };
+            yield* Queue.offer(harness.inputs, failure === "stream" ? TEST_DEFECT : brokenSnapshot);
+            yield* awaitThreadState(
+              harness.observed,
+              (value) => value.status === "synchronizing" && Option.isSome(value.error),
+            );
+            yield* TestClock.adjust(delay);
+            yield* SubscriptionRef.changes(harness.subscriptionCount).pipe(
+              Stream.filter((count) => count >= expectedSubscriptions),
+              Stream.runHead,
+            );
+            expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBeUndefined();
+          });
+
+        yield* dieAndResubscribe(2, "1 second");
+        yield* Queue.offerAll(harness.inputs, [
+          snapshot(
+            {
+              ...BASE_PROJECTION,
+              thread: { ...BASE_PROJECTION.thread, title: "Recovered thread" },
+            },
+            CACHED_SNAPSHOT_SEQUENCE + 5,
+          ),
+          synchronized(),
+        ]);
+        const recovered = yield* awaitThreadState(
+          harness.observed,
+          (value) =>
+            value.status === "live" &&
+            Option.isSome(value.data) &&
+            value.data.value.thread.title === "Recovered thread",
+        );
+        expect(Option.isNone(recovered.error)).toBe(true);
+
+        // The resync snapshot stands in for the replay that would carry thread.deleted.
+        yield* dieAndResubscribe(3, "2 seconds");
+        yield* Queue.offer(
+          harness.inputs,
+          snapshot(
+            { ...BASE_PROJECTION, thread: { ...BASE_PROJECTION.thread, deletedAt: v2Now } },
+            CACHED_SNAPSHOT_SEQUENCE + 9,
+          ),
+        );
+        const removed = yield* awaitThreadState(
+          harness.observed,
+          (value) => value.status === "deleted",
+        );
+        expect(Option.isNone(removed.data)).toBe(true);
+      }),
+  );
+
   it.effect("keeps replayed updates synchronizing until the completion marker arrives", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ cached: BASE_PROJECTION, completionMarker: true });
