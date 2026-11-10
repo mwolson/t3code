@@ -15,6 +15,7 @@ import * as Stream from "effect/Stream";
 
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { idleCompactionWindow } from "./IdleCompaction.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -36,7 +37,9 @@ export const make = Effect.gen(function* () {
       // Loops after the wait or a retarget: the thread may have moved on.
       while (true) {
         const current = yield* settings.getSettings;
-        const thread = yield* projections.getThread(threadId);
+        const thread = yield* projections.getThreadShell(threadId);
+        if (thread === null || backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []))
+          return;
         const claudeInstance = Object.hasOwn(current.providerInstances, thread.providerInstanceId)
           ? current.providerInstances[thread.providerInstanceId]?.driver === "claudeAgent"
           : thread.providerInstanceId === "claudeAgent";

@@ -197,6 +197,7 @@ describe("IdleCompactionService", () => {
     { mode: "onReturn", reads: 0 },
     { mode: "off", reads: 0 },
     { mode: "beforeCacheExpires", reads: 1 },
+    { mode: "beforeCacheExpires", pendingDelivery: true, reads: 0 },
     { mode: "beforeCacheExpires", override: "off", reads: 0 },
     { mode: "onReturn", override: "beforeCacheExpires", reads: 1 },
     { mode: "beforeCacheExpires", projectDisabled: true, reads: 0 },
@@ -206,7 +207,7 @@ describe("IdleCompactionService", () => {
     { mode: "beforeCacheExpires", driver: "claudeAgent", instance: "custom-claude", reads: 1 },
     { mode: "beforeCacheExpires", unconfigured: true, reads: 1 },
   ] as const)(
-    "loads history only for eligible idle compaction: $mode/$override/$enabled/$projectDisabled/$instance/$unconfigured",
+    "loads history only for eligible idle compaction: $mode/$override/$enabled/$projectDisabled/$instance/$unconfigured/$pendingDelivery",
     (scenario) => {
       const test = {
         override: "default",
@@ -233,6 +234,19 @@ describe("IdleCompactionService", () => {
               ...run,
               providerInstanceId: selectedInstance,
               modelSelection: { ...run.modelSelection, instanceId: selectedInstance },
+              ...("pendingDelivery" in test
+                ? {
+                    delegatedCompletion: {
+                      disposition: "open" as const,
+                      nextGeneration: 2,
+                      delivery: {
+                        generation: 1,
+                        messageId: MessageId.make("pending-completion"),
+                        taskIds: [NodeId.make("pending-child")],
+                      },
+                    },
+                  }
+                : {}),
             })),
             providerThreads: base.providerThreads.map((thread) => ({
               ...thread,
@@ -283,6 +297,7 @@ describe("IdleCompactionService", () => {
             }),
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getThread: () => Effect.succeed(data.thread),
+              getThreadShell: () => Effect.succeed(ProjectionStore.threadShellFromProjection(data)),
               getThreadRecords: () =>
                 Effect.sync(() => {
                   historyReads++;
@@ -390,6 +405,7 @@ describe("IdleCompactionService", () => {
           }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getThread: () => Effect.succeed(data.thread),
+            getThreadShell: () => Effect.succeed(ProjectionStore.threadShellFromProjection(data)),
             getThreadRecords: (_threadId, _keys, options) =>
               Effect.succeed({
                 ...data,

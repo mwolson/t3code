@@ -23,6 +23,7 @@ describe("projectThreadAwarenessV2", () => {
     overrides: Partial<
       Pick<
         OrchestrationV2ThreadShell,
+        | "delegatedFrom"
         | "activityRunStatus"
         | "latestRunStopRequested"
         | "status"
@@ -33,6 +34,8 @@ describe("projectThreadAwarenessV2", () => {
       >
     > = {},
   ) => ({
+    createdBy: "agent" as const,
+    creationSource: "mcp" as const,
     id: "thread-2" as ThreadId,
     lineage: {
       rootThreadId: "thread-2" as ThreadId,
@@ -48,13 +51,31 @@ describe("projectThreadAwarenessV2", () => {
     ...overrides,
   });
 
-  it("does not announce completion after a manual stop", () => {
+  it("announces completion only for an unstopped top-level thread", () => {
     const input = {
       environmentId: "env-1" as EnvironmentId,
       project,
       thread: v2Thread({ status: "completed" }),
     };
     expect(projectThreadAwarenessV2(input)?.phase).toBe("completed");
+    const delegated = {
+      ...input,
+      thread: {
+        ...input.thread,
+        delegatedFrom: {
+          environmentId: "parent-env" as EnvironmentId,
+          threadId: "parent-thread" as ThreadId,
+          title: "Parent",
+        },
+      },
+    };
+    expect(projectThreadAwarenessV2(delegated)).toBeNull();
+    expect(
+      projectThreadAwarenessV2({
+        ...delegated,
+        thread: { ...delegated.thread, status: "failed" },
+      })?.phase,
+    ).toBe("failed");
     expect(
       projectThreadAwarenessV2({
         ...input,

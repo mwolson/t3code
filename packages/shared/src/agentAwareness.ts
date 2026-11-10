@@ -1,5 +1,6 @@
 import {
   isListedThreadLineage,
+  isDelegatedAppThread,
   type EnvironmentId,
   isProviderNativeSubagentThread,
   type OrchestrationV2ThreadShell,
@@ -71,6 +72,7 @@ export interface ProjectThreadAwarenessV2Input {
   readonly thread: Pick<
     OrchestrationV2ThreadShell,
     | "activityRunStatus"
+    | "delegatedFrom"
     | "id"
     | "lineage"
     | "latestRunStopRequested"
@@ -96,7 +98,11 @@ export function projectThreadAwarenessV2(
   if (phase === null) {
     return null;
   }
-  if (phase === "completed" && thread.latestRunStopRequested === true) return null;
+  if (
+    phase === "completed" &&
+    (thread.latestRunStopRequested === true || isDelegatedAppThread(thread))
+  )
+    return null;
   // Resolve the phase first so live or waiting work stays visible after settlement.
   if (
     thread.settledOverride === "settled" &&
