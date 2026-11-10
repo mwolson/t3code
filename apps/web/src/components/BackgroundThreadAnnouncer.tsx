@@ -1,6 +1,6 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
-import { isListedThreadLineage } from "@t3tools/contracts";
+import { isDelegatedAppThread, isListedThreadLineage } from "@t3tools/contracts";
 import type { AnyRouter } from "@tanstack/react-router";
 import type { AtomRegistry } from "effect/reactivity";
 
@@ -52,7 +52,10 @@ export function startBackgroundThreadAnnouncements(
         title: thread.title,
         ...resolveBackgroundThreadRequest(thread),
         runId: thread.latestRun?.runId ?? null,
-        runStatus: resolveBackgroundThreadRunStatus(thread),
+        runStatus:
+          thread.latestRun?.status === "completed" && isDelegatedAppThread(thread.source)
+            ? null
+            : resolveBackgroundThreadRunStatus(thread),
         activeRunId: thread.runtime?.activeRunId ?? null,
         snoozed: effectiveSnoozed(thread, { now }),
       });

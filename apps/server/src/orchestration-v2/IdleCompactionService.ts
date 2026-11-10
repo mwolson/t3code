@@ -36,7 +36,14 @@ export const make = Effect.gen(function* () {
       // Loops after the wait or a retarget: the thread may have moved on.
       while (true) {
         const current = yield* settings.getSettings;
-        const thread = yield* projections.getThread(threadId);
+        const thread = yield* projections.getThreadShell(threadId);
+        if (
+          thread === null ||
+          thread.pendingBackgroundTasks?.some(
+            (task) => task.kind === "subagent" && task.completionDelivery === true,
+          )
+        )
+          return;
         const claudeInstance = Object.hasOwn(current.providerInstances, thread.providerInstanceId)
           ? current.providerInstances[thread.providerInstanceId]?.driver === "claudeAgent"
           : thread.providerInstanceId === "claudeAgent";
