@@ -380,23 +380,41 @@ describe("v2 thread shell lists", () => {
     expect(registry.get(threads.threadShellAtom(parentRef))?.pendingSubagentRequest).toBeNull();
     expect(registry.get(inputs).map((thread) => thread.id)).toEqual([helper.id]);
 
-    // A task whose parent is gone there is listed on its own, as is one whose
+    // A running task whose parent is gone there is listed on its own, as is one whose
     // parent's environment is switched off.
     registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [] });
     expect(listed()).toEqual([`${remoteEnvironmentId}/${task.id}`]);
-    // Archiving the parent here leaves the task there unarchived, so it is listed on its own.
+    // Archiving the parent here leaves the task there unarchived, so it is listed while it runs.
     registry.set(snapshotAtom(environmentId), {
       ...v2ShellSnapshot,
       threads: [{ ...parent, archivedAt: v2Now }],
     });
     expect(listed()).toEqual([`${remoteEnvironmentId}/${task.id}`]);
+    // It is still listed while its turn has ended but it waits on a helper of its own.
+    const finished = { ...task, status: "completed" as const, activityRunStatus: null };
+    const waiting = {
+      ...finished,
+      pendingBackgroundTasks: [
+        { taskId: "helper", kind: "subagent" as const, childThreadId: helper.id },
+      ],
+    };
+    registry.set(snapshotAtom(remoteEnvironmentId), {
+      ...v2ShellSnapshot,
+      threads: [waiting, { ...helper, pendingRuntimeRequest: approval }],
+    });
+    expect(listed()).toEqual([`${remoteEnvironmentId}/${task.id}`]);
+    // Once it finishes, it follows its archived or deleted parent out of the lists.
+    registry.set(snapshotAtom(remoteEnvironmentId), { ...v2ShellSnapshot, threads: [finished] });
+    expect(listed()).toEqual([]);
+    registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [] });
+    expect(listed()).toEqual([]);
     registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [parent] });
     expect(listed()).toEqual([`${environmentId}/${parent.id}`]);
     const catalog = registry.get(catalogValueAtom);
     const entries = new Map(catalog.entries);
     entries.set(environmentId, { ...entries.get(environmentId)!, enabled: false });
     registry.set(catalogValueAtom, { ...catalog, entries });
-    expect(listed()).toEqual([`${remoteEnvironmentId}/${task.id}`]);
+    expect(listed()).toEqual([`${remoteEnvironmentId}/${finished.id}`]);
     disposeInputs();
     disposeParent();
     disposeNavigation();

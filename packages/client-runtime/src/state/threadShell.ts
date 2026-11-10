@@ -13,6 +13,7 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { Atom } from "effect/reactivity";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 
 import type { EnvironmentThreadShell, PendingSubagentRequest } from "./models.ts";
 import { presentThreadShell, threadRuntimeIsActive } from "./models.ts";
@@ -55,11 +56,21 @@ const isChildRunLive = (
       thread.status === "running" ||
       thread.status === "waiting";
 
+// A task with work of its own left: a run, a queued one, or background work it waits on.
+const hasWorkLeft = (
+  thread: Pick<
+    OrchestrationV2ThreadShell,
+    "activityRunStatus" | "status" | "pendingBackgroundTasks"
+  >,
+) =>
+  isChildRunLive(thread) ||
+  thread.status === "queued" ||
+  backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []);
+
 /**
- * Whether a thread shows under its parent rather than in thread lists: a
- * subagent, a side chat, or a task a linked environment delegated here whose parent the
- * client lists (`delegatedUnderParent`, by thread key). A task whose parent
- * the client cannot list stays in the lists, so its work is never out of reach.
+ * Whether a thread stays out of thread lists: a subagent, a side chat, or a task a linked
+ * environment delegated here (`delegatedUnderParent`, by thread key). A task whose parent left
+ * the lists stays listed only while it has work left, so live work is never out of reach.
  */
 export function isShownUnderParent(
   ref: ScopedThreadRef,
@@ -670,13 +681,12 @@ export function createEnvironmentThreadShellAtoms(input: {
     for (const environmentId of environmentIds) {
       for (const thread of get(environmentThreadsAtom(environmentId))) {
         const parent = thread.delegatedFrom;
-        if (
-          parent !== undefined &&
-          environmentIds.has(parent.environmentId) &&
-          // An archived parent leaves navigation; its task there stays listed on its own.
+        if (parent === undefined || !environmentIds.has(parent.environmentId)) continue;
+        const parentListed =
           get(environmentThreadIndexAtom(parent.environmentId)).get(parent.threadId)?.archivedAt ===
-            null
-        ) {
+          null;
+        // A finished task follows an archived or deleted parent out of the lists.
+        if (parentListed || !hasWorkLeft(thread)) {
           next.add(threadKey({ environmentId, threadId: thread.id }));
         }
       }
