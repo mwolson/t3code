@@ -108,6 +108,41 @@ describe("projectThreadAwarenessV2", () => {
     ).toBeNull();
   });
 
+  it("keeps a delegated question quiet while agent-created top-level questions notify", () => {
+    const request = {
+      id: RuntimeRequestId.make("question"),
+      kind: "user_input" as const,
+      createdAt: updatedAt,
+    };
+    const input = {
+      environmentId: "env-1" as EnvironmentId,
+      project,
+      thread: v2Thread({ pendingRuntimeRequest: request }),
+    };
+    expect(projectThreadAwarenessV2(input)?.phase).toBe("waiting_for_input");
+    const delegated = {
+      ...input.thread,
+      delegatedFrom: {
+        environmentId: "elsewhere" as EnvironmentId,
+        threadId: "parent" as ThreadId,
+        title: "Parent",
+      },
+    };
+    expect(projectThreadAwarenessV2({ ...input, thread: delegated })?.phase).toBe("running");
+    expect(
+      projectThreadAwarenessV2({ ...input, thread: { ...delegated, status: "completed" } }),
+    ).toBeNull();
+    expect(
+      projectThreadAwarenessV2({ ...input, thread: { ...delegated, status: "failed" } })?.phase,
+    ).toBe("failed");
+    expect(
+      projectThreadAwarenessV2({
+        ...input,
+        thread: { ...delegated, pendingRuntimeRequest: { ...request, kind: "command" } },
+      })?.phase,
+    ).toBe("waiting_for_approval");
+  });
+
   it("keeps an older activity run visible over a newer cancelled run", () => {
     expect(
       projectThreadAwarenessV2({

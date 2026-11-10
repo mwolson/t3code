@@ -1169,7 +1169,7 @@ it.effect("wakes the parent once when its delegated task asks a question", () =>
     const wakes = (yield* projections.getThreadProjection(parentThreadId)).messages.filter(
       (message) => message.notification !== undefined,
     );
-    assert.include(wakes[0]?.text, "asked a question and is still working");
+    assert.include(wakes[0]?.text, "asked a question. Its answer will arrive as a message");
     assert.deepEqual(
       wakes.map((message) => message.notification),
       [

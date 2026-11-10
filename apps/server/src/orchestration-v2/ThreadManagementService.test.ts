@@ -14,6 +14,8 @@ import {
   ProjectId,
   ProviderInstanceId,
   RunId,
+  RuntimeRequestId,
+  type OrchestrationV2RuntimeRequest,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -355,6 +357,109 @@ it.effect("waitForThread can wait past an ended run for the thread's delegated w
       resultRun: { id: wakeRunId, status: "completed" },
     });
   }),
+);
+
+it.effect(
+  "waitForThread reports question changes and holds a finished run until its message question resolves",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:questions");
+      const threadId = ThreadId.make("thread:questions");
+      const runId = RunId.make("run:questions");
+      const requestId = RuntimeRequestId.make("question");
+      const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+      const subscribed = yield* Deferred.make<void>();
+      let runPresent = true;
+      let status: OrchestrationV2Run["status"] = "running";
+      let runtimeRequests: ReadonlyArray<OrchestrationV2RuntimeRequest> = [];
+      const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+        Layer.provide(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadEventSequence: () => Effect.succeed(0),
+            restartContinuationPending: () => Effect.succeed(false),
+            streamStoredEventsFrom: (input) =>
+              input?.eventType === "runtime-request.updated"
+                ? Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+                    Stream.drain,
+                    Stream.concat(Stream.fromQueue(events)),
+                  )
+                : Stream.never,
+            getThreadRecords: () =>
+              Effect.sync(
+                () =>
+                  ({
+                    thread: { id: threadId, projectId, deletedAt: null },
+                    runs: runPresent ? [{ id: runId, status }] : [],
+                    runtimeRequests,
+                  }) as unknown as OrchestrationV2ThreadProjection,
+              ),
+          }),
+        ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(layerReceiptsTest),
+      );
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(layerTest),
+      );
+      const input = { projectId, threadId, runId, timeoutMs: 1, watchQuestions: true };
+      const initial = yield* service.waitForThread(input).pipe(Effect.forkChild);
+      yield* TestClock.adjust("1 millis");
+      expect(yield* Fiber.join(initial)).toMatchObject({ timedOut: false, pendingQuestions: [] });
+      const waiting = yield* service
+        .waitForThread({ ...input, knownQuestionIds: [] })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(subscribed);
+      runtimeRequests = [
+        {
+          id: requestId,
+          kind: "user_input",
+          status: "pending",
+          responseCapability: { type: "live", providerSessionId: "session" },
+        } as OrchestrationV2RuntimeRequest,
+      ];
+      yield* Queue.offer(events, {
+        event: { type: "runtime-request.updated" },
+      } as OrchestrationV2StoredEvent);
+      expect(yield* Fiber.join(waiting)).toMatchObject({
+        timedOut: false,
+        pendingQuestions: [{ id: requestId, responseMode: "live" }],
+      });
+      status = "completed";
+      runtimeRequests = [{ ...runtimeRequests[0]!, responseCapability: { type: "message" } }];
+      const held = yield* service
+        .waitForThread({ ...input, knownQuestionIds: [requestId] })
+        .pipe(Effect.forkChild);
+      yield* TestClock.adjust("1 millis");
+      expect(yield* Fiber.join(held)).toMatchObject({
+        timedOut: true,
+        pendingQuestions: [{ id: requestId, responseMode: "message" }],
+      });
+      const answered = yield* service
+        .waitForThread({ ...input, knownQuestionIds: [requestId] })
+        .pipe(Effect.forkChild);
+      runtimeRequests = [];
+      yield* Queue.offer(events, {
+        event: { type: "runtime-request.updated" },
+      } as OrchestrationV2StoredEvent);
+      expect(yield* Fiber.join(answered)).toMatchObject({
+        timedOut: false,
+        pendingQuestions: [],
+        run: { status: "completed" },
+      });
+      runPresent = false;
+      runtimeRequests = [
+        {
+          id: requestId,
+          kind: "user_input",
+          status: "pending",
+          responseCapability: { type: "message" },
+        } as OrchestrationV2RuntimeRequest,
+      ];
+      expect(
+        yield* service.waitForThread({ projectId, threadId, timeoutMs: 1, watchQuestions: true }),
+      ).toMatchObject({ run: null, pendingQuestions: [{ id: requestId }] });
+    }),
 );
 
 it.effect("waitForThread settles delegated work on a thread rolled back past its only run", () =>

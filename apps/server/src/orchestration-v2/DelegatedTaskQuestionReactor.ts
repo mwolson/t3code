@@ -1,6 +1,4 @@
 import {
-  CommandId,
-  MessageId,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2Subagent,
@@ -11,7 +9,11 @@ import * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
-import { reportLabel } from "@t3tools/provider-core/server/notification";
+import {
+  cancelQuestionWake,
+  questionWake,
+  questionWakeMessageId,
+} from "./delegatedTaskQuestion.ts";
 
 import { forkParked } from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -34,28 +36,9 @@ const make = Effect.gen(function* () {
     request: OrchestrationV2RuntimeRequest,
   ) {
     if (task.childThreadId === null) return;
-    const key = `${task.threadId}:${request.id}`;
-    const label = reportLabel(task.title?.trim() || task.prompt);
-    const situation =
-      request.responseCapability.type === "message"
-        ? `Delegated task ${task.id} asked a question and is still working.`
-        : `Delegated task ${task.id} is blocked on a question and cannot continue until it is answered.`;
-    yield* engine.dispatch({
-      type: "message.dispatch",
-      commandId: CommandId.make(`server:delegated-task-question:${key}`),
-      threadId: task.threadId,
-      messageId: MessageId.make(`message:delegated-task-question:${key}`),
-      text: `${situation} Read it with t3_pending_request action read, threadId ${task.childThreadId}, and requestId ${request.id}. Answer it with action respond when the answer follows from the task or the user's instructions; otherwise ask the user, then answer it. If it is no longer pending, it was answered or dismissed.`,
-      notification: {
-        source: { kind: "delegated_task", taskIds: [task.id], childThreadId: task.childThreadId },
-        outcome: "updated",
-        summary: `Delegated task${label === undefined ? "" : ` "${label}"`} has a question`,
-      },
-      attachments: [],
-      dispatchMode: { type: "queue_after_active" },
-      createdBy: "agent",
-      creationSource: "server",
-    });
+    yield* engine.dispatch(
+      questionWake(task, { id: request.id, responseMode: request.responseCapability.type }),
+    );
   });
 
   // Runs for every domain event; most events return before any work is needed.
@@ -107,20 +90,14 @@ const make = Effect.gen(function* () {
       const parentThreadId = child.lineage.parentThreadId;
       if (parentThreadId === null) return;
       const request = yield* projections.getRuntimeRequest(event.threadId, event.payload.id);
-      const key = `${parentThreadId}:${event.payload.id}`;
-      const messageId = MessageId.make(`message:delegated-task-question:${key}`);
+      const messageId = questionWakeMessageId(parentThreadId, event.payload.id);
       if (event.payload.status !== "pending" || request?.status !== "pending") {
         const parent = yield* projections.getThreadRecords(parentThreadId, ["runs"]);
         const queued = parent.runs.find(
           (run) => run.status === "queued" && run.userMessageId === messageId,
         );
         if (queued !== undefined) {
-          yield* engine.dispatch({
-            type: "queued-run.cancel",
-            commandId: CommandId.make(`server:delegated-task-question-cancel:${key}`),
-            threadId: parentThreadId,
-            runId: queued.id,
-          });
+          yield* engine.dispatch(cancelQuestionWake(parentThreadId, messageId, queued.id));
         }
         return;
       }

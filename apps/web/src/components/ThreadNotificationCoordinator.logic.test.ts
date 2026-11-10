@@ -70,6 +70,15 @@ describe("createThreadNotificationGate", () => {
     ]);
   });
 
+  it("silences a delegated question while other attention still notifies", () => {
+    const { gate, notify } = harness();
+    const question = { ...working, attention: "run-1:input" };
+    gate.observe("thread", working, question, { ...visible, quietInput: true });
+    expect(notify).not.toHaveBeenCalled();
+    gate.observe("thread", question, { ...working, attention: "run-1:approval" }, visible);
+    expect(notify.mock.calls).toEqual([["thread", "input"]]);
+  });
+
   it("does not replay a completion after attention resolves", () => {
     const { notify, observe } = harness();
     observe(working);
