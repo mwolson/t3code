@@ -43,6 +43,7 @@ import { resolveSidebarThreadStatus, type SidebarThreadStatus } from "./Sidebar.
 import {
   createThreadNotificationGate,
   isSnoozedForNotification,
+  quietDelegatedThreadInput,
   type ThreadNotificationKind,
   type ThreadNotificationObservation,
 } from "./ThreadNotificationCoordinator.logic";
@@ -314,6 +315,8 @@ export function startThreadNotifications(
         archived: state.thread.archivedAt !== null,
         quiet: state.raw.latestRunStopRequested === true || isDelegatedAppThread(state.raw),
         snoozed: isSnoozedForNotification(state.thread, state.completedAt, now),
+        quietInput:
+          state.status === "input" && quietDelegatedThreadInput(state.raw, state.subagentRequest),
       });
     }
   };

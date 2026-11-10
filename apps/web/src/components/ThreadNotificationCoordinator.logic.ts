@@ -1,3 +1,5 @@
+import type { PendingSubagentRequest } from "@t3tools/client-runtime/state/models";
+import { isDelegatedAppThread, type OrchestrationV2ThreadShell } from "@t3tools/contracts";
 import {
   effectiveSnoozed,
   type ThreadSnoozeShell,
@@ -34,6 +36,18 @@ export function isSnoozedForNotification(
   if (completedAt === null) return false;
   if (thread.snoozedAt != null && completedAt < Date.parse(thread.snoozedAt)) return false;
   return effectiveSnoozed(thread, { now: new Date(completedAt).toISOString() });
+}
+
+export function quietDelegatedThreadInput(
+  thread: Pick<OrchestrationV2ThreadShell, "lineage" | "delegatedFrom" | "pendingRuntimeRequest">,
+  subagentRequest: PendingSubagentRequest | null,
+): boolean {
+  return (
+    thread.pendingRuntimeRequest?.kind === "user_input" &&
+    thread.pendingRuntimeRequest.userOnly !== true &&
+    subagentRequest === null &&
+    isDelegatedAppThread(thread)
+  );
 }
 
 export function createThreadNotificationGate<Key>(
@@ -84,7 +98,12 @@ export function createThreadNotificationGate<Key>(
       key: Key,
       prior: ThreadNotificationObservation | undefined,
       next: ThreadNotificationObservation,
-      options: { readonly archived: boolean; readonly quiet: boolean; readonly snoozed: boolean },
+      options: {
+        readonly archived: boolean;
+        readonly quiet: boolean;
+        readonly quietInput?: boolean;
+        readonly snoozed: boolean;
+      },
     ): void {
       // The grace survives updates that keep the wake's completion; anything else cancels it.
       const pending = releases.get(key);
@@ -98,7 +117,7 @@ export function createThreadNotificationGate<Key>(
       if (!prior || silenced) skip(key, next.completedAt);
       const fresh = attend(key, prior, next);
       if (!prior || options.archived) return;
-      if (fresh) {
+      if (fresh && !options.quietInput) {
         notify(key, "input");
         return;
       }

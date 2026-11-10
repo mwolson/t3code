@@ -232,7 +232,9 @@ it("readThread preserves caller access errors and prefers activity-run status ov
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
         Layer.mock(ProjectService.ProjectService)({}),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({
           list: () => Effect.succeed({ tasks: [] }),
         } satisfies Partial<ScheduledTaskService.ScheduledTaskService["Service"]>),
@@ -385,7 +387,9 @@ it("readThread pages cut-off text without splitting an emoji across pages", asyn
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
         Layer.mock(ProjectService.ProjectService)({}),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({
           list: () => Effect.succeed({ tasks: [] }),
         } satisfies Partial<ScheduledTaskService.ScheduledTaskService["Service"]>),
@@ -621,7 +625,9 @@ it("readThread returns the newest items that fit the response budget", async () 
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
         Layer.mock(ProjectService.ProjectService)({}),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({
           list: () => Effect.succeed({ tasks: [] }),
         } satisfies Partial<ScheduledTaskService.ScheduledTaskService["Service"]>),
@@ -755,7 +761,9 @@ it("readThread keeps an activity page within an MCP client's output limit and pa
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
         Layer.mock(ProjectService.ProjectService)({}),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({
           list: () => Effect.succeed({ tasks: [] }),
         } satisfies Partial<ScheduledTaskService.ScheduledTaskService["Service"]>),
@@ -917,7 +925,9 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
         Layer.mock(ProjectService.ProjectService)({}),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({
           list: () => Effect.succeed({ tasks: [] }),
         } satisfies Partial<ScheduledTaskService.ScheduledTaskService["Service"]>),
@@ -1049,7 +1059,9 @@ it("readThread and sendToThread reach threads in other projects", async () => {
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
         Layer.mock(ProjectService.ProjectService)({}),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({
           list: () =>
             Effect.succeed({
@@ -1241,7 +1253,9 @@ it("requestSecret saves a pasted value to a file without opening a card", async 
               return file;
             }),
         }),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
         NodeCrypto.layer,
@@ -1339,7 +1353,9 @@ it("requestSecret returns the unsaved note for a declined, cancelled or timed-ou
           } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
           Layer.mock(ProjectService.ProjectService)({}),
           Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
           Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
           NodeCrypto.layer,

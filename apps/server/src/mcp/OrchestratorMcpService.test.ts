@@ -10,6 +10,7 @@ import {
   MessageId,
   NodeId,
   ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
+  OrchestratorMcpFailure,
   type OrchestratorMcpCapabilitiesInput,
   type OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpListScheduledTasksInput,
@@ -217,7 +218,9 @@ describe("OrchestratorMcpService", () => {
         }),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -341,7 +344,9 @@ describe("OrchestratorMcpService", () => {
         }),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -487,7 +492,9 @@ describe("OrchestratorMcpService", () => {
         }),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -706,7 +713,9 @@ describe("OrchestratorMcpService", () => {
         }),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -817,7 +826,9 @@ describe("OrchestratorMcpService", () => {
         }),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -919,7 +930,9 @@ describe("OrchestratorMcpService", () => {
           }),
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
           Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         );
         const scope: McpInvocationScope = {
@@ -1028,7 +1041,9 @@ describe("OrchestratorMcpService", () => {
         }),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -1125,7 +1140,9 @@ describe("OrchestratorMcpService", () => {
         }),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -1219,7 +1236,9 @@ describe("OrchestratorMcpService", () => {
           }),
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
           Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         );
         const scope: McpInvocationScope = {
@@ -1311,7 +1330,9 @@ describe("OrchestratorMcpService", () => {
         }),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -1501,7 +1522,9 @@ describe("OrchestratorMcpService", () => {
         }),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -1782,7 +1805,9 @@ describe("OrchestratorMcpService provider resolution", () => {
         adapterRegistryLayer([codexInstanceId]),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       yield* Effect.gen(function* () {
@@ -1912,7 +1937,9 @@ describe("OrchestratorMcpService provider resolution", () => {
         adapterRegistryLayer([codexInstanceId]),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       yield* Effect.gen(function* () {
@@ -2053,7 +2080,9 @@ describe("OrchestratorMcpService provider resolution", () => {
         adapterRegistryLayer([]),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       yield* Effect.gen(function* () {
@@ -2250,7 +2279,9 @@ describe("OrchestratorMcpService provider resolution", () => {
           ]),
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
           Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         );
 
@@ -2437,7 +2468,9 @@ describe("OrchestratorMcpService provider resolution", () => {
                 adapterRegistryLayer([codexInstanceId, opencodeInstanceId]),
                 Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
                 Layer.mock(SecretRequests.SecretRequests)({}),
-                Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+                Layer.mock(RemoteDelegation.RemoteDelegation)({
+                  pendingQuestions: () => Effect.succeed([]),
+                }),
                 Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
               ),
             ),
@@ -2655,7 +2688,9 @@ describe("OrchestratorMcpService provider resolution", () => {
           adapterRegistryLayer([museInstanceId]),
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
           Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         );
         yield* Effect.gen(function* () {
@@ -2811,7 +2846,9 @@ describe("OrchestratorMcpService provider resolution", () => {
         adapterRegistryLayer([codexInstanceId]),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
 
@@ -2872,7 +2909,9 @@ describe("OrchestratorMcpService provider resolution", () => {
         adapterRegistryLayer([codexInstanceId]),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const error = yield* Effect.gen(function* () {
@@ -2941,7 +2980,9 @@ describe("OrchestratorMcpService provider resolution", () => {
           adapterRegistryLayer([codexInstanceId]),
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
           Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         );
         const error = yield* Effect.gen(function* () {
@@ -2988,7 +3029,9 @@ describe("OrchestratorMcpService provider resolution", () => {
         adapterRegistryLayer([codexInstanceId]),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
 
@@ -3110,7 +3153,9 @@ describe("OrchestratorMcpService provider resolution", () => {
         adapterRegistryLayer([codexInstanceId, altInstanceId]),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         ServerSettings.layerTest(),
       );
@@ -3331,7 +3376,9 @@ describe("OrchestratorMcpService provider resolution", () => {
           adapterRegistryLayer([codexInstanceId, altInstanceId]),
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
           Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
           ServerSettings.layerTest(),
         );
@@ -3445,7 +3492,9 @@ describe("OrchestratorMcpService provider resolution", () => {
                   ),
               }),
               Layer.mock(SecretRequests.SecretRequests)({}),
-              Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+              Layer.mock(RemoteDelegation.RemoteDelegation)({
+                pendingQuestions: () => Effect.succeed([]),
+              }),
               Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
             ),
           ),
@@ -3617,7 +3666,12 @@ describe("OrchestratorMcpService provider resolution", () => {
       }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
-  it.effect.each(["local", "remote"] as const)(
+  it.effect.each([
+    "local",
+    "remote",
+    "remote with failed question lookup",
+    "remote with stalled question lookup",
+  ] as const)(
     "a blocking %s delegation cancelled mid-wait wakes its parent like an async task",
     (placement) =>
       Effect.gen(function* () {
@@ -3652,6 +3706,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           Layer.provideMerge(layerSettings),
         );
         const waiting = yield* Deferred.make<void>();
+        const lookupInterrupted = yield* Deferred.make<void>();
         const layerWatchedThreads = Layer.effect(
           ThreadManagementService.ThreadManagementService,
           Effect.gen(function* () {
@@ -3677,6 +3732,22 @@ describe("OrchestratorMcpService provider resolution", () => {
           Effect.gen(function* () {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             return Layer.mock(RemoteDelegation.RemoteDelegation)({
+              pendingQuestions: () =>
+                Effect.gen(function* () {
+                  if (placement === "remote with failed question lookup") {
+                    return yield* new OrchestratorMcpFailure({
+                      code: "orchestration_error",
+                      message: "The linked environment stopped answering.",
+                    });
+                  }
+                  if (placement === "remote with stalled question lookup") {
+                    yield* Deferred.succeed(waiting, undefined);
+                    return yield* Effect.never.pipe(
+                      Effect.onInterrupt(() => Deferred.succeed(lookupInterrupted, undefined)),
+                    );
+                  }
+                  return [];
+                }),
               delegate: (_scope, input) =>
                 Effect.gen(function* () {
                   const run = (yield* orchestrator.getThreadProjection(parentThreadId)).runs[0]!;
@@ -3747,7 +3818,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           const call = yield* service
             .delegateTask(scope, {
               task: "Review the change.",
-              ...(placement === "remote"
+              ...(placement !== "local"
                 ? { target: { environmentId: remoteChild.environmentId } }
                 : {}),
               mode: "wait",
@@ -3757,6 +3828,9 @@ describe("OrchestratorMcpService provider resolution", () => {
           yield* Deferred.await(waiting);
           // A steered Claude parent cancels the tools/call, which interrupts this fiber.
           yield* Fiber.interrupt(call);
+          if (placement === "remote with stalled question lookup") {
+            assert.isTrue(yield* Deferred.isDone(lookupInterrupted));
+          }
           const parent = yield* orchestrator.getThreadProjection(parentThreadId);
           const task = parent.subagents.find((subagent) => subagent.origin === "app_owned");
           assert.equal(task?.status, "running");
@@ -3925,7 +3999,9 @@ describe("OrchestratorMcpService provider resolution", () => {
             ),
             Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
             Layer.mock(SecretRequests.SecretRequests)({}),
-            Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+            Layer.mock(RemoteDelegation.RemoteDelegation)({
+              pendingQuestions: () => Effect.succeed([]),
+            }),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
           );
 
@@ -4107,7 +4183,9 @@ describe("OrchestratorMcpService provider resolution", () => {
                 } as Project),
             }),
             Layer.mock(SecretRequests.SecretRequests)({}),
-            Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+            Layer.mock(RemoteDelegation.RemoteDelegation)({
+              pendingQuestions: () => Effect.succeed([]),
+            }),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({
               list: () => Effect.succeed({ tasks }),
               upsert: () =>
@@ -4242,7 +4320,9 @@ describe("OrchestratorMcpService provider resolution", () => {
                   }),
                   Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
                   Layer.mock(SecretRequests.SecretRequests)({}),
-                  Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+                  Layer.mock(RemoteDelegation.RemoteDelegation)({
+                    pendingQuestions: () => Effect.succeed([]),
+                  }),
                   Layer.mock(ScheduledTaskService.ScheduledTaskService)({
                     list: () => Effect.succeed({ tasks: [bound] }),
                     upsert: () =>
@@ -4339,7 +4419,9 @@ describe("OrchestratorMcpService provider resolution", () => {
                 } as never),
             }),
             Layer.mock(SecretRequests.SecretRequests)({}),
-            Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+            Layer.mock(RemoteDelegation.RemoteDelegation)({
+              pendingQuestions: () => Effect.succeed([]),
+            }),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({
               list: () => Effect.succeed({ tasks: [task] }),
               upsert: (input) =>
@@ -4696,7 +4778,9 @@ describe("OrchestratorMcpService provider resolution", () => {
           adapterRegistryLayer([]),
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
           Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         );
         yield* Effect.gen(function* () {
@@ -4914,7 +4998,9 @@ describe("OrchestratorMcpService provider resolution", () => {
             adapterRegistryLayer([codexInstanceId, peerId, antigravityId]),
             Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
             Layer.mock(SecretRequests.SecretRequests)({}),
-            Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+            Layer.mock(RemoteDelegation.RemoteDelegation)({
+              pendingQuestions: () => Effect.succeed([]),
+            }),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
           );
           yield* Effect.gen(function* () {
@@ -5009,7 +5095,9 @@ describe("OrchestratorMcpService provider resolution", () => {
         adapterRegistryLayer([codexInstanceId]),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       yield* Effect.gen(function* () {
@@ -5063,7 +5151,9 @@ describe("OrchestratorMcpService provider resolution", () => {
         adapterRegistryLayer([codexInstanceId]),
         Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const error = yield* Effect.gen(function* () {
@@ -5106,7 +5196,9 @@ describe("OrchestratorMcpService provider resolution", () => {
           }),
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
           Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         );
         const error = yield* Effect.gen(function* () {
@@ -5187,7 +5279,9 @@ describe("OrchestratorMcpService thread lookup", () => {
           }),
           Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
           Layer.mock(SecretRequests.SecretRequests)({}),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         ),
       ),
@@ -5506,7 +5600,9 @@ describe("OrchestratorMcpService thread list", () => {
               : Effect.succeedNone,
         }),
         Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       ),
     ),
@@ -5746,7 +5842,9 @@ describe("OrchestratorMcpService thread stop", () => {
             Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
             Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
             Layer.mock(SecretRequests.SecretRequests)({}),
-            Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+            Layer.mock(RemoteDelegation.RemoteDelegation)({
+              pendingQuestions: () => Effect.succeed([]),
+            }),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
           ),
         ),

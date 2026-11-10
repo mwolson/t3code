@@ -1,4 +1,8 @@
-import type { OrchestrationV2RunStatus, RunId } from "@t3tools/contracts";
+import {
+  isDelegatedAppThread,
+  type OrchestrationV2RunStatus,
+  type RunId,
+} from "@t3tools/contracts";
 import {
   backgroundWorkHoldsCompletion,
   monitorHoldsWakeCompletion,
@@ -33,13 +37,20 @@ export function resolveBackgroundThreadRequest(
     SidebarThreadSummary,
     "hasPendingApprovals" | "hasPendingUserInput" | "pendingSubagentRequest"
   > & {
-    readonly source: Pick<SidebarThreadSummary["source"], "pendingRuntimeRequest">;
+    readonly source: Pick<
+      SidebarThreadSummary["source"],
+      "pendingRuntimeRequest" | "lineage" | "delegatedFrom"
+    >;
   },
 ): Pick<BackgroundThreadSnapshot, "request" | "requestId"> {
   const ownRequestId = thread.source.pendingRuntimeRequest?.id ?? null;
   if (thread.hasPendingApprovals) return { request: "approval", requestId: ownRequestId };
   if (thread.pendingSubagentRequest === "approval") return { request: "approval", requestId: null };
-  if (thread.hasPendingUserInput) return { request: "input", requestId: ownRequestId };
+  if (
+    thread.hasPendingUserInput &&
+    (thread.source.pendingRuntimeRequest?.userOnly === true || !isDelegatedAppThread(thread.source))
+  )
+    return { request: "input", requestId: ownRequestId };
   if (thread.pendingSubagentRequest === "user_input") return { request: "input", requestId: null };
   return { request: null, requestId: null };
 }
