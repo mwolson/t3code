@@ -1172,6 +1172,7 @@ export class AcpSessionRuntime extends Context.Service<
     readonly terminateProcessGroup?: Effect.Effect<void, AcpProcessGroupTerminationError>;
     readonly setMode: (
       modeId: string,
+      force?: boolean,
     ) => Effect.Effect<EffectAcpSchema.SetSessionModeResponse, EffectAcpErrors.AcpError>;
     readonly setSessionModel: (
       modelId: string,
@@ -1186,9 +1187,12 @@ export class AcpSessionRuntime extends Context.Service<
     readonly setConfigOption: (
       configId: string,
       value: string | boolean,
-      options?: { readonly allowUnlistedValue?: boolean },
+      options?: { readonly allowUnlistedValue?: boolean; readonly force?: boolean },
     ) => Effect.Effect<EffectAcpSchema.SetSessionConfigOptionResponse, EffectAcpErrors.AcpError>;
-    readonly setModel: (model: string) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+    readonly setModel: (
+      model: string,
+      force?: boolean,
+    ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
     readonly request: (
       method: string,
       payload: unknown,
@@ -2031,7 +2035,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
   const setConfigOption = (
     configId: string,
     value: string | boolean,
-    options?: { readonly allowUnlistedValue?: boolean },
+    options?: { readonly allowUnlistedValue?: boolean; readonly force?: boolean },
   ): Effect.Effect<EffectAcpSchema.SetSessionConfigOptionResponse, EffectAcpErrors.AcpError> =>
     validateConfigOptionValue(configId, value, options?.allowUnlistedValue === true).pipe(
       Effect.andThen(getStartedState),
@@ -2039,7 +2043,11 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
         SubscriptionRef.get(configOptionsRef).pipe(
           Effect.flatMap((configOptions) => {
             const existing = findSessionConfigOption(configOptions, configId);
-            if (existing && configOptionCurrentValueMatches(existing, value)) {
+            if (
+              options?.force !== true &&
+              existing &&
+              configOptionCurrentValueMatches(existing, value)
+            ) {
               return Effect.succeed({
                 configOptions,
               } satisfies EffectAcpSchema.SetSessionConfigOptionResponse);
@@ -2672,9 +2680,9 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
     // A session's mode is its `category: "mode"` config option. ACP v1 agents
     // that only advertise `modes` (gemini-cli) take `session/set_mode`
     // instead, which ACP v2 removed.
-    setMode: Effect.fn("AcpSessionRuntime.setMode")(function* (modeId) {
+    setMode: Effect.fn("AcpSessionRuntime.setMode")(function* (modeId, force = false) {
       const modeState = yield* Ref.get(modeStateRef);
-      if (modeState?.currentModeId === modeId) {
+      if (!force && modeState?.currentModeId === modeId) {
         return {} satisfies EffectAcpSchema.SetSessionModeResponse;
       }
       const modeConfigOption = (yield* SubscriptionRef.get(configOptionsRef))?.find(
@@ -2687,7 +2695,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
         yield* updateCurrentModeId(modeId);
         return {} satisfies EffectAcpSchema.SetSessionModeResponse;
       }
-      const response = yield* setConfigOption(modeConfigOption?.id ?? "mode", modeId);
+      const response = yield* setConfigOption(modeConfigOption?.id ?? "mode", modeId, { force });
       const reported = parseSessionModeState({ configOptions: response.configOptions });
       if (reported === undefined) {
         yield* updateCurrentModeId(modeId);
@@ -2708,9 +2716,19 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
         }),
       ),
     setConfigOption,
-    setModel: (model) =>
+    setModel: (model, force = false) =>
       getStartedState.pipe(
-        Effect.flatMap((started) => setConfigOption(started.modelConfigId ?? "model", model)),
+        Effect.flatMap((started) =>
+          SubscriptionRef.get(configOptionsRef).pipe(
+            Effect.flatMap((configOptions) =>
+              setConfigOption(
+                findModelConfigOption(configOptions)?.id ?? started.modelConfigId ?? "model",
+                model,
+                { force },
+              ),
+            ),
+          ),
+        ),
         Effect.asVoid,
       ),
 

@@ -40,6 +40,8 @@ export interface ProviderSwitchServiceV2Shape {
       "thread" | "providerSessions" | "providerThreads"
     >;
     readonly targetModelSelection: ModelSelection;
+    readonly executionSelection?: ModelSelection | null;
+    readonly freshAttachment?: boolean;
   }) => Effect.Effect<ProviderSwitchPlanV2, ProviderSwitchPlanError>;
 }
 
@@ -62,10 +64,19 @@ export const layer: Layer.Layer<
     const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
     return ProviderSwitchServiceV2.of({
       plan: Effect.fn("ProviderSwitchService.plan")(
-        function* ({ projection, targetModelSelection }) {
-          const current = projection.thread.modelSelection;
-          const instanceChanged = current.instanceId !== targetModelSelection.instanceId;
-          const getMetadata = (instanceId: typeof current.instanceId) =>
+        function* ({ projection, targetModelSelection, executionSelection, freshAttachment }) {
+          const current =
+            executionSelection === undefined
+              ? projection.thread.modelSelection
+              : executionSelection;
+          const currentInstanceId =
+            current?.instanceId ??
+            projection.providerThreads.find(
+              (thread) => thread.id === projection.thread.activeProviderThreadId,
+            )?.providerInstanceId ??
+            projection.thread.providerInstanceId;
+          const instanceChanged = currentInstanceId !== targetModelSelection.instanceId;
+          const getMetadata = (instanceId: ModelSelection["instanceId"]) =>
             adapters.getMetadata !== undefined
               ? adapters.getMetadata(instanceId)
               : adapters.get(instanceId).pipe(
@@ -80,26 +91,34 @@ export const layer: Layer.Layer<
                     ),
                   ),
                 );
-          const currentInstance = yield* Effect.option(getMetadata(current.instanceId));
+          const currentInstance = yield* Effect.option(getMetadata(currentInstanceId));
           const targetInstance = yield* Effect.option(getMetadata(targetModelSelection.instanceId));
           const targetAdapter = yield* Effect.option(adapters.get(targetModelSelection.instanceId));
           const currentSessions = projection.providerSessions
-            .filter((session) => session.providerInstanceId === current.instanceId)
+            .filter((session) => session.providerInstanceId === currentInstanceId)
             .toSorted(
               (left, right) =>
                 DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
             );
-          const currentSession = currentSessions.find(isLiveProviderSession);
+          const activeSessionId = projection.providerThreads.find(
+            (thread) => thread.id === projection.thread.activeProviderThreadId,
+          )?.providerSessionId;
+          const currentSession = currentSessions.find(
+            (session) =>
+              isLiveProviderSession(session) &&
+              (executionSelection === undefined || session.id === activeSessionId),
+          );
           const negotiatedCapabilities =
             currentSession?.capabilities ?? currentSessions[0]?.capabilities;
           const currentProviderThread = projection.providerThreads.find(
             (thread) =>
               thread.id === projection.thread.activeProviderThreadId &&
-              thread.providerInstanceId === current.instanceId &&
+              thread.providerInstanceId === currentInstanceId &&
               thread.nativeThreadRef !== null,
           );
           const selectionTransition =
-            current.instanceId === targetModelSelection.instanceId &&
+            current !== null &&
+            currentInstanceId === targetModelSelection.instanceId &&
             !modelSelectionsEqual(current, targetModelSelection) &&
             Option.isSome(targetAdapter) &&
             Option.isSome(currentInstance) &&
@@ -110,48 +129,72 @@ export const layer: Layer.Layer<
                   sessionCapabilities: negotiatedCapabilities ?? currentInstance.value.capabilities,
                 })
               : undefined;
-          const transition =
-            Option.isNone(targetInstance) || Option.isNone(targetAdapter)
-              ? ({
-                  type: "reject",
-                  reason: "The target provider instance is unavailable.",
-                } as const)
-              : decideProviderSessionTransition({
-                  current:
-                    Option.isNone(currentInstance) ||
-                    (currentSession === undefined && currentProviderThread === undefined)
-                      ? null
-                      : {
-                          driver: currentInstance.value.driver,
-                          continuationIdentity: {
-                            driverKind: currentInstance.value.driver,
-                            continuationKey: currentInstance.value.continuationKey,
-                          },
-                          modelSelection: current,
-                          runtimeMode: projection.thread.runtimeMode,
-                          interactionMode: projection.thread.interactionMode,
-                          workspace:
-                            currentSession?.cwd ??
-                            projection.thread.worktreePath ??
-                            "<unresolved-workspace>",
-                        },
-                  target: {
-                    driver: targetInstance.value.driver,
-                    continuationIdentity: {
-                      driverKind: targetInstance.value.driver,
-                      continuationKey: targetInstance.value.continuationKey,
+          const canResumeUnknown =
+            currentProviderThread !== undefined &&
+            Option.isSome(currentInstance) &&
+            Option.isSome(targetInstance) &&
+            currentInstance.value.driver === targetInstance.value.driver &&
+            currentInstance.value.continuationKey === targetInstance.value.continuationKey;
+          const unknownTransition = (() => {
+            if (currentInstanceId === targetModelSelection.instanceId) {
+              return {
+                type:
+                  freshAttachment === true ? ("reuse" as const) : ("restart_and_resume" as const),
+              };
+            }
+            return {
+              type: canResumeUnknown
+                ? ("restart_and_resume" as const)
+                : ("create_with_handoff" as const),
+            };
+          })();
+          const transition = (() => {
+            if (
+              Option.isNone(targetInstance) ||
+              Option.isNone(targetAdapter) ||
+              !targetInstance.value.enabled
+            ) {
+              return {
+                type: "reject" as const,
+                reason: "The target provider instance is unavailable.",
+              };
+            }
+            if (current === null) return unknownTransition;
+            return decideProviderSessionTransition({
+              current:
+                Option.isNone(currentInstance) ||
+                (currentSession === undefined && currentProviderThread === undefined)
+                  ? null
+                  : {
+                      driver: currentInstance.value.driver,
+                      continuationIdentity: {
+                        driverKind: currentInstance.value.driver,
+                        continuationKey: currentInstance.value.continuationKey,
+                      },
+                      modelSelection: current,
+                      runtimeMode: projection.thread.runtimeMode,
+                      interactionMode: projection.thread.interactionMode,
+                      workspace:
+                        currentSession?.cwd ??
+                        projection.thread.worktreePath ??
+                        "<unresolved-workspace>",
                     },
-                    modelSelection: targetModelSelection,
-                    runtimeMode: projection.thread.runtimeMode,
-                    interactionMode: projection.thread.interactionMode,
-                    workspace:
-                      projection.thread.worktreePath ??
-                      currentSession?.cwd ??
-                      "<unresolved-workspace>",
-                    available: targetInstance.value.enabled,
-                  },
-                  ...(selectionTransition === undefined ? {} : { selectionTransition }),
-                });
+              target: {
+                driver: targetInstance.value.driver,
+                continuationIdentity: {
+                  driverKind: targetInstance.value.driver,
+                  continuationKey: targetInstance.value.continuationKey,
+                },
+                modelSelection: targetModelSelection,
+                runtimeMode: projection.thread.runtimeMode,
+                interactionMode: projection.thread.interactionMode,
+                workspace:
+                  projection.thread.worktreePath ?? currentSession?.cwd ?? "<unresolved-workspace>",
+                available: targetInstance.value.enabled,
+              },
+              ...(selectionTransition === undefined ? {} : { selectionTransition }),
+            });
+          })();
           if (transition.type === "reject") {
             return yield* new ProviderSwitchPlanError({
               threadId: projection.thread.id,
