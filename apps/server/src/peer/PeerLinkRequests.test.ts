@@ -167,7 +167,11 @@ const makeLaptopWith = (
       Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
       Layer.provideMerge(PeerLinkRequests.layer),
       Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-      Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+      Layer.provide(
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
+      ),
       Layer.provide(Layer.succeedContext(answering)),
       Layer.provide(NodeCrypto.layer),
       Layer.provideMerge(layerThreads),
