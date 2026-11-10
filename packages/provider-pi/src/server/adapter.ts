@@ -75,6 +75,18 @@ import { PI_FILE_CHANGE_TOOLS, PI_T3_SERVICE_TIER_COMMAND } from "./mcpExtension
 import { PI_STANDARD_SERVICE_TIER } from "./modelCapabilities.ts";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
+function piLastErrorAt(input: {
+  readonly previousError: string | null;
+  readonly previousErrorAt: DateTime.Utc | null;
+  readonly nextError: string | null;
+  readonly now: DateTime.Utc;
+}): DateTime.Utc | null {
+  if (input.nextError === null) return null;
+  // A status refresh is not a new occurrence, even for untimestamped legacy errors.
+  if (input.nextError === input.previousError) return input.previousErrorAt;
+  return input.now;
+}
+
 const PI_DRIVER_KIND = PI_PROVIDER;
 const DEFAULT_PI_SETTINGS = Schema.decodeSync(PiSettings)({});
 
@@ -631,10 +643,17 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           lastError: string | null = sessionEntity.lastError,
         ) {
           const updatedAt = yield* DateTime.now;
+          const lastErrorAt = piLastErrorAt({
+            previousError: sessionEntity.lastError,
+            previousErrorAt: sessionEntity.lastErrorAt ?? null,
+            nextError: lastError,
+            now: updatedAt,
+          });
           sessionEntity = {
             ...sessionEntity,
             status,
             lastError,
+            lastErrorAt,
             updatedAt,
             ...(status === "stopped" || runtimeRetired || unsolicitedActivityDetected
               ? { extensionStatuses: [] }
