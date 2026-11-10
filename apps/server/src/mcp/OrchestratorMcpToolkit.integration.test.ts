@@ -288,7 +288,11 @@ describe("orchestrator MCP toolkit", () => {
             Layer.provide(layerOrchestration),
           ),
         ),
-        Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+        Layer.provide(
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
+        ),
         Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       );
 
