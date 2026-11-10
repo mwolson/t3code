@@ -1,6 +1,7 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
-import { isDelegatedAppThread, isListedThreadLineage } from "@t3tools/contracts";
+import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
+import { isDelegatedAppThread } from "@t3tools/contracts";
 import type { AnyRouter } from "@tanstack/react-router";
 import type { AtomRegistry } from "effect/reactivity";
 
@@ -41,14 +42,20 @@ export function startBackgroundThreadAnnouncements(
   const update = () => {
     const threads = registry.get(environmentThreadShells.quietThreadShellsAtom);
     const liveEnvironmentIds = registry.get(liveShellEnvironmentIdsAtom);
+    const delegatedUnderParent = registry.get(environmentThreadShells.delegatedUnderParentAtom);
     const now = new Date().toISOString();
     const snapshots: BackgroundThreadSnapshot[] = [];
     for (const thread of threads) {
-      // Subagents and side chats have no row of their own; their requests surface on the parent.
-      if (thread.archivedAt !== null || !isListedThreadLineage(thread.lineage)) continue;
+      // Subagents, side chats and delegated tasks without a row surface on their parent.
+      const ref = scopeThreadRef(thread.environmentId, thread.id);
+      if (
+        thread.archivedAt !== null ||
+        isShownUnderParent(ref, thread.lineage, delegatedUnderParent)
+      )
+        continue;
       if (!liveEnvironmentIds.has(thread.environmentId)) continue;
       snapshots.push({
-        key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+        key: scopedThreadKey(ref),
         title: thread.title,
         ...resolveBackgroundThreadRequest(thread),
         runId: thread.latestRun?.runId ?? null,
@@ -78,6 +85,7 @@ export function startBackgroundThreadAnnouncements(
   const unsubscribes = [
     registry.subscribe(environmentThreadShells.quietThreadShellsAtom, update),
     registry.subscribe(liveShellEnvironmentIdsAtom, update),
+    registry.subscribe(environmentThreadShells.delegatedUnderParentAtom, update),
     router.subscribe("onResolved", updateOpenThread),
     useComposerDraftStore.subscribe(updateOpenThread),
   ];
