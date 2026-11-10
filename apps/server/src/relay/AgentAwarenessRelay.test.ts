@@ -16,6 +16,8 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import { RelayAgentActivityState } from "@t3tools/contracts/relay";
+import { decodeRelayJwt } from "@t3tools/shared/relayJwt";
+import * as BackgroundRelaySettings from "./BackgroundRelaySettings.ts";
 import { BackgroundRelayConfig } from "./BackgroundRelayConfig.ts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -121,7 +123,10 @@ function waitingChild(
   });
 }
 
-const PublishPayload = Schema.Struct({ state: Schema.NullOr(RelayAgentActivityState) });
+const PublishPayload = Schema.Struct({
+  state: Schema.NullOr(RelayAgentActivityState),
+  proof: Schema.String,
+});
 const decodePublishPayload = Schema.decodeUnknownSync(Schema.fromJsonString(PublishPayload));
 const unused = () => Effect.die("Unexpected test dependency call");
 
@@ -193,6 +198,9 @@ describe("startup agent activity", () => {
 const makeTestRelay = Effect.fnUntraced(function* (
   options: {
     readonly respond?: (attempt: number) => Response;
+    readonly snapshotThreads?: () => ReadonlyArray<OrchestrationV2ThreadShell>;
+    readonly beforeSet?: (name: string) => Effect.Effect<void>;
+    readonly afterSet?: (name: string) => Effect.Effect<void>;
     readonly failSecretRead?: (name: string) => boolean;
     readonly linked?: boolean;
     readonly readShell?: (threadId: ThreadId) => Effect.Effect<OrchestrationV2ThreadShell | null>;
@@ -226,7 +234,11 @@ const makeTestRelay = Effect.fnUntraced(function* (
         return Effect.succeed(Option.fromUndefinedOr(values.get(name)));
       }),
     create: (name, value) => Effect.sync(() => void values.set(name, value)),
-    set: (name, value) => Effect.sync(() => void values.set(name, value)),
+    set: (name, value) =>
+      (options.beforeSet?.(name) ?? Effect.void).pipe(
+        Effect.andThen(Effect.sync(() => void values.set(name, value))),
+        Effect.andThen(options.afterSet?.(name) ?? Effect.void),
+      ),
     remove: (name) => Effect.sync(() => void values.delete(name)),
     getOrCreateRandom: unused,
   });
@@ -240,7 +252,10 @@ const makeTestRelay = Effect.fnUntraced(function* (
       threadId === undefined
         ? Effect.sync(() => {
             catchUp.activitySnapshotReads += 1;
-            return { snapshotSequence: 1, threads: options.catchUpThreads ?? [] };
+            return {
+              snapshotSequence: 1,
+              threads: options.snapshotThreads?.() ?? options.catchUpThreads ?? [],
+            };
           })
         : Effect.sync(() => shellReads.push(threadId)).pipe(
             Effect.andThen(options.readShell?.(threadId) ?? Ref.get(currentShell)),
@@ -295,6 +310,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
   const publications: Array<{
     readonly url: string;
     readonly authorization: string | null;
+    readonly proof: string;
     readonly state: RelayAgentActivityState | null;
   }> = [];
   const fetch: typeof globalThis.fetch = Object.assign(
@@ -313,6 +329,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
         url: String(input),
         authorization: new Headers(init?.headers).get("authorization"),
         state: payload.state,
+        proof: payload.proof,
       });
       return Promise.resolve(
         options.respond?.(publications.length) ?? Response.json({ ok: true, deliveries: [] }),
@@ -332,6 +349,10 @@ const makeTestRelay = Effect.fnUntraced(function* (
   };
   const relay = yield* AgentAwarenessRelay.make.pipe(
     Effect.provide(EnvironmentKeys.layer),
+    Effect.provideServiceEffect(
+      BackgroundRelaySettings.BackgroundRelaySettings,
+      BackgroundRelaySettings.make,
+    ),
     Effect.provideService(ServerSecretStore.ServerSecretStore, secrets),
     Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
     Effect.provideService(ServerEnvironment.ServerEnvironment, {
@@ -998,9 +1019,9 @@ describe("AgentAwarenessRelay", () => {
   );
 });
 
-it.effect("catches up after startup without polling after success", () =>
+it.effect("resnapshots on explicit catch-up while idle configuration checks avoid snapshots", () =>
   Effect.gen(function* () {
-    const { relay, secrets, secretReads, catchUp, publications } = yield* makeTestRelay({
+    const { relay, secrets, catchUp, publications } = yield* makeTestRelay({
       catchUpThreads: [shell()],
     });
     yield* relay.start();
@@ -1025,10 +1046,8 @@ it.effect("catches up after startup without polling after success", () =>
     yield* TestClock.adjust("1 second");
     assert.equal(catchUp.activitySnapshotReads, 2);
 
-    const readsBeforeIdle = secretReads.length;
     yield* TestClock.adjust("10 minutes");
     assert.equal(catchUp.activitySnapshotReads, 2);
-    assert.equal(secretReads.length, readsBeforeIdle);
 
     yield* secrets.set(
       RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
@@ -1042,3 +1061,189 @@ it.effect("catches up after startup without polling after success", () =>
     assert.equal(publications[1]?.state?.threadId, THREAD_ID);
   }).pipe(Effect.scoped),
 );
+
+const secretConfig = (label: string) =>
+  new TextEncoder().encode(
+    JSON.stringify({
+      version: 1,
+      url: `https://${label}.example.test`,
+      issuer: `https://${label}-issuer.example.test`,
+      environmentCredential: `${label}-credential`,
+    }),
+  );
+
+const setBackground = (secrets: ServerSecretStore.ServerSecretStore["Service"], label: string) =>
+  secrets.set(BackgroundRelaySettings.SECRET, secretConfig(label));
+
+describe("background relay resync", () => {
+  it.effect("disables a malformed secret without primary fallback and catches up after clear", () =>
+    Effect.gen(function* () {
+      const { relay, secrets, publications } = yield* makeTestRelay({
+        snapshotThreads: () => [shell()],
+      });
+      yield* secrets.set(BackgroundRelaySettings.SECRET, new TextEncoder().encode('{"version":2}'));
+      yield* relay.start();
+      yield* TestClock.adjust("1 second");
+      yield* relay.publishThread(THREAD_ID);
+      yield* TestClock.adjust("1 minute");
+      assert.equal(publications.length, 0);
+      yield* secrets.remove(BackgroundRelaySettings.SECRET);
+      yield* TestClock.adjust("5 seconds");
+      yield* relay.drain;
+      assert.equal(publications.length, 1);
+      assert.equal(publications[0]?.authorization, "Bearer credential-1");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("activates a secret-only destination after startup catch-up has finished", () =>
+    Effect.gen(function* () {
+      const { relay, secrets, publications, catchUp } = yield* makeTestRelay({
+        linked: false,
+        snapshotThreads: () => [shell()],
+      });
+      yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, new TextEncoder().encode("true"));
+      yield* relay.start();
+      yield* TestClock.adjust("1 second");
+      assert.equal(catchUp.activitySnapshotReads, 0);
+      yield* setBackground(secrets, "first");
+      yield* TestClock.adjust("1 minute");
+      yield* relay.drain;
+      assert.equal(publications.length, 1);
+      assert.equal(publications[0]?.authorization, "Bearer first-credential");
+      yield* setBackground(secrets, "second");
+      yield* TestClock.adjust("5 seconds");
+      yield* relay.drain;
+      assert.equal(publications.length, 2);
+      assert.equal(publications[1]?.authorization, "Bearer second-credential");
+      yield* TestClock.adjust("10 minutes");
+      assert.equal(publications.length, 2);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("recovers exhausted retries quietly after the acknowledged startup resync", () =>
+    Effect.gen(function* () {
+      let failing = false;
+      let title = "Initial";
+      const ids = [THREAD_ID, SECOND_THREAD_ID];
+      const snapshot = () => ids.map((id) => shell({ id, title }));
+      const { relay, publications } = yield* makeTestRelay({
+        snapshotThreads: snapshot,
+        readShell: (id) => Effect.sync(() => shell({ id, title })),
+        respond: () =>
+          Response.json(failing ? {} : { ok: true, deliveries: [] }, {
+            status: failing ? 503 : 200,
+          }),
+      });
+      yield* relay.start();
+      yield* TestClock.adjust("1 second");
+      yield* relay.drain;
+      assert.equal(publications.length, 2);
+      yield* TestClock.adjust("1 minute");
+      assert.equal(publications.length, 2);
+      failing = true;
+      title = "Changed during outage";
+      for (const id of ids) yield* relay.publishThread(id);
+      for (let i = 0; i < 60; i++) {
+        yield* TestClock.adjust("1 second");
+        yield* relay.drain;
+      }
+      const outageAttempts = publications.length;
+      assert.isAbove(outageAttempts, 14);
+      failing = false;
+      yield* TestClock.adjust("5 minutes");
+      yield* relay.drain;
+      assert.equal(publications.length, outageAttempts + 2);
+      assert.deepEqual(
+        publications
+          .slice(-2)
+          .map((p) => p.state?.threadId)
+          .sort(),
+        [...ids].sort(),
+      );
+      assert.isTrue(publications.slice(-2).every((p) => p.state?.threadTitle === title));
+      const acknowledgedAttempts = publications.length;
+      yield* TestClock.adjust("10 minutes");
+      assert.equal(publications.length, acknowledgedAttempts);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("restarts resync when sharing is enabled again", () =>
+    Effect.gen(function* () {
+      const { relay, secrets, publications } = yield* makeTestRelay({
+        snapshotThreads: () => [shell()],
+      });
+      yield* relay.start();
+      yield* TestClock.adjust("1 second");
+      yield* relay.drain;
+      assert.equal(publications.length, 1);
+      yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, new TextEncoder().encode("false"));
+      yield* TestClock.adjust("5 seconds");
+      yield* setBackground(secrets, "changed");
+      yield* TestClock.adjust("5 seconds");
+      assert.equal(publications.length, 1);
+      yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, new TextEncoder().encode("true"));
+      yield* TestClock.adjust("5 seconds");
+      yield* relay.drain;
+      assert.equal(publications.length, 2);
+      assert.equal(publications[1]?.authorization, "Bearer changed-credential");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("publishes one immutable tuple across atomic replacement and clear barriers", () =>
+    Effect.gen(function* () {
+      const beforeWrite = yield* Deferred.make<void>();
+      const allowWrite = yield* Deferred.make<void>();
+      const afterWrite = yield* Deferred.make<void>();
+      const finishWrite = yield* Deferred.make<void>();
+      let barrier = false;
+      const { relay, secrets, publications, currentShell } = yield* makeTestRelay({
+        beforeSet: (name) =>
+          name === BackgroundRelaySettings.SECRET && barrier
+            ? Deferred.succeed(beforeWrite, undefined).pipe(
+                Effect.andThen(Deferred.await(allowWrite)),
+              )
+            : Effect.void,
+        afterSet: (name) =>
+          name === BackgroundRelaySettings.SECRET && barrier
+            ? Deferred.succeed(afterWrite, undefined).pipe(
+                Effect.andThen(Deferred.await(finishWrite)),
+              )
+            : Effect.void,
+      });
+      yield* setBackground(secrets, "first");
+      barrier = true;
+      const write = yield* setBackground(secrets, "second").pipe(Effect.forkScoped);
+      yield* Deferred.await(beforeWrite);
+      yield* relay.publishThread(THREAD_ID);
+      yield* Deferred.succeed(allowWrite, undefined);
+      yield* Deferred.await(afterWrite);
+      yield* Ref.set(currentShell, shell({ title: "After replacement" }));
+      yield* relay.publishThread(THREAD_ID);
+      yield* Deferred.succeed(finishWrite, undefined);
+      yield* Fiber.join(write);
+      yield* secrets.remove(BackgroundRelaySettings.SECRET);
+      yield* Ref.set(currentShell, shell({ title: "After clear" }));
+      yield* relay.publishThread(THREAD_ID);
+      assert.deepEqual(
+        yield* Effect.forEach(publications, (p) =>
+          decodeRelayJwt(p.proof).pipe(
+            Effect.map((claims) => [new URL(p.url).origin, claims.aud, p.authorization]),
+          ),
+        ),
+        [
+          [
+            "https://first.example.test",
+            "https://first-issuer.example.test",
+            "Bearer first-credential",
+          ],
+          [
+            "https://second.example.test",
+            "https://second-issuer.example.test",
+            "Bearer second-credential",
+          ],
+          ["https://relay.example.test", "https://relay.example.test", "Bearer credential-1"],
+        ],
+      );
+    }).pipe(Effect.scoped),
+  );
+});
