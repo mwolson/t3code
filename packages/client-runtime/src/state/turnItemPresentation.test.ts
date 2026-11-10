@@ -1,20 +1,28 @@
 import {
+  MessageId,
+  OrchestrationV2TurnItem,
+  OrchestrationV2TurnItemJson,
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   RunId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2Run,
-  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  presentLegacyWakeItem,
   turnItemIsWorkspacePreparation,
   workspacePreparationRetryRunIds,
 } from "./turnItemPresentation.ts";
 
-function command(input: string): OrchestrationV2TurnItem {
+const encodeTurnItemJson = Schema.encodeSync(OrchestrationV2TurnItemJson);
+const decodeDurableTurnItem = Schema.decodeSync(Schema.fromJsonString(OrchestrationV2TurnItemJson));
+const decodeWireTurnItem = Schema.decodeSync(OrchestrationV2TurnItem);
+
+function command(input: string): Extract<OrchestrationV2TurnItem, { type: "command_execution" }> {
   const now = DateTime.makeUnsafe("2026-08-03T00:00:00.000Z");
   return {
     id: TurnItemId.make("item-command"),
@@ -69,6 +77,46 @@ function run(
     ...(workspacePreparation === undefined ? {} : { workspacePreparation }),
   };
 }
+
+function wake(
+  overrides: Partial<Extract<OrchestrationV2TurnItem, { type: "user_message" }>> = {},
+): Extract<OrchestrationV2TurnItem, { type: "user_message" }> {
+  return {
+    ...command("ignored"),
+    type: "user_message",
+    messageId: MessageId.make("old-wake"),
+    createdBy: "agent",
+    creationSource: "provider",
+    inputIntent: "turn_start",
+    text: "Background task completed.",
+    attachments: [],
+    ...overrides,
+  };
+}
+
+describe("legacy trial wake presentation", () => {
+  it("preserves authoritative metadata through durable JSON and live wire decoding", () => {
+    const original = wake({
+      text: "Provider-specific payload without the sentinel",
+      providerWake: { kind: "background_command", count: 2 },
+    });
+    const encoded = encodeTurnItemJson(original);
+    const durable = decodeDurableTurnItem(JSON.stringify(encoded));
+    const wire = decodeWireTurnItem(durable);
+    expect(wire).toMatchObject({
+      providerWake: original.providerWake,
+      createdBy: "agent",
+      creationSource: "provider",
+    });
+    expect(presentLegacyWakeItem(wire)).toMatchObject({
+      type: "notification",
+      source: { kind: "command" },
+      summary: "2 background tasks finished",
+      detail: original.text,
+    });
+    expect(wire.type).toBe("user_message");
+  });
+});
 
 describe("turnItemIsWorkspacePreparation", () => {
   it("hides a preparation failure only once a retry cancelled it", () => {

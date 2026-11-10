@@ -1615,6 +1615,13 @@ const OrchestrationV2LinkRequestFields = {
   failure: Schema.optional(Schema.String),
 } as const;
 
+// Read compatibility for historical trial user-message wakes only. New events
+// use OrchestrationV2Notification; this does not restore a wake producer.
+const LegacyProviderWake = Schema.Struct({
+  kind: Schema.Literals(["background_command", "background_task"]),
+  count: PositiveInt,
+});
+
 export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -1624,6 +1631,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     ...OrchestrationV2CreationFields,
+    providerWake: Schema.optional(LegacyProviderWake),
     type: Schema.Literal("user_message"),
     messageId: MessageId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -2468,6 +2476,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     ...OrchestrationV2CreationFields,
+    providerWake: Schema.optional(LegacyProviderWake),
     type: Schema.Literal("user_message"),
     messageId: MessageId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
