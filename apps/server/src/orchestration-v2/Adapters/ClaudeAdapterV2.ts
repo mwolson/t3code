@@ -84,6 +84,7 @@ import {
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { applyClaudePromptEffortPrefix } from "@t3tools/shared/model";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import {
   CLAUDE_RESUME_COMPACTION_COMPACT_ANSWER,
   CLAUDE_RESUME_COMPACTION_NEVER_ANSWER,
@@ -5288,6 +5289,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const opaqueBackgroundTaskReplayTombstonesByNativeThread = yield* Ref.make(
           new Map<string, Set<string>>(),
         );
+        // Tasks the thread waited on that ended while idle stay listed until their wake turn
+        // attaches, so the thread never reads as completed between the task and its wake run.
+        const wakeHeldBackgroundTasksByNativeThread = yield* Ref.make(
+          new Map<string, ReadonlyMap<string, OrchestrationV2PendingBackgroundTask>>(),
+        );
         const lastProviderThreadByNativeThread = yield* Ref.make(
           new Map<string, OrchestrationV2ProviderThread>(),
         );
@@ -5773,12 +5779,18 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             yield* Ref.get(awaitedBackgroundTasksByNativeThread),
             input.nativeThreadId,
           );
+          const wakeHeld = (yield* Ref.get(wakeHeldBackgroundTasksByNativeThread)).get(
+            input.nativeThreadId,
+          );
           const now = yield* DateTime.now;
           const providerThread: OrchestrationV2ProviderThread = {
             ...input.providerThread,
             providerSessionId: session.id,
             ...(input.status === undefined ? {} : { status: input.status }),
-            pendingBackgroundTasks: claudePendingBackgroundTasksFromRoster(roster, awaitedTaskIds),
+            pendingBackgroundTasks: [
+              ...claudePendingBackgroundTasksFromRoster(roster, awaitedTaskIds),
+              ...[...(wakeHeld?.values() ?? [])].filter((task) => !roster.has(task.taskId)),
+            ],
             ...(goalsByNativeThread.has(input.nativeThreadId)
               ? { goal: goalsByNativeThread.get(input.nativeThreadId) ?? null }
               : {}),
@@ -5790,6 +5802,91 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             driver: CLAUDE_PROVIDER,
             providerThread,
           });
+        });
+
+        const dropWakeHeldBackgroundTasks = (nativeThreadId: string) =>
+          Ref.modify(wakeHeldBackgroundTasksByNativeThread, (current) => {
+            if (!current.has(nativeThreadId)) return [false, current] as const;
+            const updated = new Map(current);
+            updated.delete(nativeThreadId);
+            return [true, updated] as const;
+          });
+
+        // For a wake that will not start: nothing else would take the held tasks off the thread.
+        const releaseWakeHeldBackgroundTasks = Effect.fn(
+          "ClaudeAdapterV2.releaseWakeHeldBackgroundTasks",
+        )(function* (nativeThreadId: string) {
+          if (!(yield* dropWakeHeldBackgroundTasks(nativeThreadId))) return;
+          const providerThread = (yield* Ref.get(lastProviderThreadByNativeThread)).get(
+            nativeThreadId,
+          );
+          if (providerThread === undefined) return;
+          yield* emitProviderThreadRoster({ nativeThreadId, providerThread });
+        });
+
+        // Holds the awaited tasks that just left the roster while their completion still has to
+        // wake Claude, and lets go of held tasks whose notification will not be delivered.
+        const reconcileWakeHeldBackgroundTasks = Effect.fnUntraced(function* (
+          nativeThreadId: string,
+          listedBefore: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+        ) {
+          const roster = rosterForNativeThread(
+            yield* Ref.get(pendingBackgroundTasksByNativeThread),
+            nativeThreadId,
+          );
+          const wakeEligible = taskIdSetForNativeThread(
+            yield* Ref.get(wakeEligibleBackgroundTasksByNativeThread),
+            nativeThreadId,
+          );
+          const buffered = (yield* Ref.get(wakeBuffers)).get(nativeThreadId)?.messages ?? [];
+          const awaitsWake = (taskId: string) =>
+            !roster.has(taskId) &&
+            (wakeEligible.has(taskId) ||
+              buffered.some(
+                (message) =>
+                  message.type === "system" &&
+                  message.subtype === "task_notification" &&
+                  message.task_id === taskId,
+              ));
+          const changed = yield* Ref.modify(wakeHeldBackgroundTasksByNativeThread, (current) => {
+            const held =
+              current.get(nativeThreadId) ??
+              new Map<string, OrchestrationV2PendingBackgroundTask>();
+            const next = new Map(
+              [...held.values(), ...listedBefore]
+                .filter((task) => awaitsWake(task.taskId) && backgroundWorkHoldsCompletion([task]))
+                .map((task) => [task.taskId, task] as const),
+            );
+            if (next.size === held.size && [...next.keys()].every((taskId) => held.has(taskId))) {
+              return [null, current] as const;
+            }
+            const updated = new Map(current);
+            if (next.size === 0) updated.delete(nativeThreadId);
+            else updated.set(nativeThreadId, next);
+            return [next, updated] as const;
+          });
+          if (changed === null) return false;
+          if (changed.size === 0) return true;
+          // A notification or wake turn that never arrives must not hold the thread for good.
+          yield* Effect.sleep(CLAUDE_WAKE_TURN_START_DEADLINE).pipe(
+            Effect.andThen(
+              sdkMessageLock.withPermits(1)(
+                Effect.gen(function* () {
+                  const held = (yield* Ref.get(wakeHeldBackgroundTasksByNativeThread)).get(
+                    nativeThreadId,
+                  );
+                  if (held !== changed) return;
+                  yield* Effect.logWarning("orchestration-v2.claude-wake-held-task-never-woke", {
+                    providerSessionId: input.providerSessionId,
+                    nativeThreadId,
+                  });
+                  yield* releaseWakeHeldBackgroundTasks(nativeThreadId);
+                }),
+              ),
+            ),
+            Effect.forkIn(sessionScope),
+          );
+          return true;
         });
 
         const trackClaudeGoal = Effect.fnUntraced(function* (input: {
@@ -5925,6 +6022,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               return updated;
             });
             yield* clearNativeThreadTaskIdSet(awaitedBackgroundTasksByNativeThread, nativeThreadId);
+            yield* dropWakeHeldBackgroundTasks(nativeThreadId);
             yield* endClaudeMonitorTasks((_taskId, task) => task.nativeThreadId === nativeThreadId);
           });
 
@@ -5957,6 +6055,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               return updated;
             });
             yield* forgetAbsorbedWake(nativeThreadId);
+            yield* releaseWakeHeldBackgroundTasks(nativeThreadId);
           });
 
         // Claude runs one root turn at a time, so a user turn's result also ends a wake turn it
@@ -8835,6 +8934,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 updated.delete(wakeInput.nativeThreadId);
                 return [true, updated] as const;
               });
+              if (cleared) yield* releaseWakeHeldBackgroundTasks(wakeInput.nativeThreadId);
               const suppressReofferWhile = options?.suppressReofferWhile;
               if (!cleared || suppressReofferWhile === undefined) return;
               yield* Ref.update(wakeBuffers, (current) => {
@@ -8885,6 +8985,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         }) {
           const message = input.message;
           let rosterChanged = false;
+          const listedBefore =
+            input.activeContext === null
+              ? claudePendingBackgroundTasksFromRoster(
+                  rosterForNativeThread(
+                    yield* Ref.get(pendingBackgroundTasksByNativeThread),
+                    input.nativeThreadId,
+                  ),
+                  taskIdSetForNativeThread(
+                    yield* Ref.get(awaitedBackgroundTasksByNativeThread),
+                    input.nativeThreadId,
+                  ),
+                )
+              : [];
 
           if (isClaudeBackgroundTasksChangedMessage(message)) {
             const roster = Reflect.get(message, "tasks");
@@ -8947,6 +9060,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             rosterChanged = removed;
           }
 
+          if (
+            input.activeContext === null &&
+            (yield* reconcileWakeHeldBackgroundTasks(input.nativeThreadId, listedBefore))
+          ) {
+            rosterChanged = true;
+          }
           if (!rosterChanged) {
             return false;
           }
@@ -11615,6 +11734,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             const attachTurn = Effect.gen(function* () {
               querySession.lastTurn = context;
               yield* Ref.set(activeTurn, context);
+              yield* dropWakeHeldBackgroundTasks(nativeThreadId);
               if (
                 !isClaudeProviderContinuationTurn(turnInput) &&
                 permissionModeForClaudeRuntimePolicy(turnInput.runtimePolicy) ===
