@@ -18,6 +18,8 @@ export interface ThreadNotificationObservation {
   readonly completedAt: number | null;
   /** The latest run answers a background-work progress wake, like a Monitor line. */
   readonly backgroundWake: boolean;
+  /** The completed run is still waiting on background work. */
+  readonly held?: boolean;
 }
 
 /** Matches the push relay's completion confirmation: a final wake can start right after a progress wake. */
@@ -55,18 +57,24 @@ export function createThreadNotificationGate<Key>(
 ) {
   // The newest completion already notified, or deliberately skipped.
   const handled = new Map<Key, number>();
+  const wasHeld = new Set<Key>();
   // Wake completions waiting out the grace, by completion time; no timer while paused.
   const releases = new Map<
     Key,
-    { readonly at: number; readonly timer: ReturnType<typeof setTimeout> | undefined }
+    {
+      readonly at: number;
+      readonly grace: number;
+      readonly timer: ReturnType<typeof setTimeout> | undefined;
+    }
   >();
-  const release = (key: Key, at: number) => {
+  const release = (key: Key, at: number, grace = RELEASED_COMPLETION_GRACE_MS) => {
     const timer = setTimeout(() => {
       releases.delete(key);
+      wasHeld.delete(key);
       handled.set(key, at);
       notify(key, "completion");
-    }, RELEASED_COMPLETION_GRACE_MS);
-    releases.set(key, { at, timer });
+    }, grace);
+    releases.set(key, { at, grace, timer });
   };
   const skip = (key: Key, at: number | null) => {
     if (at !== null && at > (handled.get(key) ?? -Infinity)) handled.set(key, at);
@@ -105,11 +113,13 @@ export function createThreadNotificationGate<Key>(
         readonly snoozed: boolean;
       },
     ): void {
+      if (next.held === true) wasHeld.add(key);
+      else if (!next.settled && next.attention === null) wasHeld.delete(key);
       // The grace survives updates that keep the wake's completion; anything else cancels it.
       const pending = releases.get(key);
       const silenced = options.archived || options.quiet || options.snoozed;
-      if (pending?.at === next.completedAt && !silenced) {
-        if (pending.timer === undefined) release(key, pending.at);
+      if (pending?.at === next.completedAt && next.settled && !silenced) {
+        if (pending.timer === undefined) release(key, pending.at, pending.grace);
         return;
       }
       cancel(key);
@@ -123,8 +133,8 @@ export function createThreadNotificationGate<Key>(
       }
       const at = next.completedAt;
       if (!next.settled || at === null || at <= (handled.get(key) ?? -Infinity)) return;
-      if (next.backgroundWake) {
-        release(key, at);
+      if (next.backgroundWake || wasHeld.has(key)) {
+        release(key, at, next.backgroundWake ? RELEASED_COMPLETION_GRACE_MS : 1_000);
         return;
       }
       handled.set(key, at);
@@ -132,20 +142,22 @@ export function createThreadNotificationGate<Key>(
     },
     /** Stops grace timers while the snapshot is stale; the next observation restarts or drops them. */
     pause(): void {
-      for (const [key, { at, timer }] of releases) {
+      for (const [key, { at, grace, timer }] of releases) {
         clearTimeout(timer);
-        releases.set(key, { at, timer: undefined });
+        releases.set(key, { at, grace, timer: undefined });
       }
     },
     /** Forgets threads that left the snapshot. */
     retain(keys: ReadonlySet<Key>): void {
       for (const key of handled.keys()) if (!keys.has(key)) handled.delete(key);
+      for (const key of wasHeld) if (!keys.has(key)) wasHeld.delete(key);
       for (const key of releases.keys()) if (!keys.has(key)) cancel(key);
       for (const key of attended.keys()) if (!keys.has(key)) attended.delete(key);
     },
     clear(): void {
       for (const key of releases.keys()) cancel(key);
       handled.clear();
+      wasHeld.clear();
       attended.clear();
     },
   };

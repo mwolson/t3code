@@ -188,44 +188,58 @@ describe("createThreadNotificationGate", () => {
     }
   });
 
-  it("waits out the grace before notifying a wake's completion, and a final wake replaces it", () => {
-    using _timers = fakeTimers();
-    const { notify, observe } = harness();
-    observe(working);
-    observe(completed(1));
-    // Held until the monitor left, or completing after it already had: either way unheld here.
-    observe(waking);
-    observe(woke(2));
-    expect(notify).toHaveBeenCalledTimes(1);
-    observe(working);
-    vi.advanceTimersByTime(RELEASED_COMPLETION_GRACE_MS);
-    expect(notify).toHaveBeenCalledTimes(1);
-    observe(completed(3));
-    vi.advanceTimersByTime(RELEASED_COMPLETION_GRACE_MS);
-    expect(notify.mock.calls).toEqual([
-      ["thread", "completion"],
-      ["thread", "completion"],
-    ]);
-  });
+  it.each([false, true])(
+    "confirms a completion and drops it when a wake follows (held=%s)",
+    (held) => {
+      using _timers = fakeTimers();
+      const { notify, observe } = harness();
+      observe(working);
+      observe(completed(1));
+      // Held until the monitor left, or completing after it already had: either way unheld here.
+      observe(held ? { ...working, held: true } : waking);
+      observe(held ? completed(2) : woke(2));
+      expect(notify).toHaveBeenCalledTimes(1);
+      observe(working);
+      vi.advanceTimersByTime(RELEASED_COMPLETION_GRACE_MS);
+      expect(notify).toHaveBeenCalledTimes(1);
+      observe(completed(3));
+      vi.advanceTimersByTime(RELEASED_COMPLETION_GRACE_MS);
+      expect(notify.mock.calls).toEqual([
+        ["thread", "completion"],
+        ["thread", "completion"],
+      ]);
+    },
+  );
 
-  it("notifies a wake's completion once after the grace when no run follows, even across a pause", () => {
-    using _timers = fakeTimers();
-    const { gate, notify, observe } = harness();
-    observe(waking);
-    observe(woke(1));
-    gate.pause();
-    vi.advanceTimersByTime(RELEASED_COMPLETION_GRACE_MS);
-    expect(notify).not.toHaveBeenCalled();
-    observe({ ...woke(1) });
-    vi.advanceTimersByTime(RELEASED_COMPLETION_GRACE_MS - 1);
-    observe({ ...woke(1) });
-    expect(notify).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
-    expect(notify.mock.calls).toEqual([["thread", "completion"]]);
-    observe({ ...woke(1) });
-    vi.advanceTimersByTime(RELEASED_COMPLETION_GRACE_MS);
-    expect(notify).toHaveBeenCalledTimes(1);
-  });
+  it.each([false, true])(
+    "confirms a completion once across a pause and attention (held=%s)",
+    (held) => {
+      using _timers = fakeTimers();
+      const { gate, notify, observe } = harness();
+      const waiting = held ? { ...working, held: true } : waking;
+      const finished = held ? completed(1) : woke(1);
+      const grace = held ? 1_000 : RELEASED_COMPLETION_GRACE_MS;
+      observe(waiting);
+      if (held) {
+        observe({ ...waiting, attention: "run-1:approval" });
+        expect(notify.mock.calls).toEqual([["thread", "input"]]);
+        notify.mockClear();
+      }
+      observe(finished);
+      gate.pause();
+      vi.advanceTimersByTime(grace);
+      expect(notify).not.toHaveBeenCalled();
+      observe({ ...finished });
+      vi.advanceTimersByTime(grace - 1);
+      observe({ ...finished });
+      expect(notify).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(notify.mock.calls).toEqual([["thread", "completion"]]);
+      observe({ ...finished });
+      vi.advanceTimersByTime(grace);
+      expect(notify).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("drops a pending wake completion when the thread is snoozed", () => {
     using _timers = fakeTimers();
