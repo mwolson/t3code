@@ -13,6 +13,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import type { ClientSettings } from "@t3tools/contracts/settings";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Option from "effect/Option";
 import type { AtomRegistry } from "effect/reactivity";
 import {
@@ -51,6 +52,9 @@ interface NotificationState extends ThreadNotificationObservation {
 }
 
 type ToastId = ReturnType<typeof toastManager.add>;
+
+// Long enough for the server to create a wake run after held work ends; the relay confirms too.
+const HELD_COMPLETION_CONFIRM_MS = 1_000;
 
 interface WatchedEnvironment {
   unsubscribe: () => void;
@@ -275,6 +279,9 @@ export function startThreadNotifications(
         attention,
         settled,
         completedAt: settled && Number.isFinite(completedAt) ? completedAt : null,
+        held:
+          thread.latestRun?.status === "completed" &&
+          backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks),
       };
       next.set(thread.id, state);
       changed.push([prior, state]);
@@ -296,10 +303,16 @@ export function startThreadNotifications(
       previous: new Map(),
       reconnecting: false,
       unsubscribe: () => {},
-      gate: createThreadNotificationGate<ThreadId>((threadId, kind) => {
-        const state = entry.previous.get(threadId);
-        if (state) present(environmentId, state, kind);
-      }),
+      gate: createThreadNotificationGate<ThreadId>(
+        (threadId, kind) => {
+          const state = entry.previous.get(threadId);
+          if (state) present(environmentId, state, kind);
+        },
+        (confirmed) => {
+          const timer = window.setTimeout(confirmed, HELD_COMPLETION_CONFIRM_MS);
+          return () => window.clearTimeout(timer);
+        },
+      ),
     };
     let threads: ReadonlyArray<OrchestrationV2ThreadShell> | null = null;
     const unsubscribeShell = registry.subscribe(
@@ -314,6 +327,7 @@ export function startThreadNotifications(
           return;
         }
         entry.reconnecting = true;
+        entry.gate.suspend();
       },
       { immediate: true },
     );
