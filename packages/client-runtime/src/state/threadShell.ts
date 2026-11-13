@@ -56,14 +56,16 @@ const isChildRunLive = (
       thread.status === "running" ||
       thread.status === "waiting";
 
-// A task with work of its own left: a run, a queued one, or background work it waits on.
+// A task with work of its own left: a run, a queued one, a pending request (which can outlive
+// the run that asked), or background work it waits on.
 const hasWorkLeft = (
   thread: Pick<
     OrchestrationV2ThreadShell,
-    "activityRunStatus" | "status" | "pendingBackgroundTasks"
+    "activityRunStatus" | "status" | "pendingBackgroundTasks" | "pendingRuntimeRequest"
   >,
 ) =>
   isChildRunLive(thread) ||
+  thread.pendingRuntimeRequest != null ||
   thread.status === "queued" ||
   backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []);
 

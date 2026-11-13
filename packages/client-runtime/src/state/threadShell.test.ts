@@ -403,6 +403,13 @@ describe("v2 thread shell lists", () => {
       threads: [waiting, { ...helper, pendingRuntimeRequest: approval }],
     });
     expect(listed()).toEqual([`${remoteEnvironmentId}/${task.id}`]);
+    registry.set(snapshotAtom(remoteEnvironmentId), {
+      ...v2ShellSnapshot,
+      threads: [
+        { ...finished, pendingRuntimeRequest: { ...approval, kind: "user_input" as const } },
+      ],
+    });
+    expect(listed()).toEqual([`${remoteEnvironmentId}/${task.id}`]);
     // Once it finishes, it follows its archived or deleted parent out of the lists.
     registry.set(snapshotAtom(remoteEnvironmentId), { ...v2ShellSnapshot, threads: [finished] });
     expect(listed()).toEqual([]);

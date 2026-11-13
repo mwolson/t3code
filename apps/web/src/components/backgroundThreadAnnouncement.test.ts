@@ -1,4 +1,4 @@
-import { RunId, RuntimeRequestId } from "@t3tools/contracts";
+import { EnvironmentId, RunId, RuntimeRequestId, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -170,8 +170,73 @@ describe("resolveBackgroundThreadRequest", () => {
       hasPendingApprovals: false,
       hasPendingUserInput: parentQuestion !== null,
       pendingSubagentRequest: "approval",
-      source: { pendingRuntimeRequest: parentQuestion === null ? null : question(parentQuestion) },
+      source: {
+        lineage: {
+          rootThreadId: ThreadId.make("root"),
+          parentThreadId: null,
+          relationshipToParent: null,
+        },
+        pendingRuntimeRequest: parentQuestion === null ? null : question(parentQuestion),
+      },
     });
+
+  it("silences a delegated question without hiding top-level or side-chat questions", () => {
+    const source = {
+      lineage: {
+        rootThreadId: ThreadId.make("root"),
+        parentThreadId: null,
+        relationshipToParent: null,
+      },
+      pendingRuntimeRequest: question("input"),
+    };
+    const input = {
+      hasPendingApprovals: false,
+      hasPendingUserInput: true,
+      pendingSubagentRequest: null,
+      source,
+    };
+    expect(resolveBackgroundThreadRequest(input).request).toBe("input");
+    expect(
+      resolveBackgroundThreadRequest({
+        ...input,
+        source: {
+          ...source,
+          delegatedFrom: {
+            environmentId: EnvironmentId.make("other"),
+            threadId: ThreadId.make("parent"),
+            title: "Parent",
+          },
+        },
+      }).request,
+    ).toBeNull();
+    expect(
+      resolveBackgroundThreadRequest({
+        ...input,
+        source: {
+          ...source,
+          lineage: {
+            ...source.lineage,
+            parentThreadId: ThreadId.make("parent"),
+            relationshipToParent: "subagent",
+          },
+        },
+      }).request,
+    ).toBeNull();
+    expect(
+      resolveBackgroundThreadRequest({
+        ...input,
+        source: {
+          ...source,
+          lineage: {
+            ...source.lineage,
+            parentThreadId: ThreadId.make("parent"),
+            relationshipToParent: "fork",
+            sideChat: true,
+          },
+        },
+      }).request,
+    ).toBe("input");
+  });
 
   it("raises a subagent's request on the parent without borrowing the parent's request id", () => {
     expect(childApproval(null)).toEqual({ request: "approval", requestId: null });

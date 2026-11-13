@@ -286,6 +286,7 @@ export function startThreadNotifications(
       entry.gate.observe(state.thread.id, prior, state, {
         archived: state.thread.archivedAt !== null,
         quiet: state.raw.latestRunStopRequested === true || isDelegatedAppThread(state.raw),
+        quietInput: state.status === "input" && isDelegatedAppThread(state.raw),
       });
     }
   };

@@ -244,7 +244,7 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   resultContextTransferId: Schema.NullOr(ContextTransferId),
   hasPendingQuestion: Schema.Boolean.annotate({
     description:
-      "A question blocks the child and ends a wait. Answer via `t3_pending_request` on `childThreadId`, or the user does.",
+      "A question ends a wait. Answer it via `t3_pending_request` on `childThreadId`, or on the `remoteChild` environment and thread.",
   }),
   pendingApproval: Schema.NullOr(
     Schema.Struct({ requestId: RuntimeRequestId, kind: ProviderRequestKind, runId: RunId }),
@@ -549,6 +549,13 @@ export const OrchestratorMcpThreadWaitInput = Schema.Struct({
   threadId: ThreadId,
   runId: Schema.optional(RunId),
   timeoutMs: Schema.optional(Schema.Finite),
+  watchQuestions: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Also return when its pending questions differ from `knownQuestionIds`, and hold a finished run while one is pending. `pendingQuestions` lists them.",
+    }),
+  ),
+  knownQuestionIds: Schema.optional(Schema.Array(RuntimeRequestId)),
   untilDelegatedWorkSettled: Schema.optional(
     Schema.Boolean.annotate({
       description:
@@ -564,6 +571,14 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
   status: OrchestratorMcpThreadStatus,
   timedOut: Schema.Boolean,
   next: Schema.optional(OrchestratorMcpRunningTaskNext),
+  pendingQuestions: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        id: RuntimeRequestId,
+        responseMode: Schema.Literals(["live", "message", "not_resumable"]),
+      }),
+    ),
+  ),
   /** With untilDelegatedWorkSettled, once settled: the run whose reply is the thread's result. */
   resultRun: Schema.optional(Schema.Struct({ runId: RunId, status: OrchestrationV2RunStatus })),
 });

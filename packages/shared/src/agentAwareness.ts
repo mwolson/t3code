@@ -141,11 +141,12 @@ function resolveThreadAwarenessPhaseV2(
   thread: ProjectThreadAwarenessV2Input["thread"],
   childAwaitsApproval: boolean,
 ): AgentAwarenessPhase | null {
-  if (thread.pendingRuntimeRequest?.kind === "user_input") return "waiting_for_input";
-  if (
-    thread.pendingRuntimeRequest !== null &&
-    thread.pendingRuntimeRequest.kind !== "auth_refresh"
-  ) {
+  const request =
+    thread.pendingRuntimeRequest?.kind === "user_input" && isDelegatedAppThread(thread)
+      ? null
+      : thread.pendingRuntimeRequest;
+  if (request?.kind === "user_input") return "waiting_for_input";
+  if (request !== null && request.kind !== "auth_refresh") {
     return "waiting_for_approval";
   }
   // The parent can finish its own turn while a delegated child keeps working,

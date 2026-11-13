@@ -12,6 +12,8 @@ import {
   type ProjectId,
   type ProviderInstanceId,
   ProviderDriverKind,
+  type RuntimeRequestId,
+  type OrchestratorMcpThreadWaitResult,
   type RunId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -34,6 +36,11 @@ import {
   resolveRuntimeMode,
   taskPrompt,
 } from "../mcp/delegatedTaskModes.ts";
+import {
+  cancelQuestionWake,
+  questionWake,
+  questionWakeMessageId,
+} from "../orchestration-v2/delegatedTaskQuestion.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -79,6 +86,13 @@ export class RemoteDelegation extends Context.Service<
         };
       },
     ) => Effect.Effect<{ readonly taskId: NodeId }, OrchestratorMcpFailure>;
+    readonly pendingQuestions: (
+      scope: ThreadScope,
+      task: OrchestrationV2Subagent,
+    ) => Effect.Effect<
+      NonNullable<OrchestratorMcpThreadWaitResult["pendingQuestions"]>,
+      OrchestratorMcpFailure
+    >;
     /**
      * Stops the task's thread there, then completes it here as cancelled. A
      * task that already has its result keeps it; its thread there is still
@@ -129,6 +143,7 @@ const make = Effect.gen(function* () {
   );
   // Followers live as long as this service, so shutting down stops them.
   const followers = yield* Scope.Scope;
+  const stopping = new Map<NodeId, number>();
 
   // One follower runs per open task and holds what it read across a wait of
   // up to FOLLOW_WAIT_MS, so it reads its own task, never the parent's whole
@@ -520,22 +535,69 @@ const make = Effect.gen(function* () {
    * dropped route) is retried with back-off, and so is completing.
    */
   const follow = (parentThreadId: ThreadId, taskId: NodeId): Effect.Effect<void> =>
-    followOnce(parentThreadId, taskId).pipe(
-      // `false` means it is still running there: follow again straight away.
-      Effect.repeat({ while: (done) => !done }),
-      Effect.catchTags({
-        OrchestratorMcpFailure: Effect.fn("RemoteDelegation.followFailed")(function* (error) {
-          const reason = yield* finalReason(parentThreadId, taskId, error);
-          if (reason === undefined) return yield* error;
-          // Gone there, or no link to reach it by: nothing left to stop there.
-          const { task } = yield* readTask(parentThreadId, taskId);
-          const stopCount = task?.remoteChild?.stopCount;
-          yield* complete(parentThreadId, taskId, "failed", reason, "stopped", stopCount);
+    Effect.suspend(() => {
+      const questions: { ids?: ReadonlyArray<RuntimeRequestId> } = {};
+      return followOnce(parentThreadId, taskId, questions).pipe(
+        Effect.repeat({ while: (done) => !done }),
+        Effect.catchTags({
+          OrchestratorMcpFailure: Effect.fn("RemoteDelegation.followFailed")(function* (error) {
+            const reason = yield* finalReason(parentThreadId, taskId, error);
+            if (reason === undefined) return yield* error;
+            const { task } = yield* readTask(parentThreadId, taskId);
+            const stopCount = task?.remoteChild?.stopCount;
+            yield* syncQuestions(parentThreadId, taskId, []);
+            yield* complete(parentThreadId, taskId, "failed", reason, "stopped", stopCount);
+          }),
         }),
-      }),
-      Effect.retry(followRetry),
-      Effect.ignoreCause({ log: true }),
+        Effect.retry(followRetry),
+        Effect.ignoreCause({ log: true }),
+      );
+    });
+
+  const syncQuestions = Effect.fn("RemoteDelegation.syncQuestions")(function* (
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    pending: NonNullable<OrchestratorMcpThreadWaitResult["pendingQuestions"]>,
+  ) {
+    const { thread, task } = yield* readTask(parentThreadId, taskId);
+    if (task?.remoteChild === undefined) return;
+    const shell = yield* threads.getThreadShell(parentThreadId);
+    const canWake =
+      task.result === null &&
+      shell !== null &&
+      !stopping.has(taskId) &&
+      !["cancelled", "interrupted", "completed", "failed"].includes(task.status) &&
+      thread.archivedAt === null &&
+      thread.deletedAt === null &&
+      shell?.latestRunStopRequested !== true;
+    const allowed = new Set(
+      canWake
+        ? pending.map((request) =>
+            questionWakeMessageId(parentThreadId, request.id, task.remoteChild!.environmentId),
+          )
+        : [],
     );
+    const { runs } = yield* threads.getThreadRecords(parentThreadId, ["runs"], {
+      runStatuses: ["queued"],
+    });
+    const { messages } = yield* threads.getThreadRecords(parentThreadId, ["messages"], {
+      messageIds: runs.flatMap((run) => (run.userMessageId === null ? [] : [run.userMessageId])),
+    });
+    for (const run of runs) {
+      if (run.status !== "queued" || run.userMessageId === null || allowed.has(run.userMessageId))
+        continue;
+      const message = messages.find((message) => message.id === run.userMessageId);
+      if (
+        message?.id.startsWith("message:delegated-task-question:") &&
+        message.notification?.source.kind === "delegated_task" &&
+        message.notification.source.taskIds.includes(taskId)
+      ) {
+        yield* threads.dispatch(cancelQuestionWake(parentThreadId, message.id, run.id));
+      }
+    }
+    if (!canWake) return;
+    for (const request of pending) yield* threads.dispatch(questionWake(task, request));
+  });
 
   /**
    * One wait on the task's thread there; true once the task here is done.
@@ -545,6 +607,7 @@ const make = Effect.gen(function* () {
   const followOnce = Effect.fn("RemoteDelegation.followOnce")(function* (
     parentThreadId: ThreadId,
     taskId: NodeId,
+    questions: { ids?: ReadonlyArray<RuntimeRequestId> },
   ) {
     const sequence = yield* threads.getThreadEventSequence(parentThreadId);
     const { thread, task } = yield* readTask(parentThreadId, taskId);
@@ -558,6 +621,7 @@ const make = Effect.gen(function* () {
     // machine or before a restart: it still has to be stopped there. So
     // does one its parent here was stopped after, for what followed there.
     if (task.result !== null) {
+      yield* syncQuestions(parentThreadId, taskId, []);
       if (
         remote.stoppedThere === false ||
         ((task.status === "cancelled" || task.status === "interrupted") &&
@@ -613,10 +677,17 @@ const make = Effect.gen(function* () {
         // tasks to wake it for the answer, which a task here waits for too.
         // An older peer ignores this and reports the run alone.
         untilDelegatedWorkSettled: true,
+        watchQuestions: true,
+        ...(questions.ids === undefined ? {} : { knownQuestionIds: questions.ids }),
       })
       .pipe(Effect.raceFirst(endedHere));
     // The next look reads the result and stops it there.
     if ("endedHere" in waited) return false;
+    if (waited.pendingQuestions !== undefined) {
+      yield* syncQuestions(parentThreadId, taskId, waited.pendingQuestions);
+      questions.ids = waited.pendingQuestions.map((request) => request.id);
+      if (waited.pendingQuestions.length > 0) return false;
+    }
     if (waited.timedOut) return false;
     // A task recorded without its run waits on the thread's latest; a
     // thread there with none has nothing left to wait for.
@@ -694,6 +765,18 @@ const make = Effect.gen(function* () {
       );
     });
 
+  const pendingQuestions: RemoteDelegation["Service"]["pendingQuestions"] = (scope, task) => {
+    const remote = task.remoteChild;
+    if (remote === undefined || task.result !== null) return Effect.succeed([]);
+    return forwarding
+      .waitForThread(scope, remote.environmentId, {
+        threadId: remote.threadId,
+        timeoutMs: 1,
+        watchQuestions: true,
+      })
+      .pipe(Effect.map((result) => result.pendingQuestions ?? []));
+  };
+
   const cancel: RemoteDelegation["Service"]["cancel"] = Effect.fn("RemoteDelegation.cancel")(
     function* (scope, task, input) {
       const remote = task.remoteChild;
@@ -765,6 +848,19 @@ const make = Effect.gen(function* () {
         status: "cancel_requested",
       } satisfies OrchestratorMcpTaskCancelResult;
     },
+    (effect, _scope, task) =>
+      Effect.suspend(() => {
+        stopping.set(task.id, (stopping.get(task.id) ?? 0) + 1);
+        return effect.pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              const remaining = (stopping.get(task.id) ?? 1) - 1;
+              if (remaining === 0) stopping.delete(task.id);
+              else stopping.set(task.id, remaining);
+            }),
+          ),
+        );
+      }),
   );
 
   const start: RemoteDelegation["Service"]["start"] = () =>
@@ -793,7 +889,7 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.ignoreCause({ log: true })),
     );
 
-  return RemoteDelegation.of({ delegate, cancel, start });
+  return RemoteDelegation.of({ delegate, cancel, pendingQuestions, start });
 });
 
 const isTerminal = (status: string) =>
