@@ -146,6 +146,10 @@ export function alertForTerminalAggregate(input: {
   return alertAllowedForPhase(input.preferences, row.phase) ? alertForActivityRows([row]) : null;
 }
 
+export function phaseCanAlert(phase: RelayAgentActivityAggregateRow["phase"]): boolean {
+  return alertAllowedForPhase(null, phase);
+}
+
 export function shouldAlertForActivity(input: {
   readonly phase: RelayAgentActivityAggregateRow["phase"];
   readonly updatedAt: string;
