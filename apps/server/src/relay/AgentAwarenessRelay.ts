@@ -206,6 +206,14 @@ function resolveAgentActivityPublishingStartupState(input: {
 const RELAY_AGENT_ACTIVITY_DETAIL_MAX_LENGTH = 160;
 const REDACTED_RELAY_AGENT_FAILURE_DETAIL = "The agent run failed.";
 const RELAY_AGENT_ACTIVITY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
+// The relay sends a card only on change and phones mark it out of date ten minutes after the
+// last push, so quiet live work is reported again well inside that window.
+const RELAY_AGENT_ACTIVITY_HEARTBEAT_MS = 3 * 60_000;
+
+// Waits and results alert, and a repeat could ring again; only silent live phases repeat.
+function phaseHeartbeats(phase: RelayAgentActivityState["phase"]): boolean {
+  return phase === "starting" || phase === "running";
+}
 
 const encodeRelayConfiguration = Schema.encodeEffect(
   Schema.fromJsonString(
@@ -504,6 +512,8 @@ export const make = Effect.gen(function* () {
   // Threads whose confirmation holds a completion, so a thread that settles during the hold still alerts.
   const heldCompletions = new Set<ThreadId>();
   let schedulePublishConfirm: (threadId: ThreadId) => Effect.Effect<void> = () => Effect.void;
+  const heartbeatDueAt = new Map<ThreadId, number>();
+  let scheduleHeartbeat: (threadId: ThreadId) => Effect.Effect<void> = () => Effect.void;
   const publishRetries = new Map<
     ThreadId,
     { readonly attempts: number; timer: Fiber.Fiber<void> | undefined }
@@ -523,6 +533,7 @@ export const make = Effect.gen(function* () {
     cachedRelayClient = undefined;
     publishConfirmDeadlines.clear();
     heldCompletions.clear();
+    heartbeatDueAt.clear();
     yield* Ref.set(publishedStateByThreadRef, new Map());
   });
 
@@ -639,9 +650,13 @@ export const make = Effect.gen(function* () {
       }
     }
     const published = publishedStateByThread.get(threadId);
+    const heartbeatDue =
+      (heartbeatDueAt.get(threadId) ?? Number.POSITIVE_INFINITY) <=
+      (yield* DateTime.now).epochMilliseconds;
     if (
       published?.revision === relayConfig.revision &&
       published.identity === publishIdentity &&
+      !heartbeatDue &&
       // A held completion settled after an earlier clear still has to alert.
       !(snapshot.state === null && heldCompletions.has(threadId))
     ) {
@@ -711,6 +726,7 @@ export const make = Effect.gen(function* () {
           reason: unsettled.reason,
         }).pipe(withRelayClientTracing);
         heldCompletions.delete(threadId);
+        heartbeatDueAt.delete(threadId);
         publishConfirmDeadlines.set(threadId, nowMs + 5_000);
         yield* Ref.update(publishedStateByThreadRef, (publishedStates) =>
           new Map(publishedStates).set(threadId, {
@@ -748,13 +764,26 @@ export const make = Effect.gen(function* () {
       childAlert?.requestId === childRequestId
         ? { ...snapshot.state, updatedAt: childAlert.updatedAt }
         : snapshot.state;
+    const heartbeatAt = state !== null && phaseHeartbeats(state.phase) ? yield* DateTime.now : null;
     yield* publishState({
       projectId: snapshot.projectId,
-      state,
+      state:
+        state === null || heartbeatAt === null
+          ? state
+          : { ...state, heartbeatAt: DateTime.formatIso(heartbeatAt) },
       reason: snapshot.reason,
     }).pipe(withRelayClientTracing);
     if (state !== null && childRequestId !== undefined) {
       childAlertByThread.set(threadId, { requestId: childRequestId, updatedAt: state.updatedAt });
+    }
+    if (heartbeatAt === null) {
+      heartbeatDueAt.delete(threadId);
+    } else {
+      heartbeatDueAt.set(
+        threadId,
+        heartbeatAt.epochMilliseconds + RELAY_AGENT_ACTIVITY_HEARTBEAT_MS,
+      );
+      yield* scheduleHeartbeat(threadId);
     }
     outcome("acknowledged");
     publishConfirmDeadlines.delete(threadId);
@@ -1005,6 +1034,21 @@ export const make = Effect.gen(function* () {
         Effect.andThen(worker.enqueue(threadId)),
         Effect.catchCause((cause) =>
           Effect.logWarning("deferred agent activity confirmation failed", {
+            threadId,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      ),
+      scope,
+    ).pipe(Effect.asVoid);
+
+  // An earlier timer for the same thread finds the heartbeat not yet due and publishes nothing.
+  scheduleHeartbeat = (threadId) =>
+    Effect.forkIn(
+      Effect.sleep(RELAY_AGENT_ACTIVITY_HEARTBEAT_MS).pipe(
+        Effect.andThen(worker.enqueue(threadId)),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("agent activity heartbeat failed", {
             threadId,
             cause: Cause.pretty(cause),
           }),

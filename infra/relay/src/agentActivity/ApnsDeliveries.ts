@@ -281,6 +281,7 @@ function chooseDelivery(input: {
   readonly aggregate: RelayAgentActivityAggregateState | null;
   readonly nowMs: number;
   readonly replay?: boolean;
+  readonly silent?: boolean;
 }): ChosenDelivery | null {
   const liveActivityDelivery = chooseLiveActivityDelivery(input);
   if (liveActivityDelivery === "suppressed") {
@@ -289,7 +290,7 @@ function chooseDelivery(input: {
   if (liveActivityDelivery) {
     return liveActivityDelivery;
   }
-  const notification = input.replay ? null : notificationForAggregate(input);
+  const notification = input.replay || input.silent ? null : notificationForAggregate(input);
   return notification && input.target.push_token
     ? {
         kind: "push_notification",
@@ -486,6 +487,8 @@ export class ApnsDeliveries extends Context.Service<
       readonly aggregate: RelayAgentActivityAggregateState | null;
       readonly nowMs: number;
       readonly replay?: boolean;
+      /** The publish cannot alert itself, so it must not ring for another thread's row. */
+      readonly silent?: boolean;
     }) => Effect.Effect<RelayDeliveryResult | null, ApnsDeliveryError>;
     readonly sendPushNotificationForTarget: (input: {
       readonly target: LiveActivities.TargetRow;
@@ -1041,6 +1044,7 @@ const make = Effect.gen(function* () {
         aggregate: input.aggregate,
         nowMs: input.nowMs,
         replay: input.replay ?? false,
+        silent: input.silent ?? false,
       });
       if (!delivery) {
         return null;
@@ -1056,13 +1060,14 @@ const make = Effect.gen(function* () {
         });
         return result;
       }
-      const notification = input.replay
-        ? null
-        : notificationForAggregate({
-            target: input.target,
-            aggregate: input.aggregate,
-            nowMs: input.nowMs,
-          });
+      const notification =
+        input.replay || input.silent
+          ? null
+          : notificationForAggregate({
+              target: input.target,
+              aggregate: input.aggregate,
+              nowMs: input.nowMs,
+            });
       // Use the end alert only when no companion notification will ring, preserving feedback for Live-Activity-only users.
       const alert = input.replay
         ? null
