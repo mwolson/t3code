@@ -3415,6 +3415,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+  const nextRosterTaskIds = Effect.fn("nextRosterTaskIds")(function* (
+    harness: Effect.Success<typeof makeWakeHarness>,
+    status: OrchestrationV2ProviderThread["status"],
+  ) {
+    while (true) {
+      const { providerThread } = yield* Queue.take(harness.providerThreadReceipts);
+      if (providerThread.status === status) {
+        return (providerThread.pendingBackgroundTasks ?? []).map((task) => task.taskId);
+      }
+    }
+  });
 
   it.effect.each(["release-after", "cancel-after", "release-before", "resume-pending"] as const)(
     "keeps attachment reservations across compaction: %s boundary",
@@ -10281,12 +10292,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ],
         );
 
-        // Once the task leaves the roster, a reused id starts unmarked.
+        // The ended task stays listed for its wake run, and a reused id starts unmarked.
         yield* Queue.offer(
           harness.sdkMessages,
           roster(["dev-server"], "00000000-0000-4000-8000-000000000303"),
         );
-        yield* nextRoster((tasks) => tasks.length === 1);
+        assert.deepStrictEqual(marks(yield* nextRoster(() => true)), [
+          ["dev-server", false],
+          [WAKE_TASK_ID, true],
+        ]);
         yield* Queue.offer(
           harness.sdkMessages,
           roster(["dev-server", WAKE_TASK_ID], "00000000-0000-4000-8000-000000000304"),
@@ -12358,12 +12372,21 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             attachments: [],
           }),
         );
-        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+        yield* harness.offerAndWait(wakeTaskStarted);
+        yield* (
+          harness.runtime.awaitBackgroundTasks?.({
+            providerThread: harness.providerThread,
+            taskIds: [WAKE_TASK_ID],
+            awaited: true,
+          }) ?? Effect.void
+        );
         yield* Queue.offer(harness.sdkMessages, turnOneResult);
         yield* harness.awaitTerminal(1);
 
+        // The awaited task stays listed, so the thread never reads as done before its wake run.
         yield* harness.offerAndWait(wakeNotification);
         assert.lengthOf(harness.continuationRequests, 0);
+        assert.deepStrictEqual(yield* nextRosterTaskIds(harness, "idle"), [WAKE_TASK_ID]);
         yield* harness.offerAndWait(wakeTurnInit);
         assert.lengthOf(harness.continuationRequests, 1);
         assert.equal(harness.continuationRequests[0]?.detail, WAKE_SUMMARY);
@@ -12388,6 +12411,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* harness.awaitTerminal(2);
         assert.equal(harness.terminalEvents()[1]?.status, "completed");
         assert.lengthOf(harness.continuationRequests, 1);
+        assert.deepStrictEqual(yield* nextRosterTaskIds(harness, "active"), []);
         assert.isTrue(
           harness.events.some(
             (event) => event.type === "message.updated" && event.message.text === WAKE_RESULT_TEXT,
@@ -12404,6 +12428,59 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ),
       ),
     ),
+  );
+
+  it.effect.each(["offer abandoned", "wake never opened"] as const)(
+    "stops listing a finished task when its wake run cannot start: %s",
+    (reason) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-wake-abandoned-1"),
+              text: "Run the build in the background.",
+              attachments: [],
+            }),
+          );
+          yield* harness.offerAndWait(wakeTaskStarted);
+          yield* (
+            harness.runtime.awaitBackgroundTasks?.({
+              providerThread: harness.providerThread,
+              taskIds: [WAKE_TASK_ID],
+              awaited: true,
+            }) ?? Effect.void
+          );
+          yield* Queue.offer(harness.sdkMessages, turnOneResult);
+          yield* harness.awaitTerminal(1);
+
+          yield* harness.offerAndWait(wakeNotification);
+          assert.deepStrictEqual(yield* nextRosterTaskIds(harness, "idle"), [WAKE_TASK_ID]);
+
+          if (reason === "offer abandoned") {
+            // The orchestrator abandons an offer for an archived thread or a failed dispatch.
+            yield* harness.offerAndWait(wakeTurnInit);
+            yield* harness.continuationRequests[0]?.clearIfCurrent?.() ?? Effect.void;
+          } else {
+            yield* TestClock.adjust("2 minutes");
+          }
+          assert.deepStrictEqual(yield* nextRosterTaskIds(harness, "idle"), []);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+              NodeCrypto.layer,
+            ),
+          ),
+        ),
+      ),
   );
 
   it.effect.each([true, false])(
