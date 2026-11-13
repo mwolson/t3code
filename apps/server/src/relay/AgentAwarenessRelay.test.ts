@@ -548,6 +548,41 @@ describe("AgentAwarenessRelay", () => {
     }),
   );
 
+  it.effect("reports quiet running work again, and stops once the run completes", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications } = yield* makeTestRelay();
+      yield* relay.publishThread(THREAD_ID);
+      for (let i = 0; i < 3; i++) {
+        yield* TestClock.adjust("3 minutes");
+        yield* relay.drain;
+      }
+      assert.deepEqual(
+        publications.map((publication) => [
+          publication.state?.phase,
+          publication.state?.updatedAt,
+          publication.state?.heartbeatAt,
+        ]),
+        [
+          ["running", NOW, "1970-01-01T00:00:00.000Z"],
+          ["running", NOW, "1970-01-01T00:03:00.000Z"],
+          ["running", NOW, "1970-01-01T00:06:00.000Z"],
+          ["running", NOW, "1970-01-01T00:09:00.000Z"],
+        ],
+      );
+
+      yield* Ref.set(currentShell, shell({ status: "completed" }));
+      yield* relay.publishThread(THREAD_ID);
+      yield* TestClock.adjust("10 minutes");
+      yield* relay.drain;
+      assert.deepEqual(
+        publications
+          .slice(4)
+          .map((publication) => [publication.state?.phase, publication.state?.heartbeatAt]),
+        [["completed", undefined]],
+      );
+    }),
+  );
+
   it.effect("republishes unchanged state with fresh credentials after relinking", () =>
     Effect.gen(function* () {
       const { relay, secrets, publications } = yield* makeTestRelay();
@@ -1057,8 +1092,8 @@ it.effect("resnapshots on explicit catch-up while idle configuration checks avoi
     yield* TestClock.adjust("1 second");
     yield* relay.drain;
     assert.equal(catchUp.activitySnapshotReads, 3);
-    assert.equal(publications.length, 2);
-    assert.equal(publications[1]?.state?.threadId, THREAD_ID);
+    assert.equal(withoutHeartbeats(publications).length, 2);
+    assert.equal(withoutHeartbeats(publications)[1]?.state?.threadId, THREAD_ID);
   }).pipe(Effect.scoped),
 );
 
@@ -1116,7 +1151,7 @@ describe("background relay resync", () => {
       assert.equal(publications.length, 2);
       assert.equal(publications[1]?.authorization, "Bearer second-credential");
       yield* TestClock.adjust("10 minutes");
-      assert.equal(publications.length, 2);
+      assert.equal(withoutHeartbeats(publications).length, 2);
     }).pipe(Effect.scoped),
   );
 
@@ -1152,18 +1187,16 @@ describe("background relay resync", () => {
       failing = false;
       yield* TestClock.adjust("5 minutes");
       yield* relay.drain;
-      assert.equal(publications.length, outageAttempts + 2);
+      const recovered = () => withoutHeartbeats(publications.slice(outageAttempts));
       assert.deepEqual(
-        publications
-          .slice(-2)
+        recovered()
           .map((p) => p.state?.threadId)
           .sort(),
         [...ids].sort(),
       );
-      assert.isTrue(publications.slice(-2).every((p) => p.state?.threadTitle === title));
-      const acknowledgedAttempts = publications.length;
+      assert.isTrue(recovered().every((p) => p.state?.threadTitle === title));
       yield* TestClock.adjust("10 minutes");
-      assert.equal(publications.length, acknowledgedAttempts);
+      assert.equal(recovered().length, 2);
     }).pipe(Effect.scoped),
   );
 
@@ -1247,3 +1280,26 @@ describe("background relay resync", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+// A heartbeat repeats a thread's previous report at least three minutes later. Tests about
+// other publishes leave heartbeats out.
+function withoutHeartbeats<
+  P extends {
+    readonly authorization: string | null;
+    readonly state: { readonly threadId: string; readonly heartbeatAt?: string | undefined } | null;
+  },
+>(publications: ReadonlyArray<P>): Array<P> {
+  const previousByThread = new Map<string, P>();
+  return publications.filter((publication) => {
+    const key = `${publication.authorization} ${publication.state?.threadId}`;
+    const previous = previousByThread.get(key);
+    previousByThread.set(key, publication);
+    if (!previous?.state?.heartbeatAt || !publication.state?.heartbeatAt) return true;
+    const { heartbeatAt: previousAt, ...previousState } = previous.state;
+    const { heartbeatAt, ...state } = publication.state;
+    return (
+      JSON.stringify(state) !== JSON.stringify(previousState) ||
+      Date.parse(heartbeatAt) - Date.parse(previousAt) < 3 * 60_000
+    );
+  });
+}

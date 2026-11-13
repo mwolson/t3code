@@ -13,6 +13,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
+import { phaseCanAlert } from "./agentActivityAlerts.ts";
 import { isTerminalPhase } from "./agentActivityPayloads.ts";
 
 export { isExpiredAgentActivityState } from "./agentActivityPayloads.ts";
@@ -96,6 +97,7 @@ const make = Effect.gen(function* () {
               target,
               aggregate: liveActivityAggregate,
               nowMs: input.nowMs,
+              silent: input.state !== null && !phaseCanAlert(input.state.phase),
             }),
             notificationOnlyAggregate === null
               ? Effect.succeed(null)

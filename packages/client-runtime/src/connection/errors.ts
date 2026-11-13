@@ -155,6 +155,7 @@ export function mapManagedRelayError(error: ManagedRelayClientError): Connection
         detail: error.message,
         hop: "relay",
       });
+    case "ManagedRelayBackgroundRelayDisabledError":
     case "ManagedRelayUrlInvalidError":
       return new ConnectionBlockedError({
         reason: "configuration",

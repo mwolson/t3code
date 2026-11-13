@@ -17,6 +17,7 @@ function layerManagedRelayTest(
   relayUrl = "https://relay.example.test",
   accessTokenStore?: ManagedRelay.ManagedRelayAccessTokenStore,
   backgroundRelayUrl?: string,
+  backgroundRelayDisabled?: boolean,
 ) {
   const layerHttpClient = RpcHttp.layerRemoteHttpClient(fetchFn);
   const layerSigner = Layer.succeed(
@@ -30,6 +31,7 @@ function layerManagedRelayTest(
   return ManagedRelay.layer({
     relayUrl,
     clientId: "t3-mobile",
+    ...(backgroundRelayDisabled !== undefined ? { backgroundRelayDisabled } : {}),
     ...(backgroundRelayUrl !== undefined ? { backgroundRelayUrl } : {}),
     ...(accessTokenStore ? { accessTokenStore } : {}),
   }).pipe(Layer.provide(layerSigner), Layer.provide(layerHttpClient));
@@ -159,6 +161,66 @@ describe("ManagedRelayClient", () => {
       ),
     );
   });
+
+  it.effect(
+    "disables every background method without a request while primary calls still work",
+    () => {
+      const requests: string[] = [];
+      const fetchFn: typeof fetch = async (input) => {
+        requests.push(String(input));
+        return Response.json({ environments: [] });
+      };
+      return Effect.gen(function* () {
+        const client = yield* ManagedRelay.ManagedRelayClient;
+        const clerkToken = "clerk-token";
+        const operations: ReadonlyArray<
+          Effect.Effect<unknown, ManagedRelay.ManagedRelayClientError>
+        > = [
+          client.listDevices({ clerkToken }),
+          client.registerDevice({
+            clerkToken,
+            payload: {
+              deviceId: "device-1",
+              label: "Phone",
+              platform: "ios",
+              iosMajorVersion: 18,
+              preferences: {
+                notificationsEnabled: true,
+                liveActivitiesEnabled: true,
+                notifyOnApproval: true,
+                notifyOnInput: true,
+                notifyOnCompletion: true,
+                notifyOnFailure: true,
+              },
+            },
+          }),
+          client.unregisterDevice({ clerkToken, deviceId: "device-1" }),
+          client.registerLiveActivity({
+            clerkToken,
+            payload: { deviceId: "device-1", activityPushToken: "token" },
+          }),
+          client.getAgentActivitySnapshot({ clerkToken }),
+        ];
+        for (const operation of operations) {
+          const error = yield* Effect.flip(Effect.asVoid(operation));
+          expect(error).toBeInstanceOf(ManagedRelay.ManagedRelayBackgroundRelayDisabledError);
+        }
+        expect(requests).toEqual([]);
+        yield* client.listEnvironments({ clerkToken });
+        expect(requests).toEqual(["https://relay.example.test/v1/environments"]);
+      }).pipe(
+        Effect.provide(
+          layerManagedRelayTest(
+            fetchFn,
+            "https://relay.example.test",
+            undefined,
+            "https://private.example.test",
+            true,
+          ),
+        ),
+      );
+    },
+  );
 
   it.effect("rejects unsafe relay URLs before sending credentials", () => {
     let requestCount = 0;

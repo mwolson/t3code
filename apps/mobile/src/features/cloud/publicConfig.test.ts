@@ -30,6 +30,19 @@ describe("resolveCloudPublicConfig", () => {
       resolveCloudPublicConfig({ relay: { backgroundUrl: "http://background.example.test" } }),
     ).toThrow(BackgroundRelayUrlInvalidError);
   });
+  it.each(["not a URL", "https://relay.t3.codes"])(
+    "disables invalid personal background config while preserving primary config (%j)",
+    (backgroundUrl) => {
+      expect(
+        resolveCloudPublicConfig({
+          iosPersonalTeamBuild: true,
+          iosPushRelay: true,
+          relay: { url: "https://primary.example.test", backgroundUrl },
+        }).relay,
+      ).toEqual({ url: "https://primary.example.test", backgroundUrl: null });
+    },
+  );
+
   it("rejects an insecure relay URL", () => {
     expect(
       resolveCloudPublicConfig({

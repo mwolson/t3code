@@ -504,6 +504,22 @@ describe("ApnsDeliveries", () => {
           },
         ]);
         expect(attempts).toEqual([]);
+
+        // Another thread's running publish or heartbeat must not ring for this waiting row again.
+        const silent = yield* deliveries.sendForTarget({
+          target: {
+            ...target,
+            push_token: "apns-device-token",
+            push_to_start_token: null,
+            activity_push_token: null,
+            remote_started_at: null,
+          },
+          aggregate: inputAggregate,
+          nowMs: 200_000,
+          silent: true,
+        });
+        expect(silent).toBeNull();
+        expect(queuedJobs).toHaveLength(1);
       }).pipe(Effect.provide(layerFor({ attempts, queuedJobs })));
     },
   );
