@@ -49,6 +49,8 @@ import { supportsAgentAwarenessPush } from "./capabilities";
 import { makeRelayDeviceRegistrationRequest, resolveApsEnvironment } from "./registrationPayload";
 
 const REMOTE_ACTIVITY_REGISTRATION_RETRY_MS = 15_000;
+// Leaves time to end the card before iOS suspends a backgrounded app.
+const BACKGROUND_ACTIVITY_REGISTRATION_TIMEOUT = "3 seconds";
 
 const AgentAwarenessOperation = Schema.Literals([
   "read-notification-permissions",
@@ -64,6 +66,7 @@ const AgentAwarenessOperation = Schema.Literals([
   "list-active-live-activities",
   "load-live-activity-prime-preferences",
   "prime-live-activity",
+  "end-unregistered-live-activity",
   "load-registration-record",
 ]);
 
@@ -83,8 +86,15 @@ export type AgentAwarenessRegistrationError =
   | AgentAwarenessOperationError
   | ManagedRelay.ManagedRelayClientError;
 
+interface ObservedLiveActivity {
+  readonly lock: Semaphore.Semaphore;
+  // The listening wrapper stays referenced: once it is collected, token events stop arriving.
+  readonly activity: LiveActivity<AgentActivityProps>;
+  // This app started the card and the relay has not accepted its token yet.
+  awaitingRelay: boolean;
+}
 // ActivityKit returns new wrappers per id; serialize by id to prevent stale-token registration.
-const activityPushTokenLocks = new Map<string, Semaphore.Semaphore>();
+const observedLiveActivities = new Map<string, ObservedLiveActivity>();
 // Each accepted registration replays the relay aggregate, repairing drifted or orphaned activities.
 const ACTIVITY_TOKEN_REREGISTER_INTERVAL_MS = 60_000;
 // Match the relay's STALE_AFTER_SECONDS so activities expire even if registration fails.
@@ -496,7 +506,7 @@ function armAgentAwarenessLiveActivityForLocalWorkNow(input: {
       return;
     }
     const nowIso = new Date(Date.now()).toISOString();
-    const activity = startAgentLiveActivity(
+    const activity = startTrackedAgentLiveActivity(
       {
         title: "T3 Code",
         subtitle: "Agent work in progress",
@@ -521,13 +531,37 @@ function armAgentAwarenessLiveActivityForLocalWorkNow(input: {
     if (!activity) {
       return;
     }
+    // iOS issues the token after the card appears, so the first attempt usually finds none.
     runRegistrationInBackground(
-      registerLiveActivityPushToken({ activity }).pipe(Effect.asVoid),
+      registerLiveActivityPushToken({ activity }).pipe(
+        Effect.catch((error) =>
+          Effect.sync(() => {
+            logRegistrationError("live activity arming after local task start failed", error);
+            return false;
+          }),
+        ),
+        Effect.map((registered) => {
+          if (!registered) {
+            scheduleActiveLiveActivityRegistrationRetry();
+          }
+        }),
+      ),
       "live activity arming after local task start failed",
     );
   } catch (error) {
     logRegistrationError("live activity arming failed", error);
   }
+}
+
+function startTrackedAgentLiveActivity(
+  props: AgentActivityProps,
+  staleDate: Date,
+): LiveActivity<AgentActivityProps> | null {
+  const activity = startAgentLiveActivity(props, staleDate);
+  if (activity) {
+    observeLiveActivityPushTokens(activity).awaitingRelay = true;
+  }
+  return activity;
 }
 
 const readAgentActivitySnapshot: () => Effect.Effect<
@@ -764,6 +798,18 @@ function ensureAppStateListener(): void {
   }
 
   appStateSubscription = AppState.addEventListener("change", (state) => {
+    if (state === "background") {
+      // The retry would try to start a card, which iOS only allows in the foreground.
+      if (activeLiveActivityRegistrationRetry) {
+        clearTimeout(activeLiveActivityRegistrationRetry);
+        activeLiveActivityRegistrationRetry = null;
+      }
+      runRegistrationInBackground(
+        endUnregisteredStartedLiveActivities(),
+        "unregistered live activity cleanup after app background failed",
+      );
+      return;
+    }
     if (state !== "active") {
       return;
     }
@@ -798,6 +844,7 @@ function endLocalLiveActivities(context: string): void {
     return;
   }
   dismissEndedLocalLiveActivities();
+  observedLiveActivities.clear();
   try {
     for (const activity of getAgentLiveActivities()) {
       activity.end("immediate").catch((error: unknown) => {
@@ -859,7 +906,7 @@ export function __resetAgentAwarenessRemoteRegistrationForTest(): void {
   androidDeviceReplayedAt = null;
   registrationStatusListeners.clear();
   registeredActivityPushTokens.clear();
-  activityPushTokenLocks.clear();
+  observedLiveActivities.clear();
   widgetSnapshotReads = 0;
 }
 
@@ -898,7 +945,7 @@ export const registerLiveActivityPushToken = Effect.fn(
     return false;
   }
 
-  const lock = observeLiveActivityPushTokens(input.activity);
+  const { lock } = observeLiveActivityPushTokens(input.activity);
   return yield* lock.withPermit(
     Effect.gen(function* () {
       const activityPushToken = yield* Effect.tryPromise({
@@ -913,7 +960,10 @@ export const registerLiveActivityPushToken = Effect.fn(
         return false;
       }
 
-      return yield* registerLiveActivityPushTokenValue({ activityPushToken });
+      return yield* registerLiveActivityPushTokenValue({
+        activityId: input.activity.getId(),
+        activityPushToken,
+      });
     }),
   );
 });
@@ -921,25 +971,66 @@ export const registerLiveActivityPushToken = Effect.fn(
 // Observe every token replacement: the relay otherwise keeps pushing to the old token until APNs rejects it.
 function observeLiveActivityPushTokens(
   activity: LiveActivity<AgentActivityProps>,
-): Semaphore.Semaphore {
+): ObservedLiveActivity {
   const activityId = activity.getId();
-  const existing = activityPushTokenLocks.get(activityId);
+  const existing = observedLiveActivities.get(activityId);
   if (existing) return existing;
   const lock = Semaphore.makeUnsafe(1);
-  activityPushTokenLocks.set(activityId, lock);
+  const observed: ObservedLiveActivity = { lock, activity, awaitingRelay: false };
+  observedLiveActivities.set(activityId, observed);
   activity.addPushTokenListener((event) => {
     if (!event.pushToken) return;
     runRegistrationInBackground(
-      lock.withPermit(registerLiveActivityPushTokenValue({ activityPushToken: event.pushToken })),
+      lock.withPermit(
+        registerLiveActivityPushTokenValue({ activityId, activityPushToken: event.pushToken }),
+      ),
       "live activity token listener registration failed",
     );
   });
-  return lock;
+  return observed;
 }
+
+// The relay cannot update or end a card whose token it never accepted; it would sit out of date for hours.
+const endUnregisteredStartedLiveActivities = Effect.fn(
+  "remoteRegistration.endUnregisteredStartedLiveActivities",
+)(function* (): Effect.fn.Return<void, never, ManagedRelay.ManagedRelayClient> {
+  for (const [activityId, observed] of observedLiveActivities) {
+    if (!observed.awaitingRelay) {
+      continue;
+    }
+    yield* registerLiveActivityPushToken({ activity: observed.activity }).pipe(
+      Effect.timeout(BACKGROUND_ACTIVITY_REGISTRATION_TIMEOUT),
+      Effect.catch((error) =>
+        Effect.sync(() => {
+          logRegistrationError("unregistered live activity registration failed", error);
+        }),
+      ),
+    );
+    // Back in the foreground the refresh keeps registering the card instead.
+    if (!observed.awaitingRelay || AppState.currentState === "active") {
+      continue;
+    }
+    yield* Effect.tryPromise({
+      try: () => observed.activity.end("immediate"),
+      catch: (cause) =>
+        new AgentAwarenessOperationError({ operation: "end-unregistered-live-activity", cause }),
+    }).pipe(
+      Effect.match({
+        onFailure: (error) => {
+          logRegistrationError("unregistered live activity cleanup failed", error);
+        },
+        onSuccess: () => {
+          observedLiveActivities.delete(activityId);
+        },
+      }),
+    );
+  }
+});
 
 const registerLiveActivityPushTokenValue = Effect.fn(
   "remoteRegistration.registerLiveActivityPushTokenValue",
 )(function* (input: {
+  readonly activityId: string;
   readonly activityPushToken: string;
 }): Effect.fn.Return<boolean, AgentAwarenessRegistrationError, ManagedRelay.ManagedRelayClient> {
   const acceptedAt = registeredActivityPushTokens.get(input.activityPushToken);
@@ -947,6 +1038,7 @@ const registerLiveActivityPushTokenValue = Effect.fn(
     acceptedAt !== undefined &&
     (yield* Clock.currentTimeMillis) - acceptedAt < ACTIVITY_TOKEN_REREGISTER_INTERVAL_MS
   ) {
+    markLiveActivityAcceptedByRelay(input.activityId);
     return true;
   }
   const deviceId = yield* Effect.tryPromise({
@@ -963,9 +1055,26 @@ const registerLiveActivityPushTokenValue = Effect.fn(
   });
   if (registered) {
     registeredActivityPushTokens.set(input.activityPushToken, yield* Clock.currentTimeMillis);
+    markLiveActivityAcceptedByRelay(input.activityId);
   }
   return registered;
 });
+
+function markLiveActivityAcceptedByRelay(activityId: string): void {
+  const observed = observedLiveActivities.get(activityId);
+  if (observed) {
+    observed.awaitingRelay = false;
+  }
+}
+
+function forgetGoneLiveActivities(active: ReadonlyArray<LiveActivity<AgentActivityProps>>): void {
+  const activeIds = new Set(active.map((activity) => activity.getId()));
+  for (const activityId of observedLiveActivities.keys()) {
+    if (!activeIds.has(activityId)) {
+      observedLiveActivities.delete(activityId);
+    }
+  }
+}
 
 function scheduleActiveLiveActivityRegistrationRetry(): void {
   if (activeLiveActivityRegistrationRetry || !relayTokenProvider) {
@@ -1017,7 +1126,11 @@ export const refreshActiveLiveActivityRemoteRegistration = Effect.fn(
 
   dismissEndedLocalLiveActivities();
   let activities = yield* Effect.try({
-    try: () => getAgentLiveActivities(),
+    try: () => {
+      const active = getAgentLiveActivities();
+      forgetGoneLiveActivities(active);
+      return active;
+    },
     catch: (cause) =>
       new AgentAwarenessOperationError({
         operation: "list-active-live-activities",
@@ -1080,7 +1193,7 @@ export const refreshActiveLiveActivityRemoteRegistration = Effect.fn(
         const aggregate = snapshot.aggregate;
         const primed = yield* Effect.try({
           try: () =>
-            startAgentLiveActivity(
+            startTrackedAgentLiveActivity(
               {
                 title: aggregate.title,
                 subtitle: aggregate.subtitle,
