@@ -45,8 +45,12 @@ export function getThreadErrorBannerMessage(error: string): string {
     : error;
 }
 
-export function getThreadErrorBannerKey(threadKey: string, error: string | null): string | null {
-  return error === null ? null : `${threadKey}\u0000${error}`;
+export function getThreadErrorBannerKey(
+  threadKey: string,
+  error: string | null,
+  occurrence: string | number | null = null,
+): string | null {
+  return error === null ? null : `${threadKey}\u0000${occurrence ?? ""}\u0000${error}`;
 }
 
 export function shouldShowThreadErrorBanner(

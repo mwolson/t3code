@@ -42,4 +42,13 @@ describe("ThreadErrorBanner", () => {
       ),
     ).toBe(true);
   });
+  it("keeps a dismissed occurrence hidden but shows a later identical failure", () => {
+    const firstKey = getThreadErrorBannerKey("env:repeated-error", "Turn failed", "run-1");
+    dismissThreadErrorBannerForSession(firstKey);
+    const remountedKey = getThreadErrorBannerKey("env:repeated-error", "Turn failed", "run-1");
+    const nextKey = getThreadErrorBannerKey("env:repeated-error", "Turn failed", "run-2");
+
+    expect(isThreadErrorBannerDismissedForSession(remountedKey)).toBe(true);
+    expect(isThreadErrorBannerDismissedForSession(nextKey)).toBe(false);
+  });
 });
