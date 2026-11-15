@@ -6,7 +6,14 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import afterPack from "./linux-after-pack.ts";
-import { parseGlibcNeeds, scanGlibcNeeds } from "./linux-glibc.ts";
+import { parseGlibcNeeds, resolveGlibcBuildCeiling, scanGlibcNeeds } from "./linux-glibc.ts";
+
+it("uses the release ceiling unless a local build names its own", () => {
+  expect(resolveGlibcBuildCeiling(undefined)).toBe("2.39");
+  expect(resolveGlibcBuildCeiling("")).toBe("2.39");
+  expect(resolveGlibcBuildCeiling(" 2.44 ")).toBe("2.44");
+  expect(() => resolveGlibcBuildCeiling("newest")).toThrow("T3CODE_LINUX_GLIBC_BUILD_CEILING");
+});
 
 it.each([
   ["GLIBC_2.9", "2.9"],
