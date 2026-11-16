@@ -19,6 +19,7 @@ import {
 
 import { act, render, stubGlobal } from "../../test/render";
 import { VoiceInputSetup } from "../components/chat/VoiceInputSetup";
+import { toastManager } from "../components/ui/toast";
 import type { createBrowserVoiceInputPlatform } from "./browserVoiceInput";
 import { useEnvironmentSpeechInput } from "./useEnvironmentSpeechInput";
 import {
@@ -33,12 +34,14 @@ const mocks = vi.hoisted(() => ({
   voice: undefined as unknown as ReturnType<typeof useEnvironmentSpeechInput>,
   settings: {} as Record<string, unknown>,
   connected: new Set<string>(),
+  reconnecting: new Set<string>(),
   voiceCapable: new Set<string>(),
   cloudVoiceCapable: new Set<string>(),
   canDictate: new Set<string>(),
   prepared: new Map<string, unknown>(),
   primaryEnvironmentId: "primary-env",
   statusRequests: [] as string[],
+  statusGate: undefined as unknown as Effect.Effect<void>,
   statusUnavailable: false,
   modelState: "ready" as "ready" | "missing-model",
   statusModelId: "test-model",
@@ -64,6 +67,7 @@ vi.mock("../state/session", () => ({
   useEnvironmentScope: (id: string) => mocks.canDictate.has(id),
   usePreparedConnection: (environmentId: string | null) => {
     if (!environmentId || !mocks.connected.has(environmentId)) return Option.none();
+    if (mocks.reconnecting.has(environmentId)) return Option.none();
     let prepared = mocks.prepared.get(environmentId);
     if (!prepared) {
       prepared = { environmentId, label: environmentId };
@@ -116,23 +120,26 @@ vi.mock("../components/ui/toast", () => ({ toastManager: { add: vi.fn() } }));
 vi.mock("@t3tools/client-runtime/voice-input", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@t3tools/client-runtime/voice-input")>()),
   getEnvironmentSpeechStatus: (prepared: PreparedConnection) =>
-    Effect.sync(() => {
-      mocks.statusRequests.push(prepared.environmentId);
-      if (mocks.statusUnavailable) throw new Error("Temporarily offline");
-      return {
-        supported: true,
-        state: mocks.modelState,
-        modelId: mocks.statusModelId,
-        model: "Test",
-        size: 1,
-        supportsStreaming: false,
-        supportsTranslation: false,
-        acceleration: "auto",
-        modelUnloadTimeout: "min_15",
-        gpuDevices: [],
-        benchmarkTier: "cpu",
-      };
-    }),
+    Effect.andThen(
+      mocks.statusGate,
+      Effect.sync(() => {
+        mocks.statusRequests.push(prepared.environmentId);
+        if (mocks.statusUnavailable) throw new Error("Temporarily offline");
+        return {
+          supported: true,
+          state: mocks.modelState,
+          modelId: mocks.statusModelId,
+          model: "Test",
+          size: 1,
+          supportsStreaming: false,
+          supportsTranslation: false,
+          acceleration: "auto",
+          modelUnloadTimeout: "min_15",
+          gpuDevices: [],
+          benchmarkTier: "cpu",
+        };
+      }),
+    ),
   downloadEnvironmentSpeechModel: (_prepared: PreparedConnection, modelId: string) =>
     Effect.promise(async () => {
       await mocks.download(modelId);
@@ -212,11 +219,13 @@ function setup(options: { readonly destination?: string | null } = {}) {
   chooseTranscriptCleanup(false);
   mocks.primaryEnvironmentId = "primary-env";
   mocks.connected = new Set(["primary-env", THREAD_ENV, "env-a", "env-b"]);
+  mocks.reconnecting.clear();
   mocks.voiceCapable = new Set(["primary-env", THREAD_ENV, "env-a", "env-b"]);
   mocks.cloudVoiceCapable.clear();
   mocks.canDictate = new Set(mocks.voiceCapable);
   mocks.prepared.clear();
   mocks.statusRequests = [];
+  mocks.statusGate = Effect.void;
   mocks.statusUnavailable = false;
   mocks.modelState = "ready";
   mocks.statusModelId = "test-model";
@@ -344,6 +353,36 @@ it.each([
     expect(mocks.voice.available).toBe(false);
   },
 );
+
+it("keeps voice input offered while the chosen environment reconnects", async () => {
+  setup({ destination: "env-a" });
+  await using screen = await render(<Probe />);
+  expect(mocks.voice.available).toBe(true);
+
+  mocks.reconnecting.add("env-a");
+  await screen.rerender(<Probe />);
+  expect(mocks.voice.available).toBe(true);
+  await act(() => mocks.voice.start());
+  expect(toastManager.add).toHaveBeenLastCalledWith(
+    expect.objectContaining({ description: "The transcription environment is not connected." }),
+  );
+  expect(mocks.microphoneRequests).toEqual([]);
+
+  // A reconnect hands back a new connection, whose status has to be probed again.
+  const probe = Deferred.makeUnsafe<void>();
+  mocks.statusGate = Deferred.await(probe);
+  mocks.prepared.delete("env-a");
+  mocks.reconnecting.delete("env-a");
+  await screen.rerender(<Probe />);
+  expect(mocks.voice.available).toBe(true);
+  Deferred.doneUnsafe(probe, Effect.void);
+  await vi.waitFor(() => expect(mocks.statusRequests).toEqual(["env-a", "env-a"]));
+  expect(mocks.voice.available).toBe(true);
+
+  mocks.voiceCapable.delete("env-a");
+  await screen.rerender(<Probe />);
+  expect(mocks.voice.available).toBe(false);
+});
 
 it.each([
   ["revoked", null],

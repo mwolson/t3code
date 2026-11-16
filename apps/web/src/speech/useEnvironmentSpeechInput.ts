@@ -138,6 +138,7 @@ export function useVoiceTranscriptionDestination() {
         ? `${CLOUD_SPEECH_LABELS[provider]} via ${environment.label}`
         : (environment?.label ?? null),
     prepared: supported && canDictate ? connection : null,
+    ...(supported && canDictate && connection === null ? { disconnected: true } : {}),
   };
 }
 
@@ -172,6 +173,7 @@ export function useEnvironmentSpeechInput(input: HookInput) {
     grantId,
     value: INITIAL_STATE,
   });
+  const [offered, setOffered] = useState({ grantId, ready: false });
   const [queuedStart, setQueuedStart] = useState<PreparedConnection | null>(null);
   const [level, setLevel] = useState(0);
   const [preview, setPreview] = useState<SpeechStreamText | null>(null);
@@ -459,7 +461,15 @@ export function useEnvironmentSpeechInput(input: HookInput) {
     const request = ++startRequestRef.current;
     const controller = controllerRef.current;
     const owner = latestRef.current.input.ownerKey;
-    if (!controller || !prepared) return;
+    if (!controller || !prepared) {
+      if (destination.disconnected)
+        toastManager.add({
+          type: "error",
+          title: "Could not start voice input",
+          description: "The transcription environment is not connected.",
+        });
+      return;
+    }
     if (cloudProvider) {
       setLevel(0);
       await controller.start();
@@ -564,12 +574,21 @@ export function useEnvironmentSpeechInput(input: HookInput) {
     }
   });
 
-  const destinationReady =
-    grantId === null
-      ? Boolean(destination.offerFirstRunSetup) && input.offerSetup !== false
-      : prepared !== null &&
-        (cloudProvider !== undefined ||
-          (status?.prepared === prepared && status.value?.supported !== false));
+  // A reconnect replaces the connection and reruns the probe; the last answer holds meanwhile.
+  let answer: boolean | undefined;
+  if (grantId === null) {
+    answer = Boolean(destination.offerFirstRunSetup) && input.offerSetup !== false;
+  } else if (prepared === null) {
+    answer = destination.disconnected ? undefined : false;
+  } else if (cloudProvider !== undefined) {
+    answer = true;
+  } else if (status?.prepared === prepared) {
+    answer = status.value?.supported !== false;
+  }
+  if (answer !== undefined && (offered.grantId !== grantId || offered.ready !== answer)) {
+    setOffered({ grantId, ready: answer });
+  }
+  const destinationReady = answer ?? (offered.grantId === grantId && offered.ready);
   return {
     available:
       destinationReady &&
