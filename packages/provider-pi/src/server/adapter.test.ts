@@ -5728,6 +5728,48 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("shows only the new reasoning when Pi starts a streaming block again", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
+      // A provider that reconnects mid-reasoning streams the same block from its start.
+      for (const delta of ["Abandoned attempt", "Replacement attempt"]) {
+        yield* fake.emit({
+          type: "message_update",
+          assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
+        });
+        yield* fake.emit({
+          type: "message_update",
+          assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta },
+        });
+      }
+      yield* fake.emit({
+        type: "message_end",
+        message: { role: "assistant", content: [], stopReason: "stop" },
+      });
+      const reasoning = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "reasoning" &&
+          event.turnItem.status === "completed",
+      );
+      assert.isTrue(
+        reasoning.type === "turn_item.updated" &&
+          reasoning.turnItem.type === "reasoning" &&
+          reasoning.turnItem.text === "Replacement attempt",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect.each([
     {
       pi: "clears its native queue",
