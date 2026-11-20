@@ -4,6 +4,7 @@ import {
   serializeCodeBlockToMarkdown,
   serializeRenderedMarkdownFragment,
   serializeTableElementToMarkdown,
+  unwrapSoleMarkdownFence,
 } from "./markdown-clipboard";
 import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import {
@@ -525,5 +526,19 @@ describe("copying rendered Markdown tables", () => {
         ) as Element,
       ),
     ).toBe("| Command | Diagram |\n| --- | --- |\n| a  b | ```mermaid A -->\\|hi\\| B ``` |");
+  });
+});
+
+describe("unwrapSoleMarkdownFence", () => {
+  it("unwraps only a message that is one complete code block", () => {
+    expect(unwrapSoleMarkdownFence("```sh\ngh workflow run Deploy\n```")).toBe(
+      "gh workflow run Deploy",
+    );
+    for (const source of [
+      "Run this:\n\n```\ngh workflow run Deploy\n```",
+      "```js\na()\n```\n\n```js\nb()\n```",
+    ]) {
+      expect(unwrapSoleMarkdownFence(source)).toBe(source);
+    }
   });
 });
