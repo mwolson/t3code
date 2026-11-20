@@ -14,10 +14,9 @@ import {
   usageLimitRunPresentedAsLatest,
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as Option from "effect/Option";
-import type { SetStateAction } from "react";
 import { applyClaudePromptEffortPrefix, resolvePromptInjectedEffort } from "@t3tools/shared/model";
 import { getProviderModelCapabilities } from "../providerModels";
-import { sanitizeThreadErrorMessage, thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import type { EnvironmentThread, ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
@@ -1230,28 +1229,8 @@ export function isCompactCommandMessage(message: ChatMessage): boolean {
   return message.role === "user" && text === "/compact" && !message.attachments?.length;
 }
 
-// Errors surface through two maps (draft-keyed and thread-keyed) whose entries
-// can race around promotion, so each write carries its time to let the latest
-// one win when they collide.
-export type LocalThreadErrorEntry = {
-  readonly message: string | null;
-  readonly at: number;
-};
-
 export function chatActionErrorMessage(error: unknown, resolve: MessageResolver = m): string {
   return thrownErrorMessage(error, resolve) ?? resolve(msg("An error occurred."));
-}
-
-/** A local copy of the runtime's error shares the runtime's key, so one dismissal covers both. */
-export function threadErrorIsServerRuntime(input: {
-  readonly isServerThread: boolean;
-  readonly localServerError: string | null;
-  readonly runtimeError: string | null;
-}): boolean {
-  return (
-    input.isServerThread &&
-    (input.localServerError === null || input.localServerError === input.runtimeError)
-  );
 }
 
 export function releaseChatTimelineAnchor<T extends { readonly messageId: MessageId | null }>(
@@ -1271,17 +1250,10 @@ export function makeThreadErrorSetter(input: {
   readonly routeThreadKey: string;
   readonly draftId: DraftId | null;
   readonly serverThreadRef: ScopedThreadRef | null;
-  readonly setLocalServerErrorsByThreadKey: (
-    update: SetStateAction<Record<string, LocalThreadErrorEntry>>,
-  ) => void;
-  readonly setLocalDraftErrorsByDraftId: (
-    update: SetStateAction<Record<string, LocalThreadErrorEntry>>,
-  ) => void;
+  readonly setLocalThreadError: (key: string, isServer: boolean, error: string | null) => void;
 }) {
   return (targetThreadId: ThreadId | null, error: string | null) => {
     if (!targetThreadId) return;
-    const nextError = sanitizeThreadErrorMessage(error);
-    const nextEntry: LocalThreadErrorEntry = { message: nextError, at: Date.now() };
     const { routeThreadRef, serverThreadRef } = input;
     if (
       serverThreadRef &&
@@ -1289,21 +1261,10 @@ export function makeThreadErrorSetter(input: {
       serverThreadRef.environmentId === routeThreadRef.environmentId &&
       serverThreadRef.threadId === targetThreadId
     ) {
-      input.setLocalServerErrorsByThreadKey((existing) => {
-        if ((existing[input.routeThreadKey]?.message ?? null) === nextError) {
-          return existing;
-        }
-        return { ...existing, [input.routeThreadKey]: nextEntry };
-      });
+      input.setLocalThreadError(input.routeThreadKey, true, error);
       return;
     }
-    const localDraftErrorKey = input.draftId ?? targetThreadId;
-    input.setLocalDraftErrorsByDraftId((existing) => {
-      if ((existing[localDraftErrorKey]?.message ?? null) === nextError) {
-        return existing;
-      }
-      return { ...existing, [localDraftErrorKey]: nextEntry };
-    });
+    input.setLocalThreadError(input.draftId ?? targetThreadId, false, error);
   };
 }
 
