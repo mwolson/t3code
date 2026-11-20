@@ -179,7 +179,9 @@ const layerTools = Layer.mergeAll(
   Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
   Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
-  Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+  Layer.provide(
+    Layer.mock(RemoteDelegation.RemoteDelegation)({ pendingQuestions: () => Effect.succeed([]) }),
+  ),
   Layer.provide(
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/p" }),
   ),
