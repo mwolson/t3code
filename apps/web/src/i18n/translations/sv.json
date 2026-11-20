@@ -12377,5 +12377,7 @@
   "27d76249d09eb69f": "Granskningsguiden är klar",
   "faa3bb26abb39c93": "Granskningsguiden misslyckades",
   "b7df38b7d8792d78": "Öppna guiden",
-  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide"
+  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide",
+  "da680b6dea6c1528": "{count, plural, =1 {Bakgrundsuppgiften slutfördes} other {# bakgrundsuppgifter slutfördes}}",
+  "374697e2e9d737f1": "{count, plural, =1 {Den delegerade uppgiften slutfördes} other {# delegerade uppgifter slutfördes}}"
 }
