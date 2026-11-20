@@ -14,6 +14,7 @@ import {
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import type { IdAllocatorV2Error } from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderCommitBatch from "./ProviderCommitBatch.ts";
 import * as ThreadViewers from "./ThreadViewers.ts";
 import * as Context from "effect/Context";
@@ -147,6 +148,14 @@ export interface EventSinkV2Shape {
       readonly resultId: OrchestrationV2TurnItem["id"];
     };
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+    /**
+     * More events, built in the write transaction once the run check passes, so the rows they
+     * are read from cannot change before the write.
+     */
+    readonly eventsInTransaction?: Effect.Effect<
+      ReadonlyArray<OrchestrationV2DomainEvent>,
+      ProjectionStore.ProjectionStoreV2Error | IdAllocatorV2Error
+    >;
     readonly effects?: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<
     {
@@ -552,7 +561,9 @@ const layerBase: Layer.Layer<
         });
 
         return yield* commitThenPublish(
-          [input.threadId, ...projectedThreadIds(input.events)],
+          input.eventsInTransaction === undefined
+            ? [input.threadId, ...projectedThreadIds(input.events)]
+            : undefined,
           Effect.gen(function* () {
             const rows = yield* sql<{
               readonly status: string;
@@ -596,10 +607,14 @@ const layerBase: Layer.Layer<
               }
             }
 
+            const events =
+              input.eventsInTransaction === undefined
+                ? input.events
+                : [...input.events, ...(yield* input.eventsInTransaction)];
             const normalized = yield* normalizeEvents(
               input.guardPendingUserInputCancellations === true
-                ? yield* guardUserInputCancellations(input.events)
-                : input.events,
+                ? yield* guardUserInputCancellations(events)
+                : events,
             );
             const storedEvents = yield* eventStore.append({
               ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
@@ -1064,9 +1079,9 @@ const layerBase: Layer.Layer<
       );
     };
 
-    // Waits only for queued provider snapshots of `threadIds`, the threads this write touches.
+    // When the write cannot name its threads up front, wait for all queued provider snapshots.
     const commitThenPublish = <A, E, R>(
-      threadIds: ReadonlyArray<ThreadId>,
+      threadIds: ReadonlyArray<ThreadId> | undefined,
       transaction: Effect.Effect<A, E, R>,
       publish: (committed: A) => Effect.Effect<void>,
     ) =>
