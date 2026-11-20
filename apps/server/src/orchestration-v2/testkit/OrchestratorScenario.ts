@@ -90,6 +90,12 @@ export type OrchestratorV2ScenarioStep =
       readonly runId: OrchestrationV2Run["id"];
     }
   | {
+      readonly type: "await_command_notice_updates";
+      readonly threadId: ThreadId;
+      readonly count: number;
+      readonly distinctMessages: number;
+    }
+  | {
       readonly type: "release_replay_gate";
       readonly label: string;
     }
@@ -721,6 +727,33 @@ export function runOrchestratorV2Scenario(
           case "release_replay_gate_after_waiting":
             yield* releaseReplayGateAfterWaiting(step.label, step.threadId, step.runId);
             break;
+          case "await_command_notice_updates": {
+            const messageIds = yield* orchestrator
+              .streamStoredEventsFrom({
+                threadId: step.threadId,
+                afterSequence: 0,
+                eventType: "message.updated",
+              })
+              .pipe(
+                Stream.map(({ event }) =>
+                  event.type === "message.updated" &&
+                  event.payload.notification?.source.kind === "command"
+                    ? event.payload.id
+                    : undefined,
+                ),
+                Stream.filter((id) => id !== undefined),
+                Stream.take(step.count),
+                Stream.runCollect,
+              );
+            const distinct = new Set(messageIds).size;
+            if (distinct !== step.distinctMessages) {
+              return yield* new OrchestratorV2ScenarioStepError({
+                scenario: scenario.name,
+                step: `await_command_notice_updates:${distinct} messages, expected ${step.distinctMessages}`,
+              });
+            }
+            break;
+          }
           case "release_replay_gate":
             yield* releaseReplayGate(step.label);
             break;
