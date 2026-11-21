@@ -1,11 +1,9 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
-import { isDelegatedAppThread } from "@t3tools/contracts";
 import type { AnyRouter } from "@tanstack/react-router";
 import type { AtomRegistry } from "effect/reactivity";
 
-import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { createLiveRegion } from "../hooks/useLiveRegion";
 import { liveShellEnvironmentIdsAtom } from "../state/shell";
@@ -16,6 +14,7 @@ import {
   type BackgroundThreadSnapshot,
   nextBackgroundThreadAnnouncement,
   resolveBackgroundThreadRequest,
+  resolveBackgroundThreadRunStatus,
 } from "./backgroundThreadAnnouncement";
 
 const backgroundThreadLiveRegion = createLiveRegion();
@@ -59,12 +58,7 @@ export function startBackgroundThreadAnnouncements(
         title: thread.title,
         ...resolveBackgroundThreadRequest(thread),
         runId: thread.latestRun?.runId ?? null,
-        runStatus:
-          thread.latestRun?.status === "completed" &&
-          (isDelegatedAppThread(thread.source) ||
-            backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks))
-            ? null
-            : (thread.latestRun?.status ?? null),
+        runStatus: resolveBackgroundThreadRunStatus(thread),
         activeRunId: thread.runtime?.activeRunId ?? null,
         snoozed: effectiveSnoozed(thread, { now }),
       });

@@ -7,6 +7,7 @@ import {
   type BackgroundThreadSnapshot,
   nextBackgroundThreadAnnouncement,
   resolveBackgroundThreadRequest,
+  resolveBackgroundThreadRunStatus,
 } from "./backgroundThreadAnnouncement";
 
 const firstRun = RunId.make("run-1");
@@ -264,5 +265,62 @@ describe("resolveBackgroundThreadRequest", () => {
         { threads: [login(childApproval(null))] },
       ]),
     ).toEqual(["Needs approval: Fix login redirect"]);
+  });
+});
+
+describe("resolveBackgroundThreadRunStatus", () => {
+  const rootLineage = {
+    rootThreadId: ThreadId.make("root"),
+    parentThreadId: null,
+    relationshipToParent: null,
+  } as const;
+  const completedRun = { runId: firstRun, status: "completed" as const };
+  const base = {
+    latestRun: completedRun,
+    pendingBackgroundTasks: [],
+    source: {
+      lineage: rootLineage,
+      pendingBackgroundTasks: [],
+    },
+  };
+
+  it("suppresses completed status while a monitor holds a wake or when stop was requested", () => {
+    const monitorTask = { taskId: "mon-1", kind: "monitor" as const, description: "tail -f" };
+    expect(resolveBackgroundThreadRunStatus(base)).toBe("completed");
+    expect(
+      resolveBackgroundThreadRunStatus({
+        ...base,
+        source: { ...base.source, latestRunStopRequested: true },
+      }),
+    ).toBeNull();
+    expect(
+      resolveBackgroundThreadRunStatus({
+        ...base,
+        pendingBackgroundTasks: [monitorTask],
+        source: {
+          ...base.source,
+          latestRunBackgroundWake: true,
+          pendingBackgroundTasks: [monitorTask],
+        },
+      }),
+    ).toBeNull();
+    expect(
+      resolveBackgroundThreadRunStatus({
+        ...base,
+        pendingBackgroundTasks: [monitorTask],
+        source: {
+          ...base.source,
+          latestRunBackgroundWake: false,
+          pendingBackgroundTasks: [monitorTask],
+        },
+      }),
+    ).toBe("completed");
+    expect(
+      resolveBackgroundThreadRunStatus({
+        ...base,
+        latestRun: { status: "failed" as const },
+        source: { ...base.source, latestRunStopRequested: true },
+      }),
+    ).toBe("failed");
   });
 });
