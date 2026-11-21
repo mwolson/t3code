@@ -1,0 +1,27 @@
+{
+  "name": "t3code-personal-relay",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vp pack && node scripts/check-runtime-neutral.ts",
+    "test": "vp test run",
+    "typecheck": "effect-tsgo tsrs --noEmit",
+    "test:pg": "bash scripts/test-postgres.sh"
+  },
+  "dependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/sql-pg": "catalog:",
+    "@t3tools/contracts": "workspace:*",
+    "@t3tools/shared": "workspace:*",
+    "drizzle-orm": "1.0.0-rc.5",
+    "effect": "catalog:",
+    "jose": "6.2.2",
+    "t3code-relay": "workspace:*"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "catalog:",
+    "selfsigned": "4.0.0",
+    "vite-plus": "catalog:"
+  }
+}
