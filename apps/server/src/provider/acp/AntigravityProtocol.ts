@@ -1,7 +1,9 @@
-import type {
-  ProviderApprovalOption,
-  ProviderUserInputAnswers,
-  UserInputQuestion,
+import {
+  type OrchestrationV2UserInputQuestion,
+  type ProviderApprovalOption,
+  type ProviderUserInputAnswers,
+  TrimmedNonEmptyString,
+  type UserInputQuestion,
 } from "@t3tools/contracts";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import * as Option from "effect/Option";
@@ -10,6 +12,7 @@ import * as Schema from "effect/Schema";
 import type * as EffectAcpSchema from "effect-acp/compat";
 import * as AcpWireSchema from "effect-acp/schema-v1";
 
+import type { AcpAdapterV2Flavor } from "@t3tools/provider-acp/server/adapter";
 import type { AcpToolCallState } from "@t3tools/provider-acp/server/runtimeModel";
 
 import {
@@ -183,6 +186,177 @@ export function makeAntigravityUserInputResponse(
   const option = matchingLabels.length === 1 ? matchingLabels[0] : undefined;
   return option ? { outcome: { outcome: "selected", optionId: option.optionId } } : undefined;
 }
+
+const ElicitationTitledOption = Schema.Struct({
+  const: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  description: Schema.optional(Schema.String),
+});
+const isElicitationForm = Schema.is(
+  Schema.Struct({ properties: Schema.Record(Schema.String, Schema.Unknown) }),
+);
+const isElicitationSingleOneOfQuestion = Schema.is(
+  Schema.Struct({
+    type: Schema.Literal("string"),
+    title: TrimmedNonEmptyString,
+    oneOf: Schema.NonEmptyArray(ElicitationTitledOption),
+  }),
+);
+const isElicitationSingleEnumQuestion = Schema.is(
+  Schema.Struct({
+    type: Schema.Literal("string"),
+    title: TrimmedNonEmptyString,
+    enum: Schema.NonEmptyArray(TrimmedNonEmptyString),
+  }),
+);
+const isElicitationMultiAnyOfQuestion = Schema.is(
+  Schema.Struct({
+    type: Schema.Literal("array"),
+    title: TrimmedNonEmptyString,
+    items: Schema.Struct({
+      type: Schema.optional(Schema.Literal("string")),
+      anyOf: Schema.NonEmptyArray(ElicitationTitledOption),
+    }),
+  }),
+);
+const isElicitationMultiEnumQuestion = Schema.is(
+  Schema.Struct({
+    type: Schema.Literal("array"),
+    title: TrimmedNonEmptyString,
+    items: Schema.Struct({
+      type: Schema.Literal("string"),
+      enum: Schema.NonEmptyArray(TrimmedNonEmptyString),
+    }),
+  }),
+);
+const isElicitationText = Schema.is(
+  Schema.Struct({
+    type: Schema.Literal("string"),
+    oneOf: Schema.optional(Schema.Undefined),
+    enum: Schema.optional(Schema.Undefined),
+  }),
+);
+
+function parseAntigravityElicitationQuestion(
+  id: string,
+  index: number,
+  field: unknown,
+): OrchestrationV2UserInputQuestion | undefined {
+  if (isElicitationSingleOneOfQuestion(field)) {
+    return {
+      id,
+      header: `Question ${index}`,
+      question: field.title,
+      options: field.oneOf.map((option) => ({
+        label: option.title,
+        value: option.const,
+        description: option.description?.trim() || option.title,
+      })),
+    };
+  }
+  if (isElicitationSingleEnumQuestion(field)) {
+    return {
+      id,
+      header: `Question ${index}`,
+      question: field.title,
+      options: field.enum.map((value) => ({
+        label: value,
+        value,
+        description: value,
+      })),
+    };
+  }
+  if (isElicitationMultiAnyOfQuestion(field)) {
+    return {
+      id,
+      header: `Question ${index}`,
+      question: field.title,
+      multiSelect: true,
+      options: field.items.anyOf.map((option) => ({
+        label: option.title,
+        value: option.const,
+        description: option.description?.trim() || option.title,
+      })),
+    };
+  }
+  if (isElicitationMultiEnumQuestion(field)) {
+    return {
+      id,
+      header: `Question ${index}`,
+      question: field.title,
+      multiSelect: true,
+      options: field.items.enum.map((value) => ({
+        label: value,
+        value,
+        description: value,
+      })),
+    };
+  }
+  return undefined;
+}
+
+/** ask_question sends each choice as qN titled with the question, plus a qN_other text field. */
+export const extractAntigravityElicitationForm: NonNullable<
+  AcpAdapterV2Flavor["extractElicitationForm"]
+> = (request) => {
+  if (request.mode !== "form" || !isElicitationForm(request.requestedSchema)) return undefined;
+  const { properties } = request.requestedSchema;
+  const questions: OrchestrationV2UserInputQuestion[] = [];
+  for (const [id, field] of Object.entries(properties)) {
+    if (!/^q\d+$/.test(id)) continue;
+    const question = parseAntigravityElicitationQuestion(id, questions.length + 1, field);
+    if (question === undefined || !isElicitationText(properties[`${id}_other`])) {
+      return undefined;
+    }
+    questions.push(question);
+  }
+  // Any other field means a different form; leave it to the generic parser.
+  if (questions.length === 0 || Object.keys(properties).length !== questions.length * 2) {
+    return undefined;
+  }
+  return {
+    questions,
+    respond: (answers) => {
+      const content: Record<string, EffectAcpSchema.ElicitationContentValue> = {};
+      for (const question of questions) {
+        const answer = Object.hasOwn(answers, question.id) ? answers[question.id] : undefined;
+        const optionValues = new Set(
+          question.options.map((option) => option.value ?? option.label),
+        );
+        if (question.multiSelect) {
+          if (Array.isArray(answer)) {
+            const selected = [
+              ...new Set(
+                answer.filter(
+                  (entry): entry is string => typeof entry === "string" && optionValues.has(entry),
+                ),
+              ),
+            ];
+            if (
+              selected.length === 0 ||
+              answer.some((entry) => typeof entry !== "string" || !optionValues.has(entry))
+            ) {
+              return { action: "cancel" };
+            }
+            content[question.id] = selected;
+          } else if (typeof answer === "string" && answer.trim().length > 0) {
+            content[`${question.id}_other`] = answer;
+          } else {
+            return { action: "cancel" };
+          }
+          continue;
+        }
+        if (typeof answer !== "string" || !answer.trim()) return { action: "cancel" };
+        if (optionValues.has(answer)) {
+          content[question.id] = answer;
+        } else {
+          content[`${question.id}_other`] = answer;
+        }
+      }
+      return { action: "accept", content };
+    },
+  };
+};
 
 function boundText(text: string, limit = TOOL_TEXT_LIMIT): string {
   return text.length <= limit

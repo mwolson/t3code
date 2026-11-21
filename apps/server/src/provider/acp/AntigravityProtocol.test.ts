@@ -4,6 +4,7 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 import * as AcpWireSchema from "effect-acp/schema-v1";
 
 import {
+  extractAntigravityElicitationForm,
   extractAntigravityUserInputQuestion,
   antigravityApprovalOptions,
   antigravitySubagentOutput,
@@ -270,6 +271,150 @@ describe("Antigravity permissions and questions", () => {
     expect(
       makeAntigravityUserInputResponse(request, { interaction_9960062f: label + "..." }),
     ).toEqual({ outcome: { outcome: "selected", optionId: "stable-choice" } });
+  });
+
+  it("folds single-select, multi-select, and mixed ask_question forms with qN_other companions", () => {
+    const request = {
+      sessionId: "session-1",
+      mode: "form",
+      message: "The agent has 3 questions.",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          q1: {
+            type: "string",
+            title: "Which approach should we take?",
+            oneOf: [
+              { const: "1", title: "(Recommended) Keep it minimal" },
+              { const: "2", title: "Expand scope" },
+            ],
+          },
+          q1_other: {
+            type: "string",
+            title: "Other",
+            description: "Optional free-form answer to: Which approach should we take?",
+          },
+          q2: {
+            type: "array",
+            title: "Which targets should be updated?",
+            items: {
+              anyOf: [
+                { const: "1", title: "Web" },
+                { const: "2", title: "Mobile" },
+                { const: "3", title: "Desktop" },
+              ],
+            },
+          },
+          q2_other: {
+            type: "string",
+            title: "Other",
+            description: "Optional free-form answer to: Which targets should be updated?",
+          },
+          q3: {
+            type: "array",
+            title: "Which platforms need verification?",
+            items: {
+              type: "string",
+              enum: ["Linux", "macOS"],
+            },
+          },
+          q3_other: {
+            type: "string",
+            title: "Other",
+            description: "Optional free-form answer to: Which platforms need verification?",
+          },
+        },
+      },
+    } satisfies EffectAcpSchema.CreateElicitationRequest;
+
+    const form = extractAntigravityElicitationForm(request);
+    expect(form).toBeDefined();
+    expect(form?.questions).toEqual([
+      {
+        id: "q1",
+        header: "Question 1",
+        question: "Which approach should we take?",
+        options: [
+          {
+            label: "(Recommended) Keep it minimal",
+            value: "1",
+            description: "(Recommended) Keep it minimal",
+          },
+          { label: "Expand scope", value: "2", description: "Expand scope" },
+        ],
+      },
+      {
+        id: "q2",
+        header: "Question 2",
+        question: "Which targets should be updated?",
+        multiSelect: true,
+        options: [
+          { label: "Web", value: "1", description: "Web" },
+          { label: "Mobile", value: "2", description: "Mobile" },
+          { label: "Desktop", value: "3", description: "Desktop" },
+        ],
+      },
+      {
+        id: "q3",
+        header: "Question 3",
+        question: "Which platforms need verification?",
+        multiSelect: true,
+        options: [
+          { label: "Linux", value: "Linux", description: "Linux" },
+          { label: "macOS", value: "macOS", description: "macOS" },
+        ],
+      },
+    ]);
+
+    expect(
+      form?.respond({
+        q1: "1",
+        q2: ["1", "3", "1"],
+        q3: "Windows VM too",
+      }),
+    ).toEqual({
+      action: "accept",
+      content: {
+        q1: "1",
+        q2: ["1", "3"],
+        q3_other: "Windows VM too",
+      },
+    });
+
+    expect(
+      form?.respond({
+        q1: "Custom single answer",
+        q2: ["2"],
+        q3: ["Linux", "macOS"],
+      }),
+    ).toEqual({
+      action: "accept",
+      content: {
+        q1_other: "Custom single answer",
+        q2: ["2"],
+        q3: ["Linux", "macOS"],
+      },
+    });
+
+    // Reject empty or unknown multi-select values.
+    expect(form?.respond({ q1: "1", q2: [], q3: ["Linux"] })).toEqual({ action: "cancel" });
+    expect(form?.respond({ q1: "1", q2: ["1", "bogus"], q3: ["Linux"] })).toEqual({
+      action: "cancel",
+    });
+
+    // Unrelated extra fields fall back to the generic elicitation parser.
+    expect(
+      extractAntigravityElicitationForm({
+        ...request,
+        requestedSchema: {
+          type: "object",
+          properties: {
+            ...request.requestedSchema.properties,
+            extra: { type: "string", title: "Extra" },
+          },
+        },
+      }),
+    ).toBeUndefined();
   });
 });
 
