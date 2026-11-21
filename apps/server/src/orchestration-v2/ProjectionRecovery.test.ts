@@ -1357,6 +1357,154 @@ it.effect.each([
   }).pipe(Effect.provide(layerRecoveryTest)),
 );
 
+it.effect.each([
+  { kind: "subagent" as const, status: "completed" as const },
+  { kind: "subagent" as const, status: "running" as const },
+  { kind: "command" as const, status: "completed" as const },
+  { kind: "command" as const, status: "running" as const },
+])(
+  "cuts off and wakes for a listed native $kind only while its item is open ($status)",
+  ({ kind, status }) =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const threadId = yield* createThread(`listed-${kind}-${status}`);
+      const providerThreadId = ProviderThreadId.make(`provider-thread:${threadId}`);
+      const providerSessionId = ProviderSessionId.make(`session:${threadId}`);
+      const nodeId = NodeId.make(`node:${threadId}:${kind}`);
+      const taskId = kind === "subagent" ? "call-review" : "sh-build";
+      yield* projections.apply({
+        id: EventId.make(`event:${threadId}:session`),
+        type: "provider-session.attached",
+        threadId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: providerSessionId,
+          driver,
+          providerInstanceId,
+          status: "ready",
+          cwd: "/workspace",
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+      });
+      const settledRun = yield* createRun(threadId, "completed", { providerThreadId });
+      yield* projections.apply({
+        id: EventId.make(`event:${threadId}:roster`),
+        type: "provider-thread.updated",
+        threadId,
+        driver,
+        providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: providerThreadId,
+          appThreadId: threadId,
+          ownerNodeId: null,
+          driver,
+          providerInstanceId,
+          providerSessionId,
+          nativeThreadRef: { driver, nativeId: "native-thread", strength: "strong" },
+          nativeConversationHeadRef: null,
+          status: "idle",
+          firstRunOrdinal: 1,
+          lastRunOrdinal: 1,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          pendingBackgroundTasks: [
+            kind === "subagent"
+              ? { taskId, description: "Review", kind: "subagent" }
+              : { taskId, description: "vp test", kind: "command", awaited: true },
+          ],
+        },
+      });
+      yield* projections.apply({
+        id: EventId.make(`event:${threadId}:item`),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload:
+          kind === "subagent"
+            ? {
+                id: TurnItemId.make(`item:${threadId}:subagent`),
+                threadId,
+                runId: settledRun,
+                nodeId,
+                providerThreadId,
+                providerTurnId: null,
+                nativeItemRef: { driver, nativeId: taskId, strength: "strong" },
+                parentItemId: null,
+                ordinal: 1,
+                type: "subagent",
+                title: "Review",
+                subagentId: nodeId,
+                origin: "provider_native",
+                driver,
+                providerInstanceId,
+                childThreadId: null,
+                prompt: "review src",
+                status,
+                result: status === "completed" ? "LGTM" : null,
+                startedAt: now,
+                completedAt: status === "completed" ? now : null,
+                updatedAt: now,
+              }
+            : {
+                id: TurnItemId.make(`item:${threadId}:command`),
+                threadId,
+                runId: settledRun,
+                nodeId,
+                providerThreadId,
+                providerTurnId: null,
+                nativeItemRef: { driver, nativeId: taskId, strength: "strong" },
+                parentItemId: null,
+                ordinal: 1,
+                type: "command_execution",
+                title: null,
+                input: "vp test",
+                output: status === "completed" ? "ok\n" : "",
+                status,
+                startedAt: now,
+                completedAt: status === "completed" ? now : null,
+                updatedAt: now,
+              },
+      });
+
+      const recoveryState = yield* projections.getRuntimeRecoveryProjection(threadId);
+      assert.deepEqual(
+        (recoveryState.settledRosterTasks ?? []).map((item) => item.nativeItemRef?.nativeId),
+        status === "completed" ? [taskId] : [],
+      );
+
+      yield* recovery.reconcile("startup");
+
+      const effects = yield* sql<{ readonly effect_id: string }>`
+        SELECT effect_id FROM orchestration_v2_effect_outbox WHERE thread_id = ${threadId}
+      `;
+      const projection = yield* projections.getThreadProjection(threadId);
+      if (status === "completed") {
+        assert.deepEqual(effects, []);
+        assert.equal(projection.runs[0]?.status, "completed");
+        assert.deepEqual(projection.runs[0]?.restartCancelledBackgroundWork ?? [], []);
+      } else {
+        assert.deepEqual(effects, [{ effect_id: `effect:restart-continuation:${settledRun}` }]);
+        assert.deepEqual(
+          (projection.runs[0]?.restartCancelledBackgroundWork ?? []).map((work) => work.kind),
+          [kind === "subagent" ? "subagent" : "shell"],
+        );
+      }
+      assert.deepEqual(projection.providerThreads[0]?.pendingBackgroundTasks ?? [], []);
+    }).pipe(Effect.provide(layerRecoveryTest)),
+);
+
 it.effect("wakes a settled run whose native subagent ran on its own provider thread", () =>
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;

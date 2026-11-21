@@ -25,6 +25,7 @@ import {
   type OrchestrationV2AppThread,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2PendingBackgroundTask,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderRetry,
@@ -309,6 +310,8 @@ interface Wake {
   readonly events: Array<OpenCode2Client.OpenCode2StreamEvent>;
   running: boolean;
   readonly reports: Array<BackgroundWorkReport>;
+  /** Finished subagents and awaited shells this wake reports, held until its continuation is dispatched. */
+  readonly tasks: Array<OrchestrationV2PendingBackgroundTask>;
   readonly detail: string | null;
   dropped: boolean;
   readonly after: string | undefined;
@@ -381,7 +384,15 @@ interface ThreadState {
       readonly childId: string;
       readonly report: BackgroundWorkReport;
       readonly text: string;
+      /** Background calls or awaited shells this report settled, held until a wake delivers it. */
+      readonly tasks: Array<OrchestrationV2PendingBackgroundTask>;
+      readonly token?: symbol;
     }
+  >;
+  /** Awaited shells whose exit arrived before their synthetic report; held until report or deadline. */
+  readonly owedShellWakes: Map<
+    string,
+    { readonly token: symbol; readonly task: OrchestrationV2PendingBackgroundTask }
   >;
   readonly stoppedChildren: Set<string>;
   readonly strandedSteers: Set<string>;
@@ -634,6 +645,7 @@ const RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = "2 seconds";
 const RECONCILE_TIMEOUT = "15 seconds";
 const RECONNECT_WAIT = "30 seconds";
+const WAKE_START_DEADLINE = "30 seconds";
 const OWNED_RECONNECT_SCHEDULE = Schedule.exponential(RECONNECT_DELAY).pipe(
   Schedule.modifyDelay(({ duration }) =>
     Effect.succeed(Duration.min(duration, Duration.seconds(30))),
@@ -948,6 +960,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       subagent,
       wakes: [],
       reports: new Map(),
+      owedShellWakes: new Map(),
       stoppedChildren: new Set(),
       strandedSteers: new Set(),
       externalPrompts: new Map(),
@@ -1060,6 +1073,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
 
     const owesWork = (state: ThreadState) =>
       [...shells.values()].some((shell) => shell.state === state && shell.running) ||
+      state.owedShellWakes.size > 0 ||
       [...state.imageJobs.values()].some((job) => job.status === "running") ||
       state.wakes.length > 0 ||
       state.reports.size > 0 ||
@@ -1767,45 +1781,85 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       yield* syncRosterAncestors(call.state);
     });
 
+    const subagentTask = (call: SubagentCall): OrchestrationV2PendingBackgroundTask => ({
+      taskId: call.nativeId,
+      kind: "subagent",
+      ...(call.title?.trim() ? { description: call.title.trim() } : {}),
+      ...(call.child?.subagent === undefined
+        ? {}
+        : { childThreadId: call.child.subagent.appThread.id }),
+    });
+
+    const shellTask = (
+      taskId: string,
+      shell: {
+        readonly state: ThreadState;
+        readonly command: string;
+        readonly awaited?: boolean;
+      },
+    ): OrchestrationV2PendingBackgroundTask => ({
+      taskId,
+      kind: "command",
+      description: shell.command,
+      ...(shell.awaited === true ? { awaited: true } : {}),
+      ...(shell.state.subagent === undefined
+        ? {}
+        : { parentTaskId: shell.state.subagent.call.nativeId }),
+    });
+
+    // Finished background work and active subagent follow-ups stay listed on the root thread
+    // until the wake run that reads their report is dispatched, so the thread never looks done in between.
+    const awaitingWake = (state: ThreadState): Array<OrchestrationV2PendingBackgroundTask> => {
+      if (state.subagent !== undefined) return [];
+      const tasks: Array<OrchestrationV2PendingBackgroundTask> = [];
+      for (const session of sessionsOf(state)) {
+        if (
+          session !== state &&
+          session.subagent !== undefined &&
+          (busy.has(session.sessionId) || session.active !== undefined)
+        ) {
+          tasks.push(subagentTask(session.subagent.call));
+        }
+        for (const entry of session.reports.values()) {
+          if (!session.stoppedChildren.has(entry.childId)) tasks.push(...entry.tasks);
+        }
+        for (const owed of session.owedShellWakes.values()) {
+          if (!session.stoppedChildren.has(owed.task.taskId)) tasks.push(owed.task);
+        }
+        for (const wake of session.wakes) tasks.push(...wake.tasks);
+      }
+      return tasks;
+    };
+
     const syncRoster = Effect.fnUntraced(function* (state: ThreadState) {
-      const roster: Array<import("@t3tools/contracts").OrchestrationV2PendingBackgroundTask> =
-        runningCalls(state)
-          .filter((call) => call.background)
-          .map((call) => ({
-            taskId: call.nativeId,
-            kind: "subagent" as const,
-            ...(call.title?.trim() ? { description: call.title.trim() } : {}),
-            ...(call.child?.subagent === undefined
-              ? {}
-              : { childThreadId: call.child.subagent.appThread.id }),
-          }));
+      const sessions = sessionsOf(state);
+      const seen = new Set<string>();
+      const allTasks: Array<OrchestrationV2PendingBackgroundTask> = [];
+      const pushTask = (task: OrchestrationV2PendingBackgroundTask) => {
+        if (seen.has(task.taskId)) return;
+        seen.add(task.taskId);
+        allTasks.push(task);
+      };
+      for (const call of runningCalls(state)) {
+        if (call.background) pushTask(subagentTask(call));
+      }
       for (const [taskId, shell] of shells) {
-        if (shell.running && sessionsOf(state).includes(shell.state)) {
-          roster.push({
-            taskId,
-            kind: "command",
-            description: shell.command,
-            ...(shell.awaited === true ? { awaited: true } : {}),
-            ...(shell.state.subagent === undefined
-              ? {}
-              : { parentTaskId: shell.state.subagent.call.nativeId }),
-          });
+        if (shell.running && sessions.includes(shell.state)) {
+          pushTask(shellTask(taskId, shell));
         }
       }
-      const imageTasks = sessionsOf(state).flatMap((session) =>
-        [...session.imageJobs.entries()].flatMap(([taskId, job]) =>
-          job.status === "running"
-            ? [
-                {
-                  taskId,
-                  kind: "background_task" as const,
-                  description: `Image generation (${job.model})`,
-                },
-              ]
-            : [],
-        ),
-      );
-      const allTasks = roster.concat(imageTasks);
+      for (const task of awaitingWake(state)) pushTask(task);
+      for (const session of sessions) {
+        for (const [taskId, job] of session.imageJobs) {
+          if (job.status === "running") {
+            pushTask({
+              taskId,
+              kind: "background_task",
+              description: `Image generation (${job.model})`,
+            });
+          }
+        }
+      }
       const current = state.providerThread.pendingBackgroundTasks ?? [];
       if (
         state.publishedBackgroundWork === hasBackground(state) &&
@@ -1813,8 +1867,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         current.every(
           (task, index) =>
             task.taskId === allTasks[index]?.taskId &&
+            task.kind === allTasks[index]?.kind &&
             task.description === allTasks[index]?.description &&
             task.awaited === allTasks[index]?.awaited &&
+            task.parentTaskId === allTasks[index]?.parentTaskId &&
             (task.kind === "subagent" ? task.childThreadId : undefined) ===
               (allTasks[index]?.kind === "subagent" ? allTasks[index]?.childThreadId : undefined),
         )
@@ -1836,6 +1892,41 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         current = current.subagent?.call.state;
       }
     });
+
+    const scheduleOwedShellExpiry = (state: ThreadState, shellId: string, token: symbol) =>
+      Effect.sleep(WAKE_START_DEADLINE).pipe(
+        Effect.andThen(
+          lock.withPermit(
+            Effect.gen(function* () {
+              if (state.owedShellWakes.get(shellId)?.token !== token) return false;
+              if (state.active !== undefined) return true;
+              state.owedShellWakes.delete(shellId);
+              yield* syncRosterAncestors(state);
+              return false;
+            }),
+          ),
+        ),
+        Effect.repeat({ while: (active) => active }),
+        Effect.forkIn(sessionScope),
+      );
+
+    const scheduleReportHoldExpiry = (state: ThreadState, inboxId: string, token: symbol) =>
+      Effect.sleep(WAKE_START_DEADLINE).pipe(
+        Effect.andThen(
+          lock.withPermit(
+            Effect.gen(function* () {
+              const entry = state.reports.get(inboxId);
+              if (entry?.token !== token || entry.tasks.length === 0) return false;
+              if (state.active !== undefined) return true;
+              entry.tasks.length = 0;
+              yield* syncRosterAncestors(state);
+              return false;
+            }),
+          ),
+        ),
+        Effect.repeat({ while: (active) => active }),
+        Effect.forkIn(sessionScope),
+      );
 
     const fetchShellOutput = Effect.fn("OpenCode2Adapter.fetchShellOutput")(function* (
       id: string,
@@ -1949,6 +2040,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       shell.stopping = false;
       shell.running = false;
       shell.state.stoppedChildren.add(id);
+      shell.state.owedShellWakes.delete(id);
       yield* emitShell(id, "interrupted");
       shells.delete(id);
       shellInfo.delete(id);
@@ -2312,6 +2404,30 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       const route = state.providerThread.appThreadId;
       if (route === null || wake.messageId === undefined) return;
       const notification = backgroundWorkNotification(wake.reports);
+      // The dispatched run holds the thread from here; a declined, failed or cleared one must not.
+      const releaseTasks = lock.withPermit(
+        Effect.suspend(() => {
+          if (wake.tasks.length === 0) return Effect.void;
+          wake.tasks.length = 0;
+          return syncRosterAncestors(state);
+        }),
+      );
+      const retireWake = Effect.gen(function* () {
+        yield* lock.withPermit(
+          Effect.gen(function* () {
+            const index = state.wakes.indexOf(wake);
+            if (index >= 0) {
+              state.wakes.splice(index, 1);
+              discardWakes(state, [wake]);
+            } else {
+              wake.tasks.length = 0;
+            }
+            for (const session of sessionsOf(state).toReversed()) yield* syncRoster(session);
+            yield* syncRosterAncestors(state);
+          }),
+        );
+        yield* stopStrays(state);
+      });
       yield* continuationRequests.offer({
         threadId: route,
         providerThreadId: state.providerThread.id,
@@ -2320,7 +2436,11 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         messageId: wake.messageId,
         ...(notification === null ? {} : { notification }),
         dispatchIfCurrent: (dispatch) =>
-          wake.dropped ? Effect.succeedNone : Effect.asSome(dispatch),
+          (wake.dropped ? Effect.succeedNone : Effect.asSome(dispatch)).pipe(
+            Effect.ensuring(releaseTasks),
+          ),
+        clearIfCurrent: () => retireWake,
+        onRunEndedWithoutStarting: () => retireWake,
       });
     });
 
@@ -3020,6 +3140,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
 
     const takeReports = Effect.fnUntraced(function* (state: ThreadState) {
       const delivered = [...state.reports.values()];
+      const tasks = delivered.flatMap((entry) =>
+        state.stoppedChildren.has(entry.childId) ? [] : entry.tasks,
+      );
       state.reports.clear();
       const stopped =
         delivered.length > 0 &&
@@ -3027,15 +3150,16 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       for (const entry of delivered) state.stoppedChildren.delete(entry.childId);
       if (stopped) {
         markUnsettled(state);
+        yield* syncRosterAncestors(state);
         yield* client.session
           .interrupt({ sessionID: Session.ID.make(state.sessionId) })
           .pipe(Effect.timeout(INTERRUPT_TIMEOUT), Effect.ignore({ log: true }));
       }
-      return { delivered, stopped };
+      return { delivered, stopped, tasks };
     });
 
     const onWake = Effect.fnUntraced(function* (state: ThreadState) {
-      const { delivered, stopped } = yield* takeReports(state);
+      const { delivered, stopped, tasks } = yield* takeReports(state);
       if (stopped) return;
       const route = state.providerThread.appThreadId;
       // History begins at whichever OpenCode queued first: a report or another client's prompt.
@@ -3050,6 +3174,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         events: [],
         running: true,
         reports: delivered.map((entry) => entry.report),
+        tasks: route === null ? [] : [...tasks],
         detail: delivered.length === 0 ? null : delivered.map((entry) => entry.text).join("\n\n"),
         dropped: false,
         after: delivered.at(-1)?.inboxId,
@@ -3157,6 +3282,17 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         const id = stringField(payload.metadata, "shellID");
         const shell = id === undefined ? undefined : shells.get(id);
         if (shell !== undefined && shell.state !== state) return;
+        const owed = id === undefined ? undefined : state.owedShellWakes.get(id);
+        if (id !== undefined) state.owedShellWakes.delete(id);
+        const tasks: Array<OrchestrationV2PendingBackgroundTask> = [];
+        if (id === undefined || !state.stoppedChildren.has(id)) {
+          if (owed !== undefined) {
+            tasks.push(owed.task);
+          } else if (id !== undefined && shell?.awaited === true && shell.stopping !== true) {
+            tasks.push(shellTask(id, shell));
+          }
+        }
+        const token = tasks.length > 0 ? Symbol(inboxId) : undefined;
         state.reports.set(inboxId, {
           inboxId,
           childId: id ?? inboxId,
@@ -3166,7 +3302,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             label: shell?.command ?? payload.description,
             outcome: reportOutcome(stringField(payload.metadata, "state")),
           },
+          tasks,
+          ...(token === undefined ? {} : { token }),
         });
+        if (token !== undefined) yield* scheduleReportHoldExpiry(state, inboxId, token);
         if (id !== undefined && shell === undefined) {
           const outcome = reportOutcome(stringField(payload.metadata, "state"));
           const known = shellInfo.get(id);
@@ -3237,6 +3376,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         written !== undefined && candidate.run < written ? [candidate.call] : [],
       );
       const outcome = reportOutcome(stringField(payload.metadata, "state"));
+      const tasks = state.stoppedChildren.has(childId)
+        ? []
+        : [...lost, ...calls].filter((each) => each.background).map(subagentTask);
+      const token = tasks.length > 0 ? Symbol(inboxId) : undefined;
       state.reports.set(inboxId, {
         inboxId,
         childId,
@@ -3247,7 +3390,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           childThreadId: call?.child?.subagent?.appThread.id,
           outcome,
         },
+        tasks,
+        ...(token === undefined ? {} : { token }),
       });
+      if (token !== undefined) yield* scheduleReportHoldExpiry(state, inboxId, token);
       const status = state.stoppedChildren.has(childId)
         ? "interrupted"
         : outcome === "failed"
@@ -3335,10 +3481,28 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             exit: "exit" in event.data ? event.data.exit : undefined,
           });
         const shell = shells.get(event.data.id);
+        if (event.type === "shell.deleted") {
+          for (const state of threads.values()) {
+            if (state.owedShellWakes.delete(event.data.id)) yield* syncRosterAncestors(state);
+          }
+        }
         if (shell === undefined || !shell.running || shell.stopping === true) return;
         if (event.type === "shell.exited")
           yield* readShellOutput(event.data.id, true).pipe(Effect.ignore({ log: true }));
         shell.running = false;
+        if (
+          event.type === "shell.exited" &&
+          shell.awaited === true &&
+          event.data.status !== "killed" &&
+          !shell.state.stoppedChildren.has(event.data.id)
+        ) {
+          const token = Symbol(event.data.id);
+          shell.state.owedShellWakes.set(event.data.id, {
+            token,
+            task: shellTask(event.data.id, shell),
+          });
+          yield* scheduleOwedShellExpiry(shell.state, event.data.id, token);
+        }
         yield* emitShell(
           event.data.id,
           event.type === "shell.deleted" || event.data.status === "killed"
@@ -3508,6 +3672,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       if (event.type === "session.inbox.cancelled" || event.type === "session.inbox.delivered") {
         const report = state.reports.get(event.data.inboxID);
         state.reports.delete(event.data.inboxID);
+        if (report !== undefined && report.tasks.length > 0) yield* syncRosterAncestors(state);
         const external = state.externalPrompts.get(event.data.inboxID);
         state.externalPrompts.delete(event.data.inboxID);
         const turn = state.active;
@@ -3583,8 +3748,12 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           if (job.status !== "running") continue;
           yield* imageReport(state, { text: message, metadata: { jobID, state: "error" } });
         }
-        for (const wake of state.wakes.splice(0)) wake.dropped = true;
+        for (const wake of state.wakes.splice(0)) {
+          wake.dropped = true;
+          wake.tasks.length = 0;
+        }
         state.reports.clear();
+        state.owedShellWakes.clear();
         yield* syncRosterAncestors(state);
       }
       yield* setSessionStatus("error", message);
@@ -3807,6 +3976,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             for (const session of sessions) {
               discardWakes(session, session.wakes.splice(0));
               session.reports.clear();
+              session.owedShellWakes.clear();
             }
             for (const session of sessions.toReversed()) yield* syncRoster(session);
           }
@@ -4515,6 +4685,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       };
       for (const wake of wakes) {
         wake.dropped = true;
+        wake.tasks.length = 0;
         for (const childId of wake.children) retire(childId);
       }
       for (let grew = retired.size > 0; grew;) {
@@ -4637,6 +4808,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             yield* settleCall(call, "interrupted");
           }
           for (const caller of callers) {
+            caller.owedShellWakes.clear();
             for (const report of caller.reports.values()) {
               caller.stoppedChildren.add(report.childId);
             }
