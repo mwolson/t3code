@@ -1,14 +1,15 @@
-import type {
-  NodeId,
-  OrchestrationV2ConversationMessage,
-  OrchestrationV2PendingBackgroundTask,
-  OrchestrationV2ProviderThread,
-  OrchestrationV2ProviderTurn,
-  OrchestrationV2RestartCancelledBackgroundWork,
-  OrchestrationV2Run,
-  OrchestrationV2RunAttempt,
-  OrchestrationV2Subagent,
-  OrchestrationV2TurnItem,
+import {
+  isOrchestrationV2WorkActive,
+  type NodeId,
+  type OrchestrationV2ConversationMessage,
+  type OrchestrationV2PendingBackgroundTask,
+  type OrchestrationV2ProviderThread,
+  type OrchestrationV2ProviderTurn,
+  type OrchestrationV2RestartCancelledBackgroundWork,
+  type OrchestrationV2Run,
+  type OrchestrationV2RunAttempt,
+  type OrchestrationV2Subagent,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { subagentHoldsCompletion } from "@t3tools/provider-core/server/subagentProjection";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -129,6 +130,40 @@ export function cancelledRosterTaskWork(task: OrchestrationV2PendingBackgroundTa
     id: task.taskId,
     ...(task.awaited === true ? { awaited: true as const } : {}),
   };
+}
+
+type RosterItem = Pick<
+  OrchestrationV2TurnItem,
+  "type" | "providerThreadId" | "nativeItemRef" | "status"
+>;
+
+/** A listed subagent or awaited shell whose item already ended was waiting only for its wake, not cut off. */
+export function rosterTaskEnded(
+  task: OrchestrationV2PendingBackgroundTask,
+  providerThreadId: OrchestrationV2ProviderThread["id"],
+  projection: {
+    readonly turnItems: ReadonlyArray<RosterItem>;
+    readonly settledRosterTasks?: ReadonlyArray<RosterItem> | undefined;
+  },
+): boolean {
+  if (task.parentTaskId !== undefined) return false;
+  let itemType: "subagent" | "command_execution" | undefined;
+  if (task.kind === "subagent") {
+    itemType = "subagent";
+  } else if (task.kind === "command" && task.awaited === true) {
+    itemType = "command_execution";
+  }
+  if (itemType === undefined) return false;
+  const ownItem = (item: RosterItem) =>
+    item.type === itemType &&
+    item.providerThreadId === providerThreadId &&
+    item.nativeItemRef?.nativeId === task.taskId;
+  return (
+    (projection.settledRosterTasks ?? []).some(
+      (item) => ownItem(item) && !isOrchestrationV2WorkActive(item.status),
+    ) &&
+    !projection.turnItems.some((item) => ownItem(item) && isOrchestrationV2WorkActive(item.status))
+  );
 }
 
 const MAX_NOTE_ENTRIES = 10;

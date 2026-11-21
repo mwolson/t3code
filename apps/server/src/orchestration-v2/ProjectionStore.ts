@@ -341,7 +341,10 @@ export type ProjectionRuntimeRecoveryState = Pick<
   | "runtimeRequests"
   | "messages"
   | "turnItems"
->;
+> & {
+  /** Ended subagent or awaited shell items still listed on the provider thread's wake hold. */
+  readonly settledRosterTasks?: OrchestrationV2ThreadProjection["turnItems"];
+};
 
 export type ProjectionPendingUserInputs = Pick<
   OrchestrationV2ThreadProjection,
@@ -5878,6 +5881,33 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 )
               ORDER BY item.ordinal ASC, item.turn_item_id ASC
             `,
+            // Ended subagents or awaited shells still listed while waiting for their wake.
+            // CROSS JOIN keeps the roster outermost so items are read only when listed.
+            settledRosterTasks: sql<PayloadRow>`
+              SELECT item.payload_json
+              FROM orchestration_v2_projection_provider_threads AS roster
+              CROSS JOIN json_each(
+                CASE WHEN json_valid(roster.payload_json) THEN roster.payload_json ELSE '{}' END,
+                '$.pendingBackgroundTasks'
+              ) AS task
+              CROSS JOIN orchestration_v2_projection_turn_items AS item
+              WHERE roster.thread_id = ${threadId}
+                AND item.thread_id = ${threadId}
+                AND item.status IN ('completed', 'failed', 'cancelled', 'interrupted')
+                AND (
+                  (json_extract(task.value, '$.kind') = 'subagent' AND item.type = 'subagent')
+                  OR (
+                    json_extract(task.value, '$.kind') = 'command'
+                    AND json_extract(task.value, '$.awaited') = 1
+                    AND item.type = 'command_execution'
+                  )
+                )
+                AND json_extract(
+                  CASE WHEN json_valid(item.payload_json) THEN item.payload_json ELSE '{}' END,
+                  '$.nativeItemRef.nativeId'
+                ) = json_extract(task.value, '$.taskId')
+              ORDER BY item.ordinal ASC, item.turn_item_id ASC
+            `,
           };
           const sections = Object.entries(queries).map(
             ([section, query]) => sql`
@@ -5902,6 +5932,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             runtimeRequests,
             messages,
             turnItems,
+            settledRosterTasks,
           ] = yield* Effect.all([
             decodeRows(decodeRunPayload, threadId)(readRows("runs")),
             decodeRows(decodeRunAttemptPayload, threadId)(readRows("attempts")),
@@ -5913,6 +5944,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             decodeRows(decodeRuntimeRequestPayload, threadId)(readRows("runtimeRequests")),
             decodeRows(decodeMessagePayload, threadId)(readRows("messages")),
             decodeRows(decodeTurnItemPayload, threadId)(readRows("turnItems")),
+            decodeRows(decodeTurnItemPayload, threadId)(readRows("settledRosterTasks")),
           ]);
           return {
             thread,
@@ -5926,6 +5958,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             runtimeRequests,
             messages,
             turnItems,
+            settledRosterTasks,
           } satisfies ProjectionRuntimeRecoveryState;
         },
         (effect, threadId) =>

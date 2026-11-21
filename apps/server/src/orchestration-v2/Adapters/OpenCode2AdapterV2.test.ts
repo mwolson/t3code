@@ -1022,7 +1022,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           assistantMessageID: "msg_assistant",
           id: "call-shell",
         };
-        const gate = makeProviderReplayGate(["shell-exit"]);
+        const gate = makeProviderReplayGate(["shell-exit", "keep-open"]);
         const { runtime, thread } = yield* resumed(
           [
             out("session.prompt", { sessionID: SESSION, text: "<any>" }),
@@ -1091,7 +1091,16 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
                   event("shell.exited", { id: shellID, exit: 143, status: "exited" }),
                   reply("shell.remove", null),
                 ]
-              : []),
+              : [
+                  event(
+                    "session.model.selected",
+                    {
+                      sessionID: SESSION,
+                      model: { providerID: "opencode", id: "big-pickle", variant: "keep-open" },
+                    },
+                    "keep-open",
+                  ),
+                ]),
           ],
           { replayGate: gate },
         );
@@ -1158,10 +1167,14 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           }),
           { matched: [] },
         );
+        const shellEnded = yield* Deferred.make<void>();
         const settled = yield* runtime.events.pipe(
           Stream.tap((e) =>
-            Effect.sync(() => {
-              if (e.type === "turn_item.updated") items.push(e.turnItem);
+            Effect.gen(function* () {
+              if (e.type !== "turn_item.updated") return;
+              items.push(e.turnItem);
+              if (e.turnItem.type === "command_execution" && e.turnItem.status !== "running")
+                yield* Deferred.succeed(shellEnded, undefined);
             }),
           ),
           Stream.filter(
@@ -1179,8 +1192,27 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
             requestRuntimeRestart: true,
           });
         else if (stopped) yield* runtime.stopTask!({ providerThread: thread, taskId: shellID });
-        else gate.release("shell-exit");
+        else {
+          gate.release("shell-exit");
+          yield* Deferred.await(shellEnded);
+          // An awaited shell holds the roster until its wake report arrives or the wake deadline expires.
+          yield* TestClock.adjust("30 seconds");
+        }
         yield* Fiber.join(settled);
+        if (!stopped) {
+          const closed = yield* runtime.events.pipe(
+            Stream.filter(
+              (e) =>
+                e.type === "provider_thread.updated" &&
+                e.providerThread.nativeMetadata?.modelSelection?.options?.[0]?.value ===
+                  "keep-open",
+            ),
+            Stream.runHead,
+            Effect.forkScoped,
+          );
+          gate.release("keep-open");
+          yield* Fiber.join(closed);
+        }
         assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
         assert.deepEqual(
           yield* runtime.awaitBackgroundTasks!({
@@ -1265,7 +1297,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           response({ output: "retained", cursor: 8, size: 8, truncated: false }),
         ),
       );
-      const gate = makeProviderReplayGate(["recovered-exit"]);
+      const gate = makeProviderReplayGate(["recovered-exit", "keep-open"]);
       const { runtime, thread } = yield* resumed(
         discovery === "settled"
           ? []
@@ -1284,7 +1316,16 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
                 }),
               ),
               ...(discovery === "exited"
-                ? []
+                ? [
+                    event(
+                      "session.model.selected",
+                      {
+                        sessionID: SESSION,
+                        model: { providerID: "opencode", id: "big-pickle", variant: "keep-open" },
+                      },
+                      "keep-open",
+                    ),
+                  ]
                 : [out("shell.remove", { id }), reply("shell.remove", null)]),
             ],
         {
@@ -1310,9 +1351,16 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       const items: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       const shellEnded = yield* Deferred.make<void>();
       const rosterEnded = yield* Deferred.make<void>();
+      const streamClosed = yield* Deferred.make<void>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) =>
           Effect.gen(function* () {
+            if (
+              event.type === "provider_thread.updated" &&
+              event.providerThread.nativeMetadata?.modelSelection?.options?.[0]?.value ===
+                "keep-open"
+            )
+              yield* Deferred.succeed(streamClosed, undefined);
             if (
               event.type === "provider_thread.updated" &&
               event.sessionScoped === true &&
@@ -1360,7 +1408,12 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       if (discovery === "exited") gate.release("recovered-exit");
       else yield* runtime.stopTask!({ providerThread: thread, taskId: id });
       yield* Deferred.await(shellEnded);
+      if (discovery === "exited") yield* TestClock.adjust("30 seconds");
       yield* Deferred.await(rosterEnded);
+      if (discovery === "exited") {
+        gate.release("keep-open");
+        yield* Deferred.await(streamClosed);
+      }
       assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
       const item = items;
       const projected = item.at(0);
@@ -1656,6 +1709,9 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         const queued = yield* Deferred.make<void>();
         const drained = yield* Deferred.make<void>();
         const timeline: Array<boolean | string> = [];
+        const rootRostersBeforeEnd: Array<ReadonlyArray<string>> = [];
+        let middleCompleted = false;
+        let lastRootRoster: ReadonlyArray<string> = [];
         yield* runtime.events.pipe(
           Stream.runForEach((event) =>
             Effect.gen(function* () {
@@ -1667,6 +1723,10 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
                   timeline.push(event.pendingBackgroundWork);
                 }
                 if (event.providerThread.id === thread.id) {
+                  lastRootRoster = (event.providerThread.pendingBackgroundTasks ?? []).map(
+                    (task) => task.taskId,
+                  );
+                  if (!middleCompleted) rootRostersBeforeEnd.push(lastRootRoster);
                   const variant =
                     event.providerThread.nativeMetadata?.modelSelection?.options?.[0]?.value;
                   if (variant === "thinking") yield* Deferred.succeed(queued, undefined);
@@ -1677,6 +1737,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
                 event.type === "provider_turn.updated" &&
                 event.providerTurn.nativeTurnRef?.nativeId === `${MIDDLE}:turn:2`
               ) {
+                if (event.providerTurn.status === "completed") middleCompleted = true;
                 timeline.push(event.providerTurn.status);
               }
               if (event.type === "message.updated" && event.message.text === "GRANDCHILD_OK") {
@@ -1691,6 +1752,11 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
         assert.isTrue(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
         assert.strictEqual(timeline.at(-1), true);
+        const deepListed = rootRostersBeforeEnd.findIndex((roster) =>
+          roster.includes(`${MIDDLE}:call-deep`),
+        );
+        assert.isAtLeast(deepListed, 0);
+        assert.deepEqual(lastRootRoster, [`${MIDDLE}:call-deep`]);
         timeline.length = 0;
         gate.release("continue");
         yield* Deferred.await(drained);
@@ -1701,6 +1767,10 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         assert.isAbove(timeline.indexOf(false), timeline.indexOf("completed"));
         assert.strictEqual(timeline.at(-1), false);
         assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
+        const between = rootRostersBeforeEnd.slice(deepListed);
+        assert.isTrue(between.some((roster) => roster.includes("call-middle")));
+        assert.isFalse(between.some((roster) => roster.length === 0));
+        assert.deepEqual(lastRootRoster, []);
       }),
   );
 
@@ -1777,7 +1847,9 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         string,
         Record<string, { status: string; result: string | null }>
       >();
-      const state: { roster: ReadonlyArray<unknown> | undefined } = { roster: undefined };
+      const state: { roster: OrchestrationV2ProviderThread["pendingBackgroundTasks"] } = {
+        roster: undefined,
+      };
       let wake = yield* Deferred.make<void>();
       yield* runtime.events.pipe(
         Stream.tap((event) =>
@@ -1826,7 +1898,11 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
             yield* until(check);
           });
         });
-      return { calls, callsById, callsAtChildTurnStart, childTurns, state, until };
+      // A reported subagent stays listed until the wake that reads its report, which these replays never start.
+      const rosterSettled = () =>
+        state.roster !== undefined &&
+        state.roster.every((task) => callsById.get(task.taskId)?.status !== "running");
+      return { calls, callsById, callsAtChildTurnStart, childTurns, state, until, rosterSettled };
     });
   const launchedAndRunning = [
     ...backgroundLaunch(CHILD),
@@ -2006,13 +2082,299 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         () =>
           watch.calls.get("Again")?.status === "completed" &&
           watch.calls.get("Sleep")?.status === "completed" &&
-          watch.state.roster?.length === 0,
+          watch.rosterSettled(),
       );
       assert.deepEqual(Object.fromEntries(watch.calls), {
         Sleep: { status: "completed", result: "CHILD_OK" },
         Again: { status: "completed", result: "CHILD_OK" },
       });
     }),
+  );
+
+  it.effect.each([
+    "dispatched",
+    "failed",
+    "cleared",
+    "unstarted",
+    "stopped",
+    "cancelled",
+    "expired",
+  ] as const)(
+    "lists a finished background subagent until its wake's continuation is %s",
+    (outcome) =>
+      Effect.gen(function* () {
+        const offered =
+          yield* Deferred.make<ProviderContinuationRequests.ProviderContinuationRequest>();
+        const gate = makeProviderReplayGate(["cancel", "keep-open"]);
+        const { runtime, thread } = yield* resumed(
+          [
+            ...launchedAndRunning,
+            event("session.execution.succeeded", { sessionID: SESSION }),
+            event("session.execution.succeeded", { sessionID: CHILD }),
+            childReport("msg_report", "CHILD_OK"),
+            ...(outcome === "cancelled"
+              ? [
+                  event(
+                    "session.inbox.cancelled",
+                    { sessionID: SESSION, inboxID: "msg_report" },
+                    "cancel",
+                  ),
+                ]
+              : outcome === "expired"
+                ? [
+                    event(
+                      "session.model.selected",
+                      {
+                        sessionID: SESSION,
+                        model: { providerID: "opencode", id: "big-pickle", variant: "none" },
+                      },
+                      "keep-open",
+                    ),
+                  ]
+                : [event("session.execution.started", { sessionID: SESSION })]),
+            ...(outcome === "stopped"
+              ? [
+                  out("session.interrupt", { sessionID: SESSION }),
+                  reply("session.interrupt", { interrupted: true }),
+                ]
+              : []),
+          ],
+          outcome === "cancelled" || outcome === "expired" ? { replayGate: gate } : undefined,
+        ).pipe(
+          Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+            offer: (request) => Deferred.succeed(offered, request).pipe(Effect.asVoid),
+            take: Effect.never,
+          }),
+        );
+        const rosters: Array<ReadonlyArray<string>> = [];
+        const streamClosed = yield* Deferred.make<void>();
+        const watch = yield* watchCalls(
+          {
+            ...runtime,
+            events: runtime.events.pipe(
+              Stream.tap((event) =>
+                Effect.gen(function* () {
+                  if (
+                    event.type === "provider_thread.updated" &&
+                    event.providerThread.id === thread.id
+                  ) {
+                    rosters.push(
+                      (event.providerThread.pendingBackgroundTasks ?? []).map(
+                        (task) => task.taskId,
+                      ),
+                    );
+                    if (
+                      event.providerThread.nativeMetadata?.modelSelection?.options?.[0]?.value ===
+                      "none"
+                    )
+                      yield* Deferred.succeed(streamClosed, undefined);
+                  }
+                }),
+              ),
+            ),
+          },
+          thread,
+        );
+        yield* runtime.startTurn(withLineage(thread));
+        yield* watch.until(() => watch.calls.get("Sleep")?.status === "completed");
+        assert.deepEqual(watch.callsById.get("call-background"), {
+          status: "completed",
+          result: "CHILD_OK",
+        });
+        const listed = rosters.findIndex((roster) => roster.includes("call-background"));
+        const held = () => {
+          assert.deepEqual(rosters.at(-1), ["call-background"]);
+          assert.isFalse(rosters.slice(listed).some((roster) => roster.length === 0));
+        };
+        held();
+        if (outcome === "cancelled") {
+          gate.release("cancel");
+        } else if (outcome === "expired") {
+          yield* TestClock.adjust("30 seconds");
+        } else {
+          const offer = yield* Deferred.await(offered);
+          held();
+          if (outcome === "dispatched" || outcome === "failed") {
+            const dispatched = yield* Effect.exit(
+              offer.dispatchIfCurrent!(
+                outcome === "dispatched" ? Effect.void : Effect.fail("dispatch failed"),
+              ),
+            );
+            assert.strictEqual(Exit.isSuccess(dispatched), outcome === "dispatched");
+          } else if (outcome === "cleared") {
+            yield* offer.clearIfCurrent!();
+            assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
+          } else if (outcome === "unstarted") {
+            yield* offer.onRunEndedWithoutStarting!();
+            assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
+          } else {
+            yield* runtime.interruptTurn({
+              providerThread: thread,
+              providerTurnId: yield* providerTurnId,
+              requestRuntimeRestart: true,
+            });
+            yield* watch.until(() => rosters.at(-1)?.length === 0);
+            assert.isTrue(Option.isNone(yield* offer.dispatchIfCurrent!(Effect.void)));
+          }
+        }
+        yield* watch.until(() => watch.state.roster?.length === 0);
+        if (outcome === "expired") {
+          gate.release("keep-open");
+          yield* Deferred.await(streamClosed);
+        }
+      }),
+  );
+
+  it.effect.each([true, false])(
+    "lists an exited background shell across report and wake only when awaited=%s",
+    (awaited) =>
+      Effect.gen(function* () {
+        const shellID = "sh_awaited_wake";
+        const tool = { sessionID: SESSION, assistantMessageID: "msg_assistant", id: "call-shell" };
+        const gate = makeProviderReplayGate(["exit", "report", "wake"]);
+        const offered =
+          yield* Deferred.make<ProviderContinuationRequests.ProviderContinuationRequest>();
+        const { runtime, thread } = yield* resumed(
+          [
+            out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+            promptAccepted,
+            event("session.execution.started", { sessionID: SESSION }),
+            event("session.tool.input.started", { ...tool, name: "shell" }),
+            event("session.tool.called", {
+              ...tool,
+              name: "shell",
+              input: { command: "vp test", background: true },
+              executed: false,
+            }),
+            event(
+              "session.tool.success",
+              {
+                ...tool,
+                content: [{ type: "text", text: "Launched" }],
+                metadata: { shellID },
+                executed: false,
+              },
+              undefined,
+              2,
+            ),
+            out("shell.output", "<any>"),
+            reply("shell.output", {
+              location: { directory: WORK },
+              data: { output: "", cursor: 0, size: 0, truncated: false },
+            }),
+            event("session.execution.succeeded", { sessionID: SESSION }),
+            event("shell.exited", { id: shellID, exit: 0, status: "exited" }, "exit"),
+            out("shell.output", "<any>"),
+            reply("shell.output", {
+              location: { directory: WORK },
+              data: { output: "ok\n", cursor: 3, size: 3, truncated: false },
+            }),
+            event(
+              "session.inbox.enqueued",
+              {
+                inboxID: "msg_shell_report",
+                sessionID: SESSION,
+                item: {
+                  type: "synthetic",
+                  payload: {
+                    text: `<shell id="${shellID}" state="completed">ok</shell>`,
+                    description: "vp test",
+                    metadata: { source: "shell", shellID, state: "completed" },
+                  },
+                  delivery: "steer",
+                },
+              },
+              "report",
+            ),
+            event("session.execution.started", { sessionID: SESSION }, "wake"),
+          ],
+          { replayGate: gate },
+        ).pipe(
+          Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+            offer: (request) => Deferred.succeed(offered, request).pipe(Effect.asVoid),
+            take: Effect.never,
+          }),
+        );
+        const rosters: Array<
+          ReadonlyArray<{ readonly taskId: string; readonly awaited?: boolean }>
+        > = [];
+        const terminal = yield* Deferred.make<void>();
+        const listedShell = yield* Deferred.make<void>();
+        const exited = yield* Deferred.make<void>();
+        const rosterEmpty = yield* Deferred.make<void>();
+        let watchEmpty = false;
+        yield* runtime.events.pipe(
+          Stream.tap((e) =>
+            Effect.gen(function* () {
+              if (e.type === "turn.terminal") yield* Deferred.succeed(terminal, undefined);
+              if (
+                e.type === "turn_item.updated" &&
+                e.turnItem.type === "command_execution" &&
+                e.turnItem.status === "completed"
+              )
+                yield* Deferred.succeed(exited, undefined);
+              if (e.type === "provider_thread.updated" && e.providerThread.id === thread.id) {
+                const tasks = (e.providerThread.pendingBackgroundTasks ?? []).map((task) => ({
+                  taskId: task.taskId,
+                  ...(task.awaited === true ? { awaited: true } : {}),
+                }));
+                rosters.push(tasks);
+                if (
+                  tasks.some(
+                    (task) => task.taskId === shellID && (task.awaited === true) === awaited,
+                  )
+                )
+                  yield* Deferred.succeed(listedShell, undefined);
+                if (watchEmpty && tasks.length === 0)
+                  yield* Deferred.succeed(rosterEmpty, undefined);
+              }
+            }),
+          ),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(withLineage(thread));
+        yield* Deferred.await(terminal);
+        if (awaited) {
+          assert.deepEqual(
+            yield* runtime.awaitBackgroundTasks!({
+              providerThread: thread,
+              taskIds: [shellID],
+              awaited: true,
+            }),
+            { matched: [shellID] },
+          );
+        }
+        yield* Deferred.await(listedShell);
+        const listed = rosters.findIndex((roster) =>
+          roster.some((task) => task.taskId === shellID && (task.awaited === true) === awaited),
+        );
+        assert.isAtLeast(listed, 0);
+        if (!awaited) watchEmpty = true;
+        gate.release("exit");
+        yield* Deferred.await(exited);
+        if (!awaited) {
+          yield* Deferred.await(rosterEmpty);
+          assert.deepEqual(rosters.at(-1), []);
+          gate.release("report");
+          gate.release("wake");
+          const offer = yield* Deferred.await(offered);
+          yield* offer.dispatchIfCurrent!(Effect.void);
+          return;
+        }
+        assert.deepEqual(rosters.at(-1), [{ taskId: shellID, awaited: true }]);
+        gate.release("report");
+        assert.isTrue(yield* Effect.promise(() => gate.waitForReached("wake")));
+        assert.deepEqual(rosters.at(-1), [{ taskId: shellID, awaited: true }]);
+        gate.release("wake");
+        const offer = yield* Deferred.await(offered);
+        assert.deepEqual(rosters.at(-1), [{ taskId: shellID, awaited: true }]);
+        assert.isFalse(rosters.slice(listed).some((roster) => roster.length === 0));
+        watchEmpty = true;
+        yield* offer.dispatchIfCurrent!(Effect.void);
+        yield* Deferred.await(rosterEmpty);
+        assert.deepEqual(rosters.at(-1), []);
+      }),
   );
 
   it.effect("keeps a call to a finished subagent for its own run's report", () =>
@@ -2145,7 +2507,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       yield* runtime.startTurn(withLineage(thread));
       yield* watch.until(
         () =>
-          watch.state.roster?.length === 0 &&
+          watch.rosterSettled() &&
           Object.keys(expected).every((id) => watch.callsById.get(id)?.status === "completed"),
       );
       assert.deepEqual(Object.fromEntries(watch.callsById), expected);

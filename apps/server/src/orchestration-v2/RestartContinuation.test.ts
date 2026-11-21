@@ -238,6 +238,85 @@ it("does not continue settled root runs with restart-cancelled background work",
       );
 });
 
+it("does not wake a settled run for a listed subagent or awaited shell that already finished", () => {
+  const projection = makeProjection();
+  const subagentItem = (status: "completed" | "running") => ({
+    id: `turn-item:review:${status}`,
+    runId,
+    providerThreadId,
+    nativeItemRef: { driver, nativeId: "call-review", strength: "strong" },
+    type: "subagent",
+    origin: "provider_native",
+    title: "Review",
+    status,
+  });
+  const shellItem = (status: "completed" | "running") => ({
+    id: `turn-item:shell:${status}`,
+    runId,
+    providerThreadId,
+    nativeItemRef: { driver, nativeId: "sh-build", strength: "strong" },
+    type: "command_execution",
+    title: null,
+    input: "vp test",
+    status,
+  });
+  const listed = (
+    task:
+      | { readonly taskId: string; readonly kind: "subagent"; readonly description: string }
+      | {
+          readonly taskId: string;
+          readonly kind: "command";
+          readonly description: string;
+          readonly awaited: true;
+        },
+    open: ReadonlyArray<unknown>,
+    settled?: ReadonlyArray<unknown>,
+  ) =>
+    ({
+      ...projection,
+      runs: [{ ...projection.runs[0]!, status: "completed" as const }],
+      providerThreads: [
+        {
+          ...projection.providerThreads[0]!,
+          status: "idle" as const,
+          pendingBackgroundTasks: [task],
+        },
+      ],
+      providerTurns: [{ ...projection.providerTurns[0]!, status: "completed" }],
+      turnItems: open,
+      ...(settled === undefined ? {} : { settledRosterTasks: settled }),
+    }) as unknown as OrchestrationV2ThreadProjection;
+  const subagentTask = { taskId: "call-review", kind: "subagent" as const, description: "Review" };
+  const shellTask = {
+    taskId: "sh-build",
+    kind: "command" as const,
+    description: "vp test",
+    awaited: true as const,
+  };
+  assert.isUndefined(
+    restartContinuationRun(listed(subagentTask, [], [subagentItem("completed")]), now),
+  );
+  assert.equal(
+    restartContinuationRun(listed(subagentTask, [subagentItem("running")]), now)?.id,
+    runId,
+  );
+  assert.equal(
+    restartContinuationRun(listed(subagentTask, []), now)?.id,
+    runId,
+    "no ended item was read",
+  );
+  assert.equal(
+    restartContinuationRun(
+      listed(subagentTask, [subagentItem("running")], [subagentItem("completed")]),
+      now,
+    )?.id,
+    runId,
+    "a later call to the same subagent still runs",
+  );
+  assert.isUndefined(restartContinuationRun(listed(shellTask, [], [shellItem("completed")]), now));
+  assert.equal(restartContinuationRun(listed(shellTask, [shellItem("running")]), now)?.id, runId);
+});
+
 it.effect.each(["completed", "waiting", "cancelled"] as const)(
   "wakes a %s run whose awaited monitor the restart cancelled, with the note as its prompt",
   (status) =>
