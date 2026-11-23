@@ -440,7 +440,6 @@ export const layerProduction = Layer.mergeAll(
   layerScheduledTaskProvided,
   layerWorkflowsProvided,
   layerScratchThreadPromotionProvided,
-  layerSecretRequestsProvided,
   layerFeedbackStoreProvided,
   GuestShareService.layer.pipe(
     Layer.provide(Layer.merge(layerOrchestratorProvided, layerCommandOutputHubProvided)),
@@ -459,6 +458,7 @@ export const layerProduction = Layer.mergeAll(
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
 ).pipe(
+  Layer.provideMerge(layerSecretRequestsProvided),
   Layer.provide(ResourceCleanupService.layer.pipe(Layer.provide(layerScheduledTaskProvided))),
   Layer.provideMerge(layerProjectService),
   Layer.provide(Scheduler.layer),

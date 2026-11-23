@@ -365,6 +365,12 @@ it("waits for nested work and retains the report across monitor acknowledgements
   });
   assert.equal(progress.state, "result_available");
   assert.equal(progress.resultRun?.id, report.id);
+  const awaitingSecret = delegatedTaskProgress({
+    ...projection,
+    runs: [run, report],
+    waitingUserRequestCards: [{ runId: report.id }],
+  });
+  assert.equal(awaitingSecret.state, "waiting_for_children");
   const ended = { ...report, id: RunId.make("monitor-ended"), ordinal: 4 };
   const afterMonitorEnded = delegatedTaskProgress({
     ...projection,

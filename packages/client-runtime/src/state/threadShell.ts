@@ -133,7 +133,7 @@ function subagentRequest(thread: OrchestrationV2ThreadShell): PendingSubagentReq
     kind === "auth_refresh" ||
     (thread.lineage.relationshipToParent !== "subagent" && thread.delegatedFrom === undefined) ||
     isProviderNativeSubagentThread(thread) ||
-    !isChildRunLive(thread)
+    (!isChildRunLive(thread) && thread.pendingRuntimeRequest?.userOnly !== true)
   ) {
     return null;
   }

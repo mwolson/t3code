@@ -445,13 +445,15 @@ describe("v2 thread shell lists", () => {
     expect(registry.get(threads.threadShellAtom(parentRef))?.pendingSubagentRequest).toBeNull();
     expect(registry.get(inputs).map((thread) => thread.id)).toEqual([helper.id]);
 
-    // A secret card needs the user, so it still reaches the parent here.
+    // A secret card needs the user, so it still reaches the parent here, even after the child's run ends.
     registry.set(snapshotAtom(remoteEnvironmentId), {
       ...v2ShellSnapshot,
       threads: [
         task,
         {
           ...helper,
+          status: "completed" as const,
+          activityRunStatus: null,
           pendingRuntimeRequest: { ...approval, kind: "user_input" as const, userOnly: true },
         },
       ],
