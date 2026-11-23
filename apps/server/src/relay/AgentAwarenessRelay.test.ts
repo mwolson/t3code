@@ -21,6 +21,7 @@ import * as BackgroundRelaySettings from "./BackgroundRelaySettings.ts";
 import { BackgroundRelayConfig } from "./BackgroundRelayConfig.ts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -711,6 +712,66 @@ describe("AgentAwarenessRelay", () => {
     }),
   );
 
+  it.effect("reports quiet running work again, and stops once the run completes", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications } = yield* makeTestRelay();
+      yield* relay.publishThread(THREAD_ID);
+      for (let i = 0; i < 3; i++) {
+        yield* TestClock.adjust("3 minutes");
+        yield* relay.drain;
+      }
+      assert.deepEqual(
+        publications.map((publication) => [
+          publication.state?.phase,
+          publication.state?.updatedAt,
+          publication.state?.heartbeatAt,
+        ]),
+        [
+          ["running", NOW, "1970-01-01T00:00:00.000Z"],
+          ["running", NOW, "1970-01-01T00:03:00.000Z"],
+          ["running", NOW, "1970-01-01T00:06:00.000Z"],
+          ["running", NOW, "1970-01-01T00:09:00.000Z"],
+        ],
+      );
+
+      yield* Ref.set(currentShell, shell({ status: "completed" }));
+      yield* relay.publishThread(THREAD_ID);
+      yield* TestClock.adjust("10 minutes");
+      yield* relay.drain;
+      assert.deepEqual(
+        publications
+          .slice(4)
+          .map((publication) => [publication.state?.phase, publication.state?.heartbeatAt]),
+        [["completed", undefined]],
+      );
+    }),
+  );
+
+  it.effect("sends the next heartbeat while waiting for a steady publish retry", () =>
+    Effect.gen(function* () {
+      const { relay, publications } = yield* makeTestRelay({
+        respond: (attempt) =>
+          attempt >= 2 && attempt <= 9
+            ? new Response("unavailable", { status: 503 })
+            : Response.json({ ok: true, deliveries: [] }),
+      });
+      yield* relay.publishThread(THREAD_ID);
+      yield* TestClock.adjust("3 minutes");
+      yield* relay.drain;
+      for (const seconds of [1, 2, 4, 8, 16, 60, 60]) {
+        yield* TestClock.adjust(Duration.seconds(seconds));
+        yield* relay.drain;
+      }
+      assert.equal(publications.length, 9);
+
+      // The next retry is at 6:31, so only the heartbeat can publish at 6:00.
+      yield* TestClock.adjust("29 seconds");
+      yield* relay.drain;
+      assert.equal(publications.length, 10);
+      assert.equal(publications[9]?.state?.heartbeatAt, "1970-01-01T00:06:00.000Z");
+    }),
+  );
+
   it.effect("republishes unchanged state with fresh credentials after relinking", () =>
     Effect.gen(function* () {
       const { relay, secrets, publications } = yield* makeTestRelay();
@@ -831,7 +892,7 @@ describe("AgentAwarenessRelay", () => {
         yield* TestClock.adjust("5 seconds");
         yield* relay.drain;
         assert.deepEqual(
-          publications.map((publication) => publication.state?.phase ?? null),
+          withoutHeartbeats(publications).map((publication) => publication.state?.phase ?? null),
           ["running", null],
         );
       }),
@@ -1250,7 +1311,7 @@ describe("AgentAwarenessRelay", () => {
   );
 });
 
-it.effect("resnapshots on explicit catch-up while idle configuration checks avoid snapshots", () =>
+it.effect("resnapshots on explicit catch-up without resnapshotting for heartbeats", () =>
   Effect.gen(function* () {
     const { relay, secrets, catchUp, publications } = yield* makeTestRelay({
       catchUpThreads: [shell()],
@@ -1288,8 +1349,8 @@ it.effect("resnapshots on explicit catch-up while idle configuration checks avoi
     yield* TestClock.adjust("1 second");
     yield* relay.drain;
     assert.equal(catchUp.activitySnapshotReads, 3);
-    assert.equal(publications.length, 2);
-    assert.equal(publications[1]?.state?.threadId, THREAD_ID);
+    assert.equal(withoutHeartbeats(publications).length, 2);
+    assert.equal(withoutHeartbeats(publications)[1]?.state?.threadId, THREAD_ID);
   }),
 );
 
@@ -1347,7 +1408,12 @@ describe("background relay resync", () => {
       assert.equal(publications.length, 2);
       assert.equal(publications[1]?.authorization, "Bearer second-credential");
       yield* TestClock.adjust("10 minutes");
-      assert.equal(publications.length, 2);
+      assert.equal(withoutHeartbeats(publications).length, 2);
+      assert.isTrue(
+        publications
+          .slice(2)
+          .every((publication) => publication.authorization === "Bearer second-credential"),
+      );
     }).pipe(Effect.scoped),
   );
 
@@ -1475,3 +1541,26 @@ describe("background relay resync", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+// A heartbeat repeats a thread's previous report at least three minutes later. Tests about
+// other publishes leave heartbeats out.
+function withoutHeartbeats<
+  P extends {
+    readonly authorization: string | null;
+    readonly state: { readonly threadId: string; readonly heartbeatAt?: string | undefined } | null;
+  },
+>(publications: ReadonlyArray<P>): Array<P> {
+  const previousByThread = new Map<string, P>();
+  return publications.filter((publication) => {
+    const key = `${publication.authorization} ${publication.state?.threadId}`;
+    const previous = previousByThread.get(key);
+    previousByThread.set(key, publication);
+    if (!previous?.state?.heartbeatAt || !publication.state?.heartbeatAt) return true;
+    const { heartbeatAt: previousAt, ...previousState } = previous.state;
+    const { heartbeatAt, ...state } = publication.state;
+    return (
+      JSON.stringify(state) !== JSON.stringify(previousState) ||
+      Date.parse(heartbeatAt) - Date.parse(previousAt) < 3 * 60_000
+    );
+  });
+}
