@@ -268,7 +268,11 @@ const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) =>
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-      Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+      Layer.provide(
+        Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
+        }),
+      ),
       Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
       Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
     ),
@@ -350,6 +354,7 @@ const makeLaptop = Effect.gen(function* () {
         ServerSettings.layerTest(),
         // No thread here delegated to the box, so a send there is no follow-up.
         Layer.mock(RemoteDelegation.RemoteDelegation)({
+          pendingQuestions: () => Effect.succeed([]),
           followUp: (_scope, _environmentId, _request, sent) => Effect.succeed(sent),
         }),
         Layer.mock(PeerLinkRequests.PeerLinkRequests)({}),

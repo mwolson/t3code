@@ -1,8 +1,11 @@
+import { ThreadId, RuntimeRequestId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   createThreadNotificationGate,
   isSnoozedForNotification,
+  quietDelegatedThreadInput,
   RELEASED_COMPLETION_GRACE_MS,
   type ThreadNotificationObservation,
 } from "./ThreadNotificationCoordinator.logic";
@@ -110,6 +113,38 @@ describe("createThreadNotificationGate", () => {
       ["thread", "input"],
       ["thread", "completion"],
     ]);
+  });
+
+  it.each([
+    { ownQuestion: true, userOnly: false, rolledUp: false, quiet: true },
+    { ownQuestion: true, userOnly: true, rolledUp: false, quiet: false },
+    { ownQuestion: false, userOnly: false, rolledUp: true, quiet: false },
+    { ownQuestion: true, userOnly: false, rolledUp: true, quiet: false },
+  ])("silences only a delegated thread's own ordinary question: %j", (row) => {
+    const { gate, notify } = harness();
+    const question = { ...working, attention: "run-1:input" };
+    const thread = {
+      lineage: {
+        rootThreadId: ThreadId.make("root"),
+        parentThreadId: ThreadId.make("parent"),
+        relationshipToParent: "subagent" as const,
+      },
+      pendingRuntimeRequest: row.ownQuestion
+        ? {
+            id: RuntimeRequestId.make("question"),
+            kind: "user_input" as const,
+            userOnly: row.userOnly,
+            createdAt: DateTime.makeUnsafe(0),
+          }
+        : null,
+    };
+    gate.observe("thread", working, question, {
+      ...visible,
+      quietInput: quietDelegatedThreadInput(thread, row.rolledUp ? "user_input" : null),
+    });
+    expect(notify.mock.calls).toEqual(row.quiet ? [] : [["thread", "input"]]);
+    gate.observe("thread", question, { ...working, attention: "run-1:approval" }, visible);
+    expect(notify.mock.calls).toHaveLength(row.quiet ? 1 : 2);
   });
 
   it("does not replay a completion after attention resolves", () => {

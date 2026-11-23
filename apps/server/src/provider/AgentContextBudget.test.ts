@@ -85,7 +85,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(PullRequestReviewGuideService)({}),
   Layer.mock(PullRequestService)({}),
   Layer.mock(GitManager)({}),
-  Layer.mock(RemoteDelegation)({}),
+  Layer.mock(RemoteDelegation)({ pendingQuestions: () => Effect.succeed([]) }),
   Layer.mock(ScheduledTaskService)({}),
   Layer.mock(SecretRequests)({}),
   Layer.mock(FeedbackStore)({}),

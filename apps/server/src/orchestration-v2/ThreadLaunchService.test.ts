@@ -399,7 +399,9 @@ it.effect.each(
           Scheduler.layer,
           Layer.mock(SecretRequests.SecretRequests)({}),
           ManagedPolicy.layerTest(),
-          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({
+            pendingQuestions: () => Effect.succeed([]),
+          }),
         ),
       ),
     );
