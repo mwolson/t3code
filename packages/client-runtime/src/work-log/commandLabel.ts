@@ -59,6 +59,24 @@ const START_PROCESS_OPTIONS_WITH_VALUE = new Set([
   "-workingdirectory",
 ]);
 const SKIPPABLE_SUDO_PROBES = new Set(["[", "[[", "test", "true"]);
+const ENV_SETUP_EVAL_SUBCOMMANDS: ReadonlyMap<string, ReadonlySet<string> | null> = new Map([
+  ["atuin", new Set(["init"])],
+  ["brew", new Set(["shellenv"])],
+  ["direnv", new Set(["export", "hook"])],
+  ["fnm", new Set(["env"])],
+  ["goenv", new Set(["init"])],
+  ["jenv", new Set(["init"])],
+  ["keychain", null],
+  ["mise", new Set(["activate", "env", "hook-env"])],
+  ["nodenv", new Set(["init"])],
+  ["opam", new Set(["config", "env"])],
+  ["pyenv", new Set(["init", "virtualenv-init"])],
+  ["rbenv", new Set(["init"])],
+  ["rtx", new Set(["activate", "env", "hook-env"])],
+  ["ssh-agent", null],
+  ["starship", new Set(["init"])],
+  ["zoxide", new Set(["init"])],
+]);
 const NON_PROGRAM_PREFIX_CHARACTERS = "<>(){}[];|&$`#!%@:";
 const NON_PROGRAM_SUFFIX_CHARACTERS = "){]}`";
 
@@ -1060,6 +1078,119 @@ function wrappedShellCommandProgramName(
   return null;
 }
 
+function unwrapCommandSubstitution(token: string): string | null {
+  const trimmed = token.trim();
+  if (trimmed.startsWith("$(") && trimmed.endsWith(")")) {
+    let depth = 0;
+    let quote: '"' | "'" | null = null;
+    let escaping = false;
+    for (let index = 0; index < trimmed.length; index += 1) {
+      const ch = trimmed[index]!;
+      if (escaping) {
+        escaping = false;
+        continue;
+      }
+      if (ch === "\\" && quote !== "'") {
+        escaping = true;
+        continue;
+      }
+      if (quote !== null) {
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        continue;
+      }
+      if (ch === "$" && trimmed[index + 1] === "(") {
+        depth += 1;
+        index += 1;
+        continue;
+      }
+      if (ch === "(") {
+        depth += 1;
+        continue;
+      }
+      if (ch === ")") {
+        depth -= 1;
+        if (depth === 0 && index < trimmed.length - 1) return null;
+      }
+    }
+    return depth === 0 && quote === null && !escaping ? trimmed.slice(2, -1).trim() : null;
+  }
+  if (trimmed.length >= 2 && trimmed.startsWith("`") && trimmed.endsWith("`")) {
+    const inner = trimmed.slice(1, -1);
+    if (inner.includes("`")) return null;
+    return inner.trim();
+  }
+  return null;
+}
+
+function isEnvSetupEvalSegment(tokens: ReadonlyArray<string>, startIndex: number): boolean {
+  let index = startIndex;
+  let sawEndOfOptions = false;
+  let substitutionToken: string | null = null;
+  while (index < tokens.length) {
+    const indexAfterRedirection = indexAfterShellRedirection(tokens, index);
+    if (indexAfterRedirection !== null) {
+      if (indexAfterRedirection > tokens.length) return false;
+      index = indexAfterRedirection;
+      continue;
+    }
+    const token = tokens[index]!;
+    if (!sawEndOfOptions && substitutionToken === null && token === "--") {
+      sawEndOfOptions = true;
+      index += 1;
+      continue;
+    }
+    if (substitutionToken !== null) return false;
+    substitutionToken = token;
+    index += 1;
+  }
+  if (substitutionToken === null) return false;
+  const innerCommand = unwrapCommandSubstitution(substitutionToken);
+  if (!innerCommand) return false;
+  const innerSplit = splitFirstShellCommand(innerCommand);
+  if (innerSplit.remainingCommand !== null) return false;
+  const innerTokens = tokenizeShellCommand(withoutShellLineContinuations(innerSplit.firstCommand));
+  if (!innerTokens || innerTokens.length === 0) return false;
+  let innerIndex = 0;
+  while (innerIndex < innerTokens.length) {
+    const nextAfterRedirection = indexAfterShellRedirection(innerTokens, innerIndex);
+    if (nextAfterRedirection !== null) {
+      if (nextAfterRedirection > innerTokens.length) return false;
+      innerIndex = nextAfterRedirection;
+      continue;
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(innerTokens[innerIndex]!)) {
+      innerIndex += 1;
+      continue;
+    }
+    break;
+  }
+  const programToken = innerTokens[innerIndex];
+  if (!programToken) return false;
+  const program = programToken
+    .split(/[\\/]/)
+    .at(-1)
+    ?.replace(/\.exe$/i, "")
+    .toLowerCase();
+  if (!program) return false;
+  if (program === "conda") {
+    const subcommand = innerTokens[innerIndex + 1]?.toLowerCase();
+    return Boolean(subcommand && subcommand.startsWith("shell."));
+  }
+  if (program === "micromamba") {
+    return innerTokens[innerIndex + 1]?.toLowerCase() === "shell";
+  }
+  if (!ENV_SETUP_EVAL_SUBCOMMANDS.has(program)) return false;
+  const allowedSubcommands = ENV_SETUP_EVAL_SUBCOMMANDS.get(program);
+  if (allowedSubcommands === null) return true;
+  if (allowedSubcommands === undefined) return false;
+  const subcommand = innerTokens[innerIndex + 1]?.toLowerCase();
+  return Boolean(subcommand && allowedSubcommands.has(subcommand));
+}
+
 function parseCommandProgramName(
   command: string,
   depth: number,
@@ -1291,7 +1422,8 @@ function parseCommandProgramName(
       tokenProgram &&
       NON_DESCRIPTIVE_SHELL_PROGRAMS.has(tokenProgram) &&
       (!TERMINAL_SHELL_PROGRAMS.has(tokenProgram) ||
-        (tokenProgram === "false" && commandSplit.separator !== "&&")) &&
+        (tokenProgram === "false" && commandSplit.separator !== "&&") ||
+        (tokenProgram === "eval" && isEnvSetupEvalSegment(tokens, index + 1))) &&
       commandSplit.remainingCommand
     ) {
       return commandProgramNameInternal(
