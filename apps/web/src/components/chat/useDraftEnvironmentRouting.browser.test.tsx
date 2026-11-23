@@ -21,6 +21,7 @@ import { expect, it, vi } from "vite-plus/test";
 
 import { act, render } from "../../../test/render";
 import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
+import { seedDraftModelSelection } from "../../lib/seedDraftModelSelection";
 import { useDraftEnvironmentRouting } from "./useDraftEnvironmentRouting";
 import { appAtomRegistry, AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { draftFanoutSelectionsAtom } from "./chatViewSend";
@@ -323,15 +324,32 @@ it("keeps the selected models when automatic routing picks another machine", asy
 });
 
 it.each([
-  { name: "takes the destination default", explicit: false, remoteDefault: true, model: "luna" },
-  { name: "keeps a model the user picked", explicit: true, remoteDefault: true, model: "sol" },
   {
-    name: "keeps the last-used model without a default",
+    name: "takes the destination default when switching machines",
+    explicit: false,
+    remoteDefault: true,
+    model: "luna",
+  },
+  {
+    name: "keeps a model the user picked when switching machines",
+    explicit: true,
+    remoteDefault: true,
+    model: "sol",
+  },
+  {
+    name: "keeps the last-used model when switching to a machine without a default",
     explicit: false,
     remoteDefault: false,
     model: "sol",
   },
-])("$name when the draft switches machine by hand", async ({ explicit, remoteDefault, model }) => {
+  {
+    name: "keeps the last-used model over a project default when picking a project",
+    explicit: false,
+    remoteDefault: true,
+    preferLastUsed: true,
+    model: "sol",
+  },
+])("$name", async ({ explicit, remoteDefault, preferLastUsed, model }) => {
   const { b, draftId, input, store } = fanoutSetup();
   const codex = ProviderInstanceId.make("codex");
   resources.projects = resources.projects.map((project) =>
@@ -341,13 +359,23 @@ it.each([
   );
   store.setStickyModelSelection(createModelSelection(codex, "sol"));
   store.setModelSelection(draftId, createModelSelection(codex, "sol"), { explicit });
-  await using screen = await render(
-    <Harness
-      input={{ ...input, automaticEnvironment: false, draftThread: store.getDraftSession(draftId) }}
-    />,
-  );
-  await screen.getByRole("button", { name: `Switch to ${b}` }).click();
-  await expect.element(screen.getByText(b)).toBeInTheDocument();
+  if (preferLastUsed) {
+    seedDraftModelSelection(draftId, scopeProjectRef(b, input.draftThread!.projectId), {
+      preferLastUsed,
+    });
+  } else {
+    await using screen = await render(
+      <Harness
+        input={{
+          ...input,
+          automaticEnvironment: false,
+          draftThread: store.getDraftSession(draftId),
+        }}
+      />,
+    );
+    await screen.getByRole("button", { name: `Switch to ${b}` }).click();
+    await expect.element(screen.getByText(b)).toBeInTheDocument();
+  }
   const draft = store.getComposerDraft(draftId);
   expect(draft?.activeProvider).toBe(codex);
   expect(draft?.modelSelectionByProvider[codex]?.model).toBe(model);

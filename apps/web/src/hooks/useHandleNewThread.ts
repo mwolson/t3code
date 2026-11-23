@@ -226,14 +226,20 @@ export function createNewThreadHandler(router: AnyRouter) {
       ? fallbackResolution.selection
       : configuredDefaultModelSelection;
     const defaultRuntimeMode = projectSettings.settings.defaultRuntimeMode;
-    const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
-      resolveNewThreadModelSelectionOverride({
+    const resolveModelSelectionOverride = (destinationDraftId: DraftId) => {
+      const { stickyActiveProvider, stickyModelSelectionByProvider } =
+        useComposerDraftStore.getState();
+      return resolveNewThreadModelSelectionOverride({
         projectDefaultSelection: projectDefaultModelSelection ?? null,
+        stickySelection: stickyActiveProvider
+          ? (stickyModelSelectionByProvider[stickyActiveProvider] ?? null)
+          : null,
         carrySelection: carryModelSelection,
         carrySourceDraftId:
           currentRouteTarget?.kind === "draft" ? currentRouteTarget.draftId : null,
         destinationDraftId,
       });
+    };
     const envModeFor = (projectFile: T3ProjectFile | null): DraftThreadEnvMode =>
       resolveNewThreadEnvMode({
         projectSettings: resolveProjectSettings(
