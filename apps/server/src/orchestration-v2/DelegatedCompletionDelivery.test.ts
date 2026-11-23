@@ -10,6 +10,7 @@ import {
   CheckpointId,
   CommandId,
   EventId,
+  EnvironmentId,
   MessageId,
   type ModelSelection,
   NodeId,
@@ -26,6 +27,7 @@ import {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -51,6 +53,7 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
@@ -124,6 +127,7 @@ const layerTestProviderInstanceRegistry = Layer.merge(
 );
 
 const layerTest = Layer.mergeAll(
+  ProjectionStore.layer,
   RuntimeLayer.layer,
   RuntimeLayer.layerEventSink,
   ThreadCommandExecutor.layer,
@@ -2334,6 +2338,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           deliveryState: "claimed",
           deliveryTaskIds: [taskId],
           completionWake: "always",
+          parentRunStatus: "completed",
           now,
         });
         for (const suffix of ["first", "second"]) {
@@ -2362,6 +2367,30 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             ],
           });
         }
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const assertPhase = Effect.fn("test.assertCompletionPhase")(function* (
+          phase: "running" | "completed",
+        ) {
+          const projection = yield* projections.getThreadProjection(threadId);
+          const shells = [
+            ProjectionStore.threadShellFromProjection(projection),
+            yield* projections.getThreadShell(threadId),
+            (yield* projections.getShellSnapshot()).threads.find((shell) => shell.id === threadId),
+            (yield* projections.getAgentAwarenessSnapshot(threadId)).threads[0],
+          ];
+          for (const shell of shells) {
+            assert.isNotNull(shell);
+            assert.equal(
+              projectThreadAwarenessV2({
+                environmentId: EnvironmentId.make("environment:delivery-recovery"),
+                project: { title: "Project" },
+                thread: shell!,
+              })?.phase,
+              phase,
+            );
+          }
+        });
+        yield* assertPhase("running");
         const statements: string[] = [];
         const tracer = Tracer.make({
           span(options) {
@@ -2384,6 +2413,16 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
         assert.isTrue(messageReads.every((query) => query.includes("message_id IN")));
         const wake = yield* requests.take;
         assert.equal(wake.delegatedCompletion?.parentRunId, runId);
+        yield* assertPhase("running");
+        yield* orchestrator.dispatch({
+          type: "delegated_task.completion-delivery.acknowledge",
+          commandId: CommandId.make("command:delivery-recovery:observed"),
+          parentThreadId: threadId,
+          taskId,
+          observedByRunId: runId,
+        });
+        assert.isEmpty((yield* projections.getThreadShell(threadId))!.pendingBackgroundTasks!);
+        yield* assertPhase("completed");
       }),
     );
     it.effect("keeps a checkpoint completion committed between finalize's read and write", () =>
