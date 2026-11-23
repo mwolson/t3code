@@ -73,6 +73,7 @@ const withService = <A, E>(
     readonly service: SecretRequests.SecretRequests["Service"];
     readonly stored: Map<string, Uint8Array>;
     readonly dispatched: Array<OrchestrationV2ServerCommand>;
+    readonly attemptedCommandIds: Array<string>;
   }) => Effect.Effect<A, E>,
   options: {
     readonly threadId?: ThreadId;
@@ -83,6 +84,8 @@ const withService = <A, E>(
     readonly removeFails?: boolean;
     readonly closedFirst?: boolean;
     readonly failedRecords?: number;
+    readonly failReadsAfterDispatch?: boolean;
+    readonly omitStoredEvents?: boolean;
     readonly resolver?: Layer.Layer<SecretResolver.SecretResolver>;
     readonly afterCreate?: Effect.Effect<void>;
   } = {},
@@ -90,8 +93,10 @@ const withService = <A, E>(
   Effect.gen(function* () {
     const stored = new Map<string, Uint8Array>();
     const dispatched: Array<OrchestrationV2ServerCommand> = [];
+    const attemptedCommandIds: Array<string> = [];
     let secretStatus = "pending";
     let failedRecords = options.failedRecords ?? 0;
+    let dispatchedAny = false;
     const requestThreadId = options.threadId ?? threadId;
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
@@ -142,47 +147,72 @@ const withService = <A, E>(
       Layer.mock(ThreadManagementService.ThreadManagementService)({
         // Reads yield like a real store, so two answers can both see a pending card.
         getThreadRecords: () =>
-          Effect.yieldNow.pipe(
-            Effect.as({
-              thread: { projectId },
-              runs: [{ id: "run-1", status: options.runStatus ?? "running" }],
-              turnItems: [
-                {
-                  id: turnItemId,
-                  threadId: requestThreadId,
-                  runId: "run-1",
-                  nodeId: "node-root",
-                  type: "secret_request",
-                  label: "GitHub token",
-                  reason: "Used as GH_TOKEN.",
-                  url: "https://github.com/settings/tokens",
-                  ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
-                  ...(options.fields === undefined ? {} : { fields: options.fields }),
-                  secretStatus,
-                },
-              ],
-            } as never),
-          ),
+          options.failReadsAfterDispatch && dispatchedAny
+            ? Effect.fail(new Error("projection read failed") as never)
+            : Effect.yieldNow.pipe(
+                Effect.as({
+                  thread: { projectId },
+                  runs: [{ id: "run-1", status: options.runStatus ?? "running" }],
+                  turnItems: [
+                    {
+                      id: turnItemId,
+                      threadId: requestThreadId,
+                      runId: "run-1",
+                      nodeId: "node-root",
+                      type: "secret_request",
+                      label: "GitHub token",
+                      reason: "Used as GH_TOKEN.",
+                      url: "https://github.com/settings/tokens",
+                      ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
+                      ...(options.fields === undefined ? {} : { fields: options.fields }),
+                      secretStatus,
+                    },
+                  ],
+                } as never),
+              ),
         dispatch: (command) => {
+          attemptedCommandIds.push(command.commandId);
           if (command.type === "secret_request.record" && failedRecords > 0) {
             failedRecords -= 1;
             return Effect.fail(new Error("orchestrator unavailable") as never);
           }
           return Effect.sync(() => {
             dispatched.push(command);
+            dispatchedAny = true;
             if (options.closedFirst && command.type === "secret_request.record") {
               secretStatus = "cancelled";
             } else if (command.type === "secret_request.record" && secretStatus === "pending") {
               secretStatus = command.secretStatus;
             }
-            return {} as never;
+            if (options.omitStoredEvents) {
+              return { sequence: dispatched.length, storedEvents: [] } as never;
+            }
+            return {
+              sequence: dispatched.length,
+              storedEvents:
+                command.type === "secret_request.record"
+                  ? [
+                      {
+                        sequence: dispatched.length,
+                        event: {
+                          type: "turn-item.updated",
+                          payload: {
+                            id: command.turnItemId,
+                            type: "secret_request",
+                            secretStatus,
+                          },
+                        },
+                      },
+                    ]
+                  : [],
+            } as never;
           });
         },
       }),
     );
     return yield* Effect.gen(function* () {
       const service = yield* SecretRequests.SecretRequests;
-      return yield* body({ service, stored, dispatched });
+      return yield* body({ service, stored, dispatched, attemptedCommandIds });
     }).pipe(Effect.provide(SecretRequests.layer.pipe(Layer.provide(layerDependencies))));
   });
 
@@ -441,19 +471,53 @@ it.effect("works in threads with long ids, such as a delegated subagent's", () =
   );
 });
 
-it.effect("refuses an answer once the agent that asked has stopped", () =>
-  withService(
-    ({ service, stored, dispatched }) =>
-      Effect.gen(function* () {
-        const late = yield* service
-          .answer({ threadId, turnItemId, answer: { type: "save", secret: "ghp_secret" } })
-          .pipe(Effect.flip);
-        assert.include(late.message, "has stopped");
-        assert.deepEqual(valuesOf(stored), []);
-        assert.equal(dispatched.length, 0);
-      }),
-    { runStatus: "completed" },
-  ),
+it.effect("accepts an answer after the asking run completed and rejects rolled_back runs", () =>
+  Effect.gen(function* () {
+    yield* withService(
+      ({ service, dispatched }) =>
+        Effect.gen(function* () {
+          yield* service.answer({
+            threadId,
+            turnItemId,
+            answer: { type: "save", secret: "ghp_secret" },
+          });
+          assert.equal(dispatched.length, 1);
+          const record = dispatched[0] as {
+            readonly secretStatus?: string;
+            readonly wake?: {
+              readonly text: string;
+              readonly secretRequestTurnItemId?: string;
+              readonly notification: { readonly summary: string };
+            };
+          };
+          assert.equal(record.secretStatus, "saved");
+          assert.isDefined(record.wake);
+          assert.equal(record.wake?.text, 'The user saved "GitHub token".');
+          assert.equal(record.wake?.secretRequestTurnItemId, turnItemId);
+          assert.notInclude(record.wake?.text ?? "", "secret-ref:");
+          assert.notInclude(record.wake?.text ?? "", "ghp_secret");
+          assert.equal(record.wake?.notification.summary, "Saved GitHub token");
+          const ref = Option.getOrThrow(yield* service.savedRef({ threadId, turnItemId }));
+          const note = Option.getOrThrow(yield* service.wakeDeliveryNote({ threadId, turnItemId }));
+          assert.include(note, ref);
+          assert.equal(yield* service.consume({ ref, projectId }), "ghp_secret");
+        }),
+      { runStatus: "completed" },
+    );
+
+    yield* withService(
+      ({ service, stored, dispatched }) =>
+        Effect.gen(function* () {
+          const rolledBack = yield* service
+            .answer({ threadId, turnItemId, answer: { type: "save", secret: "ghp_secret" } })
+            .pipe(Effect.flip);
+          assert.equal(rolledBack.reason, "not_found");
+          assert.deepEqual(valuesOf(stored), []);
+          assert.equal(dispatched.length, 0);
+        }),
+      { runStatus: "rolled_back" },
+    );
+  }),
 );
 
 it.effect("a used value that cannot be deleted is not handed out", () =>
@@ -630,50 +694,71 @@ it.effect("a fields answer interrupted between two values keeps neither", () =>
   }),
 );
 
-it.effect("a failed file write keeps the value, so the request can retry", () =>
+it.effect("a failed file write leaves the card pending, so the user can retry", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const directory = yield* fs.makeTempDirectoryScoped({ prefix: "secret-files-test-" });
     yield* withService(
-      ({ service }) =>
+      ({ service, dispatched }) =>
         Effect.gen(function* () {
+          // A file at `files` blocks creating the secret files directory.
+          const filesRoot = path.join(directory, "files");
+          yield* fs.writeFileString(filesRoot, "block");
+          const failed = yield* service
+            .answer({ threadId, turnItemId, answer: { type: "save", secret: "cf_token" } })
+            .pipe(Effect.flip);
+          assert.equal(failed.reason, "store_failed");
+          assert.equal(dispatched.length, 0);
+
+          yield* fs.remove(filesRoot);
           yield* service.answer({
             threadId,
             turnItemId,
             answer: { type: "save", secret: "cf_token" },
           });
-          const ref = Option.getOrThrow(yield* service.savedRef({ threadId, turnItemId }));
-          const name = ref.slice("secret-ref:".length);
-          // A non-empty directory where the partial file goes makes the write fail.
-          const partial = path.join(directory, "files", `${name}.partial`);
-          yield* fs.makeDirectory(path.join(partial, "block"), { recursive: true });
-          const failed = yield* service.saveToFile({ threadId, turnItemId }).pipe(Effect.flip);
-          assert.equal(failed.reason, "store_failed");
-          yield* fs.remove(partial, { recursive: true });
+          assert.equal(dispatched.length, 1);
           const file = singleFile(yield* service.saveToFile({ threadId, turnItemId }));
           assert.equal(yield* fs.readFileString(file), "cf_token");
+          const record = dispatched[0] as {
+            readonly wake?: { readonly text: string; readonly secretRequestTurnItemId?: string };
+          };
+          assert.equal(record.wake?.text, 'The user saved "GitHub token".');
+          assert.equal(record.wake?.secretRequestTurnItemId, turnItemId);
+          assert.notInclude(record.wake?.text ?? "", file);
+          assert.notInclude(record.wake?.text ?? "", "cf_token");
+          const note = Option.getOrThrow(yield* service.wakeDeliveryNote({ threadId, turnItemId }));
+          assert.include(note, file);
+          assert.notInclude(note, "cf_token");
         }),
       { delivery: "file", directory },
     );
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.effect("a file is not delivered while its stored copy cannot be removed", () =>
+it.effect("a file request with a legacy stored copy is not delivered while removal fails", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
     const directory = yield* fs.makeTempDirectoryScoped({ prefix: "secret-files-test-" });
     yield* withService(
-      ({ service }) =>
+      ({ service, stored }) =>
         Effect.gen(function* () {
           yield* service.answer({
             threadId,
             turnItemId,
             answer: { type: "save", secret: "cf_token" },
           });
+          // Simulate a pre-upgrade stored copy left behind in ServerSecretStore.
+          const file = singleFile(yield* service.saveToFile({ threadId, turnItemId }));
+          stored.set(
+            `secret-request-${path.basename(file)}`,
+            new TextEncoder().encode(
+              JSON.stringify({ projectId, value: "cf_token", savedAt: 1_700_000_000_000 }),
+            ),
+          );
           const first = yield* service.saveToFile({ threadId, turnItemId }).pipe(Effect.flip);
           assert.equal(first.reason, "consume_failed");
-          // A retry finds the file but still will not hand it out until the removal works.
           const retried = yield* service.saveToFile({ threadId, turnItemId }).pipe(Effect.flip);
           assert.equal(retried.reason, "consume_failed");
         }),
@@ -828,4 +913,128 @@ it.effect("a pasted secret is refused without a secrets directory", () =>
       assert.equal(failed.reason, "store_failed");
     }),
   ),
+);
+
+it.effect("wake text keeps handles out of history while wakeDeliveryNote resolves them", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "secret-wake-note-test-" });
+    yield* withService(({ service, dispatched }) =>
+      Effect.gen(function* () {
+        yield* service.answer({
+          threadId,
+          turnItemId,
+          answer: { type: "save", secret: "ghp_secret" },
+        });
+        const command = dispatched[0] as {
+          readonly wake?: { readonly text: string; readonly secretRequestTurnItemId?: string };
+        };
+        assert.equal(command.wake?.text, 'The user saved "GitHub token".');
+        assert.equal(command.wake?.secretRequestTurnItemId, turnItemId);
+        assert.notInclude(command.wake?.text ?? "", "secret-ref:");
+
+        const ref = Option.getOrThrow(yield* service.savedRef({ threadId, turnItemId }));
+        const note = Option.getOrThrow(yield* service.wakeDeliveryNote({ threadId, turnItemId }));
+        assert.include(note, ref);
+        assert.notInclude(note, "ghp_secret");
+      }),
+    );
+
+    yield* withService(
+      ({ service, dispatched }) =>
+        Effect.gen(function* () {
+          yield* service.answer({
+            threadId,
+            turnItemId,
+            answer: { type: "save", secret: "file_secret" },
+          });
+          const command = dispatched[0] as {
+            readonly wake?: { readonly text: string; readonly secretRequestTurnItemId?: string };
+          };
+          assert.equal(command.wake?.text, 'The user saved "GitHub token".');
+          assert.notInclude(command.wake?.text ?? "", directory);
+          const note = Option.getOrThrow(yield* service.wakeDeliveryNote({ threadId, turnItemId }));
+          assert.include(note, directory);
+          assert.notInclude(note, "file_secret");
+        }),
+      { delivery: "file", directory },
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("retries use a fresh commandId and replace stale uncommitted values", () =>
+  withService(
+    ({ service, dispatched, attemptedCommandIds }) =>
+      Effect.gen(function* () {
+        const first = yield* service
+          .answer({
+            threadId,
+            turnItemId,
+            answer: { type: "save", secret: "old_secret" },
+          })
+          .pipe(Effect.flip);
+        assert.equal(first.reason, "record_failed");
+
+        yield* service.answer({
+          threadId,
+          turnItemId,
+          answer: { type: "save", secret: "new_secret" },
+        });
+        assert.equal(dispatched.length, 1);
+        assert.equal(attemptedCommandIds.length, 2);
+        assert.notEqual(attemptedCommandIds[0], attemptedCommandIds[1]);
+        const ref = Option.getOrThrow(yield* service.savedRef({ threadId, turnItemId }));
+        assert.equal(yield* service.consume({ ref, projectId }), "new_secret");
+      }),
+    { failedRecords: 1 },
+  ),
+);
+
+it.effect("a decline that loses to the card closing reports agent_stopped", () =>
+  withService(
+    ({ service }) =>
+      Effect.gen(function* () {
+        const error = yield* service
+          .answer({ threadId, turnItemId, answer: { type: "decline" } })
+          .pipe(Effect.flip);
+        assert.equal(error.reason, "agent_stopped");
+      }),
+    { closedFirst: true },
+  ),
+);
+
+it.effect("a post-commit read failure never deletes an already-committed saved secret", () =>
+  Effect.gen(function* () {
+    // With storedEvents present, answer succeeds without needing a post-commit read.
+    yield* withService(
+      ({ service }) =>
+        Effect.gen(function* () {
+          yield* service.answer({
+            threadId,
+            turnItemId,
+            answer: { type: "save", secret: "ghp_committed" },
+          });
+          const ref = Option.getOrThrow(yield* service.savedRef({ threadId, turnItemId }));
+          assert.equal(yield* service.consume({ ref, projectId }), "ghp_committed");
+        }),
+      { failReadsAfterDispatch: true },
+    );
+    // Even if storedEvents are absent and the fallback read fails, the stored secret stays intact.
+    yield* withService(
+      ({ service }) =>
+        Effect.gen(function* () {
+          const error = yield* service
+            .answer({
+              threadId,
+              turnItemId,
+              answer: { type: "save", secret: "ghp_fallback" },
+            })
+            .pipe(Effect.flip);
+          assert.equal(error.reason, "record_failed");
+          const ref = Option.getOrThrow(yield* service.savedRef({ threadId, turnItemId }));
+          assert.equal(yield* service.consume({ ref, projectId }), "ghp_fallback");
+        }),
+      { failReadsAfterDispatch: true, omitStoredEvents: true },
+    );
+  }),
 );

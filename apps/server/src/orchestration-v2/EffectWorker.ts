@@ -418,6 +418,9 @@ export const layerExecutor: Layer.Layer<
                         ...(message.scheduledTaskId === undefined
                           ? {}
                           : { scheduledTaskId: message.scheduledTaskId }),
+                        ...(message.secretRequestTurnItemId === undefined
+                          ? {}
+                          : { secretRequestTurnItemId: message.secretRequestTurnItemId }),
                         ...(message.senderThreadId === undefined
                           ? {}
                           : { senderThreadId: message.senderThreadId }),

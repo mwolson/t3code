@@ -1627,7 +1627,7 @@ export const CODEX_THREAD_CONFIG = {
   "features.concurrent_reasoning_summaries": true,
 } as const;
 
-// request_secret can wait an hour; keep Codex's MCP timeout above that.
+// Long-running T3 MCP tools (e.g. t3_thread_wait, preview_*) need a generous MCP timeout.
 const CODEX_T3_MCP_TOOL_TIMEOUT_SEC = 65 * 60;
 // Holds T3 tools Codex must call directly, never from Code Mode. Calls arrive as
 // `t3-code-direct.<tool>`; t3McpToolPresentation.ts must keep resolving that form.

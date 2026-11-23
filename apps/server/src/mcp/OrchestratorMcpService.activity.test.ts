@@ -8,7 +8,6 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
-  RunAttemptId,
   RunId,
   ScheduledTaskId,
   SECRET_REQUEST_UNSAVED_NOTE,
@@ -17,10 +16,8 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
-import * as TestClock from "effect/testing/TestClock";
 import * as Path from "effect/Path";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "vite-plus/test";
@@ -1309,8 +1306,8 @@ it("requestSecret saves a pasted value to a file without opening a card", async 
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });
 
-it("requestSecret returns the unsaved note for a declined, cancelled or timed-out card", async () => {
-  const outcomes = ["declined", "cancelled", "pending"] as const;
+it("requestSecret returns pending on open and returns the unsaved note when a retry hits a declined or cancelled card", async () => {
+  const outcomes = ["declined", "cancelled"] as const;
   const results = await Effect.forEach(outcomes, (outcome) => {
     const dispatched: Array<{ readonly type: string; readonly turnItemId?: string }> = [];
     const projection = () => {
@@ -1364,115 +1361,29 @@ it("requestSecret returns the unsaved note for a declined, cancelled or timed-ou
     );
     return Effect.gen(function* () {
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      const request = yield* service
-        .requestSecret(makeScope(), {
-          label: "Staging password",
-          reason: "Signs in the QA account.",
-          delivery: "file",
-          timeoutMs: 1_000,
-        })
-        .pipe(Effect.forkChild({ startImmediately: true }));
-      yield* TestClock.adjust("2 seconds");
-      return yield* Fiber.join(request);
-    }).pipe(Effect.provide(Layer.merge(layer, TestClock.layer())));
+      const opened = yield* service.requestSecret(makeScope(), {
+        label: "Staging password",
+        reason: "Signs in the QA account.",
+        delivery: "file",
+        clientRequestId: `req-${outcome}`,
+      });
+      expect(opened.status).toBe("pending");
+      return yield* service.requestSecret(makeScope(), {
+        label: "Staging password",
+        reason: "Signs in the QA account.",
+        delivery: "file",
+        clientRequestId: `req-${outcome}`,
+      });
+    }).pipe(Effect.provide(layer));
   }).pipe(Effect.runPromise);
 
   expect(results).toEqual([
     { status: "declined", note: SECRET_REQUEST_UNSAVED_NOTE.declined },
     { status: "cancelled", note: SECRET_REQUEST_UNSAVED_NOTE.cancelled },
-    { status: "timed_out", note: SECRET_REQUEST_UNSAVED_NOTE.timed_out },
   ]);
 });
 
-it("requestSecret cancels its card when a steering restart supersedes the request", async () => {
-  const originalRoot = NodeId.make("node-mcp-secret-root-original");
-  const steeredRoot = NodeId.make("node-mcp-secret-root-steered");
-  const dispatched: Array<{
-    readonly type: string;
-    readonly turnItemId?: TurnItemId;
-    readonly nodeId?: NodeId;
-    readonly secretStatus?: string;
-  }> = [];
-  let steered = false;
-  const projection = () => {
-    const card = dispatched.find(
-      (command) => command.type === "secret_request.record" && command.secretStatus === "pending",
-    );
-    return {
-      thread: baseThread({
-        threadId: parentThreadId,
-        title: "Parent",
-        instanceId: parentInstanceId,
-        model: "gpt-5.4",
-      }),
-      runs: [
-        {
-          ...makeRun({ id: activeRunId, ordinal: 1, status: "running" }),
-          rootNodeId: steered ? steeredRoot : originalRoot,
-          activeAttemptId: RunAttemptId.make("attempt-mcp-secret-original"),
-        },
-      ],
-      visibleTurnItems: [],
-      turnItems:
-        card === undefined
-          ? []
-          : [{ type: "secret_request", id: card.turnItemId, secretStatus: "pending" }],
-      providerTurns: [],
-      runtimeRequests: [],
-      messages: [],
-      contextTransfers: [],
-      subagents: [],
-      updatedAt: now,
-    } as unknown as OrchestrationV2ThreadProjection;
-  };
-  const layer = layerOrchestratorService.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        Layer.mock(ThreadManagementService.ThreadManagementService)({
-          getThreadRecords: () => Effect.sync(projection),
-          getThreadShell: () =>
-            Effect.sync(() => projection().thread as unknown as OrchestrationV2ThreadShell),
-          dispatch: (command) =>
-            Effect.sync(() => {
-              dispatched.push(command as (typeof dispatched)[number]);
-              // The user steers right after the card opens, replacing the run's root.
-              if (command.type === "secret_request.record" && command.secretStatus === "pending") {
-                steered = true;
-              }
-              return undefined as never;
-            }),
-        } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
-        ServerSettings.layerTest(),
-        Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getProviders: Effect.succeed([]),
-        } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
-        Layer.mock(ProjectService.ProjectService)({}),
-        Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
-        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
-        NodeCrypto.layer,
-      ),
-    ),
-  );
-
-  await Effect.gen(function* () {
-    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-    const result = yield* service.requestSecret(makeScope(), {
-      label: "Booking details",
-      reason: "To check the passenger in.",
-      timeoutMs: 60_000,
-    });
-    // The wait ended the moment its attempt was superseded instead of blocking
-    // the agent's turn until the timeout, and the card closed with it.
-    expect(result).toEqual({ status: "cancelled", note: SECRET_REQUEST_UNSAVED_NOTE.cancelled });
-    const records = dispatched.filter((command) => command.type === "secret_request.record");
-    expect(records.map((command) => command.secretStatus)).toEqual(["pending", "cancelled"]);
-    expect(records.every((command) => command.nodeId === originalRoot)).toBe(true);
-  }).pipe(Effect.provide(layer), Effect.runPromise);
-});
-
-it("requestSecret delivers a fields card as one file per field", async () => {
+it("requestSecret records a fields card with file delivery and returns saved files on retry", async () => {
   const dispatched: Array<{
     readonly type: string;
     readonly turnItemId?: string;
@@ -1482,6 +1393,7 @@ it("requestSecret delivers a fields card as one file per field", async () => {
     email: "/home/user/.t3/userdata/secrets/files/0123456789abcdef0123456789abcdef",
     password: "/home/user/.t3/userdata/secrets/files/fedcba9876543210fedcba9876543210",
   };
+  let status: "pending" | "saved" = "pending";
   const projection = () => {
     const card = dispatched.find((command) => command.type === "secret_request.record");
     return {
@@ -1498,7 +1410,14 @@ it("requestSecret delivers a fields card as one file per field", async () => {
       turnItems:
         card === undefined
           ? []
-          : [{ type: "secret_request", id: card.turnItemId, secretStatus: "saved" }],
+          : [
+              {
+                type: "secret_request",
+                id: card.turnItemId,
+                delivery: "file",
+                secretStatus: status,
+              },
+            ],
       runtimeRequests: [],
       messages: [],
       contextTransfers: [],
@@ -1550,17 +1469,27 @@ it("requestSecret delivers a fields card as one file per field", async () => {
     }
     expect(dispatched).toEqual([]);
 
-    const result = yield* service.requestSecret(makeScope(), {
+    const opened = yield* service.requestSecret(makeScope(), {
       label: "Staging login",
       reason: "Signs in the QA account.",
       fields,
+      clientRequestId: "staging-login",
     });
-    expect(result).toEqual({ status: "saved", files });
+    expect(opened.status).toBe("pending");
     expect(dispatched[0]).toMatchObject({
       type: "secret_request.record",
       secretStatus: "pending",
       delivery: "file",
       fields,
     });
+
+    status = "saved";
+    const retried = yield* service.requestSecret(makeScope(), {
+      label: "Staging login",
+      reason: "Signs in the QA account.",
+      fields,
+      clientRequestId: "staging-login",
+    });
+    expect(retried).toEqual({ status: "saved", files });
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });

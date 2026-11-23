@@ -2054,13 +2054,8 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
-  it.effect.each([
-    { name: "ten-minute default", timeoutMs: undefined, budgetMs: 600_000 },
-    { name: "one-hour maximum", timeoutMs: 3_600_000, budgetMs: 3_600_000 },
-  ])("keeps a secret request pending for its $name", (scenario) =>
+  it.effect("returns pending immediately for a secret request without timing out", () =>
     Effect.gen(function* () {
-      const pending = yield* Deferred.make<void>();
-      const returned = yield* Deferred.make<void>();
       const statuses = yield* Ref.make<ReadonlyArray<string>>([]);
       const dependencies = Layer.mergeAll(
         NodeServices.layer,
@@ -2070,7 +2065,6 @@ describe("OrchestratorMcpService provider resolution", () => {
           dispatch: (command) => {
             if (command.type !== "secret_request.record") return Effect.die("Unexpected command");
             return Ref.update(statuses, (values) => [...values, command.secretStatus]).pipe(
-              Effect.andThen(Deferred.succeed(pending, undefined)),
               Effect.as({} as never),
             );
           },
@@ -2087,23 +2081,15 @@ describe("OrchestratorMcpService provider resolution", () => {
       );
       yield* Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        const waiting = yield* service
-          .requestSecret(scope, {
-            label: "Token",
-            reason: "Connect the account.",
-            ...(scenario.timeoutMs === undefined ? {} : { timeoutMs: scenario.timeoutMs }),
-          })
-          .pipe(
-            Effect.tap(() => Deferred.succeed(returned, undefined)),
-            Effect.forkChild,
-          );
-        yield* Deferred.await(pending);
-        yield* TestClock.adjust(Duration.millis(scenario.budgetMs - 1));
-        assert.isFalse(yield* Deferred.isDone(returned));
+        const result = yield* service.requestSecret(scope, {
+          label: "Token",
+          reason: "Connect the account.",
+        });
+        assert.equal(result.status, "pending");
+        assert.isTrue("turnItemId" in result);
+        // Advancing time past the old timeout never cancels the card.
+        yield* TestClock.adjust(Duration.hours(2));
         assert.deepEqual(yield* Ref.get(statuses), ["pending"]);
-        yield* TestClock.adjust(Duration.millis(1));
-        assert.include(yield* Fiber.join(waiting), { status: "timed_out" });
-        assert.deepEqual(yield* Ref.get(statuses), ["pending", "cancelled"]);
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
     }),
   );
@@ -2116,31 +2102,46 @@ describe("OrchestratorMcpService provider resolution", () => {
         readonly commandId: CommandId;
         readonly turnItemId: string;
       }>();
+      const recordedCards = yield* Ref.make<
+        Array<{
+          readonly id: string;
+          readonly type: "secret_request";
+          readonly secretStatus: "pending";
+        }>
+      >([]);
       const dependencies = Layer.mergeAll(
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getThreadRecords: () =>
-            Ref.get(runId).pipe(
-              Effect.map((id) => {
+            Effect.all([Ref.get(runId), Ref.get(recordedCards)]).pipe(
+              Effect.map(([id, turnItems]) => {
                 const projection = parentProjection([]);
                 return {
                   ...projection,
                   runs: projection.runs.map((run) => ({ ...run, id })),
-                  turnItems: [],
-                };
+                  turnItems,
+                } as never;
               }),
             ),
           dispatch: (command) => {
             if (command.type !== "secret_request.record") return Effect.die("Unexpected command");
-            return (
-              command.secretStatus === "pending"
-                ? Queue.offer(pending, {
-                    commandId: command.commandId,
-                    turnItemId: command.turnItemId,
-                  })
-                : Effect.void
-            ).pipe(Effect.as({} as never));
+            return Ref.update(recordedCards, (cards) => [
+              ...cards,
+              {
+                id: command.turnItemId,
+                type: "secret_request" as const,
+                secretStatus: "pending" as const,
+              },
+            ]).pipe(
+              Effect.andThen(
+                Queue.offer(pending, {
+                  commandId: command.commandId,
+                  turnItemId: command.turnItemId,
+                }),
+              ),
+              Effect.as({} as never),
+            );
           },
         }),
         ServerSettings.layerTest(),
@@ -2153,25 +2154,31 @@ describe("OrchestratorMcpService provider resolution", () => {
       );
       yield* Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        const ask = Effect.gen(function* () {
-          const call = yield* service
-            .requestSecret(scope, {
-              label: "Router API key",
-              reason: "Reads the firewall rules.",
-              clientRequestId: "router-key",
-              timeoutMs: 1_000,
-            })
-            .pipe(Effect.forkChild);
-          const card = yield* Queue.take(pending);
-          yield* TestClock.adjust(Duration.seconds(1));
-          assert.include(yield* Fiber.join(call), { status: "timed_out" });
-          return card;
+        const firstResult = yield* service.requestSecret(scope, {
+          label: "Router API key",
+          reason: "Reads the firewall rules.",
+          clientRequestId: "router-key",
         });
+        assert.equal(firstResult.status, "pending");
+        const first = yield* Queue.take(pending);
 
-        const first = yield* ask;
-        assert.deepEqual(yield* ask, first);
+        // Retrying with the same clientRequestId in the same run returns the open card without re-recording.
+        const retryResult = yield* service.requestSecret(scope, {
+          label: "Router API key",
+          reason: "Reads the firewall rules.",
+          clientRequestId: "router-key",
+        });
+        assert.deepEqual(retryResult, firstResult);
+        assert.isTrue(Option.isNone(yield* Queue.poll(pending)));
+
         yield* Ref.set(runId, RunId.make("run:mcp-providers-parent-later"));
-        const later = yield* ask;
+        const laterResult = yield* service.requestSecret(scope, {
+          label: "Router API key",
+          reason: "Reads the firewall rules.",
+          clientRequestId: "router-key",
+        });
+        assert.equal(laterResult.status, "pending");
+        const later = yield* Queue.take(pending);
         assert.notEqual(later.commandId, first.commandId);
         assert.notEqual(later.turnItemId, first.turnItemId);
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));

@@ -7256,15 +7256,21 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       for (const lookup of stopRequestLookups) {
         assert.include(lookup, "orchestration_v2_projection_turn_items_stop_request_idx");
       }
-      // The active, activity, and pending-secret lookups; walking the ordinal index instead
+      // The active and activity run lookups; walking the ordinal index instead
       // reads every run of an idle thread.
       const activeRunLookups = plan.filter(
         (detail) => detail.startsWith("SEARCH r ") && detail.includes("(thread_id=?"),
       );
-      assert.lengthOf(activeRunLookups, 4);
+      assert.lengthOf(activeRunLookups, 3);
       for (const lookup of activeRunLookups) {
         assert.include(lookup, "orchestration_v2_projection_runs_thread_status_idx");
       }
+      const secretLookups = plan.filter((detail) => detail.startsWith("SEARCH secret "));
+      assert.lengthOf(secretLookups, 1);
+      assert.include(
+        secretLookups[0] ?? "",
+        "orchestration_v2_projection_turn_items_thread_type_idx",
+      );
       const lastExecutedIndex = plan.findIndex((detail) =>
         detail.includes("orchestration_v2_projection_runs_last_executed_idx"),
       );
@@ -9790,163 +9796,231 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
-  it.effect("selects the latest waiting secret only from active runs", () =>
-    Effect.gen(function* () {
-      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
-      const sql = yield* SqlClient.SqlClient;
-      const suffix = "shell-pending-secret";
-      const threadId = yield* addRolledBackRecoveryCandidate(suffix);
-      const runId = RunId.make(`run:${suffix}:rolled-back`);
-      const nodeId = NodeId.make(`node:${suffix}:rolled-back`);
-      const now = yield* DateTime.now;
-      const addSecret = (id: string, ordinal: number, status: "waiting" | "completed") =>
-        projectionStore.apply({
-          id: EventId.make(`event:${id}`),
-          type: "turn-item.updated",
-          threadId,
-          runId,
-          nodeId,
-          driver,
-          occurredAt: now,
-          payload: {
-            id: TurnItemId.make(id),
-            threadId,
-            runId,
-            nodeId,
-            providerThreadId: null,
-            providerTurnId: null,
-            nativeItemRef: null,
-            parentItemId: null,
-            ordinal,
-            status,
-            title: null,
-            startedAt: now,
-            completedAt: null,
-            updatedAt: DateTime.add(now, { seconds: ordinal }),
-            type: "secret_request",
-            label: "Test credential",
-            reason: "Test pending input",
-            secretStatus: status === "waiting" ? "pending" : "saved",
-          },
-        });
-      yield* addSecret("secret:a", 2, "waiting");
-      yield* addSecret("secret:b", 3, "waiting");
-      yield* addSecret("secret:c", 4, "completed");
-
-      yield* sql`
-        UPDATE orchestration_v2_projection_runs
-        SET status = 'running', payload_json = json_set(payload_json, '$.status', 'running')
-        WHERE run_id = ${runId}
-      `;
-      yield* assertShellIndexCoversShells();
-      const secretOnlyShell = (yield* projectionStore.getShellSnapshot()).threads.find(
-        (thread) => thread.id === threadId,
-      );
-      const secretOnlyProjection = yield* projectionStore.getThreadProjection(threadId);
-      for (const shell of [
-        secretOnlyShell,
-        ProjectionStore.threadShellFromProjection(secretOnlyProjection),
-      ]) {
-        assert.equal(shell?.pendingRuntimeRequest?.id, "secret:b");
-        assert.isTrue(shell?.pendingRuntimeRequest?.blocking);
-        assert.isTrue(shell?.pendingRuntimeRequest?.userOnly);
-      }
-
-      const requestId = RuntimeRequestId.make(`request:${suffix}:async`);
-      yield* projectionStore.apply({
-        id: EventId.make(`event:${suffix}:async`),
-        type: "runtime-request.updated",
-        threadId,
-        runId,
-        nodeId,
-        driver,
-        occurredAt: now,
-        payload: {
-          id: requestId,
-          nodeId,
-          providerTurnId: null,
-          nativeRequestRef: null,
-          kind: "user_input",
-          status: "pending",
-          responseCapability: { type: "message" },
-          createdAt: DateTime.subtract(now, { seconds: 1 }),
-          resolvedAt: null,
-        },
-      });
-
-      for (const responseCapability of [
-        { type: "live", providerSessionId: ProviderSessionId.make("session:pending-secret") },
-        { type: "message" },
-      ] as const) {
-        for (const fresh of [true, false]) {
-          yield* projectionStore.apply({
-            id: EventId.make("event:" + suffix + ":fresh-" + fresh),
-            type: "runtime-request.updated",
+  it.effect(
+    "selects the latest waiting secret across completed runs, excluding rolled_back runs",
+    () =>
+      Effect.gen(function* () {
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const sql = yield* SqlClient.SqlClient;
+        const suffix = "shell-pending-secret";
+        const threadId = yield* addRolledBackRecoveryCandidate(suffix);
+        const runId = RunId.make(`run:${suffix}:rolled-back`);
+        const nodeId = NodeId.make(`node:${suffix}:rolled-back`);
+        const now = yield* DateTime.now;
+        const addSecret = (id: string, ordinal: number, status: "waiting" | "completed") =>
+          projectionStore.apply({
+            id: EventId.make(`event:${id}`),
+            type: "turn-item.updated",
             threadId,
             runId,
             nodeId,
             driver,
             occurredAt: now,
             payload: {
-              id: requestId,
+              id: TurnItemId.make(id),
+              threadId,
+              runId,
               nodeId,
+              providerThreadId: null,
               providerTurnId: null,
-              nativeRequestRef: null,
-              kind: "user_input",
-              status: "pending",
-              responseCapability,
-              createdAt: fresh
-                ? DateTime.add(now, { seconds: 5 })
-                : DateTime.subtract(now, { seconds: 1 }),
-              resolvedAt: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal,
+              status,
+              title: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: DateTime.add(now, { seconds: ordinal }),
+              type: "secret_request",
+              label: "Test credential",
+              reason: "Test pending input",
+              secretStatus: status === "waiting" ? "pending" : "saved",
             },
           });
-          for (const shell of [
-            (yield* projectionStore.getShellSnapshot()).threads.find(
-              (thread) => thread.id === threadId,
-            ),
-            ProjectionStore.threadShellFromProjection(
-              yield* projectionStore.getThreadProjection(threadId),
-            ),
-          ]) {
-            assert.equal(shell?.pendingRuntimeRequest?.id, fresh ? requestId : "secret:b");
+        yield* addSecret("secret:a", 2, "waiting");
+        yield* addSecret("secret:b", 3, "waiting");
+        yield* addSecret("secret:c", 4, "completed");
+
+        yield* sql`
+        UPDATE orchestration_v2_projection_runs
+        SET status = 'running', payload_json = json_set(payload_json, '$.status', 'running')
+        WHERE run_id = ${runId}
+      `;
+        yield* assertShellIndexCoversShells();
+        const secretOnlyShell = (yield* projectionStore.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        );
+        const secretOnlyProjection = yield* projectionStore.getThreadProjection(threadId);
+        for (const shell of [
+          secretOnlyShell,
+          ProjectionStore.threadShellFromProjection(secretOnlyProjection),
+        ]) {
+          assert.equal(shell?.pendingRuntimeRequest?.id, "secret:b");
+          assert.isTrue(shell?.pendingRuntimeRequest?.blocking);
+          assert.isTrue(shell?.pendingRuntimeRequest?.userOnly);
+        }
+
+        const requestId = RuntimeRequestId.make(`request:${suffix}:async`);
+        yield* projectionStore.apply({
+          id: EventId.make(`event:${suffix}:async`),
+          type: "runtime-request.updated",
+          threadId,
+          runId,
+          nodeId,
+          driver,
+          occurredAt: now,
+          payload: {
+            id: requestId,
+            nodeId,
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "user_input",
+            status: "pending",
+            responseCapability: { type: "message" },
+            createdAt: DateTime.subtract(now, { seconds: 1 }),
+            resolvedAt: null,
+          },
+        });
+
+        for (const responseCapability of [
+          { type: "live", providerSessionId: ProviderSessionId.make("session:pending-secret") },
+          { type: "message" },
+        ] as const) {
+          for (const fresh of [true, false]) {
+            yield* projectionStore.apply({
+              id: EventId.make("event:" + suffix + ":fresh-" + fresh),
+              type: "runtime-request.updated",
+              threadId,
+              runId,
+              nodeId,
+              driver,
+              occurredAt: now,
+              payload: {
+                id: requestId,
+                nodeId,
+                providerTurnId: null,
+                nativeRequestRef: null,
+                kind: "user_input",
+                status: "pending",
+                responseCapability,
+                createdAt: fresh
+                  ? DateTime.add(now, { seconds: 5 })
+                  : DateTime.subtract(now, { seconds: 1 }),
+                resolvedAt: null,
+              },
+            });
+            for (const shell of [
+              (yield* projectionStore.getShellSnapshot()).threads.find(
+                (thread) => thread.id === threadId,
+              ),
+              ProjectionStore.threadShellFromProjection(
+                yield* projectionStore.getThreadProjection(threadId),
+              ),
+            ]) {
+              assert.equal(shell?.pendingRuntimeRequest?.id, fresh ? requestId : "secret:b");
+            }
           }
         }
-      }
 
-      for (const status of [
-        "preparing",
-        "starting",
-        "running",
-        "waiting",
-        "completed",
-        "rolled_back",
-      ]) {
-        yield* sql`
+        for (const status of [
+          "preparing",
+          "starting",
+          "running",
+          "waiting",
+          "completed",
+          "rolled_back",
+        ]) {
+          yield* sql`
           UPDATE orchestration_v2_projection_runs
           SET status = ${status}, payload_json = json_set(payload_json, '$.status', ${status})
           WHERE run_id = ${runId}
         `;
-        const shell = yield* projectionStore.getShellSnapshot();
-        const thread = shell.threads.find((candidate) => candidate.id === threadId);
-        assert.isDefined(thread);
-        const projection = yield* projectionStore.getThreadProjection(threadId);
-        const memoryShell = ProjectionStore.threadShellFromProjection(projection);
-        const terminal = status === "completed" || status === "rolled_back";
-        assert.deepEqual(
-          [thread?.pendingRuntimeRequest?.id, memoryShell.pendingRuntimeRequest?.id],
-          terminal ? [requestId, requestId] : ["secret:b", "secret:b"],
+          const shell = yield* projectionStore.getShellSnapshot();
+          const thread = shell.threads.find((candidate) => candidate.id === threadId);
+          assert.isDefined(thread);
+          const projection = yield* projectionStore.getThreadProjection(threadId);
+          const memoryShell = ProjectionStore.threadShellFromProjection(projection);
+          const rolledBack = status === "rolled_back";
+          assert.deepEqual(
+            [thread?.pendingRuntimeRequest?.id, memoryShell.pendingRuntimeRequest?.id],
+            rolledBack ? [requestId, requestId] : ["secret:b", "secret:b"],
+          );
+          assert.deepEqual(
+            [thread?.pendingRuntimeRequest?.blocking, memoryShell.pendingRuntimeRequest?.blocking],
+            rolledBack ? [false, false] : [true, true],
+          );
+          assert.deepEqual(
+            [thread?.pendingRuntimeRequest?.userOnly, memoryShell.pendingRuntimeRequest?.userOnly],
+            rolledBack ? [undefined, undefined] : [true, true],
+          );
+        }
+
+        // A completed run with a waiting secret card stays out of auto-settlement until the user
+        // writes a newer message past it.
+        yield* sql`
+        UPDATE orchestration_v2_projection_runs
+        SET status = 'completed', payload_json = json_set(payload_json, '$.status', 'completed')
+        WHERE run_id = ${runId}
+      `;
+        yield* projectionStore.apply({
+          id: EventId.make(`event:${suffix}:resolve-request`),
+          type: "runtime-request.updated",
+          threadId,
+          runId,
+          nodeId,
+          driver,
+          occurredAt: now,
+          payload: {
+            id: requestId,
+            nodeId,
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "user_input",
+            status: "resolved",
+            responseCapability: { type: "message" },
+            createdAt: DateTime.subtract(now, { seconds: 1 }),
+            resolvedAt: now,
+          },
+        });
+        yield* assertShellIndexCoversShells();
+        const settledBeforeMessage = yield* projectionStore.getSettlementCandidates();
+        assert.isFalse(settledBeforeMessage.some((candidate) => candidate.id === threadId));
+
+        const movedPastAt = DateTime.add(now, { seconds: 10 });
+        yield* projectionStore.apply({
+          id: EventId.make(`event:${suffix}:user-moved-past`),
+          type: "message.updated",
+          threadId,
+          runId,
+          nodeId,
+          driver,
+          occurredAt: movedPastAt,
+          payload: {
+            id: MessageId.make(`message:${suffix}:user-moved-past`),
+            threadId,
+            runId,
+            nodeId,
+            role: "user",
+            text: "Skip that credential for now.",
+            attachments: [],
+            streaming: false,
+            createdBy: "user",
+            creationSource: "web",
+            createdAt: movedPastAt,
+            updatedAt: movedPastAt,
+          },
+        });
+        const afterUserMessageShell = (yield* projectionStore.getShellSnapshot()).threads.find(
+          (candidate) => candidate.id === threadId,
         );
-        assert.deepEqual(
-          [thread?.pendingRuntimeRequest?.blocking, memoryShell.pendingRuntimeRequest?.blocking],
-          terminal ? [false, false] : [true, true],
+        const afterUserMessageMemory = ProjectionStore.threadShellFromProjection(
+          yield* projectionStore.getThreadProjection(threadId),
         );
-        assert.deepEqual(
-          [thread?.pendingRuntimeRequest?.userOnly, memoryShell.pendingRuntimeRequest?.userOnly],
-          terminal ? [undefined, undefined] : [true, true],
-        );
-      }
-    }),
+        assert.isNull(afterUserMessageShell?.pendingRuntimeRequest);
+        assert.isNull(afterUserMessageMemory.pendingRuntimeRequest);
+        const settledAfterMessage = yield* projectionStore.getSettlementCandidates();
+        assert.isTrue(settledAfterMessage.some((candidate) => candidate.id === threadId));
+      }),
   );
 
   it.effect("counts history inherited by fork shells, but not by side chats", () =>

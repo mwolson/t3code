@@ -57,8 +57,9 @@ export function subagentAwaitsUser(
     (kind !== "user_input" || thread.pendingRuntimeRequest?.userOnly === true) &&
     thread.lineage.relationshipToParent === "subagent" &&
     !isProviderNativeSubagentThread(thread) &&
-    // The activity run stays set when a follow-up is queued behind a blocked run.
-    thread.activityRunStatus != null
+    // The activity run stays set when a follow-up is queued behind a blocked run;
+    // a user-only card (secret or link) outlives the run that asked.
+    (thread.activityRunStatus != null || thread.pendingRuntimeRequest?.userOnly === true)
   );
 }
 

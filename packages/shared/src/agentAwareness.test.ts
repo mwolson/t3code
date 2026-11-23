@@ -9,7 +9,7 @@ import type {
 import { ProviderInstanceId, RuntimeRequestId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { projectThreadAwarenessV2 } from "./agentAwareness.ts";
+import { projectThreadAwarenessV2, subagentAwaitsUser } from "./agentAwareness.ts";
 
 const NOW = "2026-05-22T12:00:00.000Z";
 
@@ -174,6 +174,20 @@ describe("projectThreadAwarenessV2", () => {
         thread: { ...delegated, pendingRuntimeRequest: { ...request, userOnly: true } },
       })?.phase,
     ).toBe("waiting_for_input");
+    expect(
+      subagentAwaitsUser(
+        v2Thread({
+          status: "completed",
+          activityRunStatus: null,
+          lineage: {
+            parentThreadId: "parent" as ThreadId,
+            relationshipToParent: "subagent",
+            rootThreadId: "parent" as ThreadId,
+          },
+          pendingRuntimeRequest: { ...request, userOnly: true },
+        }),
+      ),
+    ).toBe(true);
     expect(
       projectThreadAwarenessV2({ ...input, thread: { ...delegated, status: "completed" } }),
     ).toBeNull();

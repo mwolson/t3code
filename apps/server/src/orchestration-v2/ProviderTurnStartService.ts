@@ -81,6 +81,7 @@ import {
 } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import {
   isRestartNoteContinuation,
@@ -317,6 +318,7 @@ export const layer: Layer.Layer<
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
     const restoreMissingWorktree = yield* makeRestoreMissingWorktree;
+    const secretRequests = yield* Effect.serviceOption(SecretRequests.SecretRequests);
     const turnItemPositions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
 
     // Build draining callbacks outside startup scope so they cannot retain full thread history.
@@ -1203,10 +1205,20 @@ export const layer: Layer.Layer<
       });
       let effectiveHandoffs = handoffs;
       let resumeFellBack = false;
+      const resolvedMessageText =
+        providerMessage.secretRequestTurnItemId !== undefined && Option.isSome(secretRequests)
+          ? Option.getOrElse(
+              yield* secretRequests.value.wakeDeliveryNote({
+                threadId: input.threadId,
+                turnItemId: providerMessage.secretRequestTurnItemId,
+              }),
+              () => providerMessage.text,
+            )
+          : providerMessage.text;
       const messageText = withMessageSenderNote(
         providerMessage,
         projectComposerContextForProvider({
-          text: providerMessage.text,
+          text: resolvedMessageText,
           records: providerMessage.context?.records ?? [],
         }),
       );

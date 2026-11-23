@@ -2777,7 +2777,7 @@ export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
   "mcp__t3-code__t3_submit_output",
 ];
 
-// request_secret can wait an hour; exceed Claude's default 60 s timeout.
+// Long-running T3 MCP tools (e.g. t3_thread_wait, preview_*) need more than Claude's 60 s default.
 export const CLAUDE_T3_MCP_TOOL_TIMEOUT_MS = 65 * 60 * 1_000;
 
 // allowedTools pre-approves calls; tools controls availability. Pre-approve T3 tools for headless modes,

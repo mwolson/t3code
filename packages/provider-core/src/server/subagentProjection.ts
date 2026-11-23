@@ -403,6 +403,7 @@ export function delegatedTaskProgress(projection: {
   readonly providerThreads: ReadonlyArray<
     Pick<OrchestrationV2ThreadProjection["providerThreads"][number], "pendingBackgroundTasks">
   >;
+  readonly waitingUserRequestCards?: ReadonlyArray<Pick<OrchestrationV2TurnItem, "runId">>;
 }) {
   const terminal = (status: string) =>
     ["completed", "failed", "cancelled", "interrupted", "rolled_back"].includes(status);
@@ -425,7 +426,8 @@ export function delegatedTaskProgress(projection: {
     projection.subagents.some(subagentHoldsCompletion) ||
     projection.providerThreads.some((thread) =>
       backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []),
-    );
+    ) ||
+    (projection.waitingUserRequestCards?.length ?? 0) > 0;
   const resultRun = workRuns
     .filter((run) => terminal(run.status) && (run.startedAt !== null || run.ordinal === 1))
     .toSorted((a, b) => (runRanAfter(a, b) ? -1 : runRanAfter(b, a) ? 1 : 0))[0];

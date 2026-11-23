@@ -188,6 +188,7 @@ function layerProjectionStore(
       getCheckpointCaptureContext: () => Effect.die("not used"),
       getRunMessage: () => Effect.die("not used"),
       getDelegatedChildControls: () => Effect.die("not used"),
+      getWaitingUserRequestCards: () => Effect.die("not used"),
       getRun: () => Effect.die("not used"),
       isNodeStored: () => Effect.die("not used"),
       canStartQueuedRun: () => Effect.die("not used"),

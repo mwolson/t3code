@@ -919,15 +919,11 @@ export const OrchestratorMcpRequestSecretInput = Schema.Struct({
   }),
   fields: Schema.optional(RequestSecretFields).annotate({
     description:
-      'Values only the user has, in one card, e.g. email + password, with delivery "file". Returns `files` by name.',
+      'Values only the user has, in one card, e.g. email + password, with delivery "file". Wake lists files by name.',
   }),
   value: Schema.optional(PastedSecretValue).annotate({
     description: "Pasted in this thread; no card.",
   }),
-  /** Default 10 minutes. */
-  timeoutMs: Schema.optional(
-    Schema.Int.check(Schema.isBetween({ minimum: 1_000, maximum: 60 * 60 * 1_000 })),
-  ),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId).annotate({
     description: "Retry key.",
   }),
@@ -935,6 +931,13 @@ export const OrchestratorMcpRequestSecretInput = Schema.Struct({
 export type OrchestratorMcpRequestSecretInput = typeof OrchestratorMcpRequestSecretInput.Type;
 
 export const OrchestratorMcpRequestSecretResult = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal("pending").annotate({
+      description:
+        "The card is waiting for the user. End your turn; their answer arrives as a message in this thread.",
+    }),
+    turnItemId: TurnItemId,
+  }),
   Schema.Struct({
     status: Schema.Literal("saved"),
     secretRef: SecretRef.annotate({
@@ -955,9 +958,9 @@ export const OrchestratorMcpRequestSecretResult = Schema.Union([
     }),
   }),
   Schema.Struct({
-    status: Schema.Literals(["declined", "cancelled", "timed_out"]).annotate({
+    status: Schema.Literals(["declined", "cancelled"]).annotate({
       description:
-        "declined: user chose not to; don't ask again. cancelled: ended with the run. timed_out: no answer in time. After cancelled or timed_out, ask again with a new `clientRequestId` only if still needed.",
+        "declined: user chose not to; don't ask again. cancelled: the card closed unanswered, when the thread was stopped or archived. Ask again with a new `clientRequestId` only if still needed.",
     }),
     note: Schema.optional(Schema.String).annotate({ description: "What to do next." }),
   }),

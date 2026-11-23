@@ -382,6 +382,7 @@ export function delegatedTaskAwaitsWork(
     readonly providerThreads: ReadonlyArray<
       Pick<OrchestrationV2ProviderThread, "pendingBackgroundTasks">
     >;
+    readonly waitingUserRequestCards?: ReadonlyArray<Pick<OrchestrationV2TurnItem, "runId">>;
   },
 ): boolean {
   const runIds = new Set<string | null>(runs.map((run) => run.id));
@@ -393,7 +394,8 @@ export function delegatedTaskAwaitsWork(
           (task) => task.runId !== undefined && runIds.has(task.runId),
         ),
       ),
-    )
+    ) ||
+    (child.waitingUserRequestCards ?? []).some((card) => runIds.has(card.runId))
   );
 }
 

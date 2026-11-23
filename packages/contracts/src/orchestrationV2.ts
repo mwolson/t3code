@@ -1522,6 +1522,8 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   notification: Schema.optional(OrchestrationV2Notification),
   ...OrchestrationV2CreationFields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),
+  /** Saved secret request whose delivery handle is resolved only when starting the provider turn. */
+  secretRequestTurnItemId: Schema.optional(TurnItemId),
   /** A message that named no model; it runs on the thread's selection at start. */
   followsThreadSelection: Schema.optional(Schema.Literal(true)),
   senderThreadId: Schema.optional(ThreadId),
@@ -3608,6 +3610,7 @@ export const OrchestrationV2Command = Schema.Union([
     guestMessageId: Schema.optional(GuestMessageId),
     ...OrchestrationV2CreationFields,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
+    secretRequestTurnItemId: Schema.optional(TurnItemId),
     senderThreadId: Schema.optional(ThreadId),
     linkedSender: Schema.optional(OrchestrationV2LinkedSender),
     idleCompaction: Schema.optional(OrchestrationV2IdleCompaction),
@@ -4041,6 +4044,15 @@ const OrchestrationV2InternalCommand = Schema.Union([
     delivery: Schema.optional(OrchestrationV2SecretRequestDelivery),
     fields: Schema.optional(Schema.Array(OrchestrationV2SecretRequestField)),
     secretStatus: OrchestrationV2SecretRequestStatus,
+    /** Tells the agent how the card ended, in the same commit that closes it. */
+    wake: Schema.optional(
+      Schema.Struct({
+        messageId: MessageId,
+        text: Schema.String,
+        notification: OrchestrationV2Notification,
+        secretRequestTurnItemId: Schema.optional(TurnItemId),
+      }),
+    ),
   }),
   /** Internal so no client can mark a report sent without it being stored and sent. */
   Schema.Struct({
