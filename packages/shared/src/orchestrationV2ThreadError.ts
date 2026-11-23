@@ -44,9 +44,15 @@ export function latestRootProviderFailureItem(
   return latest;
 }
 
+export function providerFailureOccurredAt(item: ErrorTurnItem | null): string | null {
+  const at = item?.completedAt ?? item?.startedAt;
+  return at == null ? null : DateTime.formatIso(at);
+}
+
 export function threadErrorSummary(
   failure: OrchestrationV2ProviderFailure | null,
   sessionError: string | null,
+  occurrence?: { readonly sessionErrorAt?: string | null; readonly failureAt?: string | null },
 ) {
   const currentFailure =
     sessionError !== null && sessionError !== failure?.message ? null : failure;
@@ -54,6 +60,13 @@ export function threadErrorSummary(
     usageLimitResetAt:
       currentFailure?.class === "usage_limit" ? (currentFailure.resetAt ?? null) : null,
     lastError: sessionError ?? failure?.message ?? null,
+    // Identity follows the source that supplied the text, not an unrelated refresh.
+    lastErrorAt:
+      currentFailure !== null
+        ? (occurrence?.failureAt ?? null)
+        : sessionError !== null
+          ? (occurrence?.sessionErrorAt ?? null)
+          : null,
     lastErrorClass: currentFailure?.class ?? null,
     lastErrorCode: currentFailure?.code ?? null,
   };
