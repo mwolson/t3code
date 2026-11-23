@@ -5,6 +5,7 @@ import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCi
 import {
   CommandId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  isOrchestrationV2WorkActive,
   latestProviderTurnForAttempt,
   withMessageSenderNote,
   type OrchestrationV2DomainEvent,
@@ -72,6 +73,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { unsentManualContinuationSource } from "@t3tools/shared/orchestrationV2ManualContinuation";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import { endRunlessRootTurns } from "@t3tools/provider-core/server/subagentProjection";
 import {
   ContextHandoffBackgroundWorkError,
   knownProviderFailureMessage,
@@ -143,6 +145,17 @@ const isProviderAdapterProtocolError = Schema.is(ProviderAdapter.ProviderAdapter
 const isProviderAdapterOpenSessionError = Schema.is(
   ProviderAdapter.ProviderAdapterOpenSessionError,
 );
+const INHERITED_OUTPUT_ITEM_TYPES: ReadonlySet<OrchestrationV2TurnItem["type"]> = new Set([
+  "assistant_message",
+  "reasoning",
+  "approval_request",
+  "user_input_request",
+]);
+const ENDED_SUBAGENT_STATUSES = ["completed", "failed", "cancelled", "interrupted"] as const;
+const RUNTIME_REQUEST_NOT_RESUMABLE = {
+  type: "not_resumable" as const,
+  reason: "The provider turn failed before this runtime request was resolved.",
+};
 
 /**
  * Claude refuses these before it reads the prompt: replacing a process running background work,
@@ -444,6 +457,173 @@ export const layer: Layer.Layer<
       };
     };
 
+    // A native subagent can end before the rows routed to its child thread do, and nothing else
+    // closes those once the run has failed. A subagent that still runs keeps its child's rows.
+    // Those rows can still change, so this reads them inside the transaction that closes them.
+    const closeEndedSubagentOutput = Effect.fn(
+      "orchestrationV2.providerTurnStart.closeEndedSubagentOutput",
+    )(function* (run: OrchestrationV2Run, now: DateTime.Utc) {
+      const events: Array<OrchestrationV2DomainEvent> = [];
+      const seen = new Set<ThreadId>([run.threadId]);
+      const pending = [
+        ...(yield* projectionStore.getThreadRecords(run.threadId, ["subagents"], {
+          subagentRunIds: [run.id],
+        })).subagents,
+      ];
+      for (let subagent = pending.shift(); subagent !== undefined; subagent = pending.shift()) {
+        const { childThreadId, providerInstanceId } = subagent;
+        const status = ENDED_SUBAGENT_STATUSES.find((ended) => ended === subagent.status);
+        if (
+          subagent.origin !== "provider_native" ||
+          status === undefined ||
+          childThreadId === null ||
+          seen.has(childThreadId)
+        ) {
+          continue;
+        }
+        seen.add(childThreadId);
+        const child = yield* projectionStore
+          .getThreadRecords(
+            childThreadId,
+            ["nodes", "providerTurns", "turnItems", "messages", "runtimeRequests", "subagents"],
+            {
+              turnItemRunIds: [null],
+              turnItemStatuses: ["pending", "running", "waiting"],
+              messageRoles: ["assistant"],
+              runtimeRequestStatuses: ["pending"],
+            },
+          )
+          .pipe(
+            Effect.catchTags({
+              ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+            }),
+          );
+        if (child === null) continue;
+        // A subagent a run of the child thread started is that run's, not the ended subagent's.
+        pending.push(...child.subagents.filter((nested) => nested.runId === null));
+        const allocateEventId = () => idAllocator.allocate.event({ threadId: childThreadId });
+        const scope = { threadId: childThreadId, providerInstanceId, occurredAt: now };
+        events.push(
+          ...(yield* endRunlessRootTurns({
+            threadId: childThreadId,
+            providerInstanceId,
+            projection: child,
+            status,
+            now,
+            emitted: [],
+            allocateEventId,
+          })),
+        );
+        for (const message of child.messages) {
+          if (message.runId !== null || !message.streaming) continue;
+          events.push({
+            ...scope,
+            ...(message.nodeId === null ? {} : { nodeId: message.nodeId }),
+            id: yield* allocateEventId(),
+            type: "message.updated",
+            payload: { ...message, streaming: false, updatedAt: now },
+          });
+        }
+        const runlessNodeIds = new Set(
+          child.nodes.flatMap((node) => (node.runId === null ? [node.id] : [])),
+        );
+        for (const request of child.runtimeRequests) {
+          if (request.status !== "pending" || !runlessNodeIds.has(request.nodeId)) continue;
+          events.push({
+            ...scope,
+            nodeId: request.nodeId,
+            id: yield* allocateEventId(),
+            type: "runtime-request.updated",
+            payload: {
+              ...request,
+              status: "cancelled",
+              responseCapability: RUNTIME_REQUEST_NOT_RESUMABLE,
+              resolvedAt: now,
+            },
+          });
+        }
+      }
+      return events;
+    });
+
+    // A restart inherits its earlier attempt's open reply and request cards. Tools and the
+    // provider turn stay open: the provider may still be running them.
+    const closeInheritedOutput = Effect.fn(
+      "orchestrationV2.providerTurnStart.closeInheritedOutput",
+    )(function* (input: {
+      readonly run: OrchestrationV2Run;
+      readonly turnItems: ReadonlyArray<OrchestrationV2TurnItem>;
+      readonly now: DateTime.Utc;
+    }) {
+      const { run, now } = input;
+      const { messages, runtimeRequests } = yield* projectionStore.getThreadRecords(
+        run.threadId,
+        ["messages", "runtimeRequests"],
+        { messageRunIds: [run.id], runtimeRequestStatuses: ["pending"] },
+      );
+      const openItems = input.turnItems.filter(
+        (item) =>
+          item.runId === run.id &&
+          isOrchestrationV2WorkActive(item.status) &&
+          INHERITED_OUTPUT_ITEM_TYPES.has(item.type),
+      );
+      const requestIds = new Set(
+        openItems.flatMap((item) => ("requestId" in item ? [item.requestId] : [])),
+      );
+      const base = {
+        threadId: run.threadId,
+        runId: run.id,
+        providerInstanceId: run.providerInstanceId,
+        occurredAt: now,
+      };
+      const nodeOf = (nodeId: NodeId | null) => (nodeId === null ? {} : { nodeId });
+      const own = yield* Effect.forEach(
+        [
+          ...messages
+            .filter((message) => message.runId === run.id && message.streaming)
+            .map((message) => ({
+              ...base,
+              ...nodeOf(message.nodeId),
+              type: "message.updated" as const,
+              payload: { ...message, streaming: false, updatedAt: now },
+            })),
+          ...openItems.map((item) => ({
+            ...base,
+            ...nodeOf(item.nodeId),
+            type: "turn-item.updated" as const,
+            payload: {
+              ...item,
+              ...("streaming" in item ? { streaming: false } : {}),
+              status: "failed" as const,
+              completedAt: now,
+              updatedAt: now,
+            },
+          })),
+          ...runtimeRequests
+            .filter((request) => request.status === "pending" && requestIds.has(request.id))
+            .map((request) => ({
+              ...base,
+              nodeId: request.nodeId,
+              type: "runtime-request.updated" as const,
+              payload: {
+                ...request,
+                status: "cancelled" as const,
+                responseCapability: RUNTIME_REQUEST_NOT_RESUMABLE,
+                resolvedAt: now,
+              },
+            })),
+        ],
+        (event) =>
+          Effect.gen(function* () {
+            return {
+              ...event,
+              id: yield* idAllocator.allocate.event({ threadId: run.threadId }),
+            } satisfies OrchestrationV2DomainEvent;
+          }),
+      );
+      return own;
+    });
+
     const settleRunBeforeStart = Effect.fn("orchestrationV2.providerTurnStart.settleBeforeStart")(
       function* (input: {
         readonly run: OrchestrationV2Run;
@@ -507,7 +687,11 @@ export const layer: Layer.Layer<
                 },
               ]),
         ] as const;
-        const events = yield* Effect.forEach(eventPayloads, (event) =>
+        const closesInherited = status === "failed" && attempt.attemptOrdinal > 1;
+        const inheritedOutput = closesInherited
+          ? yield* closeInheritedOutput({ run, turnItems, now })
+          : [];
+        const settled = yield* Effect.forEach(eventPayloads, (event) =>
           Effect.gen(function* () {
             return {
               ...event,
@@ -520,12 +704,14 @@ export const layer: Layer.Layer<
             } satisfies OrchestrationV2DomainEvent;
           }),
         );
+        const events = [...inheritedOutput, ...settled];
         const written = yield* eventSink.writeIfRunCurrent({
           threadId: run.threadId,
           runId,
           activeAttemptId: attempt.id,
           expectedStatus: "starting",
           events,
+          ...(closesInherited ? { eventsInTransaction: closeEndedSubagentOutput(run, now) } : {}),
         });
         // A steering restart that cannot start still ends a run whose earlier turns counted.
         if (written.committed) {
