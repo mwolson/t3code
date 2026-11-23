@@ -157,6 +157,7 @@ export function useVoiceTranscriptionDestination() {
           })
         : (environment?.label ?? null),
     prepared: supported && canDictate ? connection : null,
+    ...(supported && canDictate && connection === null ? { disconnected: true } : {}),
   };
 }
 
@@ -187,6 +188,7 @@ export function useEnvironmentSpeechInput(input: HookInput) {
     readonly prepared: PreparedConnection;
     readonly value: EnvironmentSpeechStatus | null;
   } | null>(null);
+  const [offered, setOffered] = useState({ grantId, ready: false });
   const [setup, setSetup] = useState(INITIAL_SETUP);
   const [previousDestination, setPreviousDestination] = useState({ prepared, grantId });
   const [previousOwner, setPreviousOwner] = useState({
@@ -253,7 +255,8 @@ export function useEnvironmentSpeechInput(input: HookInput) {
       disposed = true;
     };
   }, [prepared, cloudProvider]);
-  const currentStatus = !cloudProvider && status?.prepared === prepared ? status.value : null;
+  const answered = status?.prepared === prepared;
+  const currentStatus = !cloudProvider && answered ? status.value : null;
   const setupModelId = setup.model?.id;
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls download progress while the setup dialog owns an active model download
@@ -400,7 +403,16 @@ export function useEnvironmentSpeechInput(input: HookInput) {
       await session.start(createTarget());
       return;
     }
-    if (!prepared) return;
+    if (!prepared) {
+      if (destination.disconnected) {
+        toastManager.add({
+          type: "error",
+          title: m(msg("Could not start voice input")),
+          description: m(msg("The selected environment is not connected.")),
+        });
+      }
+      return;
+    }
     if (cloudProvider) {
       await session.start(createTarget());
       return;
@@ -515,13 +527,23 @@ export function useEnvironmentSpeechInput(input: HookInput) {
     }
   });
 
-  const destinationReady =
-    grantId === null
-      ? Boolean(destination.offerFirstRunSetup) && input.offerSetup !== false
-      : onDevice ||
-        (prepared !== null &&
-          (cloudProvider !== undefined ||
-            (status?.prepared === prepared && status.value?.supported !== false)));
+  // A reconnect replaces the connection and reruns the probe; the last answer holds meanwhile.
+  let answer: boolean | undefined;
+  if (grantId === null) {
+    answer = Boolean(destination.offerFirstRunSetup) && input.offerSetup !== false;
+  } else if (onDevice) {
+    answer = true;
+  } else if (prepared === null) {
+    answer = destination.disconnected ? undefined : false;
+  } else if (cloudProvider !== undefined) {
+    answer = true;
+  } else if (answered) {
+    answer = status.value?.supported !== false;
+  }
+  if (answer !== undefined && (offered.grantId !== grantId || offered.ready !== answer)) {
+    setOffered({ grantId, ready: answer });
+  }
+  const destinationReady = answer ?? (offered.grantId === grantId && offered.ready);
   return {
     available:
       destinationReady &&
