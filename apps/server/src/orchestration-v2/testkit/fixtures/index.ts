@@ -129,6 +129,8 @@ import { openCode2SkillInput } from "./opencode2_skill/input.ts";
 import { assertOpenCode2SkillOutput } from "./opencode2_skill/output.ts";
 import { assertOpenCode2SimpleOutput } from "./opencode2_simple/output.ts";
 import { assertOpenCode2MissingStepUsageOutput } from "./opencode2_missing_step_usage/output.ts";
+import { codexBackgroundCommandCoalescingInput } from "./codex_background_command_coalescing/input.ts";
+import { assertCodexBackgroundCommandCoalescingOutput } from "./codex_background_command_coalescing/output.ts";
 import { assertCodexModelRerouteOutput } from "./codex_model_reroute/output.ts";
 import { openCode2ToolCallInput } from "./opencode2_tool_call/input.ts";
 import { assertOpenCode2ToolCallOutput } from "./opencode2_tool_call/output.ts";
@@ -691,6 +693,22 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         modelSelection: KIRO_MODEL_SELECTION,
         assertOutput: assertKiroSubagentInterruptOutput,
+      },
+    ],
+  },
+  {
+    name: "codex_background_command_coalescing",
+    buildInput: codexBackgroundCommandCoalescingInput,
+    providers: [
+      {
+        driver: ProviderDriverKind.make("codex"),
+        transcriptFile: new URL(
+          "./codex_background_command_coalescing/codex_transcript.ndjson",
+          import.meta.url,
+        ),
+        modelSelection: CODEX_MODEL_SELECTION,
+        runContinuationWorker: true,
+        assertOutput: assertCodexBackgroundCommandCoalescingOutput,
       },
     ],
   },

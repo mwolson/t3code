@@ -992,6 +992,22 @@ const parentTaskSyncRetry = Schedule.exponential("1 second").pipe(
   Schedule.upTo({ duration: Duration.hours(1) }),
 );
 
+type NotificationOutcome = NonNullable<
+  OrchestrationV2ConversationMessage["notification"]
+>["outcome"];
+
+// A command batch reports its most severe outcome; agreeing outcomes pass through.
+function backgroundCommandBatchOutcome(
+  previous: NotificationOutcome,
+  incoming: NotificationOutcome,
+): NotificationOutcome {
+  if (previous === "failed" || incoming === "failed") return "failed";
+  if (previous === "cancelled" || incoming === "cancelled") return "cancelled";
+  if (previous === incoming) return previous;
+  if (previous === "unknown" || incoming === "unknown") return "unknown";
+  return "updated";
+}
+
 function isTerminalDelegatedTaskStatus(status: OrchestrationV2Subagent["status"]): boolean {
   return (
     status === "completed" ||
@@ -8246,6 +8262,79 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           capabilities: queuedCapabilities,
         }),
       );
+      // The dispatch lock shared with promotion keeps the batch in its original queue position.
+      if (
+        queuedAdapter.driver === "codex" &&
+        command.createdBy === "agent" &&
+        command.creationSource === "server" &&
+        command.notification?.source.kind === "command" &&
+        delegatedCompletion === undefined &&
+        steerWhenReadyRunId === undefined &&
+        command.steerFollowUpOfRunId === undefined &&
+        command.linkedSender === undefined &&
+        command.attachments.length === 0 &&
+        command.context === undefined &&
+        command.sourcePlanRef === undefined &&
+        command.scheduledTaskId === undefined
+      ) {
+        const batchRun = queuedRunsInDeliveryOrder(projection).findLast((candidate) => {
+          const message = projection.messages.find((row) => row.id === candidate.userMessageId);
+          return (
+            candidate.providerThreadId === targetProviderThread?.id &&
+            modelSelectionsEqual(candidate.modelSelection, modelSelection) &&
+            candidate.sourcePlanRef === undefined &&
+            candidate.steerWhenReadyRunId === undefined &&
+            message?.createdBy === command.createdBy &&
+            message.creationSource === command.creationSource &&
+            message.senderThreadId === command.senderThreadId &&
+            message.linkedSender === undefined &&
+            message.delegatedCompletion === undefined &&
+            message.attachments.length === 0 &&
+            message.context === undefined &&
+            message.scheduledTaskId === undefined &&
+            message.notification?.source.kind === "command"
+          );
+        });
+        const batchMessage = projection.messages.find((row) => row.id === batchRun?.userMessageId);
+        const batchText =
+          batchMessage === undefined ? "" : `${batchMessage.text}\n\n${command.text}`;
+        if (
+          batchRun !== undefined &&
+          batchMessage?.notification !== undefined &&
+          expandAssistantCitationsForProvider(batchText).length <=
+            PROVIDER_SEND_TURN_MAX_INPUT_CHARS
+        ) {
+          const previous = batchMessage.notification;
+          const incoming = command.notification;
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "message.updated",
+            threadId: command.threadId,
+            runId: batchRun.id,
+            ...(batchMessage.nodeId === null ? {} : { nodeId: batchMessage.nodeId }),
+            providerInstanceId: batchRun.providerInstanceId,
+            occurredAt: now,
+            payload: {
+              ...batchMessage,
+              text: batchText,
+              notification: {
+                // A batch has no single native command identity.
+                source: { kind: "command" },
+                outcome: backgroundCommandBatchOutcome(previous.outcome, incoming.outcome),
+                summary: "Background commands finished",
+                detail: [
+                  previous.detail ?? previous.summary,
+                  incoming.detail ?? incoming.summary,
+                ].join("\n\n"),
+              },
+              updatedAt: now,
+            },
+          });
+          return;
+        }
+      }
       const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
         id: idAllocator.derive.providerThread({
           driver: queuedAdapter.driver,
