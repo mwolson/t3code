@@ -7049,11 +7049,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           return tasks;
         });
 
+        const owedWakeDeadlines = new Map<string, Map<string, symbol>>();
+
         const emitProviderThreadRoster = Effect.fnUntraced(function* (input: {
           readonly nativeThreadId: string;
           readonly providerThread: OrchestrationV2ProviderThread;
           readonly status?: OrchestrationV2ProviderThread["status"];
-        }) {
+        }): Effect.fn.Return<void> {
           const roster = rosterForNativeThread(
             yield* Ref.get(pendingBackgroundTasksByNativeThread),
             input.nativeThreadId,
@@ -7063,6 +7065,61 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             input.nativeThreadId,
           );
           const owedWakeTasks = yield* owedWakeTasksForNativeThread(input.nativeThreadId);
+          const deadlines =
+            owedWakeDeadlines.get(input.nativeThreadId) ?? new Map<string, symbol>();
+          for (const taskId of deadlines.keys()) {
+            if (!owedWakeTasks.some((task) => task.taskId === taskId)) deadlines.delete(taskId);
+          }
+          if (owedWakeTasks.length === 0) owedWakeDeadlines.delete(input.nativeThreadId);
+          else owedWakeDeadlines.set(input.nativeThreadId, deadlines);
+          for (const task of owedWakeTasks) {
+            if (deadlines.has(task.taskId)) continue;
+            const token = Symbol(task.taskId);
+            deadlines.set(task.taskId, token);
+            yield* Effect.sleep(CLAUDE_WAKE_TURN_START_DEADLINE).pipe(
+              Effect.andThen(
+                sdkMessageLock.withPermits(1)(
+                  Effect.gen(function* () {
+                    if (owedWakeDeadlines.get(input.nativeThreadId)?.get(task.taskId) !== token)
+                      return false;
+                    const previous = (yield* Ref.get(lastProviderThreadByNativeThread)).get(
+                      input.nativeThreadId,
+                    );
+                    const currentRoster = rosterForNativeThread(
+                      yield* Ref.get(pendingBackgroundTasksByNativeThread),
+                      input.nativeThreadId,
+                    );
+                    if (
+                      previous === undefined ||
+                      currentRoster.has(task.taskId) ||
+                      !previous.pendingBackgroundTasks?.some(
+                        (pending) => pending.taskId === task.taskId,
+                      )
+                    ) {
+                      deadlines.delete(task.taskId);
+                      return false;
+                    }
+                    if ((yield* Ref.get(activeTurn)) !== null) return true;
+                    deadlines.delete(task.taskId);
+                    // A missing native wake must not hold the completed thread indefinitely.
+                    yield* rememberProviderThread({
+                      ...previous,
+                      pendingBackgroundTasks: (previous.pendingBackgroundTasks ?? []).filter(
+                        (pending) => pending.taskId !== task.taskId,
+                      ),
+                    });
+                    yield* emitProviderThreadRoster({
+                      nativeThreadId: input.nativeThreadId,
+                      providerThread: previous,
+                    });
+                    return false;
+                  }),
+                ),
+              ),
+              Effect.repeat({ while: (active) => active }),
+              Effect.forkIn(sessionScope),
+            );
+          }
           const now = yield* DateTime.now;
           const providerThread: OrchestrationV2ProviderThread = {
             ...input.providerThread,

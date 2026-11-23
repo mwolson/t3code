@@ -18133,7 +18133,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
-  it.effect.each(["none", "before", "after", "sibling"] as const)(
+  it.effect.each(["none", "before", "after", "sibling", "never opens", "active wake"] as const)(
     "keeps an exited background command on the roster until its wake run starts (empty level %s notification)",
     (emptyLevel) =>
       Effect.gen(function* () {
@@ -18184,6 +18184,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           yield* harness.offerAndWait(emptyRoster);
         yield* harness.offerAndWait(wakeNotification);
         if (emptyLevel === "after") yield* harness.offerAndWait(emptyRoster);
+        if (emptyLevel === "never opens") {
+          yield* TestClock.adjust("2 minutes");
+          assert.deepEqual(
+            providerThreadRosterEvents(harness.events).at(-1)?.providerThread
+              .pendingBackgroundTasks,
+            [],
+          );
+          return;
+        }
         // Query replacement reads the internal roster, which the exit already cleared.
         assert.isFalse(yield* harness.hasPendingBackgroundWork);
         yield* harness.offerAndWait(wakeTurnInit);
@@ -18201,8 +18210,18 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }),
         );
         yield* harness.offerAndWait(wakeAssistant);
+        if (emptyLevel === "active wake") {
+          const rosterCount = providerThreadRosterEvents(harness.events).length;
+          yield* TestClock.adjust("2 minutes");
+          assert.lengthOf(providerThreadRosterEvents(harness.events), rosterCount);
+        }
         yield* harness.offerAndWait(wakeResult);
         yield* harness.awaitTerminal(2);
+        if (emptyLevel === "active wake") {
+          const rosterCount = providerThreadRosterEvents(harness.events).length;
+          yield* TestClock.adjust("2 minutes");
+          assert.lengthOf(providerThreadRosterEvents(harness.events), rosterCount);
+        }
 
         const wakeStart = harness.events.findIndex(
           (event) =>
