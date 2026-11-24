@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
 import type { ColorValue } from "react-native";
 import type { AppSymbolName } from "./AppSymbol";
 
@@ -126,6 +126,8 @@ export interface AppBarProps {
   };
   readonly hideBottomBorder?: boolean;
   readonly trailing?: ReactNode;
+  /** Custom control beside the trailing edge, sharing the iOS glass group. */
+  readonly beforeLastControl?: ReactElement;
   readonly matchSearchSurface?: boolean;
   readonly optionsVersion?: unknown;
 }

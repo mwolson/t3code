@@ -40,7 +40,10 @@ type OverlayFrame = {
   readonly height: number;
 };
 
-export type AndroidAnchoredMenuProps = {
+export type AndroidAnchoredMenuProps = Pick<
+  AccessibilityProps,
+  "accessible" | "accessibilityLabel" | "accessibilityRole"
+> & {
   readonly actions: readonly MenuAction[];
   readonly title?: string;
   readonly onPressAction?: MenuComponentProps["onPressAction"];
@@ -272,7 +275,8 @@ export function AndroidAnchoredMenu(props: AndroidAnchoredMenuProps) {
       ) : (
         <Pressable
           ref={setAnchorNode}
-          accessibilityRole="button"
+          accessible={props.accessible}
+          accessibilityRole={props.accessibilityRole ?? "button"}
           accessibilityLabel={triggerLabel}
           accessibilityHint={triggerHint}
           accessibilityState={triggerState}
