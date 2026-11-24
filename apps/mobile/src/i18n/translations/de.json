@@ -5622,5 +5622,6 @@
   "cf45dd747b6b7b69": "{product} wird geprüft",
   "a4b5aab4d4e546db": "{product} konnte nicht geladen werden. Versuche es erneut, ohne App-Daten zu löschen.",
   "da680b6dea6c1528": "{count, plural, =1 {Hintergrundaufgabe abgeschlossen} other {# Hintergrundaufgaben abgeschlossen}}",
-  "374697e2e9d737f1": "{count, plural, =1 {Delegierte Aufgabe abgeschlossen} other {# delegierte Aufgaben abgeschlossen}}"
+  "374697e2e9d737f1": "{count, plural, =1 {Delegierte Aufgabe abgeschlossen} other {# delegierte Aufgaben abgeschlossen}}",
+  "7f347f703643e4e9": "Diese Datei kann hier nicht in der Vorschau angezeigt werden. Speichere oder teile sie, um sie in einer anderen App zu öffnen."
 }

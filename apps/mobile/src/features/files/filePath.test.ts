@@ -1,12 +1,16 @@
+import { ProjectReadFileError, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   fileRoutePathSegments,
   isAudioPreviewFile,
+  isBinaryFileReadError,
   isMarkdownPreviewFile,
   needsWorkspaceFileContents,
   resolveFileLinkPath,
   resolveWorkspaceRelativeFilePath,
+  workspaceFileDownloadResource,
+  workspaceFileMimeType,
 } from "./filePath";
 
 describe("resolveFileLinkPath", () => {
@@ -76,5 +80,59 @@ describe("workspace preview classifiers", () => {
     ]) {
       expect(isMarkdownPreviewFile(path)).toBe(true);
     }
+  });
+});
+
+describe("workspace file download helpers", () => {
+  it("recognizes binary_file read errors only", () => {
+    const binaryError = new ProjectReadFileError({
+      cwd: "/repo",
+      relativePath: "/home/mwolson/Downloads/amp-1.7.0.apk",
+      failure: "binary_file",
+    });
+    const missingError = new ProjectReadFileError({
+      cwd: "/repo",
+      relativePath: "/home/mwolson/Downloads/missing.apk",
+      failure: "operation_failed",
+    });
+    expect(isBinaryFileReadError(binaryError)).toBe(true);
+    expect(isBinaryFileReadError(missingError)).toBe(false);
+    expect(isBinaryFileReadError(new Error("binary_file"))).toBe(false);
+  });
+
+  it("builds attachment download resources for thread and draft files", () => {
+    const threadId = ThreadId.make("thread-1");
+    expect(
+      workspaceFileDownloadResource({
+        threadId,
+        cwd: "/repo",
+        targetPath: "/home/mwolson/Downloads/amp-1.7.0.apk",
+      }),
+    ).toEqual({
+      _tag: "media-file",
+      threadId,
+      path: "/home/mwolson/Downloads/amp-1.7.0.apk",
+      disposition: "attachment",
+    });
+    expect(
+      workspaceFileDownloadResource({
+        threadId: null,
+        cwd: "/repo",
+        targetPath: "/home/mwolson/Downloads/amp-1.7.0.apk",
+      }),
+    ).toEqual({
+      _tag: "draft-workspace-file",
+      cwd: "/repo",
+      path: "/home/mwolson/Downloads/amp-1.7.0.apk",
+      disposition: "attachment",
+    });
+  });
+
+  it("derives download MIME types from the basename rather than dot directories", () => {
+    expect(workspaceFileMimeType("/home/mwolson/Downloads/amp-1.7.0.apk")).toBe(
+      "application/octet-stream",
+    );
+    expect(workspaceFileMimeType("/home/mwolson/.t3/binary")).toBe("application/octet-stream");
+    expect(workspaceFileMimeType("/home/mwolson/Downloads/report.pdf")).toBe("application/pdf");
   });
 });

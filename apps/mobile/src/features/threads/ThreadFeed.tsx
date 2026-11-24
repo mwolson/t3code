@@ -3591,7 +3591,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         };
       }
       const target = resolveFileChipTarget(href, props.workspaceRoot);
-      return target ? fileChipMenu(target) : undefined;
+      return target
+        ? fileChipMenu(target, m, {
+            canSave: readEnvironmentScope(props.environmentId, AuthFilesystemReadScope),
+          })
+        : undefined;
     },
     onFileContextMenuAction: (href, actionId, reply) => {
       const skill = enrichedSkillReference(href, props.skills);
@@ -3620,47 +3624,102 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       }
       const target = resolveFileChipTarget(href, props.workspaceRoot);
       if (!target) return;
+      const resolveChipActionTarget = (
+        onResolved: (resolved: {
+          readonly fullPath: string;
+          readonly relativePath: string | undefined;
+          readonly signal: AbortSignal;
+        }) => void,
+      ) => {
+        const presentation = resolveMarkdownLinkPresentation(href);
+        const path =
+          presentation.kind === "file"
+            ? resolveFileLinkPath(props.workspaceRoot, presentation.path)
+            : null;
+        if (presentation.kind !== "file" || path === null) return;
+        markdownLinkRequest.current?.abort();
+        const request = new AbortController();
+        markdownLinkRequest.current = request;
+        void findFileLinkTarget(presentation.path, path, request.signal, reply).then((found) => {
+          if (request.signal.aborted) return;
+          const fullPath =
+            props.workspaceRoot && !isAbsolutePath(found)
+              ? resolveWorkspaceFilePath(props.workspaceRoot, found)
+              : found;
+          const relativePath =
+            resolveWorkspaceRelativeFilePath(props.workspaceRoot, fullPath) ??
+            (!isAbsolutePath(found) ? found : target.relativePath);
+          onResolved({ fullPath, relativePath, signal: request.signal });
+        });
+      };
       switch (actionId) {
         case "copy-full-path":
-        case "copy-relative-path": {
-          const presentation = resolveMarkdownLinkPresentation(href);
-          const path =
-            presentation.kind === "file"
-              ? resolveFileLinkPath(props.workspaceRoot, presentation.path)
-              : null;
-          if (presentation.kind !== "file" || path === null) return;
-          markdownLinkRequest.current?.abort();
-          const request = new AbortController();
-          markdownLinkRequest.current = request;
-          void findFileLinkTarget(presentation.path, path, request.signal, reply).then((found) => {
-            if (request.signal.aborted) return;
-            const fullPath =
-              props.workspaceRoot && !isAbsolutePath(found)
-                ? resolveWorkspaceFilePath(props.workspaceRoot, found)
-                : found;
+        case "copy-relative-path":
+          resolveChipActionTarget(({ fullPath, relativePath }) => {
             const clipboardPath = fileChipClipboardPath(
               {
                 ...target,
                 ...(target.fullPath ? { fullPath } : {}),
-                ...(target.relativePath
-                  ? {
-                      relativePath:
-                        resolveWorkspaceRelativeFilePath(props.workspaceRoot, fullPath) ??
-                        target.relativePath,
-                    }
-                  : {}),
+                ...(target.relativePath && relativePath ? { relativePath } : {}),
               },
               actionId,
             );
             if (clipboardPath !== undefined) copyTextWithHaptic(clipboardPath);
           });
           return;
-        }
         case "open-file":
           onMarkdownLinkPress(href, false, reply);
           return;
         case "save":
-          shareFileChip(target);
+          if (!readEnvironmentScope(props.environmentId, AuthFilesystemReadScope)) return;
+          resolveChipActionTarget(({ fullPath, relativePath, signal }) => {
+            const shareResolved = () => {
+              if (signal.aborted) return;
+              shareFileChip({
+                ...target,
+                ...(isAbsolutePath(fullPath)
+                  ? { fullPath }
+                  : relativePath
+                    ? { relativePath }
+                    : { fullPath }),
+              });
+            };
+            void executeAtomQuery(
+              appAtomRegistry,
+              projectEnvironment.fileMetadata({
+                environmentId: props.environmentId,
+                input: { path: fullPath },
+              }),
+              { signal, reportFailure: false, reportDefect: false },
+            ).then(
+              (result) => {
+                if (signal.aborted) return;
+                if (result._tag === "Success" && result.value?.kind === "directory") {
+                  navigation.navigate("ThreadFile", {
+                    environmentId: String(props.environmentId),
+                    threadId: String(props.threadId),
+                    path: fileRoutePathSegments(fullPath),
+                  });
+                } else if (result._tag === "Success" && result.value?.kind === "file") {
+                  shareResolved();
+                } else {
+                  const detail =
+                    result._tag === "Failure"
+                      ? (errorDisplayMessage(squashAtomCommandFailure(result), m) ??
+                        gt("Try again."))
+                      : gt("The file could not be loaded. Reconnect and try again.");
+                  Dialog.alert(gt("Could not share file"), detail);
+                }
+              },
+              (error: unknown) => {
+                if (signal.aborted) return;
+                Dialog.alert(
+                  gt("Could not share file"),
+                  errorDisplayMessage(error, m) ?? gt("Try again."),
+                );
+              },
+            );
+          });
           return;
       }
     },

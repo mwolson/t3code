@@ -1,10 +1,17 @@
-import type { FilesystemEntryMetadata } from "@t3tools/contracts";
+import {
+  type AssetResource,
+  type FilesystemEntryMetadata,
+  ProjectReadFileError,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { filePreviewDelimiter } from "@t3tools/shared/delimitedPreview";
 import { joinPath, resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import {
+  hostPreviewMimeTypeFromExtension,
   isWorkspaceAudioPreviewPath,
   isWorkspaceVideoPreviewPath,
 } from "@t3tools/shared/filePreview";
+import * as Schema from "effect/Schema";
 
 function isWindowsAbsolutePath(value: string): boolean {
   return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
@@ -136,4 +143,39 @@ export function fileHeaderSubtitle(projectName: string, relativePath: string): s
   return isAbsolutePath(relativePath)
     ? parentDir
     : [projectName, parentDir].filter(Boolean).join(" · ");
+}
+
+const isProjectReadFileError = Schema.is(ProjectReadFileError);
+
+export function isBinaryFileReadError(failure: unknown): boolean {
+  return isProjectReadFileError(failure) && failure.failure === "binary_file";
+}
+
+export function workspaceFileMimeType(path: string): string {
+  const name = basename(path);
+  const dotIndex = name.lastIndexOf(".");
+  const extension = dotIndex > 0 && dotIndex < name.length - 1 ? name.slice(dotIndex) : "";
+  return (
+    (extension ? hostPreviewMimeTypeFromExtension(extension) : null) ?? "application/octet-stream"
+  );
+}
+
+export function workspaceFileDownloadResource(input: {
+  readonly threadId: ThreadId | null;
+  readonly cwd: string;
+  readonly targetPath: string;
+}): Extract<AssetResource, { _tag: "media-file" | "draft-workspace-file" }> {
+  return input.threadId !== null
+    ? {
+        _tag: "media-file",
+        threadId: input.threadId,
+        path: input.targetPath,
+        disposition: "attachment",
+      }
+    : {
+        _tag: "draft-workspace-file",
+        cwd: input.cwd,
+        path: input.targetPath,
+        disposition: "attachment",
+      };
 }

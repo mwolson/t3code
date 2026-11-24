@@ -1,6 +1,7 @@
 import * as Dialog from "../../components/ui/Dialog";
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { useGT } from "gt-react-native";
@@ -41,8 +42,10 @@ export function useFileChipShare(
         { signal: request.signal },
       );
       if (request.signal.aborted) return;
-      const url =
-        result._tag === "Success" ? resolveAssetUrl(httpBaseUrl, result.value.relativeUrl) : null;
+      if (result._tag === "Failure") {
+        throw squashAtomCommandFailure(result);
+      }
+      const url = resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
       if (url === null)
         throw new Error(gt("The file could not be loaded. Reconnect and try again."));
       await downloadAndShareAttachment({

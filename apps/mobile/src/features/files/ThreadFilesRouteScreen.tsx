@@ -1,4 +1,5 @@
 import { formatFilePathForClipboard } from "@t3tools/client-runtime/media-actions";
+import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
 import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
 import { environmentSession } from "../../state/session";
@@ -21,6 +22,7 @@ import {
 } from "@t3tools/shared/filePreview";
 import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
 
+import { Button } from "../../components/ui/Button";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import { filePreviewDelimiter, parseDelimitedPreview } from "@t3tools/shared/delimitedPreview";
 import { DelimitedFilePreview } from "./DelimitedFilePreview";
@@ -68,10 +70,13 @@ import {
   resolveWorkspaceFilePath,
   resolveWorkspaceRelativeFilePath,
   isAudioPreviewFile,
+  isBinaryFileReadError,
   isMarkdownPreviewFile,
   isSvgImagePreviewFile,
   isVideoPreviewFile,
   needsWorkspaceFileContents,
+  workspaceFileDownloadResource,
+  workspaceFileMimeType,
 } from "./filePath";
 import { useWorkspaceFileAssetUrlState } from "./workspaceFileAssetUrl";
 import { MOBILE_FULL_FILE_MAX_BYTES, useFullFileText } from "./useFullFileText";
@@ -115,6 +120,7 @@ function FileHeader(props: {
     readonly title: string;
     readonly icon: string;
     readonly inline: boolean;
+    readonly disabled?: boolean;
     readonly onPress: () => unknown;
   }>;
 }) {
@@ -250,6 +256,9 @@ function FileContent(props: {
   readonly resolveVideoUri: () => Promise<string | null>;
   readonly fileContents: string | null;
   readonly fileError: string | null;
+  readonly isBinaryFile: boolean;
+  readonly onShareFile?: () => void;
+  readonly sharingFile?: boolean;
   readonly relativePath: string;
   readonly threadId: ThreadId | null;
   readonly initialLine: number | null;
@@ -319,6 +328,31 @@ function FileContent(props: {
 
   if (props.activeMode === "preview" && isBrowserFile) {
     return <WorkspaceFileWebPreview uri={props.previewUri} />;
+  }
+
+  if (props.isBinaryFile) {
+    return (
+      <View className="flex-1 items-center justify-center bg-sheet px-6">
+        <EmptyState
+          variant="plain"
+          title={gt("No preview for this file")}
+          detail={gt(
+            "This file cannot be previewed here. Save or share it to open it in another app.",
+          )}
+          action={
+            props.onShareFile ? (
+              <Button
+                tone="primary"
+                icon="square.and.arrow.up"
+                label={props.sharingFile ? gt("Opening share sheet…") : gt("Save or share")}
+                loading={props.sharingFile}
+                onPress={props.onShareFile}
+              />
+            ) : undefined
+          }
+        />
+      </View>
+    );
   }
 
   if (props.fileError && props.fileContents === null) {
@@ -737,6 +771,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
   // Until the full text arrives, the 1 MB preview shows with its partial-file notice.
   const fileContents = fullText ?? fileData?.contents ?? null;
   const fileTruncated = fileData?.truncated === true && fullText === null;
+  const isBinaryFile = fileContents === null && isBinaryFileReadError(fileQuery.failure);
   const assetPreviewPath =
     !metadataPending &&
     directoryPath === null &&
@@ -769,7 +804,27 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
           resource: assetPreview.resource,
         }
       : undefined;
-  const mediaActions = useMediaActions(mediaSource);
+  const fileShareSource: MediaActionsSource | undefined =
+    mediaSource ??
+    (environmentId !== null &&
+    cwd !== null &&
+    relativePath !== null &&
+    targetPath !== null &&
+    !metadataPending &&
+    directoryPath === null &&
+    (isBinaryFile ||
+      (fileData?.exists === true && fileContents !== null) ||
+      ((isBrowserFile || isAudioFile) && assetPreview._tag === "Success"))
+      ? {
+          reference: mediaFileReference(targetPath, cwd),
+          name: basename(relativePath),
+          mimeType: workspaceFileMimeType(relativePath),
+          environmentId,
+          ...(threadId === null ? {} : { threadId }),
+          resource: workspaceFileDownloadResource({ threadId, cwd, targetPath }),
+        }
+      : undefined);
+  const mediaActions = useMediaActions(fileShareSource);
   const videoSource: MediaVideoPreviewSource | null =
     environmentId !== null &&
     relativePath !== null &&
@@ -881,7 +936,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
             onPress: () => setModeOverride({ path: relativePath, mode: "source" }),
           } as const)
         : null,
-      resolvedActiveMode === "source"
+      resolvedActiveMode === "source" && fileContents !== null
         ? ({
             id: "word-wrap",
             title: appearance.codeWordBreak ? gt("Disable word wrap") : gt("Enable word wrap"),
@@ -899,15 +954,20 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
             onPress: () => setTextSelectionPath(selectingText ? null : relativePath),
           } as const)
         : null,
-      ...(mediaSource
+      ...(fileShareSource
         ? mediaActions.actions
             .filter(({ id }) => id !== "open-file")
             .map((action) => ({
               id: action.id,
               title: action.title,
               icon:
-                action.id === "save" ? ("square.and.arrow.up" as const) : ("doc.on.doc" as const),
+                action.id === "save"
+                  ? ("square.and.arrow.up" as const)
+                  : action.id === "save-image"
+                    ? ("square.and.arrow.down" as const)
+                    : ("doc.on.doc" as const),
               inline: false,
+              disabled: action.disabled,
               onPress: action.run,
             }))
         : [
@@ -1077,7 +1137,16 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
     );
   }
 
-  const headerSubtitle = fileHeaderSubtitle(projectName, relativePath);
+  const fileSizeBytes = metadata.data?.kind === "file" ? (metadata.data.byteLength ?? null) : null;
+  const headerSubtitle =
+    isBinaryFile && fileSizeBytes !== null && fileSizeBytes > 0
+      ? [
+          fileHeaderSubtitle(projectName, relativePath),
+          formatAttachmentSize(fileSizeBytes, messages),
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : fileHeaderSubtitle(projectName, relativePath);
 
   return withInspector(
     <View className="flex-1 bg-sheet">
@@ -1104,6 +1173,9 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
           resolveVideoUri={assetPreview.refresh}
           fileContents={fileContents}
           fileError={fileQuery.error}
+          isBinaryFile={isBinaryFile}
+          onShareFile={fileShareSource ? () => void mediaActions.share() : undefined}
+          sharingFile={mediaActions.sharing}
           initialLine={targetLine}
           relativePath={relativePath}
           threadId={threadId}
