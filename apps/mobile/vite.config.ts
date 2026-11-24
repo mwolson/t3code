@@ -15,6 +15,7 @@ const reactTests = [
   "src/features/threads/git/GitBranchesSheet.occupancy.test.tsx",
   "src/features/files/useFileTreeEntries.test.tsx",
   "src/features/files/thread-file-navigator-pane.test.tsx",
+  "src/features/files/ThreadFilesRouteScreen.test.tsx",
   "src/features/files/source-file-document.test.ts",
   "src/features/projects/AddProjectScreen.test.ts",
   "src/lib/useMediaVideoPlayback.test.tsx",
